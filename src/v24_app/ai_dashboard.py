@@ -212,6 +212,9 @@ class SmartMatchDashboard:
         self.last_loaded_at = "-"
         self.last_refresh_seconds: float | None = None
         self.event_log: list[tuple[str, str, str]] = []
+        self.auto_refresh_enabled = tk.BooleanVar(value=False)
+        self.auto_refresh_interval_min = tk.IntVar(value=10)
+        self._auto_refresh_after_id: str | None = None
         self.status_var = tk.StringVar(value="正在加载赛事数据...")
         self.date_var = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
         self.summary_vars = {
@@ -269,6 +272,8 @@ class SmartMatchDashboard:
                 command = self.open_strategy_library
             elif index == 5:
                 command = self.open_data_center
+            elif index == 6:
+                command = self.open_system_settings
             self._nav_item(icon, text, active, command=command)
 
         bottom = tk.Frame(self.sidebar, bg=SIDEBAR)
@@ -362,6 +367,36 @@ class SmartMatchDashboard:
         self._log_event("INFO", "\u5f00\u59cb\u5237\u65b0\u8d5b\u4e8b\u6570\u636e")
         self.status_var.set("正在聚合赛事数据并执行 AI 分析...")
         threading.Thread(target=self._load_worker, daemon=True).start()
+
+    def _schedule_auto_refresh(self) -> None:
+        if self._auto_refresh_after_id is not None:
+            try:
+                self.root.after_cancel(self._auto_refresh_after_id)
+            except Exception:
+                pass
+            self._auto_refresh_after_id = None
+        if not self.auto_refresh_enabled.get():
+            return
+        interval = max(3, min(int(self.auto_refresh_interval_min.get()), 120))
+        self.auto_refresh_interval_min.set(interval)
+        self._auto_refresh_after_id = self.root.after(interval * 60 * 1000, self._auto_refresh_tick)
+
+    def _auto_refresh_tick(self) -> None:
+        self._auto_refresh_after_id = None
+        if not self.auto_refresh_enabled.get():
+            return
+        self._log_event("INFO", "\u81ea\u52a8\u5237\u65b0\u89e6\u53d1")
+        self.refresh()
+        self._schedule_auto_refresh()
+
+    def _on_auto_refresh_changed(self) -> None:
+        self._schedule_auto_refresh()
+        if self.auto_refresh_enabled.get():
+            self.status_var.set(f"\u81ea\u52a8\u5237\u65b0\u5df2\u5f00\u542f\uff0c\u95f4\u9694 {self.auto_refresh_interval_min.get()} \u5206\u949f")
+            self._log_event("INFO", f"\u81ea\u52a8\u5237\u65b0\u5f00\u542f: {self.auto_refresh_interval_min.get()} min")
+        else:
+            self.status_var.set("\u81ea\u52a8\u5237\u65b0\u5df2\u5173\u95ed")
+            self._log_event("INFO", "\u81ea\u52a8\u5237\u65b0\u5173\u95ed")
 
     def _load_worker(self) -> None:
         started = time.perf_counter()
@@ -903,6 +938,100 @@ class SmartMatchDashboard:
             justify=tk.LEFT,
             wraplength=350,
         ).pack(anchor=tk.W, padx=14, pady=(0, 10))
+
+    def open_system_settings(self) -> None:
+        win = tk.Toplevel(self.root)
+        win.title("\u7cfb\u7edf\u8bbe\u7f6e")
+        win.geometry("900x660")
+        win.minsize(760, 560)
+        win.configure(bg=BG)
+
+        shell = tk.Frame(win, bg=BG)
+        shell.pack(fill=tk.BOTH, expand=True, padx=22, pady=20)
+        tk.Label(shell, text="\u7cfb\u7edf\u8bbe\u7f6e", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 18, "bold")).pack(anchor=tk.W)
+        tk.Label(
+            shell,
+            text="\u672c\u5730\u8fd0\u884c\u53c2\u6570\u3001\u6570\u636e\u76ee\u5f55\u3001\u62a5\u544a\u76ee\u5f55\u548c\u98ce\u63a7\u9608\u503c\u8bf4\u660e",
+            bg=BG,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 10),
+        ).pack(anchor=tk.W, pady=(6, 16))
+
+        body = tk.Frame(shell, bg=BG)
+        body.pack(fill=tk.BOTH, expand=True)
+        left = self._card(body, PANEL)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 14))
+        right = self._card(body, PANEL)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        tk.Label(left, text="\u8fd0\u884c\u53c2\u6570", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 12))
+        control = tk.Frame(left, bg=PANEL)
+        control.pack(fill=tk.X, padx=18, pady=(0, 12))
+        tk.Checkbutton(
+            control,
+            text="\u542f\u7528\u81ea\u52a8\u5237\u65b0",
+            variable=self.auto_refresh_enabled,
+            command=self._on_auto_refresh_changed,
+            bg=PANEL,
+            fg=TEXT,
+            selectcolor=PANEL_2,
+            activebackground=PANEL,
+            activeforeground=TEXT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+        ).pack(anchor=tk.W)
+
+        interval = tk.Frame(left, bg=PANEL)
+        interval.pack(fill=tk.X, padx=18, pady=(0, 16))
+        tk.Label(interval, text="\u5237\u65b0\u95f4\u9694\uff08\u5206\u949f\uff09", bg=PANEL, fg=MUTED, font=("Microsoft YaHei UI", 10)).pack(side=tk.LEFT)
+        tk.Spinbox(
+            interval,
+            from_=3,
+            to=120,
+            width=6,
+            textvariable=self.auto_refresh_interval_min,
+            command=self._on_auto_refresh_changed,
+            bg=PANEL_2,
+            fg=TEXT,
+            buttonbackground=PANEL_2,
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10),
+        ).pack(side=tk.RIGHT)
+
+        for label, value in [
+            ("\u5f53\u524d\u6570\u636e\u6e90", self.data_source),
+            ("\u6700\u8fd1\u52a0\u8f7d", self.last_loaded_at),
+            ("\u6700\u8fd1\u8017\u65f6", f"{self.last_refresh_seconds:.2f}s" if self.last_refresh_seconds is not None else "-"),
+            ("\u9879\u76ee\u76ee\u5f55", str(PROJECT_ROOT)),
+            ("\u6570\u636e\u76ee\u5f55", str(PROJECT_ROOT / "data")),
+            ("\u62a5\u544a\u76ee\u5f55", str(REPORT_DIR)),
+        ]:
+            self._kv_row(left, label, value)
+
+        tk.Label(right, text="\u98ce\u63a7\u9608\u503c\u8bf4\u660e", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 12))
+        settings_rows = [
+            ("\u9ad8\u98ce\u9669", "\u51b7\u95e8\u6307\u6570\u9ad8\u6216\u5e02\u573a/\u6a21\u578b\u5206\u6b67\u660e\u663e\u65f6\u89e6\u53d1"),
+            ("\u4e2d\u98ce\u9669", "\u6982\u7387\u8fb9\u754c\u4e0d\u6e05\u6216\u7a33\u5b9a\u6027\u4e0d\u8db3\u65f6\u89e6\u53d1"),
+            ("\u4f4e\u98ce\u9669", "\u6a21\u578b\u3001\u5e02\u573a\u548c\u7a33\u5b9a\u6307\u6807\u65b9\u5411\u76f8\u5bf9\u4e00\u81f4"),
+            ("\u7f6e\u4fe1\u5ea6\u5206\u5c42", "<50% \u89c2\u5bdf\uff0c50%-60% \u4f4e\u6743\u91cd\uff0c60%-70% \u5e38\u89c4\uff0c>70% \u9ad8\u4f18\u5148\u7ea7"),
+            ("\u81ea\u52a8\u5237\u65b0", "\u4ec5\u5728\u5f53\u524d APP \u8fd0\u884c\u671f\u95f4\u751f\u6548\uff0c\u4e0d\u5199\u5165\u914d\u7f6e\u6587\u4ef6"),
+            ("\u7248\u672c\u7ba1\u7406", "Git \u5df2\u542f\u7528\uff0c\u6bcf\u4e2a\u529f\u80fd\u70b9\u72ec\u7acb\u63d0\u4ea4"),
+        ]
+        for label, value in settings_rows:
+            self._strategy_row(right, label, value)
+
+        tk.Button(
+            shell,
+            text="\u7acb\u5373\u5237\u65b0",
+            command=self.refresh,
+            bg=BLUE,
+            fg="white",
+            activebackground="#3d5ee7",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=18,
+            pady=7,
+        ).pack(anchor=tk.E, pady=(14, 0))
 
     def _detail_metric(self, parent: tk.Widget, label: str, value: str, color: str) -> None:
         frame = self._card(parent, PANEL)
