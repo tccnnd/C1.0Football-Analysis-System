@@ -265,6 +265,8 @@ class SmartMatchDashboard:
                 command = self.open_monitor_center
             elif index == 3:
                 command = self.open_history_reports
+            elif index == 4:
+                command = self.open_strategy_library
             elif index == 5:
                 command = self.open_data_center
             self._nav_item(icon, text, active, command=command)
@@ -824,6 +826,83 @@ class SmartMatchDashboard:
         else:
             for stamp, level, message in self.event_log:
                 logbox.insert(tk.END, f"{stamp} [{level}] {message}")
+
+    def open_strategy_library(self) -> None:
+        win = tk.Toplevel(self.root)
+        win.title("\u7b56\u7565\u5e93")
+        win.geometry("960x700")
+        win.minsize(820, 580)
+        win.configure(bg=BG)
+
+        shell = tk.Frame(win, bg=BG)
+        shell.pack(fill=tk.BOTH, expand=True, padx=22, pady=20)
+        tk.Label(shell, text="\u7b56\u7565\u5e93", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 18, "bold")).pack(anchor=tk.W)
+        tk.Label(
+            shell,
+            text="\u63a8\u8350\u7b56\u7565\u3001\u98ce\u9669\u89c4\u5219\u3001\u7f6e\u4fe1\u5ea6\u5206\u5c42\u548c\u73a9\u6cd5\u7ef4\u5ea6",
+            bg=BG,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 10),
+        ).pack(anchor=tk.W, pady=(6, 16))
+
+        top = tk.Frame(shell, bg=BG)
+        top.pack(fill=tk.X, pady=(0, 16))
+        avg_conf = self._average_confidence()
+        high_count = self._risk_counts().get("high", 0)
+        metrics = [
+            ("\u7b56\u7565\u6570", "6", TEXT),
+            ("\u73a9\u6cd5\u7ef4\u5ea6", "5", "#7aa2ff"),
+            ("\u5e73\u5747\u7f6e\u4fe1", avg_conf, TEXT),
+            ("\u98ce\u9669\u89e6\u53d1", str(high_count), RED if high_count else GREEN),
+        ]
+        for label, value, color in metrics:
+            self._detail_metric(top, label, value, color)
+
+        body = tk.Frame(shell, bg=BG)
+        body.pack(fill=tk.BOTH, expand=True)
+        left = self._card(body, PANEL)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 14))
+        right = self._card(body, PANEL)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        tk.Label(left, text="\u6838\u5fc3\u7b56\u7565", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
+        strategy_rows = [
+            ("\u4e3b\u80dc/\u5e73/\u5ba2\u80dc", "\u57fa\u4e8e\u5e02\u573a\u3001ELO\u3001Poisson\u3001XGB \u878d\u5408\u6982\u7387\u9009\u62e9\u4e3b\u7ed3\u8bba"),
+            ("\u5927\u5c0f\u7403", "\u4f7f\u7528\u8fdb\u7403\u671f\u671b\u548c Poisson \u5206\u5e03\u63a8\u5bfc 2.5 \u7403\u65b9\u5411"),
+            ("\u8ba9\u7403", "\u6839\u636e\u76d8\u53e3\u7ebf\u3001\u80dc\u5e73\u8d1f\u6982\u7387\u548c\u4e13\u5bb6\u6a21\u578b\u8f93\u51fa\u751f\u6210"),
+            ("\u6bd4\u5206", "\u4ece Poisson \u6bd4\u5206\u5206\u5e03\u4e2d\u9009\u53d6\u6982\u7387\u66f4\u9ad8\u7684\u5019\u9009"),
+            ("\u534a\u5168\u573a", "\u4f9d\u636e\u534a\u573a/\u5168\u573a\u72b6\u6001\u6982\u7387\u63a8\u5bfc\u8282\u594f\u8d70\u5411"),
+            ("\u4fdd\u5b88\u9632\u5b88", "\u9ad8\u98ce\u9669\u6216\u51b7\u95e8\u6307\u6570\u504f\u9ad8\u65f6\u964d\u4f4e\u63a8\u8350\u6743\u91cd"),
+        ]
+        for label, value in strategy_rows:
+            self._strategy_row(left, label, value)
+
+        tk.Label(right, text="\u98ce\u63a7\u89c4\u5219", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
+        rule_rows = [
+            ("\u4f4e\u98ce\u9669", "\u7f6e\u4fe1\u5ea6\u53ef\u7528\uff0c\u51b7\u95e8\u6307\u6570\u4f4e\uff0c\u5e02\u573a\u548c\u6a21\u578b\u65b9\u5411\u57fa\u672c\u4e00\u81f4"),
+            ("\u4e2d\u98ce\u9669", "\u6982\u7387\u5dee\u8ddd\u4e0d\u5927\u6216\u7a33\u5b9a\u6307\u6570\u4e0d\u8db3\uff0c\u9700\u8981\u8d5b\u524d\u590d\u6838"),
+            ("\u9ad8\u98ce\u9669", "\u51b7\u95e8\u6307\u6570\u504f\u9ad8\u6216\u76d8\u53e3/\u70ed\u5ea6\u5b58\u5728\u5f02\u5e38\uff0c\u4ee5\u9632\u5b88\u6216\u89c2\u671b\u4e3a\u4e3b"),
+            ("\u7f6e\u4fe1\u5ea6 <50%", "\u4e0d\u5efa\u8bae\u4f5c\u4e3a\u4e3b\u7b56\u7565\uff0c\u53ea\u7528\u4e8e\u89c2\u5bdf"),
+            ("\u7f6e\u4fe1\u5ea6 50%-60%", "\u4f4e\u6743\u91cd\uff0c\u9700\u914d\u5408\u98ce\u9669\u7b49\u7ea7\u5224\u65ad"),
+            ("\u7f6e\u4fe1\u5ea6 60%-70%", "\u5e38\u89c4\u53ef\u7528\u533a\u95f4\uff0c\u4ecd\u9700\u68c0\u67e5\u4e34\u573a\u4fe1\u606f"),
+            ("\u7f6e\u4fe1\u5ea6 >70%", "\u4f18\u5148\u7ea7\u8f83\u9ad8\uff0c\u4f46\u82e5\u98ce\u9669\u7b49\u7ea7\u9ad8\u4ecd\u9700\u964d\u6743"),
+        ]
+        for label, value in rule_rows:
+            self._strategy_row(right, label, value)
+
+    def _strategy_row(self, parent: tk.Widget, title: str, body: str) -> None:
+        frame = tk.Frame(parent, bg=PANEL_2, highlightbackground="#172638", highlightthickness=1)
+        frame.pack(fill=tk.X, padx=18, pady=6)
+        tk.Label(frame, text=title, bg=PANEL_2, fg=TEXT, font=("Microsoft YaHei UI", 11, "bold")).pack(anchor=tk.W, padx=14, pady=(10, 3))
+        tk.Label(
+            frame,
+            text=body,
+            bg=PANEL_2,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 9),
+            justify=tk.LEFT,
+            wraplength=350,
+        ).pack(anchor=tk.W, padx=14, pady=(0, 10))
 
     def _detail_metric(self, parent: tk.Widget, label: str, value: str, color: str) -> None:
         frame = self._card(parent, PANEL)
