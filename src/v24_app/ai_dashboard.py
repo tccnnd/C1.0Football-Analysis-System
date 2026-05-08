@@ -276,11 +276,6 @@ class SmartMatchDashboard:
                 command = self.open_system_settings
             self._nav_item(icon, text, active, command=command)
 
-        bottom = tk.Frame(self.sidebar, bg=SIDEBAR)
-        bottom.pack(side=tk.BOTTOM, fill=tk.X, padx=24, pady=24)
-        tk.Label(bottom, text="●  个人开发者", bg=SIDEBAR, fg=TEXT, font=("Microsoft YaHei UI", 10)).pack(anchor=tk.W, pady=(0, 12))
-        tk.Label(bottom, text="⇱  退出登录", bg=SIDEBAR, fg=TEXT, font=("Microsoft YaHei UI", 10)).pack(anchor=tk.W)
-
     def _nav_item(self, icon: str, text: str, active: bool, command=None) -> None:
         bg = "#4051c8" if active else SIDEBAR
         item = tk.Frame(self.sidebar, bg=bg, height=48)
