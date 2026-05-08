@@ -161,6 +161,43 @@ def _markdown_report(row: DashboardRow, generated_at: datetime | None = None) ->
     )
 
 
+def _bytes_text(size: int) -> str:
+    value = float(max(size, 0))
+    for unit in ["B", "KB", "MB", "GB"]:
+        if value < 1024 or unit == "GB":
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024
+    return f"{value:.1f} GB"
+
+
+def _dir_stats(path: Path) -> tuple[int, int]:
+    if not path.exists():
+        return 0, 0
+    count = 0
+    size = 0
+    try:
+        files = path.rglob("*")
+        for item in files:
+            try:
+                if item.is_file():
+                    count += 1
+                    size += item.stat().st_size
+            except OSError:
+                continue
+    except OSError:
+        return count, size
+    return count, size
+
+
+def _mtime_text(path: Path) -> str:
+    try:
+        if not path.exists():
+            return "-"
+        return datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+    except OSError:
+        return "-"
+
+
 class SmartMatchDashboard:
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -170,6 +207,8 @@ class SmartMatchDashboard:
         self.root.configure(bg=BG)
 
         self.rows: list[DashboardRow] = []
+        self.data_source = "-"
+        self.last_loaded_at = "-"
         self.status_var = tk.StringVar(value="正在加载赛事数据...")
         self.date_var = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
         self.summary_vars = {
@@ -218,7 +257,11 @@ class SmartMatchDashboard:
             ("⚙", "系统设置", False),
         ]
         for index, (icon, text, active) in enumerate(nav):
-            command = self.open_history_reports if index == 3 else None
+            command = None
+            if index == 3:
+                command = self.open_history_reports
+            elif index == 5:
+                command = self.open_data_center
             self._nav_item(icon, text, active, command=command)
 
         bottom = tk.Frame(self.sidebar, bg=SIDEBAR)
@@ -326,6 +369,8 @@ class SmartMatchDashboard:
 
     def _apply_rows(self, rows: list[DashboardRow], source: str) -> None:
         self.rows = rows
+        self.data_source = source or "-"
+        self.last_loaded_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.date_var.set(datetime.now().strftime("(%Y-%m-%d)"))
         self._refresh_metrics()
         self._refresh_matches()
@@ -567,6 +612,116 @@ class SmartMatchDashboard:
             preview.configure(state=tk.DISABLED)
 
         listbox.bind("<<ListboxSelect>>", lambda _event: show_file(listbox.curselection()[0] if listbox.curselection() else -1))
+
+    def open_data_center(self) -> None:
+        win = tk.Toplevel(self.root)
+        win.title("\u6570\u636e\u4e2d\u5fc3")
+        win.geometry("940x680")
+        win.minsize(800, 560)
+        win.configure(bg=BG)
+
+        shell = tk.Frame(win, bg=BG)
+        shell.pack(fill=tk.BOTH, expand=True, padx=22, pady=20)
+        tk.Label(shell, text="\u6570\u636e\u4e2d\u5fc3", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 18, "bold")).pack(anchor=tk.W)
+        tk.Label(
+            shell,
+            text="\u5f53\u524d\u6570\u636e\u6e90\u3001\u7f13\u5b58\u3001\u6a21\u578b\u72b6\u6001\u548c\u62a5\u544a\u4ea7\u7269",
+            bg=BG,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 10),
+        ).pack(anchor=tk.W, pady=(6, 16))
+
+        top = tk.Frame(shell, bg=BG)
+        top.pack(fill=tk.X, pady=(0, 16))
+        risk_counts = self._risk_counts()
+        report_count = len(list(REPORT_DIR.glob("ai_match_report_*.md"))) if REPORT_DIR.exists() else 0
+        metrics = [
+            ("\u6570\u636e\u6e90", self.data_source, "#7aa2ff"),
+            ("\u4eca\u65e5\u8d5b\u4e8b", str(len(self.rows)), TEXT),
+            ("\u9ad8\u98ce\u9669", str(risk_counts.get("high", 0)), RED),
+            ("\u5386\u53f2\u62a5\u544a", str(report_count), TEXT),
+        ]
+        for label, value, color in metrics:
+            self._detail_metric(top, label, value, color)
+
+        body = tk.Frame(shell, bg=BG)
+        body.pack(fill=tk.BOTH, expand=True)
+        left = self._card(body, PANEL)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 14))
+        right = self._card(body, PANEL)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        tk.Label(left, text="\u8fd0\u884c\u72b6\u6001", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
+        status_rows = [
+            ("\u9879\u76ee\u76ee\u5f55", str(PROJECT_ROOT)),
+            ("\u6700\u8fd1\u52a0\u8f7d", self.last_loaded_at),
+            ("\u5f53\u524d\u6a21\u578b", self._dominant_model_name()),
+            ("\u5e73\u5747\u7f6e\u4fe1\u5ea6", self._average_confidence()),
+            ("\u62a5\u544a\u76ee\u5f55", str(REPORT_DIR)),
+        ]
+        for label, value in status_rows:
+            self._kv_row(left, label, value)
+
+        tk.Label(right, text="\u6570\u636e\u6587\u4ef6", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
+        data_rows = self._data_inventory_rows()
+        for label, value in data_rows:
+            self._kv_row(right, label, value)
+
+        tk.Button(
+            shell,
+            text="\u5237\u65b0\u6570\u636e",
+            command=lambda: (win.destroy(), self.refresh()),
+            bg=BLUE,
+            fg="white",
+            activebackground="#3d5ee7",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=18,
+            pady=7,
+        ).pack(anchor=tk.E, pady=(14, 0))
+
+    def _dominant_model_name(self) -> str:
+        for row in self.rows:
+            model = str(row.prediction.get("model") or "").strip()
+            if model:
+                return model
+        return "-"
+
+    def _average_confidence(self) -> str:
+        values = [float(row.prediction.get("confidence", 0) or 0) for row in self.rows]
+        if not values:
+            return "-"
+        return f"{sum(values) / len(values):.1%}"
+
+    def _data_inventory_rows(self) -> list[tuple[str, str]]:
+        paths = [
+            ("cache", PROJECT_ROOT / "data" / "cache"),
+            ("state", PROJECT_ROOT / "data" / "state"),
+            ("models", PROJECT_ROOT / "data" / "models"),
+            ("c1_state", PROJECT_ROOT / "data" / "c1_state"),
+            ("reports", REPORT_DIR),
+        ]
+        rows: list[tuple[str, str]] = []
+        for label, path in paths:
+            count, size = _dir_stats(path)
+            rows.append((label, f"{count} files / {_bytes_text(size)} / updated {_mtime_text(path)}"))
+
+        key_files = [
+            ("500_config", PROJECT_ROOT / "config" / "500_config.json"),
+            ("settlements", PROJECT_ROOT / "data" / "state" / "settlements.json"),
+            ("prediction_snapshots", PROJECT_ROOT / "data" / "state" / "prediction_snapshots.json"),
+            ("xgb_model", PROJECT_ROOT / "data" / "models" / "xgb_v0_match_outcome.json"),
+        ]
+        for label, path in key_files:
+            rows.append((label, f"{'OK' if path.exists() else 'missing'} / updated {_mtime_text(path)}"))
+        return rows
+
+    def _kv_row(self, parent: tk.Widget, label: str, value: str) -> None:
+        row = tk.Frame(parent, bg=PANEL)
+        row.pack(fill=tk.X, padx=18, pady=7)
+        tk.Label(row, text=label, bg=PANEL, fg=MUTED, width=18, anchor=tk.W, font=("Microsoft YaHei UI", 10)).pack(side=tk.LEFT)
+        tk.Label(row, text=value, bg=PANEL, fg=TEXT, anchor=tk.W, justify=tk.LEFT, wraplength=320, font=("Microsoft YaHei UI", 10, "bold")).pack(side=tk.LEFT, fill=tk.X, expand=True)
 
     def _detail_metric(self, parent: tk.Widget, label: str, value: str, color: str) -> None:
         frame = self._card(parent, PANEL)
