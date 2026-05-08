@@ -118,6 +118,8 @@ def _world_cup_notice(prediction: dict) -> str:
         return ""
     phase_map = {"group": "\u5c0f\u7ec4\u8d5b", "knockout": "\u6dd8\u6c70\u8d5b", "unknown": "\u5f85\u5224\u5b9a"}
     phase = phase_map.get(str(payload.get("phase") or "unknown"), "\u5f85\u5224\u5b9a")
+    group_context = payload.get("group_context", {}) if isinstance(payload.get("group_context"), dict) else {}
+    pressure_text = _world_cup_group_context_text(group_context)
     cap = _pct1(payload.get("confidence_cap"))
     adjusted = "\u5df2\u964d\u6743" if payload.get("confidence_adjusted") else "\u672a\u89e6\u53d1\u964d\u6743"
     return (
@@ -125,8 +127,31 @@ def _world_cup_notice(prediction: dict) -> str:
         f"- \u8d5b\u5236\u9636\u6bb5\uff1a{phase}\n"
         f"- \u7f6e\u4fe1\u4e0a\u9650\uff1a{cap}\uff08{adjusted}\uff09\n"
         "- \u8bc4\u5206\u6c60\uff1a\u56fd\u5bb6\u961f ELO\uff0c\u4e0d\u4e0e\u4ff1\u4e50\u90e8\u8bc4\u5206\u6df7\u7528\u3002\n"
+        f"{pressure_text}"
         "- \u56fd\u5bb6\u961f\u6837\u672c\u7a00\u758f\uff0c\u9635\u5bb9\u3001\u8d5b\u7a0b\u5bc6\u5ea6\u548c\u79ef\u5206\u5f62\u52bf\u9700\u8981\u4f18\u5148\u590d\u6838\u3002\n"
         "- \u5c0f\u7ec4\u8d5b\u8981\u5173\u6ce8\u51c0\u80dc\u7403\u548c\u8f6e\u6362\uff0c\u6dd8\u6c70\u8d5b\u8981\u5173\u6ce8\u52a0\u65f6/\u70b9\u7403\u548c\u4fdd\u5b88\u7b56\u7565\u3002"
+    )
+
+
+def _world_cup_group_context_text(context: dict) -> str:
+    if not context:
+        return "- \u5c0f\u7ec4\u4e0a\u4e0b\u6587\uff1a\u6682\u65e0\u79ef\u5206\u6570\u636e\uff0c\u9700\u8d5b\u524d\u8865\u5145\u3002\n"
+    group = str(context.get("group") or "-")
+    group_round = int(context.get("round") or 0)
+    tags = context.get("pressure_tags", [])
+    tag_labels = {
+        "final_group_round": "\u5c0f\u7ec4\u672b\u8f6e",
+        "points_tight": "\u79ef\u5206\u63a5\u8fd1",
+        "asymmetric_motivation": "\u6218\u610f\u4e0d\u5bf9\u79f0",
+        "goal_difference_pressure": "\u51c0\u80dc\u7403\u538b\u529b",
+    }
+    readable_tags = [tag_labels.get(str(tag), str(tag)) for tag in tags if tag]
+    tag_text = "\u3001".join(readable_tags) if readable_tags else "\u5f85\u89c2\u5bdf"
+    return (
+        f"- \u5c0f\u7ec4\u4e0a\u4e0b\u6587\uff1a{group} \u7b2c{group_round or '-'}\u8f6e | "
+        f"\u79ef\u5206 {context.get('home_points', '-')}:{context.get('away_points', '-')} | "
+        f"\u51c0\u80dc\u7403 {context.get('home_goal_diff', '-')}:{context.get('away_goal_diff', '-')} | "
+        f"\u538b\u529b\u6807\u7b7e {tag_text}\n"
     )
 
 

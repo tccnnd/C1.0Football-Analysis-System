@@ -193,6 +193,14 @@ class AppMatch:
     kelly_away: float = 0.0
     source: str = "unknown"
     source_id: str = ""
+    competition_group: str = ""
+    group_round: int = 0
+    home_points: int | None = None
+    away_points: int | None = None
+    home_goal_diff: int | None = None
+    away_goal_diff: int | None = None
+    home_group_rank: int | None = None
+    away_group_rank: int | None = None
 
     @property
     def match_id(self) -> str:
@@ -224,6 +232,15 @@ def _safe_float(value: object, default: float = 0.0) -> float:
         return float(value)
     except Exception:
         return default
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
 
 
 def _safe_int(value: object, default: int | None = None) -> int | None:
@@ -314,6 +331,7 @@ def _apply_world_cup_overlay(match: AppMatch, prediction: dict) -> dict:
     adjusted["world_cup_mode"] = {
         "enabled": True,
         "phase": _world_cup_phase_hint(match),
+        "group_context": _world_cup_group_context(match),
         "confidence_cap": WORLD_CUP_CONFIDENCE_CAP,
         "confidence_adjusted": confidence_adjusted,
         "notes": [
@@ -323,6 +341,37 @@ def _apply_world_cup_overlay(match: AppMatch, prediction: dict) -> dict:
         ],
     }
     return adjusted
+
+
+def _world_cup_group_context(match: AppMatch) -> dict[str, object]:
+    home_points = getattr(match, "home_points", None)
+    away_points = getattr(match, "away_points", None)
+    home_goal_diff = getattr(match, "home_goal_diff", None)
+    away_goal_diff = getattr(match, "away_goal_diff", None)
+    group_round = int(getattr(match, "group_round", 0) or 0)
+    context = {
+        "group": normalize_text(getattr(match, "competition_group", "")),
+        "round": group_round,
+        "home_points": home_points,
+        "away_points": away_points,
+        "home_goal_diff": home_goal_diff,
+        "away_goal_diff": away_goal_diff,
+        "home_group_rank": getattr(match, "home_group_rank", None),
+        "away_group_rank": getattr(match, "away_group_rank", None),
+        "pressure_tags": [],
+    }
+    tags: list[str] = []
+    if group_round >= 3:
+        tags.append("final_group_round")
+    if isinstance(home_points, int) and isinstance(away_points, int):
+        if abs(home_points - away_points) <= 1:
+            tags.append("points_tight")
+        if max(home_points, away_points) >= 4 and min(home_points, away_points) <= 1:
+            tags.append("asymmetric_motivation")
+    if isinstance(home_goal_diff, int) and isinstance(away_goal_diff, int) and abs(home_goal_diff - away_goal_diff) >= 3:
+        tags.append("goal_difference_pressure")
+    context["pressure_tags"] = tags
+    return context
 
 
 def _looks_like_match_time(value: str) -> bool:
@@ -364,6 +413,14 @@ def _to_app_match(raw: object, source: str) -> AppMatch | None:
         kelly_draw = _safe_float(getattr(raw, "kelly_draw", 0.0), default=0.0)
         kelly_away = _safe_float(getattr(raw, "kelly_away", 0.0), default=0.0)
         source_id = normalize_text(getattr(raw, "match_id", ""))
+        competition_group = normalize_text(getattr(raw, "competition_group", ""))
+        group_round = _optional_int(getattr(raw, "group_round", None)) or 0
+        home_points = _optional_int(getattr(raw, "home_points", None))
+        away_points = _optional_int(getattr(raw, "away_points", None))
+        home_goal_diff = _optional_int(getattr(raw, "home_goal_diff", None))
+        away_goal_diff = _optional_int(getattr(raw, "away_goal_diff", None))
+        home_group_rank = _optional_int(getattr(raw, "home_group_rank", None))
+        away_group_rank = _optional_int(getattr(raw, "away_group_rank", None))
     elif isinstance(raw, dict):
         home_team = normalize_text(raw.get("home_team", ""))
         away_team = normalize_text(raw.get("away_team", ""))
@@ -382,6 +439,14 @@ def _to_app_match(raw: object, source: str) -> AppMatch | None:
         kelly_draw = _safe_float(raw.get("kelly_draw"), default=0.0)
         kelly_away = _safe_float(raw.get("kelly_away"), default=0.0)
         source_id = normalize_text(raw.get("source_id", "") or raw.get("match_source_id", ""))
+        competition_group = normalize_text(raw.get("competition_group", ""))
+        group_round = _optional_int(raw.get("group_round")) or 0
+        home_points = _optional_int(raw.get("home_points"))
+        away_points = _optional_int(raw.get("away_points"))
+        home_goal_diff = _optional_int(raw.get("home_goal_diff"))
+        away_goal_diff = _optional_int(raw.get("away_goal_diff"))
+        home_group_rank = _optional_int(raw.get("home_group_rank"))
+        away_group_rank = _optional_int(raw.get("away_group_rank"))
     else:
         return None
 
@@ -415,6 +480,14 @@ def _to_app_match(raw: object, source: str) -> AppMatch | None:
         kelly_away=kelly_away,
         source=source,
         source_id=source_id,
+        competition_group=competition_group,
+        group_round=group_round,
+        home_points=home_points,
+        away_points=away_points,
+        home_goal_diff=home_goal_diff,
+        away_goal_diff=away_goal_diff,
+        home_group_rank=home_group_rank,
+        away_group_rank=away_group_rank,
     )
 
 
@@ -442,6 +515,14 @@ def _app_match_from_payload(payload: dict, source: str) -> AppMatch | None:
     kelly_home = _safe_float(payload.get("kelly_home"), default=0.0)
     kelly_draw = _safe_float(payload.get("kelly_draw"), default=0.0)
     kelly_away = _safe_float(payload.get("kelly_away"), default=0.0)
+    competition_group = normalize_text(payload.get("competition_group", ""))
+    group_round = _optional_int(payload.get("group_round")) or 0
+    home_points = _optional_int(payload.get("home_points"))
+    away_points = _optional_int(payload.get("away_points"))
+    home_goal_diff = _optional_int(payload.get("home_goal_diff"))
+    away_goal_diff = _optional_int(payload.get("away_goal_diff"))
+    home_group_rank = _optional_int(payload.get("home_group_rank"))
+    away_group_rank = _optional_int(payload.get("away_group_rank"))
     if min(odds_home, odds_draw, odds_away) <= 1.0:
         odds_home, odds_draw, odds_away = 2.20, 3.10, 2.80
 
@@ -464,6 +545,14 @@ def _app_match_from_payload(payload: dict, source: str) -> AppMatch | None:
         kelly_away=kelly_away,
         source=source,
         source_id=normalize_text(payload.get("source_id", "")),
+        competition_group=competition_group,
+        group_round=group_round,
+        home_points=home_points,
+        away_points=away_points,
+        home_goal_diff=home_goal_diff,
+        away_goal_diff=away_goal_diff,
+        home_group_rank=home_group_rank,
+        away_group_rank=away_group_rank,
     )
 
 
@@ -1176,6 +1265,14 @@ def _build_parlay_leg(
         "match_date": match.match_date,
         "match_time": match.match_time,
         "league": match.league,
+        "competition_group": match.competition_group,
+        "group_round": match.group_round,
+        "home_points": match.home_points,
+        "away_points": match.away_points,
+        "home_goal_diff": match.home_goal_diff,
+        "away_goal_diff": match.away_goal_diff,
+        "home_group_rank": match.home_group_rank,
+        "away_group_rank": match.away_group_rank,
         "home_team": match.home_team,
         "away_team": match.away_team,
         "play_type": play_type,
@@ -5989,6 +6086,14 @@ def settle_match_result(
         "match_date": match.match_date,
         "match_time": match.match_time,
         "league": match.league,
+        "competition_group": match.competition_group,
+        "group_round": match.group_round,
+        "home_points": match.home_points,
+        "away_points": match.away_points,
+        "home_goal_diff": match.home_goal_diff,
+        "away_goal_diff": match.away_goal_diff,
+        "home_group_rank": match.home_group_rank,
+        "away_group_rank": match.away_group_rank,
         "home_team": match.home_team,
         "away_team": match.away_team,
         "home_goals": int(home_goals),
