@@ -146,21 +146,99 @@ def _slug(text: str) -> str:
     return cleaned[:80] or "match"
 
 
+def _md_cell(value: object) -> str:
+    return str(value if value is not None else "-").replace("|", "/").replace("\n", " ")
+
+
+def _prob_table(title: str, probabilities: dict) -> str:
+    if not isinstance(probabilities, dict) or not probabilities:
+        return f"### {title}\n\n暂无数据\n"
+    return (
+        f"### {title}\n\n"
+        "| 主胜 | 平局 | 客胜 |\n"
+        "|---:|---:|---:|\n"
+        f"| {_pct1(probabilities.get('home', 0))} | {_pct1(probabilities.get('draw', 0))} | {_pct1(probabilities.get('away', 0))} |\n"
+    )
+
+
+def _index_table(indices: dict) -> str:
+    return (
+        "| 指标 | 数值 |\n"
+        "|---|---:|\n"
+        f"| 冷门指数 | {_pct1(indices.get('upset_index', 0))} |\n"
+        f"| 稳定指数 | {_pct1(indices.get('stability_index', 0))} |\n"
+        f"| 信心指数 | {_pct1(indices.get('confidence_index', 0))} |\n"
+    )
+
+
 def _markdown_report(row: DashboardRow, generated_at: datetime | None = None) -> str:
     now = generated_at or datetime.now()
     match = row.match
     pred = row.prediction
+    probs = pred.get("probabilities", {}) if isinstance(pred.get("probabilities"), dict) else {}
+    market_probs = pred.get("market_probabilities", {}) if isinstance(pred.get("market_probabilities"), dict) else {}
+    elo_probs = pred.get("elo_probabilities", {}) if isinstance(pred.get("elo_probabilities"), dict) else {}
+    poisson_probs = pred.get("poisson_probabilities", {}) if isinstance(pred.get("poisson_probabilities"), dict) else {}
+    xgb_probs = pred.get("xgb_probabilities", {}) if isinstance(pred.get("xgb_probabilities"), dict) else {}
+    handicap_probs = pred.get("handicap_probabilities", {}) if isinstance(pred.get("handicap_probabilities"), dict) else {}
+    ou_probs = pred.get("ou_probabilities", {}) if isinstance(pred.get("ou_probabilities"), dict) else {}
+    indices = pred.get("indices", {}) if isinstance(pred.get("indices"), dict) else {}
     return (
         f"# {match.home_team} vs {match.away_team} \u8d5b\u4e8b\u5206\u6790\u62a5\u544a\n\n"
-        f"- \u751f\u6210\u65f6\u95f4\uff1a{now.strftime('%Y-%m-%d %H:%M:%S')}\n"
-        f"- \u8054\u8d5b\uff1a{match.league}\n"
-        f"- \u5f00\u8d5b\u65f6\u95f4\uff1a{match.match_date} {match.match_time}\n"
-        f"- \u6570\u636e\u6e90\uff1a{match.source}\n"
-        f"- \u98ce\u9669\u7b49\u7ea7\uff1a{_risk_label(pred.get('risk_level'))}\n"
-        f"- \u63a8\u8350\u7b56\u7565\uff1a{_strategy_text(pred)}\n"
-        f"- \u7f6e\u4fe1\u5ea6\uff1a{_pct1(pred.get('confidence'))}\n\n"
-        "## AI \u5206\u6790\n\n"
-        f"{_analysis_report(row)}\n"
+        "## 1. 基本信息\n\n"
+        "| 字段 | 内容 |\n"
+        "|---|---|\n"
+        f"| 生成时间 | {now.strftime('%Y-%m-%d %H:%M:%S')} |\n"
+        f"| 联赛 | {_md_cell(match.league)} |\n"
+        f"| 开赛时间 | {_md_cell(match.match_date)} {_md_cell(match.match_time)} |\n"
+        f"| 数据源 | {_md_cell(match.source)} |\n"
+        f"| 数据 ID | {_md_cell(match.source_id or '-')} |\n\n"
+        "## 2. 核心结论\n\n"
+        "| 项目 | 结果 |\n"
+        "|---|---|\n"
+        f"| 推荐策略 | {_md_cell(_strategy_text(pred))} |\n"
+        f"| 风险等级 | {_md_cell(_risk_label(pred.get('risk_level')))} |\n"
+        f"| 综合置信度 | {_pct1(pred.get('confidence'))} |\n"
+        f"| 预计总进球 | {_num(pred.get('expected_goals'))} |\n"
+        f"| 当前模型 | {_md_cell(pred.get('model', '-'))} |\n\n"
+        "## 3. 概率分布\n\n"
+        f"{_prob_table('融合概率', probs)}\n"
+        f"{_prob_table('市场隐含概率', market_probs)}\n"
+        f"{_prob_table('ELO 概率', elo_probs)}\n"
+        f"{_prob_table('Poisson 概率', poisson_probs)}\n"
+        f"{_prob_table('XGBoost 概率', xgb_probs)}\n"
+        "## 4. 玩法维度\n\n"
+        "| 玩法 | 推荐 | 置信度 | 补充 |\n"
+        "|---|---|---:|---|\n"
+        f"| 1X2 | {_md_cell(pred.get('recommendation', '-'))} | {_pct1(pred.get('confidence'))} | 主胜/平局/客胜 |\n"
+        f"| 大小球 | {_md_cell(pred.get('ou_recommendation', '-'))} | {_pct1(pred.get('ou_confidence'))} | Over {_pct1(ou_probs.get('over'))} / Under {_pct1(ou_probs.get('under'))} |\n"
+        f"| 让球 | {_md_cell(pred.get('handicap_recommendation', '-'))} | {_pct1(pred.get('handicap_confidence'))} | H {_pct1(handicap_probs.get('home'))} / D {_pct1(handicap_probs.get('draw'))} / A {_pct1(handicap_probs.get('away'))} |\n"
+        f"| 比分 | {_md_cell(pred.get('score_recommendation', '-'))} | {_pct1(pred.get('score_confidence'))} | 精确比分候选 |\n"
+        f"| 半全场 | {_md_cell(pred.get('htft_recommendation', '-'))} | {_pct1(pred.get('htft_confidence'))} | 节奏推演 |\n\n"
+        "## 5. 风控指标\n\n"
+        f"{_index_table(indices)}\n"
+        "## 6. 盘口与市场数据\n\n"
+        "| 指标 | 数值 |\n"
+        "|---|---:|\n"
+        f"| 即时主胜赔率 | {_num(match.odds_home, 3)} |\n"
+        f"| 即时平局赔率 | {_num(match.odds_draw, 3)} |\n"
+        f"| 即时客胜赔率 | {_num(match.odds_away, 3)} |\n"
+        f"| 初盘主胜赔率 | {_num(match.opening_odds_home, 3)} |\n"
+        f"| 初盘平局赔率 | {_num(match.opening_odds_draw, 3)} |\n"
+        f"| 初盘客胜赔率 | {_num(match.opening_odds_away, 3)} |\n"
+        f"| 让球线 | {_num(match.handicap_line, 2)} |\n"
+        f"| 返还率 | {_pct1(match.return_rate)} |\n"
+        f"| Kelly 主胜 | {_num(match.kelly_home, 3)} |\n"
+        f"| Kelly 平局 | {_num(match.kelly_draw, 3)} |\n"
+        f"| Kelly 客胜 | {_num(match.kelly_away, 3)} |\n\n"
+        "## 7. AI 分析摘要\n\n"
+        f"{_analysis_report(row)}\n\n"
+        "## 8. 复核清单\n\n"
+        "- [ ] 复核首发阵容与关键伤停\n"
+        "- [ ] 复核临场盘口是否继续偏离模型方向\n"
+        "- [ ] 复核市场热度与赔率变化是否一致\n"
+        "- [ ] 高风险场次降低策略权重或仅观察\n"
+        "- [ ] 赛后回收赛果并进入复盘中心\n"
     )
 
 
