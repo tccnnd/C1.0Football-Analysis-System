@@ -795,13 +795,16 @@ class SmartMatchDashboard:
         self._refresh_matches()
 
     def _bind_match_scroll(self, widget: tk.Widget) -> None:
-        widget.bind("<MouseWheel>", self._on_match_mousewheel)
+        widget.bind("<MouseWheel>", self._on_match_mousewheel, add="+")
         for child in widget.winfo_children():
             self._bind_match_scroll(child)
 
     def _on_match_mousewheel(self, event) -> None:
         if self._widget_alive("match_canvas"):
-            self.match_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            delta = int(-1 * (event.delta / 120)) if event.delta else 0
+            if delta:
+                self.match_canvas.yview_scroll(delta, "units")
+            return "break"
 
     def _refresh_matches(self) -> None:
         for child in self.match_list.winfo_children():
@@ -821,6 +824,9 @@ class SmartMatchDashboard:
 
         if not ranked:
             tk.Label(self.match_list, text="暂无通过校验的赛事数据", bg=PANEL, fg=MUTED, font=("Microsoft YaHei UI", 11)).pack(anchor=tk.W, pady=20)
+            if self._widget_alive("match_canvas"):
+                self.match_canvas.configure(scrollregion=self.match_canvas.bbox("all"))
+                self.match_canvas.yview_moveto(0)
             return
 
         for row in ranked:
@@ -854,7 +860,6 @@ class SmartMatchDashboard:
             tk.Label(block, text=value, bg=PANEL_2, fg=color, font=("Microsoft YaHei UI", 12, "bold"), wraplength=width - 8, justify=tk.LEFT).pack(anchor=tk.W, pady=(8, 0))
 
         self._bind_detail_open(frame, row)
-        self._bind_match_scroll(frame)
 
     def _bind_detail_open(self, widget: tk.Widget, row: DashboardRow) -> None:
         widget.bind("<Button-1>", lambda _event: self.open_match_detail(row))
