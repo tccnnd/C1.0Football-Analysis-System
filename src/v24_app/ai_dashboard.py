@@ -100,6 +100,29 @@ def _strategy_text(prediction: dict) -> str:
     return pick
 
 
+def _competition_mode_label(prediction: dict) -> str:
+    if prediction.get("competition_mode") == "world_cup":
+        return "\u4e16\u754c\u676f\u6a21\u5f0f"
+    return "\u5e38\u89c4\u6a21\u5f0f"
+
+
+def _world_cup_notice(prediction: dict) -> str:
+    payload = prediction.get("world_cup_mode")
+    if not isinstance(payload, dict) or not payload.get("enabled"):
+        return ""
+    phase_map = {"group": "\u5c0f\u7ec4\u8d5b", "knockout": "\u6dd8\u6c70\u8d5b", "unknown": "\u5f85\u5224\u5b9a"}
+    phase = phase_map.get(str(payload.get("phase") or "unknown"), "\u5f85\u5224\u5b9a")
+    cap = _pct1(payload.get("confidence_cap"))
+    adjusted = "\u5df2\u964d\u6743" if payload.get("confidence_adjusted") else "\u672a\u89e6\u53d1\u964d\u6743"
+    return (
+        "\n\n\u4e16\u754c\u676f\u6a21\u5f0f\n"
+        f"- \u8d5b\u5236\u9636\u6bb5\uff1a{phase}\n"
+        f"- \u7f6e\u4fe1\u4e0a\u9650\uff1a{cap}\uff08{adjusted}\uff09\n"
+        "- \u56fd\u5bb6\u961f\u6837\u672c\u7a00\u758f\uff0c\u9635\u5bb9\u3001\u8d5b\u7a0b\u5bc6\u5ea6\u548c\u79ef\u5206\u5f62\u52bf\u9700\u8981\u4f18\u5148\u590d\u6838\u3002\n"
+        "- \u5c0f\u7ec4\u8d5b\u8981\u5173\u6ce8\u51c0\u80dc\u7403\u548c\u8f6e\u6362\uff0c\u6dd8\u6c70\u8d5b\u8981\u5173\u6ce8\u52a0\u65f6/\u70b9\u7403\u548c\u4fdd\u5b88\u7b56\u7565\u3002"
+    )
+
+
 def _analysis_report(row: DashboardRow) -> str:
     match = row.match
     pred = row.prediction
@@ -146,6 +169,7 @@ def _analysis_report(row: DashboardRow) -> str:
         "\u590d\u6838\u5efa\u8bae\n"
         "- \u8d5b\u524d\u91cd\u70b9\u590d\u6838\u4f24\u505c\u3001\u9996\u53d1\u3001\u76d8\u53e3\u53d8\u5316\u548c\u5e02\u573a\u70ed\u5ea6\u3002\n"
         "- \u82e5\u4e34\u573a\u76d8\u53e3\u4e0e\u6a21\u578b\u65b9\u5411\u6301\u7eed\u80cc\u79bb\uff0c\u5e94\u4e0b\u8c03\u7b56\u7565\u6743\u91cd\u3002"
+        f"{_world_cup_notice(pred)}"
     )
 
 
@@ -917,7 +941,7 @@ class SmartMatchDashboard:
             ("\u98ce\u9669\u7b49\u7ea7", _risk_label(pred.get("risk_level")), _risk_color(pred.get("risk_level"))),
             ("\u63a8\u8350\u7b56\u7565", _strategy_text(pred), TEXT),
             ("\u7f6e\u4fe1\u5ea6", _pct1(pred.get("confidence")), "#7aa2ff"),
-            ("\u9884\u8ba1\u8fdb\u7403", _num(pred.get("expected_goals")), TEXT),
+            ("\u8d5b\u4e8b\u6a21\u5f0f", _competition_mode_label(pred), YELLOW if pred.get("competition_mode") == "world_cup" else TEXT),
         ]:
             self._detail_metric(summary, label, value, color)
 

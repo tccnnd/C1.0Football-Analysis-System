@@ -63,6 +63,14 @@ LEAGUE_STRENGTH = {
     "欧冠": 1.02,
     "欧联": 0.98,
 }
+WORLD_CUP_LEAGUE_KEYWORDS = (
+    "世界杯",
+    "世界盃",
+    "world cup",
+    "fifa world cup",
+    "worldcup",
+)
+WORLD_CUP_CONFIDENCE_CAP = 0.56
 
 ELO_ENGINE = EloRatingEngine()
 POISSON_ENGINE = PoissonScoreEngine()
@@ -255,6 +263,48 @@ def normalize_text(value: object) -> str:
         text = repaired
 
     return text.replace("\xa0", " ").strip()
+
+
+def is_world_cup_match(match: AppMatch) -> bool:
+    league = normalize_text(getattr(match, "league", "")).lower()
+    return any(keyword in league for keyword in WORLD_CUP_LEAGUE_KEYWORDS)
+
+
+def _world_cup_phase_hint(match: AppMatch) -> str:
+    league = normalize_text(getattr(match, "league", ""))
+    if any(text in league for text in ("淘汰", "1/8", "八分之一", "半决赛", "决赛")):
+        return "knockout"
+    if any(text in league for text in ("小组", "分组", "group")):
+        return "group"
+    return "unknown"
+
+
+def _apply_world_cup_overlay(match: AppMatch, prediction: dict) -> dict:
+    if not is_world_cup_match(match) or not isinstance(prediction, dict):
+        return prediction
+
+    adjusted = dict(prediction)
+    raw_confidence = _safe_float(adjusted.get("confidence"), default=0.0)
+    capped_confidence = min(raw_confidence, WORLD_CUP_CONFIDENCE_CAP)
+    confidence_adjusted = capped_confidence < raw_confidence
+    if confidence_adjusted:
+        adjusted["confidence"] = round(capped_confidence, 4)
+
+    original_model = str(adjusted.get("model") or "")
+    adjusted["model"] = f"{original_model}+WorldCupMode" if original_model else "WorldCupMode"
+    adjusted["competition_mode"] = "world_cup"
+    adjusted["world_cup_mode"] = {
+        "enabled": True,
+        "phase": _world_cup_phase_hint(match),
+        "confidence_cap": WORLD_CUP_CONFIDENCE_CAP,
+        "confidence_adjusted": confidence_adjusted,
+        "notes": [
+            "世界杯赛事使用独立提示，不与普通联赛样本直接混用。",
+            "国家队样本稀疏，阵容、赛程和赛制权重应高于俱乐部联赛。",
+            "小组赛需关注积分形势，淘汰赛需关注加时/点球和保守策略。",
+        ],
+    }
+    return adjusted
 
 
 def _looks_like_match_time(value: str) -> bool:
@@ -5694,13 +5744,14 @@ def predict_match(match: AppMatch) -> dict:
 
     league_strength = LEAGUE_STRENGTH.get(match.league, 0.92)
     recent_form_features = _recent_form_features_for_match(match)
-    return _predict_match_with_inputs(
+    prediction = _predict_match_with_inputs(
         match=match,
         home_rating=home_rating,
         away_rating=away_rating,
         league_strength=league_strength,
         recent_form_features=recent_form_features,
     )
+    return _apply_world_cup_overlay(match, prediction)
 
 
 def persist_prediction_snapshot(match: AppMatch, prediction: dict) -> None:
