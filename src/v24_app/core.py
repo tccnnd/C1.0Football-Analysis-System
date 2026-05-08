@@ -1,0 +1,6312 @@
+from __future__ import annotations
+
+import json
+from collections import defaultdict
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
+from itertools import product
+from math import log, log2
+from pathlib import Path
+from typing import Any, Iterable
+
+from .models.elo_rating import EloRatingEngine
+from .models.ensemble import (
+    EloProbabilityModel,
+    EnsembleContext,
+    MarketProbabilityModel,
+    PoissonProbabilityModel,
+    WeightedEnsembleEngine,
+    get_poisson_outcome,
+)
+from .models.poisson import PoissonScoreEngine
+from .models.play_xgboost import ScorelineXGBoostModel, TotalGoalsXGBoostModel, VolatileScorelineXGBoostModel
+from .models.xgboost_v0 import XGBoostProbabilityModel
+from .models.bayesian_calibration import calibrate_three_way_probabilities
+from .storage.state_store import StateStore
+from .training_samples import build_recent_form_feature_map, build_team_histories_from_state
+
+try:
+    from .data_sources.match_fetcher_titan import MatchFetcherTitan
+except Exception:
+    MatchFetcherTitan = None
+
+try:
+    from .data_sources.match_fetcher_500 import MatchFetcher500
+except Exception:
+    MatchFetcher500 = None
+
+try:
+    from .data_sources.market_intent_500 import MarketIntentFetcher500
+except Exception:
+    MarketIntentFetcher500 = None
+
+
+PACKAGE_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = PACKAGE_DIR.parent.parent
+CACHE_FILE = PROJECT_DIR / "data" / "cache" / "500_matches_today.json"
+REPORT_DIR = PROJECT_DIR / "reports"
+ENSEMBLE_WEIGHTS_FILE = PROJECT_DIR / "data" / "models" / "ensemble_weights_v1.json"
+PLAY_THRESHOLDS_FILE = PROJECT_DIR / "data" / "models" / "play_thresholds_v1.json"
+PLAY_MODEL_POLICY_FILE = PROJECT_DIR / "data" / "models" / "play_model_policy_v1.json"
+BAYES_CALIBRATION_FILE = PROJECT_DIR / "data" / "models" / "bayes_calibration_v1.json"
+
+
+LEAGUE_STRENGTH = {
+    "英超": 1.00,
+    "西甲": 0.98,
+    "德甲": 0.97,
+    "意甲": 0.96,
+    "法甲": 0.94,
+    "中超": 0.88,
+    "日职联": 0.90,
+    "美职联": 0.89,
+    "欧冠": 1.02,
+    "欧联": 0.98,
+}
+
+ELO_ENGINE = EloRatingEngine()
+POISSON_ENGINE = PoissonScoreEngine()
+MARKET_MODEL = MarketProbabilityModel()
+ELO_MODEL = EloProbabilityModel(ELO_ENGINE)
+POISSON_MODEL = PoissonProbabilityModel(POISSON_ENGINE)
+XGBOOST_MODEL = XGBoostProbabilityModel(PROJECT_DIR)
+TOTAL_GOALS_MODEL = TotalGoalsXGBoostModel(PROJECT_DIR)
+SCORELINE_MODEL = ScorelineXGBoostModel(PROJECT_DIR)
+VOLATILE_SCORELINE_MODEL = VolatileScorelineXGBoostModel(PROJECT_DIR)
+DEFAULT_ENSEMBLE_WEIGHTS = {
+    "market": 0.35,
+    "elo": 0.30,
+    "poisson": 0.20,
+    "xgboost": 0.15,
+}
+DEFAULT_PLAY_THRESHOLDS = {
+    "1x2": 0.56,
+    "handicap": 0.56,
+    "total_goals": 0.18,
+    "score": 0.10,
+    "htft": 0.18,
+}
+PLAY_THRESHOLD_RANGE = {
+    "1x2": (0.45, 0.78),
+    "handicap": (0.45, 0.78),
+    "total_goals": (0.12, 0.40),
+    "score": (0.06, 0.28),
+    "htft": (0.12, 0.40),
+}
+DEFAULT_PLAY_POLICY = {
+    "1x2": {"single_enabled": True, "parlay_enabled": True, "display_enabled": True, "priority": 1},
+    "handicap": {"single_enabled": True, "parlay_enabled": True, "display_enabled": True, "priority": 2},
+    "total_goals": {"single_enabled": True, "parlay_enabled": True, "display_enabled": True, "priority": 3},
+    "htft": {"single_enabled": True, "parlay_enabled": False, "display_enabled": True, "priority": 4},
+    "score": {"single_enabled": False, "parlay_enabled": False, "display_enabled": True, "priority": 5},
+}
+DEFAULT_PLAY_MODEL_POLICY = {
+    "total_goals": {
+        "takeover_enabled": False,
+        "min_confidence": 0.24,
+    },
+    "scoreline": {
+        "takeover_enabled": True,
+        "regular_same_outcome_min_confidence": 0.07,
+        "regular_cross_outcome_enabled": True,
+        "regular_cross_outcome_min_confidence": 0.11,
+        "volatile_same_outcome_min_confidence": 0.13,
+        "volatile_cross_outcome_enabled": False,
+        "volatile_cross_outcome_min_confidence": 0.17,
+    },
+}
+DEFAULT_BAYES_CALIBRATION = {
+    "enabled": True,
+    "prior_source": "market",
+    "prior_strength": 24.0,
+    "model_strength": 56.0,
+    "uncertainty_gain": 0.55,
+    "draw_bias_scale": 0.18,
+    "min_probability": 0.02,
+}
+LEAGUE_WEIGHT_MIN_VALIDATION_SAMPLES = 120
+BAYES_LEAGUE_MIN_VALIDATION_SAMPLES = 260
+ENSEMBLE_ENGINE = WeightedEnsembleEngine(
+    weights=DEFAULT_ENSEMBLE_WEIGHTS
+)
+STATE_STORE = StateStore(PROJECT_DIR)
+_RECENT_FORM_CACHE: dict[str, object] = {
+    "signature": None,
+    "team_histories": {},
+}
+_ENSEMBLE_WEIGHT_CACHE: dict[str, object] = {
+    "mtime": None,
+    "weights": dict(DEFAULT_ENSEMBLE_WEIGHTS),
+    "report": {},
+}
+_PLAY_THRESHOLD_CACHE: dict[str, object] = {
+    "mtime": None,
+    "thresholds": dict(DEFAULT_PLAY_THRESHOLDS),
+    "report": {},
+}
+_PLAY_MODEL_POLICY_CACHE: dict[str, object] = {
+    "mtime": None,
+    "policy": json.loads(json.dumps(DEFAULT_PLAY_MODEL_POLICY)),
+    "report": {},
+}
+_BAYES_CALIBRATION_CACHE: dict[str, object] = {
+    "mtime": None,
+    "config": dict(DEFAULT_BAYES_CALIBRATION),
+    "report": {},
+}
+_CONFIDENCE_CALIBRATION_CACHE: dict[str, object] = {
+    "settlement_mtime": None,
+    "profile": {},
+}
+_LIVE_PLAY_THRESHOLD_CACHE: dict[str, object] = {
+    "cache_key": None,
+    "thresholds": {},
+    "meta": {},
+}
+
+
+@dataclass
+class AppMatch:
+    home_team: str
+    away_team: str
+    league: str
+    match_time: str
+    match_date: str
+    odds_home: float
+    odds_draw: float
+    odds_away: float
+    handicap_line: float = 0.0
+    opening_odds_home: float = 0.0
+    opening_odds_draw: float = 0.0
+    opening_odds_away: float = 0.0
+    return_rate: float = 0.0
+    kelly_home: float = 0.0
+    kelly_draw: float = 0.0
+    kelly_away: float = 0.0
+    source: str = "unknown"
+    source_id: str = ""
+
+    @property
+    def match_id(self) -> str:
+        return f"{self.match_date}|{self.league}|{self.home_team}|{self.away_team}"
+
+
+@dataclass
+class FetchDiagnostics:
+    source: str = "none"
+    fixture_source_guard: bool = False
+    fixture_page_guard: bool = False
+    cache_fresh: bool = False
+    cache_exists: bool = False
+    fetched_at: str = ""
+    messages: list[str] = field(default_factory=list)
+
+    def add(self, message: str) -> None:
+        self.messages.append(message)
+
+
+@dataclass
+class FetchResult:
+    matches: list[AppMatch]
+    diagnostics: FetchDiagnostics
+
+
+def _safe_float(value: object, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _safe_int(value: object, default: int | None = None) -> int | None:
+    try:
+        if value in (None, ""):
+            return default
+        return int(float(value))
+    except Exception:
+        return default
+
+
+def _text_quality(text: str) -> float:
+    if not text:
+        return 0.0
+    useful = 0
+    for char in text:
+        if "\u4e00" <= char <= "\u9fff" or char.isascii():
+            useful += 1
+    return useful / max(len(text), 1)
+
+
+def normalize_text(value: object) -> str:
+    if value is None:
+        return ""
+
+    text = str(value).strip()
+    if not text:
+        return ""
+
+    original_quality = _text_quality(text)
+    try:
+        repaired = text.encode("gbk", errors="ignore").decode("utf-8", errors="ignore").strip()
+    except Exception:
+        repaired = text
+
+    if repaired and _text_quality(repaired) > original_quality:
+        text = repaired
+
+    return text.replace("\xa0", " ").strip()
+
+
+def _looks_like_match_time(value: str) -> bool:
+    return len(value) == 5 and value[2] == ":" and value[:2].isdigit() and value[3:].isdigit()
+
+
+def _looks_like_date(value: str) -> bool:
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+        return True
+    except ValueError:
+        return False
+
+
+def _has_readable_name(text: str) -> bool:
+    text = normalize_text(text)
+    return len(text) >= 2 and _text_quality(text) >= 0.75
+
+
+def _to_app_match(raw: object, source: str) -> AppMatch | None:
+    if raw is None:
+        return None
+
+    if hasattr(raw, "home_team"):
+        home_team = normalize_text(getattr(raw, "home_team", ""))
+        away_team = normalize_text(getattr(raw, "away_team", ""))
+        league = normalize_text(getattr(raw, "league", ""))
+        match_time = normalize_text(getattr(raw, "match_time", ""))
+        match_date = normalize_text(getattr(raw, "match_date", ""))
+        odds_home = _safe_float(getattr(raw, "odds_home", None))
+        odds_draw = _safe_float(getattr(raw, "odds_draw", None))
+        odds_away = _safe_float(getattr(raw, "odds_away", None))
+        handicap_line = _safe_float(getattr(raw, "handicap_line", 0.0), default=0.0)
+        opening_odds_home = _safe_float(getattr(raw, "opening_odds_home", 0.0), default=0.0)
+        opening_odds_draw = _safe_float(getattr(raw, "opening_odds_draw", 0.0), default=0.0)
+        opening_odds_away = _safe_float(getattr(raw, "opening_odds_away", 0.0), default=0.0)
+        return_rate = _safe_float(getattr(raw, "return_rate", 0.0), default=0.0)
+        kelly_home = _safe_float(getattr(raw, "kelly_home", 0.0), default=0.0)
+        kelly_draw = _safe_float(getattr(raw, "kelly_draw", 0.0), default=0.0)
+        kelly_away = _safe_float(getattr(raw, "kelly_away", 0.0), default=0.0)
+        source_id = normalize_text(getattr(raw, "match_id", ""))
+    elif isinstance(raw, dict):
+        home_team = normalize_text(raw.get("home_team", ""))
+        away_team = normalize_text(raw.get("away_team", ""))
+        league = normalize_text(raw.get("league", ""))
+        match_time = normalize_text(raw.get("match_time", ""))
+        match_date = normalize_text(raw.get("match_date", ""))
+        odds_home = _safe_float(raw.get("odds_home"))
+        odds_draw = _safe_float(raw.get("odds_draw"))
+        odds_away = _safe_float(raw.get("odds_away"))
+        handicap_line = _safe_float(raw.get("handicap_line"), default=0.0)
+        opening_odds_home = _safe_float(raw.get("opening_odds_home"), default=0.0)
+        opening_odds_draw = _safe_float(raw.get("opening_odds_draw"), default=0.0)
+        opening_odds_away = _safe_float(raw.get("opening_odds_away"), default=0.0)
+        return_rate = _safe_float(raw.get("return_rate"), default=0.0)
+        kelly_home = _safe_float(raw.get("kelly_home"), default=0.0)
+        kelly_draw = _safe_float(raw.get("kelly_draw"), default=0.0)
+        kelly_away = _safe_float(raw.get("kelly_away"), default=0.0)
+        source_id = normalize_text(raw.get("source_id", "") or raw.get("match_source_id", ""))
+    else:
+        return None
+
+    if not _has_readable_name(home_team) or not _has_readable_name(away_team):
+        return None
+    if not _has_readable_name(league):
+        return None
+    if not _looks_like_match_time(match_time):
+        return None
+    if not _looks_like_date(match_date):
+        return None
+    if min(odds_home, odds_draw, odds_away) <= 1.0:
+        return None
+
+    return AppMatch(
+        home_team=home_team,
+        away_team=away_team,
+        league=league,
+        match_time=match_time,
+        match_date=match_date,
+        odds_home=odds_home,
+        odds_draw=odds_draw,
+        odds_away=odds_away,
+        handicap_line=handicap_line,
+        opening_odds_home=opening_odds_home,
+        opening_odds_draw=opening_odds_draw,
+        opening_odds_away=opening_odds_away,
+        return_rate=return_rate,
+        kelly_home=kelly_home,
+        kelly_draw=kelly_draw,
+        kelly_away=kelly_away,
+        source=source,
+        source_id=source_id,
+    )
+
+
+def _app_match_from_payload(payload: dict, source: str) -> AppMatch | None:
+    if not isinstance(payload, dict):
+        return None
+    home_team = normalize_text(payload.get("home_team", ""))
+    away_team = normalize_text(payload.get("away_team", ""))
+    league = normalize_text(payload.get("league", ""))
+    match_time = normalize_text(payload.get("match_time", ""))
+    match_date = normalize_text(payload.get("match_date", ""))
+    if not _has_readable_name(home_team) or not _has_readable_name(away_team) or not _has_readable_name(league):
+        return None
+    if not _looks_like_match_time(match_time) or not _looks_like_date(match_date):
+        return None
+
+    odds_home = _safe_float(payload.get("odds_home"), default=2.20)
+    odds_draw = _safe_float(payload.get("odds_draw"), default=3.10)
+    odds_away = _safe_float(payload.get("odds_away"), default=2.80)
+    handicap_line = _safe_float(payload.get("handicap_line"), default=0.0)
+    opening_odds_home = _safe_float(payload.get("opening_odds_home"), default=0.0)
+    opening_odds_draw = _safe_float(payload.get("opening_odds_draw"), default=0.0)
+    opening_odds_away = _safe_float(payload.get("opening_odds_away"), default=0.0)
+    return_rate = _safe_float(payload.get("return_rate"), default=0.0)
+    kelly_home = _safe_float(payload.get("kelly_home"), default=0.0)
+    kelly_draw = _safe_float(payload.get("kelly_draw"), default=0.0)
+    kelly_away = _safe_float(payload.get("kelly_away"), default=0.0)
+    if min(odds_home, odds_draw, odds_away) <= 1.0:
+        odds_home, odds_draw, odds_away = 2.20, 3.10, 2.80
+
+    return AppMatch(
+        home_team=home_team,
+        away_team=away_team,
+        league=league,
+        match_time=match_time,
+        match_date=match_date,
+        odds_home=odds_home,
+        odds_draw=odds_draw,
+        odds_away=odds_away,
+        handicap_line=handicap_line,
+        opening_odds_home=opening_odds_home,
+        opening_odds_draw=opening_odds_draw,
+        opening_odds_away=opening_odds_away,
+        return_rate=return_rate,
+        kelly_home=kelly_home,
+        kelly_draw=kelly_draw,
+        kelly_away=kelly_away,
+        source=source,
+        source_id=normalize_text(payload.get("source_id", "")),
+    )
+
+
+def _snapshot_lookup_key(match_date: str, league: str, home_team: str, away_team: str) -> tuple[str, str, str, str]:
+    return (
+        normalize_text(match_date),
+        normalize_text(league),
+        normalize_text(home_team),
+        normalize_text(away_team),
+    )
+
+
+def _snapshot_lookup_team_key(match_date: str, home_team: str, away_team: str) -> tuple[str, str, str]:
+    return (
+        normalize_text(match_date),
+        normalize_text(home_team),
+        normalize_text(away_team),
+    )
+
+
+def _market_snapshot_exact_key(match_date: str, league: str, home_team: str, away_team: str) -> str:
+    return "exact|" + "|".join(
+        [
+            normalize_text(match_date),
+            normalize_text(league),
+            normalize_text(home_team),
+            normalize_text(away_team),
+        ]
+    )
+
+
+def _market_snapshot_team_key(match_date: str, home_team: str, away_team: str) -> str:
+    return "team|" + "|".join(
+        [
+            normalize_text(match_date),
+            normalize_text(home_team),
+            normalize_text(away_team),
+        ]
+    )
+
+
+def _market_snapshot_source_key(source_id: str) -> str:
+    return f"source|{normalize_text(source_id)}"
+
+
+def _market_snapshot_fields_from_match(match: AppMatch) -> dict[str, float]:
+    return {
+        "opening_odds_home": round(_safe_float(match.opening_odds_home, default=0.0), 4),
+        "opening_odds_draw": round(_safe_float(match.opening_odds_draw, default=0.0), 4),
+        "opening_odds_away": round(_safe_float(match.opening_odds_away, default=0.0), 4),
+        "return_rate": round(_safe_float(match.return_rate, default=0.0), 4),
+        "kelly_home": round(_safe_float(match.kelly_home, default=0.0), 4),
+        "kelly_draw": round(_safe_float(match.kelly_draw, default=0.0), 4),
+        "kelly_away": round(_safe_float(match.kelly_away, default=0.0), 4),
+    }
+
+
+def _has_market_snapshot_fields(match: AppMatch) -> bool:
+    fields = _market_snapshot_fields_from_match(match)
+    return any(value > 0.0 for value in fields.values())
+
+
+def _apply_market_snapshot_fields(match: AppMatch, fields: dict) -> bool:
+    if not isinstance(fields, dict):
+        return False
+    changed = False
+    for name in (
+        "opening_odds_home",
+        "opening_odds_draw",
+        "opening_odds_away",
+        "return_rate",
+        "kelly_home",
+        "kelly_draw",
+        "kelly_away",
+    ):
+        current = _safe_float(getattr(match, name, 0.0), default=0.0)
+        incoming = _safe_float(fields.get(name), default=0.0)
+        if current <= 0.0 and incoming > 0.0:
+            setattr(match, name, incoming)
+            changed = True
+    return changed
+
+
+def persist_market_snapshot(match: AppMatch) -> int:
+    if not isinstance(match, AppMatch) or not _has_market_snapshot_fields(match):
+        return 0
+    saved = 0
+    record = {
+        "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "match": {
+            "match_id": match.match_id,
+            "source_id": normalize_text(match.source_id),
+            "match_date": match.match_date,
+            "match_time": match.match_time,
+            "league": match.league,
+            "home_team": match.home_team,
+            "away_team": match.away_team,
+            "source": match.source,
+        },
+        "market": _market_snapshot_fields_from_match(match),
+    }
+    keys = [
+        _market_snapshot_exact_key(match.match_date, match.league, match.home_team, match.away_team),
+        _market_snapshot_team_key(match.match_date, match.home_team, match.away_team),
+    ]
+    source_id = normalize_text(match.source_id)
+    if source_id:
+        keys.insert(0, _market_snapshot_source_key(source_id))
+    for snapshot_id in keys:
+        STATE_STORE.upsert_market_snapshot(snapshot_id, record)
+        saved += 1
+    return saved
+
+
+def persist_market_snapshots(matches: Iterable[AppMatch]) -> int:
+    total = 0
+    for match in matches:
+        if isinstance(match, AppMatch):
+            total += persist_market_snapshot(match)
+    return total
+
+
+def enrich_match_from_market_snapshot_store(match: AppMatch) -> bool:
+    if not isinstance(match, AppMatch) or _has_market_snapshot_fields(match):
+        return False
+    items = STATE_STORE.load_market_snapshots()
+    candidates: list[str] = []
+    source_id = normalize_text(match.source_id)
+    if source_id:
+        candidates.append(_market_snapshot_source_key(source_id))
+    candidates.append(_market_snapshot_exact_key(match.match_date, match.league, match.home_team, match.away_team))
+    candidates.append(_market_snapshot_team_key(match.match_date, match.home_team, match.away_team))
+    for key in candidates:
+        record = items.get(key)
+        if not isinstance(record, dict):
+            continue
+        market = record.get("market")
+        if _apply_market_snapshot_fields(match, market):
+            return True
+    return False
+
+
+def enrich_matches_from_market_snapshot_store(matches: list[AppMatch], diagnostics: FetchDiagnostics | None = None) -> int:
+    enriched = 0
+    for match in matches:
+        if enrich_match_from_market_snapshot_store(match):
+            enriched += 1
+    if diagnostics is not None and enriched > 0:
+        diagnostics.add(f"赛前市场快照回填成功: {enriched} 场。")
+    return enriched
+
+
+def dedupe_matches(matches: Iterable[AppMatch]) -> list[AppMatch]:
+    unique: dict[str, AppMatch] = {}
+    for match in matches:
+        unique[match.match_id] = match
+    return list(unique.values())
+
+
+def _serialize_raw_matches(raw_matches: Iterable[object]) -> list[dict]:
+    serialized_matches: list[dict] = []
+    for raw in raw_matches:
+        serialized_matches.append(
+            {
+                "home_team": getattr(raw, "home_team", ""),
+                "away_team": getattr(raw, "away_team", ""),
+                "league": getattr(raw, "league", ""),
+                "match_time": getattr(raw, "match_time", ""),
+                "match_date": getattr(raw, "match_date", ""),
+                "odds_home": getattr(raw, "odds_home", 0),
+                "odds_draw": getattr(raw, "odds_draw", 0),
+                "odds_away": getattr(raw, "odds_away", 0),
+                "handicap_line": getattr(raw, "handicap_line", 0.0),
+                "opening_odds_home": getattr(raw, "opening_odds_home", 0.0),
+                "opening_odds_draw": getattr(raw, "opening_odds_draw", 0.0),
+                "opening_odds_away": getattr(raw, "opening_odds_away", 0.0),
+                "return_rate": getattr(raw, "return_rate", 0.0),
+                "kelly_home": getattr(raw, "kelly_home", 0.0),
+                "kelly_draw": getattr(raw, "kelly_draw", 0.0),
+                "kelly_away": getattr(raw, "kelly_away", 0.0),
+                "source_id": getattr(raw, "match_id", ""),
+            }
+        )
+    return serialized_matches
+
+
+def _compute_live_source_health_score(*, raw_count: int, valid_count: int, merged_count: int) -> int:
+    raw = max(0, int(raw_count))
+    valid = max(0, int(valid_count))
+    merged = max(0, int(merged_count))
+    if raw <= 0 or valid <= 0 or merged <= 0:
+        return 0
+    valid_rate = _clamp(valid / max(raw, 1), 0.0, 1.0)
+    coverage_rate = _clamp(valid / max(merged, 1), 0.0, 1.0)
+    score = (valid_rate * 0.55 + coverage_rate * 0.45) * 100.0
+    return int(round(score))
+
+
+def load_cached_payload() -> tuple[dict | None, FetchDiagnostics]:
+    diagnostics = FetchDiagnostics(source="cache")
+    diagnostics.cache_exists = CACHE_FILE.exists()
+    diagnostics.fetched_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    if not CACHE_FILE.exists():
+        diagnostics.add("本地缓存不存在。")
+        return None, diagnostics
+
+    try:
+        payload = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
+    except Exception as exc:
+        diagnostics.add(f"本地缓存读取失败: {exc}")
+        return None, diagnostics
+
+    cache_date = normalize_text(payload.get("date", ""))
+    today = datetime.now().strftime("%Y-%m-%d")
+    diagnostics.cache_fresh = cache_date == today
+    if diagnostics.cache_fresh:
+        diagnostics.add("发现当日缓存，可作为有效赛事源。")
+    else:
+        diagnostics.add(f"缓存日期不是今天: {cache_date or '空'}")
+
+    return payload, diagnostics
+
+
+def fixture_page_guard_from_items(items: list[dict], source: str) -> tuple[list[AppMatch], list[str]]:
+    matches: list[AppMatch] = []
+    messages: list[str] = []
+
+    for item in items:
+        match = _to_app_match(item, source=source)
+        if match is not None:
+            matches.append(match)
+
+    if not matches:
+        messages.append("页面校验失败: 没有解析出任何有效赛事。")
+        return [], messages
+
+    filtered = len(items) - len(matches)
+    if filtered > 0:
+        messages.append(f"页面校验过滤了 {filtered} 条异常赛事。")
+    else:
+        messages.append("页面校验通过: 赛事字段完整且可读。")
+
+    return dedupe_matches(matches), messages
+
+
+def _enrich_matches_with_market_intent(matches: list[AppMatch], diagnostics: FetchDiagnostics) -> None:
+    if not matches or MarketIntentFetcher500 is None:
+        return
+    try:
+        fetcher = MarketIntentFetcher500(PROJECT_DIR, debug=False)
+        enriched = int(fetcher.enrich_matches(matches))
+        if enriched > 0:
+            diagnostics.add(f"500 市场意图补强成功: {enriched} 场已补开赔/返还率/凯利。")
+        else:
+            diagnostics.add("500 市场意图补强未命中任何赛事。")
+    except Exception as exc:
+        diagnostics.add(f"500 市场意图补强失败: {exc}")
+
+
+def _persist_market_snapshots_with_diagnostics(matches: list[AppMatch], diagnostics: FetchDiagnostics) -> None:
+    saved = persist_market_snapshots(matches)
+    if saved > 0:
+        diagnostics.add(f"赛前市场快照已落盘: {saved} 条索引。")
+
+
+def fetch_matches_v24(strict_today: bool = True) -> FetchResult:
+    diagnostics = FetchDiagnostics(
+        source="none",
+        fetched_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    )
+
+    payload, cache_diagnostics = load_cached_payload()
+    diagnostics.cache_exists = cache_diagnostics.cache_exists
+    diagnostics.cache_fresh = cache_diagnostics.cache_fresh
+    diagnostics.messages.extend(cache_diagnostics.messages)
+    cache_date_text = normalize_text(payload.get("date", "")) if payload else ""
+
+    stale_cache_matches: list[AppMatch] = []
+    stale_cache_messages: list[str] = []
+    if payload and payload.get("matches") and strict_today and not diagnostics.cache_fresh:
+        cache_age_days: int | None = None
+        if _looks_like_date(cache_date_text):
+            cache_age_days = (datetime.now().date() - datetime.strptime(cache_date_text, "%Y-%m-%d").date()).days
+
+        if cache_age_days is not None and 0 <= cache_age_days <= 2:
+            stale_cache_matches, stale_cache_messages = fixture_page_guard_from_items(
+                payload.get("matches", []),
+                source="cache_stale",
+            )
+            if stale_cache_matches:
+                diagnostics.add(
+                    f"检测到可回退缓存({cache_date_text})，若在线源不可用将自动启用。"
+                )
+
+    def try_stale_fallback(reason: str) -> FetchResult | None:
+        if not stale_cache_matches:
+            return None
+        diagnostics.fixture_source_guard = True
+        diagnostics.fixture_page_guard = True
+        diagnostics.source = "cache_stale"
+        diagnostics.messages.extend(stale_cache_messages)
+        enrich_matches_from_market_snapshot_store(stale_cache_matches, diagnostics)
+        _enrich_matches_with_market_intent(stale_cache_matches, diagnostics)
+        _persist_market_snapshots_with_diagnostics(stale_cache_matches, diagnostics)
+        diagnostics.add(
+            f"{reason}，已回退到最近缓存({cache_date_text})，共 {len(stale_cache_matches)} 场。"
+        )
+        return FetchResult(matches=stale_cache_matches, diagnostics=diagnostics)
+
+    if payload and payload.get("matches"):
+        if strict_today and not diagnostics.cache_fresh:
+            diagnostics.add("fixture_source_guard 拒绝使用过期缓存。")
+        else:
+            diagnostics.fixture_source_guard = True
+            matches, messages = fixture_page_guard_from_items(payload.get("matches", []), source="cache")
+            diagnostics.messages.extend(messages)
+            if matches:
+                enrich_matches_from_market_snapshot_store(matches, diagnostics)
+                _enrich_matches_with_market_intent(matches, diagnostics)
+                _persist_market_snapshots_with_diagnostics(matches, diagnostics)
+                diagnostics.fixture_page_guard = True
+                diagnostics.source = "cache"
+                return FetchResult(matches=matches, diagnostics=diagnostics)
+
+    fetchers: list[tuple[str, object]] = []
+    if MatchFetcherTitan is not None:
+        fetchers.append(("titan", MatchFetcherTitan(debug=False)))
+    if MatchFetcher500 is not None:
+        fetchers.append(("500", MatchFetcher500(debug=False)))
+
+    if not fetchers:
+        diagnostics.add("未加载到任何在线抓取器。")
+        fallback_result = try_stale_fallback("主数据源不可用")
+        if fallback_result is not None:
+            return fallback_result
+        return FetchResult(matches=[], diagnostics=diagnostics)
+
+    source_reports: list[dict] = []
+    live_all_matches: list[AppMatch] = []
+    for source_name, fetcher in fetchers:
+        try:
+            raw_matches = fetcher.get_today_matches()
+        except Exception as exc:
+            diagnostics.add(f"{source_name} 在线抓取失败: {exc}")
+            source_reports.append(
+                {"source": source_name, "status": "error", "raw_count": 0, "valid_count": 0, "error": str(exc)}
+            )
+            continue
+
+        serialized_matches = _serialize_raw_matches(raw_matches)
+        raw_count = len(serialized_matches)
+        if raw_count <= 0:
+            diagnostics.add(f"{source_name} 在线抓取未返回任何赛事。")
+            source_reports.append({"source": source_name, "status": "empty", "raw_count": 0, "valid_count": 0})
+            continue
+
+        diagnostics.fixture_source_guard = True
+        matches, messages = fixture_page_guard_from_items(
+            serialized_matches,
+            source=f"live:{source_name}",
+        )
+        for message in messages:
+            diagnostics.add(f"{source_name}: {message}")
+        if not matches:
+            diagnostics.add(f"{source_name} 在线赛事未通过页面字段校验。")
+            source_reports.append(
+                {"source": source_name, "status": "guard_reject", "raw_count": raw_count, "valid_count": 0}
+            )
+            continue
+
+        source_reports.append(
+            {"source": source_name, "status": "ready", "raw_count": raw_count, "valid_count": len(matches)}
+        )
+        live_all_matches.extend(matches)
+
+    if live_all_matches:
+        merged_matches = dedupe_matches(live_all_matches)
+        merged_count = len(merged_matches)
+        ready_reports = [item for item in source_reports if str(item.get("status")) == "ready"]
+        for item in ready_reports:
+            raw_count = int(item.get("raw_count", 0))
+            valid_count = int(item.get("valid_count", 0))
+            coverage = _clamp(valid_count / max(merged_count, 1), 0.0, 1.0)
+            score = _compute_live_source_health_score(
+                raw_count=raw_count,
+                valid_count=valid_count,
+                merged_count=merged_count,
+            )
+            item["coverage"] = round(coverage, 4)
+            item["health_score"] = score
+
+        ready_reports.sort(
+            key=lambda item: (
+                -int(item.get("health_score", 0)),
+                -int(item.get("valid_count", 0)),
+                str(item.get("source", "")),
+            )
+        )
+        primary_source = str(ready_reports[0].get("source", "")) if ready_reports else "unknown"
+        diagnostics.fixture_page_guard = True
+        diagnostics.source = f"live:{primary_source}" if len(ready_reports) <= 1 else f"live:hybrid(primary={primary_source})"
+
+        for item in ready_reports:
+            diagnostics.add(
+                "源健康[{source}]: raw={raw} valid={valid} coverage={coverage:.1%} score={score}".format(
+                    source=item.get("source", "-"),
+                    raw=int(item.get("raw_count", 0)),
+                    valid=int(item.get("valid_count", 0)),
+                    coverage=float(item.get("coverage", 0.0) or 0.0),
+                    score=int(item.get("health_score", 0)),
+                )
+            )
+        for item in source_reports:
+            status = str(item.get("status", ""))
+            if status in {"ready", ""}:
+                continue
+            diagnostics.add(
+                f"源状态[{item.get('source', '-')}] {status}: raw={int(item.get('raw_count', 0))} valid={int(item.get('valid_count', 0))}"
+            )
+
+        max_single_valid = max((int(item.get("valid_count", 0)) for item in ready_reports), default=0)
+        if merged_count > max_single_valid:
+            diagnostics.add(f"多源合并增益: +{merged_count - max_single_valid} 场（合并后 {merged_count} 场）")
+        else:
+            diagnostics.add(f"多源合并完成: {merged_count} 场（无新增去重增益）")
+
+        enrich_matches_from_market_snapshot_store(merged_matches, diagnostics)
+        _enrich_matches_with_market_intent(merged_matches, diagnostics)
+        _persist_market_snapshots_with_diagnostics(merged_matches, diagnostics)
+        return FetchResult(matches=merged_matches, diagnostics=diagnostics)
+
+    fallback_result = try_stale_fallback("所有在线源均不可用")
+    if fallback_result is not None:
+        return fallback_result
+    return FetchResult(matches=[], diagnostics=diagnostics)
+
+
+def _normalize_probs(home: float, draw: float, away: float) -> tuple[float, float, float]:
+    total = max(home + draw + away, 1e-9)
+    return home / total, draw / total, away / total
+
+
+def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
+    return max(low, min(value, high))
+
+
+def _strength_score(rating: float) -> float:
+    return _clamp((rating - 1300.0) / 4.0, 0.0, 100.0)
+
+
+def _distribution_entropy(probs: tuple[float, float, float]) -> float:
+    entropy = 0.0
+    for prob in probs:
+        p = max(prob, 1e-12)
+        entropy -= p * log2(p)
+    return entropy / log2(3.0)
+
+
+def _model_distance(a: tuple[float, float, float], b: tuple[float, float, float]) -> float:
+    return sum(abs(a[i] - b[i]) for i in range(3)) / 2.0
+
+
+def _risk_level_from_upset(upset_index: float) -> str:
+    if upset_index >= 0.66:
+        return "高"
+    if upset_index >= 0.45:
+        return "中"
+    return "低"
+
+
+def _result_label(home_goals: int, away_goals: int) -> str:
+    if home_goals > away_goals:
+        return "主胜"
+    if home_goals < away_goals:
+        return "客胜"
+    return "平局"
+
+
+def _result_to_label(result: str) -> int | None:
+    mapping = {"主胜": 0, "平局": 1, "客胜": 2}
+    return mapping.get(result)
+
+
+def _ou_result_label(total_goals: int, line: float = 2.5) -> str:
+    return f"大{line}" if total_goals > line else f"小{line}"
+
+
+def _extract_ou_prediction(prediction: dict | None, line: float = 2.5) -> tuple[str | None, float | None]:
+    if not prediction:
+        return None, None
+
+    direct_pick = prediction.get("ou_recommendation")
+    if direct_pick:
+        return str(direct_pick), _safe_float(prediction.get("ou_confidence"), default=0.0)
+
+    poisson = prediction.get("poisson") or {}
+    over_prob = _safe_float(poisson.get("over_2_5"), default=0.0)
+    under_prob = _safe_float(poisson.get("under_2_5"), default=max(0.0, 1.0 - over_prob))
+    pick = f"大{line}" if over_prob >= under_prob else f"小{line}"
+    confidence = max(over_prob, under_prob)
+    return pick, confidence
+
+
+def _format_total_goals_label(total_goals: int | None) -> str:
+    if total_goals is None:
+        return "-"
+    return f"{int(total_goals)}球"
+
+
+def _extract_total_goals_prediction(prediction: dict | None) -> tuple[str | None, int | None, float | None]:
+    if not prediction:
+        return None, None, None
+
+    total_goals_value = prediction.get("total_goals_value")
+    if total_goals_value is not None:
+        try:
+            parsed_total = int(total_goals_value)
+        except Exception:
+            parsed_total = None
+        if parsed_total is not None:
+            return (
+                _format_total_goals_label(parsed_total),
+                parsed_total,
+                _safe_float(prediction.get("total_goals_confidence"), default=0.0),
+            )
+
+    direct_pick = prediction.get("total_goals_recommendation")
+    if direct_pick:
+        direct_text = str(direct_pick).strip()
+        parsed_total = None
+        if direct_text.endswith("球"):
+            try:
+                parsed_total = int(direct_text[:-1])
+            except Exception:
+                parsed_total = None
+        return direct_text, parsed_total, _safe_float(prediction.get("total_goals_confidence"), default=0.0)
+
+    poisson = prediction.get("poisson") or {}
+    top_total_goals = poisson.get("top_total_goals") or []
+    if top_total_goals:
+        first = top_total_goals[0]
+        try:
+            parsed_total = int(first.get("goals"))
+        except Exception:
+            parsed_total = None
+        return (
+            _format_total_goals_label(parsed_total) if parsed_total is not None else None,
+            parsed_total,
+            _safe_float(first.get("probability"), default=0.0),
+        )
+
+    expected_goals = prediction.get("expected_goals")
+    if expected_goals is not None:
+        parsed_total = max(0, int(round(_safe_float(expected_goals), 0)))
+        return _format_total_goals_label(parsed_total), parsed_total, None
+
+    return None, None, None
+
+
+def _extract_score_prediction(prediction: dict | None) -> tuple[str | None, float | None]:
+    if not prediction:
+        return None, None
+
+    direct_pick = prediction.get("score_recommendation")
+    if direct_pick:
+        return str(direct_pick), _safe_float(prediction.get("score_confidence"), default=0.0)
+
+    poisson = prediction.get("poisson") or {}
+    top_scores = poisson.get("top_scores") or []
+    if top_scores:
+        first = top_scores[0]
+        return str(first.get("score", "")) or None, _safe_float(first.get("probability"), default=0.0)
+
+    return None, None
+
+
+def _best_score_for_total_goals(
+    score_distribution: list[dict] | None,
+    total_goals: int | None,
+    outcome_key: str | None = None,
+) -> dict | None:
+    if total_goals is None or not isinstance(score_distribution, list):
+        return None
+    primary: list[dict] = []
+    fallback: list[dict] = []
+    for item in score_distribution:
+        if not isinstance(item, dict):
+            continue
+        score_text = str(item.get("score", "")).strip()
+        if "-" not in score_text:
+            continue
+        try:
+            home_goals, away_goals = [int(part) for part in score_text.split("-", 1)]
+        except Exception:
+            continue
+        if home_goals + away_goals != int(total_goals):
+            continue
+        if outcome_key and _score_outcome_key(score_text) == outcome_key:
+            primary.append(item)
+        fallback.append(item)
+    if primary:
+        return max(primary, key=lambda entry: _safe_float(entry.get("probability"), default=0.0))
+    if fallback:
+        return max(fallback, key=lambda entry: _safe_float(entry.get("probability"), default=0.0))
+    return None
+
+
+def _extract_htft_prediction(prediction: dict | None) -> tuple[str | None, float | None]:
+    if not prediction:
+        return None, None
+
+    direct_pick = prediction.get("htft_recommendation")
+    if direct_pick:
+        return str(direct_pick), _safe_float(prediction.get("htft_confidence"), default=0.0)
+
+    poisson = prediction.get("poisson") or {}
+    htft_top = poisson.get("htft_top") or []
+    if htft_top:
+        first = htft_top[0]
+        label = str(first.get("label", "")).strip()
+        return label or None, _safe_float(first.get("probability"), default=0.0)
+
+    return None, None
+
+
+def _format_handicap_line(handicap_line: float) -> str:
+    line = _safe_float(handicap_line, default=0.0)
+    if abs(line - round(line)) < 1e-9:
+        text = str(int(round(line)))
+    else:
+        text = f"{line:.2f}".rstrip("0").rstrip(".")
+    if not text.startswith("-"):
+        text = f"+{text}"
+    return text
+
+
+def _handicap_outcome_key(home_goals: int, away_goals: int, handicap_line: float) -> str:
+    adjusted_home = float(home_goals) + _safe_float(handicap_line, default=0.0)
+    adjusted_away = float(away_goals)
+    if adjusted_home > adjusted_away:
+        return "home"
+    if adjusted_home < adjusted_away:
+        return "away"
+    return "draw"
+
+
+def _handicap_label_from_key(key: str) -> str:
+    mapping = {"home": "让胜", "draw": "让平", "away": "让负"}
+    return mapping.get(key, "-")
+
+
+def _format_handicap_display(handicap_line: float, key: str) -> str:
+    return f"{_format_handicap_line(handicap_line)} {_handicap_label_from_key(key)}"
+
+
+def _score_outcome_key(score_text: str) -> str | None:
+    if "-" not in score_text:
+        return None
+    try:
+        home_goals, away_goals = [int(part) for part in score_text.split("-", 1)]
+    except Exception:
+        return None
+    if home_goals > away_goals:
+        return "home"
+    if home_goals < away_goals:
+        return "away"
+    return "draw"
+
+
+def _htft_label_from_key(key: str) -> str:
+    mapping = {"home": "胜", "draw": "平", "away": "负"}
+    left, right = key.split("_", 1)
+    return f"{mapping.get(left, '-')} / {mapping.get(right, '-')}"
+
+
+def _extract_handicap_prediction(prediction: dict | None) -> tuple[str | None, str | None, float | None]:
+    if not prediction:
+        return None, None, None
+
+    direct_display = prediction.get("handicap_display")
+    direct_pick = prediction.get("handicap_recommendation")
+    if direct_pick:
+        return (
+            str(direct_display or direct_pick),
+            str(direct_pick),
+            _safe_float(prediction.get("handicap_confidence"), default=0.0),
+        )
+
+    return None, None, None
+
+
+def _build_parlay_leg(
+    match: AppMatch,
+    play_type: str,
+    pick: str,
+    confidence: float,
+    *,
+    prediction: dict | None = None,
+) -> dict:
+    indices = prediction.get("indices", {}) if isinstance(prediction, dict) else {}
+    upset_index = _safe_float(indices.get("upset_index"), default=0.5)
+    stability_index = _safe_float(indices.get("stability_index"), default=0.5)
+    confidence_index = _safe_float(
+        indices.get("confidence_index"),
+        default=_safe_float((prediction or {}).get("confidence"), default=0.5),
+    )
+    return {
+        "match_id": match.match_id,
+        "match_date": match.match_date,
+        "match_time": match.match_time,
+        "league": match.league,
+        "home_team": match.home_team,
+        "away_team": match.away_team,
+        "play_type": play_type,
+        "pick": pick,
+        "confidence": round(_safe_float(confidence, default=0.0), 4),
+        "upset_index": round(_clamp(upset_index), 4),
+        "stability_index": round(_clamp(stability_index), 4),
+        "confidence_index": round(_clamp(confidence_index), 4),
+    }
+
+
+def _calibrate_parlay_leg_confidence(play_type: str, confidence: float) -> float:
+    play = str(play_type or "").strip().lower()
+    raw = _clamp(_safe_float(confidence, default=0.0), 0.01, 0.99)
+    shrink_map = {
+        "1x2": 0.92,
+        "handicap": 0.82,
+        "total_goals": 0.74,
+        "htft": 0.80,
+        "score": 0.68,
+    }
+    floor_map = {
+        "1x2": 0.05,
+        "handicap": 0.05,
+        "total_goals": 0.05,
+        "htft": 0.03,
+        "score": 0.02,
+    }
+    cap_map = {
+        "1x2": 0.90,
+        "handicap": 0.88,
+        "total_goals": 0.72,
+        "htft": 0.80,
+        "score": 0.60,
+    }
+    shrink = _safe_float(shrink_map.get(play), default=0.86)
+    calibrated = 0.5 + (raw - 0.5) * shrink
+    floor = _safe_float(floor_map.get(play), default=0.05)
+    cap = _safe_float(cap_map.get(play), default=0.88)
+    return _clamp(calibrated, floor, cap)
+
+
+def _parlay_correlation_discount(leg_a: dict, leg_b: dict) -> float:
+    play_a = str(leg_a.get("play_type") or "").strip().lower()
+    play_b = str(leg_b.get("play_type") or "").strip().lower()
+    discount = 1.0
+    if play_a == play_b:
+        same_play_discount = {
+            "1x2": 0.90,
+            "handicap": 0.86,
+            "total_goals": 0.88,
+            "htft": 0.80,
+            "score": 0.72,
+        }
+        discount *= _safe_float(same_play_discount.get(play_a), default=0.90)
+    league_a = normalize_text(leg_a.get("league", ""))
+    league_b = normalize_text(leg_b.get("league", ""))
+    if league_a and league_a == league_b:
+        discount *= 0.95
+    date_a = normalize_text(leg_a.get("match_date", ""))
+    date_b = normalize_text(leg_b.get("match_date", ""))
+    time_a = normalize_text(leg_a.get("match_time", ""))
+    time_b = normalize_text(leg_b.get("match_time", ""))
+    if date_a and date_a == date_b and time_a and time_a == time_b:
+        discount *= 0.97
+    return _clamp(discount, 0.55, 1.0)
+
+
+def _parlay_pair_quality_factor(leg_a: dict, leg_b: dict) -> float:
+    upset_avg = (
+        _safe_float(leg_a.get("upset_index"), default=0.5)
+        + _safe_float(leg_b.get("upset_index"), default=0.5)
+    ) / 2.0
+    stability_avg = (
+        _safe_float(leg_a.get("stability_index"), default=0.5)
+        + _safe_float(leg_b.get("stability_index"), default=0.5)
+    ) / 2.0
+    confidence_index_avg = (
+        _safe_float(leg_a.get("confidence_index"), default=0.5)
+        + _safe_float(leg_b.get("confidence_index"), default=0.5)
+    ) / 2.0
+    factor = 0.88
+    factor += (stability_avg - 0.5) * 0.22
+    factor += (confidence_index_avg - 0.5) * 0.12
+    factor -= (upset_avg - 0.5) * 0.26
+    return _clamp(factor, 0.72, 1.18)
+
+
+def _recent_play_reliability_factor(play_type: str, settlements: list[dict]) -> dict[str, float | int]:
+    normalized_play = str(play_type or "").strip().lower()
+    score_keys = {
+        "1x2": "is_correct",
+        "handicap": "handicap_is_correct",
+        "total_goals": "total_goals_is_correct",
+        "score": "score_is_correct",
+    }
+    score_key = score_keys.get(normalized_play)
+    if not score_key:
+        return {"factor": 1.0, "sample_count": 0, "posterior_hit_rate": 0.5}
+
+    rows: list[bool] = []
+    for item in settlements:
+        if not isinstance(item, dict):
+            continue
+        value = item.get(score_key)
+        if isinstance(value, bool):
+            rows.append(value)
+    sample_count = len(rows)
+    if sample_count <= 0:
+        return {"factor": 1.0, "sample_count": 0, "posterior_hit_rate": 0.5}
+
+    hits = sum(1 for item in rows if item)
+    prior_mean = 0.50
+    prior_strength = 18.0
+    posterior = (hits + prior_mean * prior_strength) / (sample_count + prior_strength)
+    factor = _clamp(0.84 + (posterior - 0.5) * 0.90, 0.74, 1.12)
+    return {
+        "factor": round(factor, 4),
+        "sample_count": sample_count,
+        "posterior_hit_rate": round(posterior, 4),
+    }
+
+
+def _settlement_mtime() -> float:
+    try:
+        return float(STATE_STORE.settlements_file.stat().st_mtime)
+    except Exception:
+        return 0.0
+
+
+def _confidence_calibration_profile() -> dict[str, Any]:
+    mtime = _settlement_mtime()
+    if _CONFIDENCE_CALIBRATION_CACHE.get("settlement_mtime") == mtime:
+        cached_profile = _CONFIDENCE_CALIBRATION_CACHE.get("profile")
+        if isinstance(cached_profile, dict):
+            return cached_profile
+
+    bins = [
+        {"name": "b0", "low": 0.00, "high": 0.50, "default_scale": 1.00},
+        {"name": "b1", "low": 0.50, "high": 0.56, "default_scale": 0.88},
+        {"name": "b2", "low": 0.56, "high": 0.62, "default_scale": 0.74},
+        {"name": "b3", "low": 0.62, "high": 0.68, "default_scale": 0.70},
+        {"name": "b4", "low": 0.68, "high": 0.74, "default_scale": 0.66},
+        {"name": "b5", "low": 0.74, "high": 1.01, "default_scale": 0.70},
+    ]
+    settlements = STATE_STORE.load_settlements()
+    recent_rows = settlements[-400:] if len(settlements) > 400 else list(settlements)
+    resolved: list[dict[str, float | int | str]] = []
+    for item in bins:
+        low = _safe_float(item.get("low"), 0.0)
+        high = _safe_float(item.get("high"), 1.01)
+        default_scale = _safe_float(item.get("default_scale"), 0.80)
+        values: list[tuple[float, bool]] = []
+        for row in recent_rows:
+            if not isinstance(row, dict):
+                continue
+            hit = row.get("is_correct")
+            conf = _safe_float(row.get("prediction_confidence"), default=0.0)
+            if not isinstance(hit, bool):
+                continue
+            if conf < low or conf >= high:
+                continue
+            values.append((conf, hit))
+        n = len(values)
+        if n <= 0:
+            scale = default_scale
+            avg_conf = 0.0
+            hit_rate = 0.0
+        else:
+            avg_conf = sum(value for value, _ in values) / n
+            hit_rate = sum(1 for _, hit in values if hit) / n
+            ratio = (hit_rate / avg_conf) if avg_conf > 0 else default_scale
+            if n >= 20:
+                scale = _clamp(ratio, 0.55, 1.0)
+            elif n >= 8:
+                scale = _clamp(default_scale * 0.7 + ratio * 0.3, 0.55, 1.0)
+            else:
+                scale = _clamp(default_scale, 0.55, 1.0)
+        resolved.append(
+            {
+                "name": str(item.get("name") or ""),
+                "low": round(low, 4),
+                "high": round(high, 4),
+                "sample_count": n,
+                "avg_confidence": round(avg_conf, 4),
+                "hit_rate": round(hit_rate, 4),
+                "scale": round(scale, 4),
+            }
+        )
+
+    profile = {
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "sample_count": len(recent_rows),
+        "bins": resolved,
+    }
+    _CONFIDENCE_CALIBRATION_CACHE["settlement_mtime"] = mtime
+    _CONFIDENCE_CALIBRATION_CACHE["profile"] = profile
+    return profile
+
+
+def _calibrate_recommendation_confidence(raw_confidence: float) -> tuple[float, dict[str, Any]]:
+    raw = _clamp(_safe_float(raw_confidence, 0.0), 0.01, 0.99)
+    profile = _confidence_calibration_profile()
+    bins = profile.get("bins", []) if isinstance(profile, dict) else []
+    selected_bin: dict[str, Any] | None = None
+    for item in bins:
+        if not isinstance(item, dict):
+            continue
+        low = _safe_float(item.get("low"), 0.0)
+        high = _safe_float(item.get("high"), 1.01)
+        if low <= raw < high:
+            selected_bin = item
+            break
+    if not selected_bin:
+        selected_bin = {"name": "fallback", "scale": 0.80, "sample_count": 0}
+    scale = _clamp(_safe_float(selected_bin.get("scale"), 0.80), 0.55, 1.0)
+    calibrated = _clamp(raw * scale, 0.03, 0.92)
+    meta = {
+        "raw_confidence": round(raw, 4),
+        "calibrated_confidence": round(calibrated, 4),
+        "scale": round(scale, 4),
+        "bin": str(selected_bin.get("name", "-")),
+        "bin_sample_count": int(selected_bin.get("sample_count", 0) or 0),
+    }
+    return calibrated, meta
+
+
+def _current_play_policy() -> dict[str, dict]:
+    return {
+        key: dict(value) for key, value in DEFAULT_PLAY_POLICY.items() if isinstance(value, dict)
+    }
+
+
+def _parlay_leg_candidates(matches: list[AppMatch], predictions: dict[str, dict]) -> list[dict]:
+    candidates: list[dict] = []
+    min_conf_map = {
+        "1x2": 0.58,
+        "handicap": 0.60,
+        "total_goals": 0.30,
+        "htft": 0.34,
+        "score": 0.18,
+    }
+    for match in matches:
+        prediction = predictions.get(match.match_id)
+        if not isinstance(prediction, dict):
+            continue
+        eligible_plays = prediction.get("parlay_eligible_plays", [])
+        if not isinstance(eligible_plays, list):
+            continue
+        for item in eligible_plays:
+            if not isinstance(item, dict):
+                continue
+            leg = _build_parlay_leg(
+                match,
+                str(item.get("play_type") or "-"),
+                str(item.get("pick") or "-"),
+                _safe_float(item.get("confidence"), default=0.0),
+                prediction=prediction,
+            )
+            if leg["pick"] == "-":
+                continue
+            play_key = str(leg.get("play_type", "")).strip().lower()
+            min_conf = _safe_float(min_conf_map.get(play_key), default=0.58)
+            if _safe_float(leg.get("confidence"), default=0.0) < min_conf:
+                continue
+            candidates.append(leg)
+    return candidates
+
+
+def _select_diversified_parlay_pairs(
+    ranked_pairs: list[dict],
+    *,
+    limit: int,
+    min_expected_hit: float,
+    max_match_exposure: int = 2,
+    max_leg_upset: float = 0.64,
+    allow_fallback_fill: bool = True,
+) -> list[dict]:
+    target = max(0, int(limit))
+    if target <= 0:
+        return []
+    picked_ids: set[str] = set()
+    match_exposure: dict[str, int] = defaultdict(int)
+    selected: list[dict] = []
+
+    for item in ranked_pairs:
+        if len(selected) >= target:
+            break
+        ticket_id = str(item.get("ticket_id", ""))
+        if not ticket_id or ticket_id in picked_ids:
+            continue
+        expected_hit = _safe_float(item.get("expected_hit"), default=0.0)
+        if expected_hit < min_expected_hit and len(selected) >= min(2, target):
+            continue
+        if _safe_float(item.get("max_leg_upset"), default=0.5) > max_leg_upset and len(selected) >= min(3, target):
+            continue
+        if _safe_float(item.get("correlation_discount"), default=1.0) < 0.82 and len(selected) >= min(3, target):
+            continue
+        legs = item.get("legs", [])
+        if not isinstance(legs, list) or len(legs) != 2:
+            continue
+        leg_match_ids = [str(legs[0].get("match_id", "")), str(legs[1].get("match_id", ""))]
+        if any(not value for value in leg_match_ids):
+            continue
+        if any(match_exposure[mid] >= max_match_exposure for mid in leg_match_ids):
+            continue
+        selected.append(item)
+        picked_ids.add(ticket_id)
+        for mid in leg_match_ids:
+            match_exposure[mid] += 1
+
+    if len(selected) >= target or not allow_fallback_fill:
+        return selected
+
+    for item in ranked_pairs:
+        if len(selected) >= target:
+            break
+        ticket_id = str(item.get("ticket_id", ""))
+        if not ticket_id or ticket_id in picked_ids:
+            continue
+        selected.append(item)
+        picked_ids.add(ticket_id)
+    return selected
+
+
+def _parlay_ticket_id(leg_a: dict, leg_b: dict) -> str:
+    left = f"{leg_a['match_id']}|{leg_a['play_type']}|{leg_a['pick']}"
+    right = f"{leg_b['match_id']}|{leg_b['play_type']}|{leg_b['pick']}"
+    ordered = sorted([left, right])
+    return f"2串1|{ordered[0]}||{ordered[1]}"
+
+
+def _parse_datetime_text(value: object) -> datetime | None:
+    text = normalize_text(value)
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt)
+        except Exception:
+            continue
+    return None
+
+
+def _is_pending_ticket_fresh(ticket: dict, *, now: datetime) -> bool:
+    if str(ticket.get("status", "")) != "pending":
+        return False
+    created_at = _parse_datetime_text(ticket.get("created_at"))
+    if created_at is not None and (now - created_at).days >= 2:
+        return False
+    legs = ticket.get("legs", [])
+    if not isinstance(legs, list) or not legs:
+        return False
+    leg_datetimes: list[datetime] = []
+    for leg in legs:
+        if not isinstance(leg, dict):
+            continue
+        match_date = normalize_text(leg.get("match_date"))
+        match_time = normalize_text(leg.get("match_time"))
+        leg_dt = _parse_datetime_text(f"{match_date} {match_time}".strip())
+        if leg_dt is not None:
+            leg_datetimes.append(leg_dt)
+    if leg_datetimes and max(leg_datetimes) < now.replace(hour=0, minute=0, second=0, microsecond=0):
+        return False
+    return True
+
+
+def generate_mix_parlay_recommendations(
+    matches: list[AppMatch],
+    predictions: dict[str, dict],
+    limit: int = 5,
+) -> list[dict]:
+    candidates = _parlay_leg_candidates(matches, predictions)
+    if len(candidates) < 2:
+        return []
+    recent_settlements = STATE_STORE.load_settlements()
+    recent_window = recent_settlements[-240:] if len(recent_settlements) > 240 else list(recent_settlements)
+    play_reliability_cache: dict[str, dict[str, float | int]] = {}
+
+    ranked_pairs: list[dict] = []
+    for index, leg_a in enumerate(candidates):
+        for leg_b in candidates[index + 1 :]:
+            if leg_a["match_id"] == leg_b["match_id"]:
+                continue
+            leg_a_calibrated = _calibrate_parlay_leg_confidence(
+                str(leg_a.get("play_type") or ""),
+                _safe_float(leg_a.get("confidence"), 0.0),
+            )
+            leg_b_calibrated = _calibrate_parlay_leg_confidence(
+                str(leg_b.get("play_type") or ""),
+                _safe_float(leg_b.get("confidence"), 0.0),
+            )
+            raw_combined_probability = _safe_float(leg_a["confidence"], 0.0) * _safe_float(leg_b["confidence"], 0.0)
+            correlation_discount = _parlay_correlation_discount(leg_a, leg_b)
+            combined_probability = leg_a_calibrated * leg_b_calibrated * correlation_discount
+            pair_quality_factor = _parlay_pair_quality_factor(leg_a, leg_b)
+            play_a = str(leg_a.get("play_type") or "").strip().lower()
+            play_b = str(leg_b.get("play_type") or "").strip().lower()
+            if play_a not in play_reliability_cache:
+                play_reliability_cache[play_a] = _recent_play_reliability_factor(play_a, recent_window)
+            if play_b not in play_reliability_cache:
+                play_reliability_cache[play_b] = _recent_play_reliability_factor(play_b, recent_window)
+            rel_a = play_reliability_cache[play_a]
+            rel_b = play_reliability_cache[play_b]
+            play_reliability_factor = (
+                _safe_float(rel_a.get("factor"), default=1.0)
+                + _safe_float(rel_b.get("factor"), default=1.0)
+            ) / 2.0
+            mixed = leg_a["play_type"] != leg_b["play_type"]
+            rank_score = combined_probability * (1.05 if mixed else 1.0) * pair_quality_factor * play_reliability_factor
+            ranked_pairs.append(
+                {
+                    "ticket_id": _parlay_ticket_id(leg_a, leg_b),
+                    "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "status": "pending",
+                    "kind": "parlay_2",
+                    "mixed": mixed,
+                    "legs": [
+                        {**leg_a, "calibrated_confidence": round(leg_a_calibrated, 4)},
+                        {**leg_b, "calibrated_confidence": round(leg_b_calibrated, 4)},
+                    ],
+                    "expected_hit": round(combined_probability, 4),
+                    "expected_hit_raw": round(raw_combined_probability, 4),
+                    "correlation_discount": round(correlation_discount, 4),
+                    "pair_quality_factor": round(pair_quality_factor, 4),
+                    "play_reliability_factor": round(play_reliability_factor, 4),
+                    "play_reliability_sample_count": int(
+                        min(
+                            int(rel_a.get("sample_count", 0) or 0),
+                            int(rel_b.get("sample_count", 0) or 0),
+                        )
+                    ),
+                    "max_leg_upset": round(
+                        max(
+                            _safe_float(leg_a.get("upset_index"), default=0.5),
+                            _safe_float(leg_b.get("upset_index"), default=0.5),
+                        ),
+                        4,
+                    ),
+                    "rank_score": round(rank_score, 4),
+                    "display": (
+                        f"{leg_a['home_team']} vs {leg_a['away_team']} {leg_a['pick']} + "
+                        f"{leg_b['home_team']} vs {leg_b['away_team']} {leg_b['pick']}"
+                    ),
+                }
+            )
+
+    ranked_pairs.sort(
+        key=lambda item: (
+            0 if item["mixed"] else 1,
+            -item["rank_score"],
+            -item["expected_hit"],
+            item["ticket_id"],
+        )
+    )
+    top_expected_hit = _safe_float(ranked_pairs[0].get("expected_hit"), default=0.0) if ranked_pairs else 0.0
+    min_expected_hit = _clamp(max(0.08, top_expected_hit * 0.55), 0.08, 0.26)
+    selected = _select_diversified_parlay_pairs(
+        ranked_pairs,
+        limit=max(0, limit),
+        min_expected_hit=min_expected_hit,
+        max_match_exposure=2,
+        max_leg_upset=0.64,
+    )
+    if not selected:
+        return []
+
+    existing = STATE_STORE.load_parlay_tickets()
+    now = datetime.now()
+    settled_index: dict[str, dict] = {}
+    pending_index: dict[str, dict] = {}
+    for item in existing:
+        if not isinstance(item, dict):
+            continue
+        ticket_id = str(item.get("ticket_id", ""))
+        if not ticket_id:
+            continue
+        status = str(item.get("status", ""))
+        if status in {"won", "lost"}:
+            settled_index[ticket_id] = item
+            continue
+        if _is_pending_ticket_fresh(item, now=now):
+            pending_index[ticket_id] = item
+
+    for ticket in selected:
+        pending_index[ticket["ticket_id"]] = ticket
+
+    pending_pool = list(pending_index.values())
+    pending_pool.sort(
+        key=lambda item: (
+            0 if bool(item.get("mixed")) else 1,
+            -_safe_float(item.get("rank_score"), 0.0),
+            -_safe_float(item.get("expected_hit"), 0.0),
+            str(item.get("ticket_id", "")),
+        )
+    )
+    pending_final = _select_diversified_parlay_pairs(
+        pending_pool,
+        limit=60,
+        min_expected_hit=0.0,
+        max_match_exposure=2,
+        max_leg_upset=0.70,
+        allow_fallback_fill=False,
+    )
+    merged = sorted(
+        [*settled_index.values(), *pending_final],
+        key=lambda item: (str(item.get("created_at", "")), str(item.get("ticket_id", ""))),
+    )
+    STATE_STORE.save_parlay_tickets(merged)
+    return selected
+
+
+def get_active_parlay_recommendations(limit: int = 10) -> list[dict]:
+    items = STATE_STORE.load_parlay_tickets()
+    now = datetime.now()
+    settled_index: dict[str, dict] = {}
+    pending_index: dict[str, dict] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        ticket_id = str(item.get("ticket_id", ""))
+        if not ticket_id:
+            continue
+        status = str(item.get("status", ""))
+        if status in {"won", "lost"}:
+            settled_index[ticket_id] = item
+            continue
+        if _is_pending_ticket_fresh(item, now=now):
+            pending_index[ticket_id] = item
+
+    pending_pool = list(pending_index.values())
+    pending_pool.sort(
+        key=lambda item: (
+            0 if bool(item.get("mixed")) else 1,
+            -_safe_float(item.get("rank_score"), 0.0),
+            -_safe_float(item.get("expected_hit"), 0.0),
+            str(item.get("ticket_id", "")),
+        )
+    )
+    pending_final = _select_diversified_parlay_pairs(
+        pending_pool,
+        limit=max(60, max(1, int(limit))),
+        min_expected_hit=0.0,
+        max_match_exposure=2,
+        max_leg_upset=0.70,
+        allow_fallback_fill=False,
+    )
+
+    normalized = sorted(
+        [*settled_index.values(), *pending_final],
+        key=lambda item: (str(item.get("created_at", "")), str(item.get("ticket_id", ""))),
+    )
+    normalized_ids = {str(item.get("ticket_id", "")) for item in normalized}
+    original_ids = {str(item.get("ticket_id", "")) for item in items if isinstance(item, dict)}
+    if normalized_ids != original_ids or len(normalized) != len(items):
+        STATE_STORE.save_parlay_tickets(normalized)
+
+    pending_final.sort(
+        key=lambda item: (
+            0 if bool(item.get("mixed")) else 1,
+            -_safe_float(item.get("rank_score"), 0.0),
+            -_safe_float(item.get("expected_hit"), 0.0),
+            str(item.get("ticket_id", "")),
+        )
+    )
+    return pending_final[: max(0, limit)]
+
+
+def _settlement_hit_by_play_type(settlement: dict, play_type: str) -> bool | None:
+    mapping = {
+        "1x2": settlement.get("is_correct"),
+        "handicap": settlement.get("handicap_is_correct"),
+        "total_goals": settlement.get("total_goals_is_correct"),
+        "score": settlement.get("score_is_correct"),
+    }
+    value = mapping.get(play_type)
+    return value if isinstance(value, bool) else None
+
+
+def auto_settle_pending_parlays() -> dict:
+    tickets = STATE_STORE.load_parlay_tickets()
+    if not tickets:
+        return {"new_settled": 0, "won": 0, "lost": 0, "items": []}
+
+    settlement_map: dict[str, dict] = {}
+    for item in STATE_STORE.load_settlements():
+        match_id = str(item.get("match_id", ""))
+        if match_id:
+            settlement_map[match_id] = item
+
+    changed = False
+    summary = {"new_settled": 0, "won": 0, "lost": 0, "items": []}
+    for ticket in tickets:
+        if not isinstance(ticket, dict) or ticket.get("status") != "pending":
+            continue
+
+        legs = ticket.get("legs", [])
+        if not isinstance(legs, list) or not legs:
+            continue
+
+        any_loss = False
+        all_resolved = True
+        leg_results: list[dict] = []
+        for leg in legs:
+            if not isinstance(leg, dict):
+                all_resolved = False
+                continue
+            settlement = settlement_map.get(str(leg.get("match_id", "")))
+            hit = _settlement_hit_by_play_type(settlement or {}, str(leg.get("play_type", ""))) if settlement else None
+            leg_results.append(
+                {
+                    "match_id": leg.get("match_id"),
+                    "play_type": leg.get("play_type"),
+                    "pick": leg.get("pick"),
+                    "resolved": hit is not None,
+                    "is_hit": hit,
+                }
+            )
+            if hit is False:
+                any_loss = True
+            if hit is None:
+                all_resolved = False
+
+        if not any_loss and not all_resolved:
+            continue
+
+        ticket["status"] = "won" if all_resolved and not any_loss else "lost"
+        ticket["settled_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ticket["is_hit"] = ticket["status"] == "won"
+        ticket["leg_results"] = leg_results
+        summary["new_settled"] += 1
+        summary["won"] += 1 if ticket["status"] == "won" else 0
+        summary["lost"] += 1 if ticket["status"] == "lost" else 0
+        summary["items"].append(ticket)
+        changed = True
+
+    if changed:
+        STATE_STORE.save_parlay_tickets(tickets)
+    return summary
+
+
+def get_recent_parlay_settlements(limit: int = 20) -> list[dict]:
+    items = STATE_STORE.load_parlay_tickets()
+    settled = [item for item in items if isinstance(item, dict) and item.get("status") in {"won", "lost"}]
+    settled.sort(key=lambda item: str(item.get("settled_at", item.get("created_at", ""))))
+    if limit <= 0:
+        return settled
+    return settled[-limit:]
+
+
+def _gate_metrics_from_records(records: list[dict], breaker_threshold: int = 3) -> dict:
+    normalized: list[dict] = []
+    for item in records:
+        is_hit = item.get("is_hit")
+        if not isinstance(is_hit, bool):
+            continue
+        normalized.append(
+            {
+                "timestamp": str(item.get("timestamp", "")),
+                "is_hit": is_hit,
+                "expected_hit": _safe_float(item.get("expected_hit"), default=0.0),
+            }
+        )
+
+    if not normalized:
+        return {
+            "sample_count": 0,
+            "hit_rate": 0.0,
+            "expected_hit_rate": 0.0,
+            "ev_bias": 0.0,
+            "losing_streak": 0,
+            "breaker_on": False,
+        }
+
+    ordered = sorted(normalized, key=lambda item: item["timestamp"])
+    sample_count = len(ordered)
+    hit_rate = sum(1 for item in ordered if item["is_hit"]) / sample_count
+    expected_values = [item["expected_hit"] for item in ordered if item["expected_hit"] > 0]
+    expected_hit_rate = (sum(expected_values) / len(expected_values)) if expected_values else 0.0
+    losing_streak = 0
+    for item in reversed(ordered):
+        if item["is_hit"]:
+            break
+        losing_streak += 1
+    return {
+        "sample_count": sample_count,
+        "hit_rate": round(hit_rate, 4),
+        "expected_hit_rate": round(expected_hit_rate, 4),
+        "ev_bias": round((hit_rate - expected_hit_rate) if expected_values else 0.0, 4),
+        "losing_streak": losing_streak,
+        "breaker_on": losing_streak >= breaker_threshold,
+    }
+
+
+def get_gate_metrics(window: int = 20) -> dict:
+    single_items = [
+        {
+            "timestamp": item.get("timestamp"),
+            "is_hit": item.get("is_correct"),
+            "expected_hit": item.get("prediction_confidence"),
+        }
+        for item in get_recent_settlements(limit=window)
+    ]
+    parlay_items = [
+        {
+            "timestamp": item.get("settled_at") or item.get("created_at"),
+            "is_hit": item.get("is_hit"),
+            "expected_hit": item.get("expected_hit"),
+        }
+        for item in get_recent_parlay_settlements(limit=window)
+    ]
+    overall_items = (single_items + parlay_items)[-max(0, window) :]
+    singles = _gate_metrics_from_records(single_items)
+    parlays = _gate_metrics_from_records(parlay_items)
+    overall = _gate_metrics_from_records(overall_items)
+    return {
+        "singles": singles,
+        "parlays": parlays,
+        "overall": overall,
+    }
+
+
+def get_parlay_selector_metrics(limit: int = 120) -> dict:
+    tickets = get_active_parlay_recommendations(limit=max(1, int(limit)))
+    if not tickets:
+        return {
+            "ticket_count": 0,
+            "unique_match_count": 0,
+            "max_match_exposure": 0,
+            "avg_match_exposure": 0.0,
+            "mixed_ratio": 0.0,
+            "avg_expected_hit": 0.0,
+            "max_expected_hit": 0.0,
+            "high_expected_hit_count": 0,
+            "low_discount_count": 0,
+            "high_upset_leg_count": 0,
+            "avg_pair_quality_factor": 0.0,
+            "avg_play_reliability_factor": 0.0,
+        }
+
+    match_exposure: dict[str, int] = defaultdict(int)
+    expected_hits: list[float] = []
+    pair_quality_values: list[float] = []
+    reliability_values: list[float] = []
+    mixed_count = 0
+    high_expected_hit_count = 0
+    low_discount_count = 0
+    high_upset_leg_count = 0
+
+    for ticket in tickets:
+        if not isinstance(ticket, dict):
+            continue
+        legs = ticket.get("legs", [])
+        if isinstance(legs, list):
+            for leg in legs:
+                if not isinstance(leg, dict):
+                    continue
+                match_id = str(leg.get("match_id", ""))
+                if match_id:
+                    match_exposure[match_id] += 1
+        if bool(ticket.get("mixed")):
+            mixed_count += 1
+        expected_hit = _safe_float(ticket.get("expected_hit"), default=0.0)
+        expected_hits.append(expected_hit)
+        if expected_hit >= 0.40:
+            high_expected_hit_count += 1
+        if _safe_float(ticket.get("correlation_discount"), default=1.0) < 0.82:
+            low_discount_count += 1
+        if _safe_float(ticket.get("max_leg_upset"), default=0.0) > 0.64:
+            high_upset_leg_count += 1
+        pair_quality_values.append(_safe_float(ticket.get("pair_quality_factor"), default=1.0))
+        reliability_values.append(_safe_float(ticket.get("play_reliability_factor"), default=1.0))
+
+    ticket_count = len(tickets)
+    exposure_values = list(match_exposure.values())
+    max_match_exposure = max(exposure_values) if exposure_values else 0
+    avg_match_exposure = (sum(exposure_values) / len(exposure_values)) if exposure_values else 0.0
+    avg_expected_hit = (sum(expected_hits) / len(expected_hits)) if expected_hits else 0.0
+    max_expected_hit = max(expected_hits) if expected_hits else 0.0
+    avg_pair_quality_factor = (sum(pair_quality_values) / len(pair_quality_values)) if pair_quality_values else 0.0
+    avg_play_reliability_factor = (sum(reliability_values) / len(reliability_values)) if reliability_values else 0.0
+
+    return {
+        "ticket_count": ticket_count,
+        "unique_match_count": len(match_exposure),
+        "max_match_exposure": max_match_exposure,
+        "avg_match_exposure": round(avg_match_exposure, 4),
+        "mixed_ratio": round((mixed_count / ticket_count) if ticket_count > 0 else 0.0, 4),
+        "avg_expected_hit": round(avg_expected_hit, 4),
+        "max_expected_hit": round(max_expected_hit, 4),
+        "high_expected_hit_count": high_expected_hit_count,
+        "low_discount_count": low_discount_count,
+        "high_upset_leg_count": high_upset_leg_count,
+        "avg_pair_quality_factor": round(avg_pair_quality_factor, 4),
+        "avg_play_reliability_factor": round(avg_play_reliability_factor, 4),
+    }
+
+
+def _safe_model_dir() -> None:
+    ENSEMBLE_WEIGHTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _normalize_weights(weights: dict[str, float]) -> dict[str, float]:
+    return ENSEMBLE_ENGINE._normalize_weights(weights)
+
+
+def _ensemble_weights_mtime() -> float | None:
+    try:
+        return ENSEMBLE_WEIGHTS_FILE.stat().st_mtime
+    except Exception:
+        return None
+
+
+def _load_ensemble_weight_report() -> dict:
+    mtime = _ensemble_weights_mtime()
+    if mtime is not None and _ENSEMBLE_WEIGHT_CACHE.get("mtime") == mtime:
+        cached_report = _ENSEMBLE_WEIGHT_CACHE.get("report")
+        if isinstance(cached_report, dict):
+            return cached_report
+    if not ENSEMBLE_WEIGHTS_FILE.exists():
+        report = {
+            "updated_at": None,
+            "mode": "default",
+            "weights": dict(DEFAULT_ENSEMBLE_WEIGHTS),
+            "default_weights": dict(DEFAULT_ENSEMBLE_WEIGHTS),
+            "metrics": {},
+            "validation": {},
+        }
+        _ENSEMBLE_WEIGHT_CACHE["mtime"] = None
+        _ENSEMBLE_WEIGHT_CACHE["weights"] = dict(DEFAULT_ENSEMBLE_WEIGHTS)
+        _ENSEMBLE_WEIGHT_CACHE["report"] = report
+        return report
+    try:
+        report = json.loads(ENSEMBLE_WEIGHTS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        report = {}
+    if not isinstance(report, dict):
+        report = {}
+    weights = report.get("weights")
+    if not isinstance(weights, dict):
+        weights = dict(DEFAULT_ENSEMBLE_WEIGHTS)
+        report["weights"] = weights
+    report.setdefault("default_weights", dict(DEFAULT_ENSEMBLE_WEIGHTS))
+    report.setdefault("mode", "calibrated")
+    report.setdefault("metrics", {})
+    report.setdefault("validation", {})
+    report.setdefault("league_weights", {})
+    _ENSEMBLE_WEIGHT_CACHE["mtime"] = mtime
+    _ENSEMBLE_WEIGHT_CACHE["weights"] = _normalize_weights(
+        {key: float(value) for key, value in weights.items() if key in DEFAULT_ENSEMBLE_WEIGHTS}
+    )
+    _ENSEMBLE_WEIGHT_CACHE["report"] = report
+    return report
+
+
+def get_ensemble_weight_status() -> dict:
+    report = _load_ensemble_weight_report()
+    weights = report.get("weights")
+    normalized = _normalize_weights(
+        {key: float(value) for key, value in (weights or {}).items() if key in DEFAULT_ENSEMBLE_WEIGHTS}
+    )
+    return {
+        "updated_at": report.get("updated_at"),
+        "mode": report.get("mode", "default"),
+        "weights": normalized,
+        "default_weights": dict(DEFAULT_ENSEMBLE_WEIGHTS),
+        "metrics": report.get("metrics", {}),
+        "validation": report.get("validation", {}),
+        "league_weights": report.get("league_weights", {}),
+    }
+
+
+def _current_ensemble_weights() -> dict[str, float]:
+    status = get_ensemble_weight_status()
+    weights = status.get("weights", {})
+    if not isinstance(weights, dict) or not weights:
+        return dict(DEFAULT_ENSEMBLE_WEIGHTS)
+    return _normalize_weights({key: float(weights.get(key, 0.0)) for key in DEFAULT_ENSEMBLE_WEIGHTS})
+
+
+def _ensemble_weights_for_league(league: str) -> dict[str, float]:
+    status = get_ensemble_weight_status()
+    league_weights = status.get("league_weights", {})
+    league_key = normalize_text(league)
+    if isinstance(league_weights, dict):
+        league_payload = league_weights.get(league_key)
+        if isinstance(league_payload, dict):
+            weights = league_payload.get("weights", {})
+            if isinstance(weights, dict) and weights:
+                return _normalize_weights({key: float(weights.get(key, 0.0)) for key in DEFAULT_ENSEMBLE_WEIGHTS})
+    return _current_ensemble_weights()
+
+
+def _save_ensemble_weight_report(report: dict) -> None:
+    if not isinstance(report, dict):
+        return
+    _safe_model_dir()
+    ENSEMBLE_WEIGHTS_FILE.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    _ENSEMBLE_WEIGHT_CACHE["mtime"] = _ensemble_weights_mtime()
+    _ENSEMBLE_WEIGHT_CACHE["report"] = report
+    _ENSEMBLE_WEIGHT_CACHE["weights"] = dict(report.get("weights", DEFAULT_ENSEMBLE_WEIGHTS))
+
+
+def _sample_sort_key(item: dict) -> tuple[str, str, str]:
+    meta = item.get("meta") if isinstance(item, dict) else {}
+    if not isinstance(meta, dict):
+        meta = {}
+    return (
+        normalize_text(meta.get("match_date", "")),
+        normalize_text(meta.get("match_time", "00:00")),
+        normalize_text(item.get("match_id", "")),
+    )
+
+
+def _sample_to_context(item: dict) -> EnsembleContext | None:
+    if not isinstance(item, dict):
+        return None
+    features = item.get("features")
+    meta = item.get("meta")
+    if not isinstance(features, dict) or not isinstance(meta, dict):
+        return None
+    market_home = _safe_float(features.get("market_home"), default=0.0)
+    market_draw = _safe_float(features.get("market_draw"), default=0.0)
+    market_away = _safe_float(features.get("market_away"), default=0.0)
+    home_rating = _safe_float(features.get("home_rating"), default=ELO_ENGINE.base_rating)
+    away_rating = _safe_float(features.get("away_rating"), default=ELO_ENGINE.base_rating)
+    league_strength = _safe_float(features.get("league_strength"), default=0.92)
+    metadata = {
+        "match_id": normalize_text(item.get("match_id", "")),
+        "match_date": normalize_text(meta.get("match_date", "")),
+        "match_time": normalize_text(meta.get("match_time", "")),
+        "league": normalize_text(meta.get("league", "")),
+        "home_team": normalize_text(meta.get("home_team", "")),
+        "away_team": normalize_text(meta.get("away_team", "")),
+        "odds_home": _safe_float(features.get("odds_home"), default=0.0),
+        "odds_draw": _safe_float(features.get("odds_draw"), default=0.0),
+        "odds_away": _safe_float(features.get("odds_away"), default=0.0),
+        "opening_odds_home": _safe_float(meta.get("opening_odds_home"), default=_safe_float(features.get("opening_odds_home"), default=0.0)),
+        "opening_odds_draw": _safe_float(meta.get("opening_odds_draw"), default=_safe_float(features.get("opening_odds_draw"), default=0.0)),
+        "opening_odds_away": _safe_float(meta.get("opening_odds_away"), default=_safe_float(features.get("opening_odds_away"), default=0.0)),
+        "return_rate": _safe_float(meta.get("return_rate"), default=_safe_float(features.get("return_rate"), default=0.0)),
+        "kelly_home": _safe_float(meta.get("kelly_home"), default=_safe_float(features.get("kelly_home"), default=0.0)),
+        "kelly_draw": _safe_float(meta.get("kelly_draw"), default=_safe_float(features.get("kelly_draw"), default=0.0)),
+        "kelly_away": _safe_float(meta.get("kelly_away"), default=_safe_float(features.get("kelly_away"), default=0.0)),
+    }
+    for name in XGBOOST_MODEL.FEATURE_ORDER:
+        if name in metadata:
+            continue
+        metadata[name] = _safe_float(features.get(name), default=0.0)
+    return EnsembleContext(
+        market_probs=(market_home, market_draw, market_away),
+        home_rating=home_rating,
+        away_rating=away_rating,
+        market_draw_prob=market_draw,
+        league_strength=league_strength,
+        metadata=metadata,
+    )
+
+
+def _model_log_loss(probability: float) -> float:
+    return -log(max(min(probability, 1.0 - 1e-12), 1e-12))
+
+
+def _probs_from_feature_map(feature_map: dict[str, float]) -> tuple[float, float, float]:
+    return (
+        _safe_float(feature_map.get("market_home"), default=0.0),
+        _safe_float(feature_map.get("market_draw"), default=0.0),
+        _safe_float(feature_map.get("market_away"), default=0.0),
+    )
+
+
+def _finalize_component_metrics(metrics: dict[str, dict[str, float]]) -> tuple[dict[str, dict[str, float | int]], dict[str, float]]:
+    model_scores: dict[str, float] = {}
+    finalized_metrics: dict[str, dict[str, float | int]] = {}
+    for key, bucket in metrics.items():
+        count = int(bucket["count"])
+        if count <= 0:
+            finalized_metrics[key] = {"logloss": 0.0, "brier": 0.0, "accuracy": 0.0, "count": 0}
+            model_scores[key] = DEFAULT_ENSEMBLE_WEIGHTS[key]
+            continue
+        avg_logloss = bucket["logloss_sum"] / count
+        avg_brier = bucket["brier_sum"] / count
+        avg_accuracy = bucket["accuracy_sum"] / count
+        finalized_metrics[key] = {
+            "logloss": round(avg_logloss, 6),
+            "brier": round(avg_brier, 6),
+            "accuracy": round(avg_accuracy, 6),
+            "count": count,
+        }
+        model_scores[key] = 1.0 / max(avg_logloss, 1e-6)
+    return finalized_metrics, model_scores
+
+
+def _weights_from_model_scores(
+    model_scores: dict[str, float],
+    base_blend: float,
+    min_weight: float,
+    max_weight: float,
+) -> dict[str, float]:
+    score_weights = _normalize_weights(model_scores)
+    blend_ratio = max(0.0, min(base_blend, 1.0))
+    blended_weights = {
+        key: DEFAULT_ENSEMBLE_WEIGHTS[key] * blend_ratio + score_weights.get(key, 0.0) * (1.0 - blend_ratio)
+        for key in DEFAULT_ENSEMBLE_WEIGHTS
+    }
+    clipped_weights = {
+        key: max(min_weight, min(max_weight, float(value)))
+        for key, value in blended_weights.items()
+    }
+    return _normalize_weights(clipped_weights)
+
+
+def _collect_component_metrics_from_rows(rows: list[dict]) -> tuple[dict[str, dict[str, float | int]], dict[str, float]]:
+    metrics: dict[str, dict[str, float]] = {
+        key: {"logloss_sum": 0.0, "brier_sum": 0.0, "accuracy_sum": 0.0, "count": 0.0}
+        for key in DEFAULT_ENSEMBLE_WEIGHTS
+    }
+    for row in rows:
+        label = row.get("label")
+        components = row.get("components", {})
+        if label not in (0, 1, 2) or not isinstance(components, dict):
+            continue
+        for key, probs in components.items():
+            if key not in metrics:
+                continue
+            normalized = _normalize_probs(float(probs[0]), float(probs[1]), float(probs[2]))
+            prob_true = normalized[int(label)]
+            one_hot = [1.0 if idx == label else 0.0 for idx in range(3)]
+            brier = sum((float(normalized[idx]) - one_hot[idx]) ** 2 for idx in range(3)) / 3.0
+            metrics[key]["logloss_sum"] += _model_log_loss(prob_true)
+            metrics[key]["brier_sum"] += brier
+            metrics[key]["accuracy_sum"] += 1.0 if normalized.index(max(normalized)) == label else 0.0
+            metrics[key]["count"] += 1.0
+    return _finalize_component_metrics(metrics)
+
+
+def _build_league_weight_overrides(
+    rows: list[dict],
+    base_blend: float,
+    min_weight: float,
+    max_weight: float,
+    min_samples: int = LEAGUE_WEIGHT_MIN_VALIDATION_SAMPLES,
+) -> dict[str, dict]:
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        league = normalize_text(row.get("league", ""))
+        if not league:
+            continue
+        grouped.setdefault(league, []).append(row)
+
+    overrides: dict[str, dict] = {}
+    for league, league_rows in grouped.items():
+        if len(league_rows) < max(30, int(min_samples)):
+            continue
+        metrics, model_scores = _collect_component_metrics_from_rows(league_rows)
+        weights = _weights_from_model_scores(model_scores, base_blend, min_weight, max_weight)
+        dates = [row.get("match_date") for row in league_rows if row.get("match_date")]
+        overrides[league] = {
+            "weights": weights,
+            "metrics": metrics,
+            "sample_count": len(league_rows),
+            "date_start": min(dates) if dates else None,
+            "date_end": max(dates) if dates else None,
+        }
+    return overrides
+
+
+def calibrate_ensemble_weights_now(
+    validation_ratio: float = 0.20,
+    min_validation_samples: int = 1000,
+    base_blend: float = 0.35,
+    min_weight: float = 0.08,
+    max_weight: float = 0.55,
+) -> dict:
+    samples = STATE_STORE.load_xgb_samples()
+    ordered = [item for item in samples if isinstance(item, dict) and isinstance(item.get("features"), dict)]
+    ordered.sort(key=_sample_sort_key)
+    sample_count = len(ordered)
+    if sample_count < 300:
+        return {
+            "calibrated": False,
+            "reason": "insufficient_samples",
+            "sample_count": sample_count,
+            "weights": _current_ensemble_weights(),
+            "status": get_ensemble_weight_status(),
+        }
+
+    validation_count = max(int(sample_count * max(0.05, min(validation_ratio, 0.5))), int(min_validation_samples))
+    validation_count = min(max(validation_count, 90), sample_count // 2 if sample_count >= 180 else sample_count)
+    if validation_count <= 0 or sample_count - validation_count < 90:
+        return {
+            "calibrated": False,
+            "reason": "split_too_small",
+            "sample_count": sample_count,
+            "weights": _current_ensemble_weights(),
+            "status": get_ensemble_weight_status(),
+        }
+
+    train_items = ordered[:-validation_count]
+    validation_items = ordered[-validation_count:]
+    xgb_model = None
+    xgb_reason = "ok"
+    train_result = None
+    try:
+        x_matrix, y_vector = XGBOOST_MODEL._samples_to_xy(train_items)
+        if x_matrix is None or y_vector is None:
+            xgb_reason = "no_training_matrix"
+        elif not XGBOOST_MODEL._can_train(y_vector, len(train_items), min_samples=90):
+            xgb_reason = "insufficient_or_unbalanced_train"
+        else:
+            xgb_model = XGBOOST_MODEL.build_estimator()
+            if xgb_model is None:
+                xgb_reason = "xgb_unavailable"
+            else:
+                xgb_model.fit(x_matrix, y_vector)
+                train_result = {
+                    "train_sample_count": len(train_items),
+                    "train_label_counts": XGBOOST_MODEL._label_counter(y_vector),
+                }
+    except Exception as exc:
+        xgb_reason = f"xgb_validation_train_failed:{exc}"
+        xgb_model = None
+
+    component_rows, extra = _build_validation_component_rows(train_items, validation_items)
+    finalized_metrics, model_scores = _collect_component_metrics_from_rows(component_rows)
+    blend_ratio = max(0.0, min(base_blend, 1.0))
+    calibrated_weights = _weights_from_model_scores(model_scores, blend_ratio, min_weight, max_weight)
+    league_overrides = _build_league_weight_overrides(
+        component_rows,
+        base_blend=blend_ratio,
+        min_weight=min_weight,
+        max_weight=max_weight,
+    )
+
+    validation_meta = [item.get("meta", {}) for item in validation_items if isinstance(item.get("meta"), dict)]
+    validation_dates = [normalize_text(meta.get("match_date", "")) for meta in validation_meta if normalize_text(meta.get("match_date", ""))]
+    report = {
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "mode": "league_calibrated" if league_overrides else "calibrated",
+        "weights": calibrated_weights,
+        "default_weights": dict(DEFAULT_ENSEMBLE_WEIGHTS),
+        "metrics": finalized_metrics,
+        "validation": {
+            "sample_count": len(validation_items),
+            "train_sample_count": len(train_items),
+            "ratio": round(validation_count / max(sample_count, 1), 4),
+            "date_start": min(validation_dates) if validation_dates else None,
+            "date_end": max(validation_dates) if validation_dates else None,
+            "base_blend": round(blend_ratio, 4),
+            "min_weight": round(min_weight, 4),
+            "max_weight": round(max_weight, 4),
+            "xgb_validation_reason": extra.get("xgb_validation_reason", xgb_reason),
+            "league_override_count": len(league_overrides),
+        },
+        "league_weights": league_overrides,
+    }
+    if train_result:
+        report["validation"]["train_label_counts"] = train_result.get("train_label_counts", {})
+
+    _save_ensemble_weight_report(report)
+    ENSEMBLE_ENGINE.set_weights(calibrated_weights)
+    return {
+        "calibrated": True,
+        "reason": "ok",
+        "sample_count": sample_count,
+        "weights": calibrated_weights,
+        "metrics": finalized_metrics,
+        "validation": report["validation"],
+        "status": get_ensemble_weight_status(),
+    }
+
+
+def _validation_split_samples(
+    validation_ratio: float = 0.20,
+    min_validation_samples: int = 1000,
+) -> tuple[list[dict], list[dict]]:
+    samples = STATE_STORE.load_xgb_samples()
+    ordered = [item for item in samples if isinstance(item, dict) and isinstance(item.get("features"), dict)]
+    ordered.sort(key=_sample_sort_key)
+    sample_count = len(ordered)
+    if sample_count <= 0:
+        return [], []
+    validation_count = max(int(sample_count * max(0.05, min(validation_ratio, 0.5))), int(min_validation_samples))
+    validation_count = min(max(validation_count, 90), sample_count // 2 if sample_count >= 180 else sample_count)
+    if validation_count <= 0 or sample_count - validation_count < 90:
+        return [], []
+    return ordered[:-validation_count], ordered[-validation_count:]
+
+
+def _build_validation_component_rows(
+    train_items: list[dict],
+    validation_items: list[dict],
+) -> tuple[list[dict], dict]:
+    xgb_model = None
+    xgb_reason = "ok"
+    try:
+        x_matrix, y_vector = XGBOOST_MODEL._samples_to_xy(train_items)
+        if x_matrix is None or y_vector is None:
+            xgb_reason = "no_training_matrix"
+        elif not XGBOOST_MODEL._can_train(y_vector, len(train_items), min_samples=90):
+            xgb_reason = "insufficient_or_unbalanced_train"
+        else:
+            xgb_model = XGBOOST_MODEL.build_estimator()
+            if xgb_model is None:
+                xgb_reason = "xgb_unavailable"
+            else:
+                xgb_model.fit(x_matrix, y_vector)
+    except Exception as exc:
+        xgb_reason = f"xgb_validation_train_failed:{exc}"
+        xgb_model = None
+
+    rows: list[dict] = []
+    for item in validation_items:
+        context = _sample_to_context(item)
+        if context is None:
+            continue
+        features = item.get("features", {})
+        meta = item.get("meta", {}) if isinstance(item.get("meta"), dict) else {}
+        try:
+            label = int(item.get("label"))
+        except Exception:
+            continue
+        if label not in (0, 1, 2):
+            continue
+        components: dict[str, tuple[float, float, float]] = {
+            "market": _normalize_probs(*_probs_from_feature_map(features)),
+            "elo": _normalize_probs(*ELO_MODEL.predict(context).probabilities),
+            "poisson": _normalize_probs(*POISSON_MODEL.predict(context).probabilities),
+        }
+        if xgb_model is not None:
+            try:
+                vector = [float(features.get(name, 0.0)) for name in XGBOOST_MODEL.FEATURE_ORDER]
+                probs = xgb_model.predict_proba([vector])[0]
+                components["xgboost"] = _normalize_probs(float(probs[0]), float(probs[1]), float(probs[2]))
+            except Exception:
+                components["xgboost"] = _normalize_probs(*_probs_from_feature_map(features))
+                xgb_reason = "xgb_validation_predict_failed"
+        else:
+            components["xgboost"] = _normalize_probs(*_probs_from_feature_map(features))
+
+        rows.append(
+            {
+                "label": label,
+                "components": components,
+                "match_id": item.get("match_id"),
+                "match_date": normalize_text(meta.get("match_date", "")),
+                "match_time": normalize_text(meta.get("match_time", "")),
+                "league": normalize_text(meta.get("league", "")),
+                "home_team": normalize_text(meta.get("home_team", "")),
+                "away_team": normalize_text(meta.get("away_team", "")),
+            }
+        )
+    return rows, {"xgb_validation_reason": xgb_reason}
+
+
+def _evaluate_ensemble_scheme(rows: list[dict], weights: dict[str, float]) -> dict:
+    normalized_weights = _normalize_weights({key: float(weights.get(key, 0.0)) for key in DEFAULT_ENSEMBLE_WEIGHTS})
+    count = 0
+    logloss_sum = 0.0
+    brier_sum = 0.0
+    accuracy_sum = 0.0
+    for row in rows:
+        label = row.get("label")
+        components = row.get("components", {})
+        if label not in (0, 1, 2) or not isinstance(components, dict):
+            continue
+        blend_home = 0.0
+        blend_draw = 0.0
+        blend_away = 0.0
+        for key, probs in components.items():
+            if key not in normalized_weights:
+                continue
+            home, draw, away = probs
+            weight = normalized_weights.get(key, 0.0)
+            blend_home += float(home) * weight
+            blend_draw += float(draw) * weight
+            blend_away += float(away) * weight
+        probs = _normalize_probs(blend_home, blend_draw, blend_away)
+        prob_true = probs[int(label)]
+        one_hot = [1.0 if idx == label else 0.0 for idx in range(3)]
+        brier = sum((float(probs[idx]) - one_hot[idx]) ** 2 for idx in range(3)) / 3.0
+        logloss_sum += _model_log_loss(prob_true)
+        brier_sum += brier
+        accuracy_sum += 1.0 if probs.index(max(probs)) == label else 0.0
+        count += 1
+    if count <= 0:
+        return {"logloss": 0.0, "brier": 0.0, "accuracy": 0.0, "count": 0, "weights": normalized_weights}
+    return {
+        "logloss": round(logloss_sum / count, 6),
+        "brier": round(brier_sum / count, 6),
+        "accuracy": round(accuracy_sum / count, 6),
+        "count": count,
+        "weights": normalized_weights,
+    }
+
+
+def _evaluate_league_aware_scheme(
+    rows: list[dict],
+    global_weights: dict[str, float],
+    league_weights: dict[str, dict],
+) -> dict:
+    normalized_global = _normalize_weights({key: float(global_weights.get(key, 0.0)) for key in DEFAULT_ENSEMBLE_WEIGHTS})
+    count = 0
+    logloss_sum = 0.0
+    brier_sum = 0.0
+    accuracy_sum = 0.0
+    league_hits = 0
+    for row in rows:
+        label = row.get("label")
+        components = row.get("components", {})
+        league = normalize_text(row.get("league", ""))
+        if label not in (0, 1, 2) or not isinstance(components, dict):
+            continue
+        league_payload = league_weights.get(league, {}) if isinstance(league_weights, dict) else {}
+        weights = league_payload.get("weights", {}) if isinstance(league_payload, dict) else {}
+        normalized_weights = normalized_global
+        if isinstance(weights, dict) and weights:
+            normalized_weights = _normalize_weights({key: float(weights.get(key, 0.0)) for key in DEFAULT_ENSEMBLE_WEIGHTS})
+            league_hits += 1
+        blend_home = 0.0
+        blend_draw = 0.0
+        blend_away = 0.0
+        for key, probs in components.items():
+            if key not in normalized_weights:
+                continue
+            weight = normalized_weights.get(key, 0.0)
+            blend_home += float(probs[0]) * weight
+            blend_draw += float(probs[1]) * weight
+            blend_away += float(probs[2]) * weight
+        probs = _normalize_probs(blend_home, blend_draw, blend_away)
+        prob_true = probs[int(label)]
+        one_hot = [1.0 if idx == label else 0.0 for idx in range(3)]
+        brier = sum((float(probs[idx]) - one_hot[idx]) ** 2 for idx in range(3)) / 3.0
+        logloss_sum += _model_log_loss(prob_true)
+        brier_sum += brier
+        accuracy_sum += 1.0 if probs.index(max(probs)) == label else 0.0
+        count += 1
+    if count <= 0:
+        return {"logloss": 0.0, "brier": 0.0, "accuracy": 0.0, "count": 0, "league_hits": 0, "weights": normalized_global}
+    return {
+        "logloss": round(logloss_sum / count, 6),
+        "brier": round(brier_sum / count, 6),
+        "accuracy": round(accuracy_sum / count, 6),
+        "count": count,
+        "league_hits": league_hits,
+        "weights": normalized_global,
+    }
+
+
+def _evaluate_prediction_scheme_from_payloads(
+    validation_items: list[dict],
+    probability_field: str,
+) -> dict:
+    count = 0
+    logloss_sum = 0.0
+    brier_sum = 0.0
+    accuracy_sum = 0.0
+    draw_picks = 0
+    draw_hits = 0
+    for item in validation_items:
+        prediction = _sample_item_prediction(item)
+        if not isinstance(prediction, dict):
+            continue
+        probabilities = prediction.get(probability_field)
+        if not isinstance(probabilities, dict):
+            continue
+        try:
+            label = int(item.get("label"))
+        except Exception:
+            continue
+        if label not in (0, 1, 2):
+            continue
+        probs = _normalize_probs(
+            _safe_float(probabilities.get("home"), default=0.0),
+            _safe_float(probabilities.get("draw"), default=0.0),
+            _safe_float(probabilities.get("away"), default=0.0),
+        )
+        prob_true = probs[int(label)]
+        one_hot = [1.0 if idx == label else 0.0 for idx in range(3)]
+        brier = sum((float(probs[idx]) - one_hot[idx]) ** 2 for idx in range(3)) / 3.0
+        prediction_idx = probs.index(max(probs))
+        if prediction_idx == 1:
+            draw_picks += 1
+            if label == 1:
+                draw_hits += 1
+        logloss_sum += _model_log_loss(prob_true)
+        brier_sum += brier
+        accuracy_sum += 1.0 if prediction_idx == label else 0.0
+        count += 1
+    if count <= 0:
+        return {
+            "logloss": 0.0,
+            "brier": 0.0,
+            "accuracy": 0.0,
+            "count": 0,
+            "draw_picks": 0,
+            "draw_hit_rate": 0.0,
+        }
+    return {
+        "logloss": round(logloss_sum / count, 6),
+        "brier": round(brier_sum / count, 6),
+        "accuracy": round(accuracy_sum / count, 6),
+        "count": count,
+        "draw_picks": draw_picks,
+        "draw_hit_rate": round(draw_hits / max(draw_picks, 1), 6),
+    }
+
+
+def _collect_bayes_validation_rows(validation_items: list[dict]) -> tuple[list[dict], dict]:
+    rows: list[dict] = []
+    sample_dates: list[str] = []
+    for item in validation_items:
+        if not isinstance(item, dict):
+            continue
+        label = item.get("label")
+        if label not in (0, 1, 2):
+            continue
+        prediction = _sample_item_prediction(item)
+        if not isinstance(prediction, dict):
+            continue
+        pre_probs = prediction.get("pre_bayes_probabilities")
+        if not isinstance(pre_probs, dict):
+            pre_probs = prediction.get("probabilities")
+        market_probs = prediction.get("market_probabilities")
+        if not isinstance(pre_probs, dict) or not isinstance(market_probs, dict):
+            continue
+        normalized_pre = _normalize_probs(
+            _safe_float(pre_probs.get("home"), default=0.0),
+            _safe_float(pre_probs.get("draw"), default=0.0),
+            _safe_float(pre_probs.get("away"), default=0.0),
+        )
+        normalized_market = _normalize_probs(
+            _safe_float(market_probs.get("home"), default=0.0),
+            _safe_float(market_probs.get("draw"), default=0.0),
+            _safe_float(market_probs.get("away"), default=0.0),
+        )
+        meta = item.get("meta")
+        rows.append(
+            {
+                "label": int(label),
+                "league": normalize_text(meta.get("league", "")) if isinstance(meta, dict) else "",
+                "pre_bayes_probabilities": {
+                    "home": normalized_pre[0],
+                    "draw": normalized_pre[1],
+                    "away": normalized_pre[2],
+                },
+                "market_probabilities": {
+                    "home": normalized_market[0],
+                    "draw": normalized_market[1],
+                    "away": normalized_market[2],
+                },
+            }
+        )
+        if isinstance(meta, dict):
+            date_text = normalize_text(meta.get("match_date", ""))
+            if date_text:
+                sample_dates.append(date_text)
+    extra = {
+        "sample_count": len(rows),
+        "date_start": min(sample_dates) if sample_dates else None,
+        "date_end": max(sample_dates) if sample_dates else None,
+    }
+    return rows, extra
+
+
+def _evaluate_bayes_config(rows: list[dict], candidate_config: dict) -> dict:
+    logloss_sum = 0.0
+    brier_sum = 0.0
+    accuracy_sum = 0.0
+    draw_picks = 0
+    draw_hits = 0
+    count = 0
+    key_order = ("home", "draw", "away")
+    for item in rows:
+        label = item.get("label")
+        pre_probs = item.get("pre_bayes_probabilities")
+        market_probs = item.get("market_probabilities")
+        if label not in (0, 1, 2) or not isinstance(pre_probs, dict) or not isinstance(market_probs, dict):
+            continue
+        calibrated, _meta = calibrate_three_way_probabilities(
+            model_probabilities=pre_probs,
+            market_probabilities=market_probs,
+            config=candidate_config,
+        )
+        calibrated_tuple = (
+            _safe_float(calibrated.get("home"), default=0.0),
+            _safe_float(calibrated.get("draw"), default=0.0),
+            _safe_float(calibrated.get("away"), default=0.0),
+        )
+        predicted_idx = int(max(range(3), key=lambda idx: calibrated_tuple[idx]))
+        prob_true = calibrated_tuple[int(label)]
+        one_hot = [1.0 if idx == label else 0.0 for idx in range(3)]
+        brier = sum((calibrated_tuple[idx] - one_hot[idx]) ** 2 for idx in range(3)) / 3.0
+        logloss_sum += _model_log_loss(prob_true)
+        brier_sum += brier
+        accuracy_sum += 1.0 if predicted_idx == label else 0.0
+        if key_order[predicted_idx] == "draw":
+            draw_picks += 1
+            if int(label) == 1:
+                draw_hits += 1
+        count += 1
+    if count <= 0:
+        return {
+            "count": 0,
+            "logloss": 0.0,
+            "brier": 0.0,
+            "accuracy": 0.0,
+            "draw_picks": 0,
+            "draw_hit_rate": 0.0,
+        }
+    return {
+        "count": count,
+        "logloss": round(logloss_sum / count, 6),
+        "brier": round(brier_sum / count, 6),
+        "accuracy": round(accuracy_sum / count, 6),
+        "draw_picks": draw_picks,
+        "draw_hit_rate": round(draw_hits / max(draw_picks, 1), 6),
+    }
+
+
+def _bayes_candidate_grid(current_config: dict) -> list[dict]:
+    current_min_prob = round(_safe_float(current_config.get("min_probability"), default=0.02), 3)
+    min_probability_grid = sorted({0.0, 0.01, 0.02, current_min_prob})
+    candidates: list[dict] = []
+    for prior_source, prior_strength, model_strength, uncertainty_gain, draw_bias_scale, min_probability in product(
+        ("market", "uniform"),
+        (12.0, 20.0, 28.0, 36.0),
+        (44.0, 56.0, 72.0),
+        (0.0, 0.35, 0.55),
+        (0.0, 0.12, 0.24),
+        min_probability_grid,
+    ):
+        candidates.append(
+            {
+                "enabled": True,
+                "prior_source": prior_source,
+                "prior_strength": float(prior_strength),
+                "model_strength": float(model_strength),
+                "uncertainty_gain": float(uncertainty_gain),
+                "draw_bias_scale": float(draw_bias_scale),
+                "min_probability": float(min_probability),
+            }
+        )
+    candidates.append(dict(current_config))
+    return candidates
+
+
+def _bayes_search_best(rows: list[dict], current_config: dict) -> tuple[dict, dict, dict, int]:
+    baseline_metrics = _evaluate_bayes_config(rows, current_config)
+    best_config = dict(current_config)
+    best_metrics = dict(baseline_metrics)
+    evaluated = 0
+    for candidate in _bayes_candidate_grid(current_config):
+        metrics = _evaluate_bayes_config(rows, candidate)
+        evaluated += 1
+        candidate_score = (
+            float(metrics.get("logloss", 1.0)),
+            float(metrics.get("brier", 1.0)),
+            -float(metrics.get("accuracy", 0.0)),
+        )
+        best_score = (
+            float(best_metrics.get("logloss", 1.0)),
+            float(best_metrics.get("brier", 1.0)),
+            -float(best_metrics.get("accuracy", 0.0)),
+        )
+        if candidate_score < best_score:
+            best_config = _normalize_bayes_calibration_config(candidate)
+            best_metrics = metrics
+    return _normalize_bayes_calibration_config(best_config), baseline_metrics, best_metrics, evaluated
+
+
+def _bayes_improvement_metrics(baseline_metrics: dict, best_metrics: dict) -> tuple[dict, bool]:
+    logloss_delta = round(float(baseline_metrics.get("logloss", 0.0)) - float(best_metrics.get("logloss", 0.0)), 6)
+    brier_delta = round(float(baseline_metrics.get("brier", 0.0)) - float(best_metrics.get("brier", 0.0)), 6)
+    accuracy_delta = round(float(best_metrics.get("accuracy", 0.0)) - float(baseline_metrics.get("accuracy", 0.0)), 6)
+    improved = (
+        logloss_delta > 0.0001
+        or brier_delta > 0.0001
+        or (logloss_delta >= 0.0 and brier_delta >= 0.0 and accuracy_delta > 0.0005)
+    )
+    return {
+        "logloss_delta": logloss_delta,
+        "brier_delta": brier_delta,
+        "accuracy_delta": accuracy_delta,
+    }, improved
+
+
+def _build_bayes_league_overrides(rows: list[dict], global_config: dict) -> dict[str, dict]:
+    grouped: dict[str, list[dict]] = {}
+    for item in rows:
+        league = normalize_text(item.get("league", ""))
+        if not league:
+            continue
+        grouped.setdefault(league, []).append(item)
+    overrides: dict[str, dict] = {}
+    for league, league_rows in grouped.items():
+        if len(league_rows) < int(BAYES_LEAGUE_MIN_VALIDATION_SAMPLES):
+            continue
+        league_best_config, league_baseline, league_best, evaluated = _bayes_search_best(
+            rows=league_rows,
+            current_config=global_config,
+        )
+        league_improvement, improved = _bayes_improvement_metrics(league_baseline, league_best)
+        overrides[league] = {
+            "enabled": bool(improved),
+            "sample_count": len(league_rows),
+            "config": league_best_config if improved else dict(global_config),
+            "metrics": {
+                "baseline": league_baseline,
+                "best": league_best if improved else league_baseline,
+                "improvement": league_improvement,
+                "search": {"evaluated": evaluated},
+            },
+        }
+    return overrides
+
+
+def calibrate_bayes_calibration_now(
+    validation_ratio: float = 0.20,
+    min_validation_samples: int = 800,
+) -> dict:
+    train_items, validation_items = _validation_split_samples(
+        validation_ratio=validation_ratio,
+        min_validation_samples=min_validation_samples,
+    )
+    if not train_items or not validation_items:
+        return {
+            "calibrated": False,
+            "reason": "insufficient_validation_split",
+            "status": get_bayes_calibration_status(),
+        }
+    rows, extra = _collect_bayes_validation_rows(validation_items)
+    if not rows:
+        return {
+            "calibrated": False,
+            "reason": "no_valid_rows",
+            "status": get_bayes_calibration_status(),
+        }
+
+    current_config = _current_bayes_calibration_config()
+    best_config, baseline_metrics, best_metrics, evaluated = _bayes_search_best(
+        rows=rows,
+        current_config=current_config,
+    )
+    improvement, should_update = _bayes_improvement_metrics(baseline_metrics, best_metrics)
+    if not should_update:
+        best_config = dict(current_config)
+        best_metrics = dict(baseline_metrics)
+    league_overrides = _build_bayes_league_overrides(
+        rows=rows,
+        global_config=best_config if should_update else current_config,
+    )
+
+    report = {
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "mode": "calibrated" if should_update else "observed",
+        "config": _normalize_bayes_calibration_config(best_config),
+        "league_overrides": league_overrides,
+        "metrics": {
+            "baseline": baseline_metrics,
+            "best": best_metrics,
+            "improvement": improvement,
+            "search": {
+                "evaluated": evaluated,
+            },
+            "league_override_count": sum(
+                1 for payload in league_overrides.values() if isinstance(payload, dict) and payload.get("enabled")
+            ),
+        },
+        "validation": {
+            "sample_count": int(extra.get("sample_count", len(rows))),
+            "train_sample_count": len(train_items),
+            "ratio": round(len(validation_items) / max(len(train_items) + len(validation_items), 1), 4),
+            "date_start": extra.get("date_start"),
+            "date_end": extra.get("date_end"),
+        },
+    }
+    _save_bayes_calibration_report(report)
+    return {
+        "calibrated": should_update,
+        "reason": "ok" if should_update else "no_significant_improvement",
+        "validation": report["validation"],
+        "metrics": report["metrics"],
+        "config": report["config"],
+        "league_overrides": league_overrides,
+        "status": get_bayes_calibration_status(),
+    }
+
+
+def _play_thresholds_mtime() -> float | None:
+    try:
+        return PLAY_THRESHOLDS_FILE.stat().st_mtime
+    except Exception:
+        return None
+
+
+def _load_play_threshold_report() -> dict:
+    mtime = _play_thresholds_mtime()
+    if mtime is not None and _PLAY_THRESHOLD_CACHE.get("mtime") == mtime:
+        cached = _PLAY_THRESHOLD_CACHE.get("report")
+        if isinstance(cached, dict):
+            return cached
+    if not PLAY_THRESHOLDS_FILE.exists():
+        report = {
+            "updated_at": None,
+            "mode": "default",
+            "thresholds": dict(DEFAULT_PLAY_THRESHOLDS),
+            "metrics": {},
+            "validation": {},
+        }
+        _PLAY_THRESHOLD_CACHE["mtime"] = None
+        _PLAY_THRESHOLD_CACHE["thresholds"] = dict(DEFAULT_PLAY_THRESHOLDS)
+        _PLAY_THRESHOLD_CACHE["report"] = report
+        return report
+    try:
+        report = json.loads(PLAY_THRESHOLDS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        report = {}
+    if not isinstance(report, dict):
+        report = {}
+    thresholds = report.get("thresholds")
+    if not isinstance(thresholds, dict):
+        thresholds = dict(DEFAULT_PLAY_THRESHOLDS)
+        report["thresholds"] = thresholds
+    report.setdefault("mode", "calibrated")
+    report.setdefault("metrics", {})
+    report.setdefault("validation", {})
+    _PLAY_THRESHOLD_CACHE["mtime"] = mtime
+    _PLAY_THRESHOLD_CACHE["thresholds"] = {
+        key: float(thresholds.get(key, DEFAULT_PLAY_THRESHOLDS[key]))
+        for key in DEFAULT_PLAY_THRESHOLDS
+    }
+    _PLAY_THRESHOLD_CACHE["report"] = report
+    return report
+
+
+def get_play_threshold_status() -> dict:
+    report = _load_play_threshold_report()
+    thresholds = report.get("thresholds", {})
+    normalized = {
+        key: float(thresholds.get(key, DEFAULT_PLAY_THRESHOLDS[key]))
+        for key in DEFAULT_PLAY_THRESHOLDS
+    }
+    return {
+        "updated_at": report.get("updated_at"),
+        "mode": report.get("mode", "default"),
+        "thresholds": normalized,
+        "default_thresholds": dict(DEFAULT_PLAY_THRESHOLDS),
+        "metrics": report.get("metrics", {}),
+        "validation": report.get("validation", {}),
+    }
+
+
+def _current_play_thresholds() -> dict[str, float]:
+    status = get_play_threshold_status()
+    thresholds = status.get("thresholds", {})
+    if not isinstance(thresholds, dict):
+        return dict(DEFAULT_PLAY_THRESHOLDS)
+    return {key: float(thresholds.get(key, DEFAULT_PLAY_THRESHOLDS[key])) for key in DEFAULT_PLAY_THRESHOLDS}
+
+
+def _runtime_dynamic_play_thresholds(base_thresholds: dict[str, float], *, window: int = 120) -> tuple[dict[str, float], dict[str, Any]]:
+    normalized_base = {
+        key: float(base_thresholds.get(key, DEFAULT_PLAY_THRESHOLDS[key]))
+        for key in DEFAULT_PLAY_THRESHOLDS
+    }
+    threshold_mtime = _play_thresholds_mtime()
+    cache_key = (
+        round(_settlement_mtime(), 3),
+        round(float(threshold_mtime or 0.0), 3),
+        tuple((key, round(value, 4)) for key, value in sorted(normalized_base.items())),
+        int(window),
+    )
+    if _LIVE_PLAY_THRESHOLD_CACHE.get("cache_key") == cache_key:
+        cached_thresholds = _LIVE_PLAY_THRESHOLD_CACHE.get("thresholds")
+        cached_meta = _LIVE_PLAY_THRESHOLD_CACHE.get("meta")
+        if isinstance(cached_thresholds, dict) and isinstance(cached_meta, dict):
+            return dict(cached_thresholds), dict(cached_meta)
+
+    settlements = get_recent_settlements(limit=max(0, int(window)))
+    observed = _collect_settlement_play_metrics(settlements)
+    gate_records = [
+        {
+            "timestamp": item.get("timestamp"),
+            "is_hit": item.get("is_correct"),
+            "expected_hit": item.get("prediction_confidence"),
+        }
+        for item in settlements
+        if isinstance(item, dict)
+    ]
+    single_gate = _gate_metrics_from_records(gate_records, breaker_threshold=4)
+    losing_streak = int(single_gate.get("losing_streak", 0) or 0)
+    breaker_on = bool(single_gate.get("breaker_on"))
+
+    adjusted = dict(normalized_base)
+    per_play: dict[str, dict[str, Any]] = {}
+
+    for play_name, old_threshold in normalized_base.items():
+        item = observed.get(play_name, {}) if isinstance(observed, dict) else {}
+        sample_count = int(item.get("sample_count", 0) or 0)
+        hit_rate = _safe_float(item.get("hit_rate"), default=0.0)
+        expected_hit_rate = _safe_float(item.get("expected_hit_rate"), default=0.0)
+        ev_bias = _safe_float(item.get("ev_bias"), default=0.0)
+        delta = 0.0
+        reasons: list[str] = []
+
+        if sample_count >= 24 and play_name != "htft":
+            if ev_bias <= -0.20:
+                delta += 0.05
+                reasons.append("ev_bias_very_low")
+            elif ev_bias <= -0.14:
+                delta += 0.04
+                reasons.append("ev_bias_low")
+            elif ev_bias <= -0.10:
+                delta += 0.03
+                reasons.append("ev_bias_low")
+            elif ev_bias <= -0.06:
+                delta += 0.02
+                reasons.append("ev_bias_weak")
+            elif ev_bias <= -0.03:
+                delta += 0.01
+                reasons.append("ev_bias_slight")
+            elif sample_count >= 48 and ev_bias >= 0.14:
+                delta -= 0.02
+                reasons.append("ev_bias_strong_positive")
+            elif sample_count >= 36 and ev_bias >= 0.08:
+                delta -= 0.01
+                reasons.append("ev_bias_positive")
+
+            if expected_hit_rate > 0.0 and (expected_hit_rate - hit_rate) >= 0.18:
+                delta += 0.01
+                reasons.append("calibration_gap")
+
+        if breaker_on or losing_streak >= 5:
+            if play_name in {"1x2", "handicap"}:
+                delta += 0.02
+                reasons.append("breaker_hard")
+            elif play_name in {"total_goals", "score", "htft"}:
+                delta += 0.01
+                reasons.append("breaker_soft")
+        elif losing_streak >= 3 and play_name in {"1x2", "handicap"}:
+            delta += 0.01
+            reasons.append("losing_streak")
+
+        min_thr, max_thr = PLAY_THRESHOLD_RANGE.get(play_name, (0.0, 1.0))
+        new_threshold = round(_clamp(old_threshold + delta, min_thr, max_thr), 2)
+        adjusted[play_name] = new_threshold
+        per_play[play_name] = {
+            "old": round(old_threshold, 2),
+            "new": new_threshold,
+            "delta": round(new_threshold - old_threshold, 2),
+            "sample_count": sample_count,
+            "hit_rate": round(hit_rate, 4),
+            "expected_hit_rate": round(expected_hit_rate, 4),
+            "ev_bias": round(ev_bias, 4),
+            "reasons": reasons,
+        }
+
+    meta = {
+        "window": int(window),
+        "settlement_sample_count": len(settlements),
+        "single_gate": {
+            "sample_count": int(single_gate.get("sample_count", 0) or 0),
+            "hit_rate": round(_safe_float(single_gate.get("hit_rate"), default=0.0), 4),
+            "expected_hit_rate": round(_safe_float(single_gate.get("expected_hit_rate"), default=0.0), 4),
+            "ev_bias": round(_safe_float(single_gate.get("ev_bias"), default=0.0), 4),
+            "losing_streak": losing_streak,
+            "breaker_on": breaker_on,
+        },
+        "per_play": per_play,
+    }
+    _LIVE_PLAY_THRESHOLD_CACHE["cache_key"] = cache_key
+    _LIVE_PLAY_THRESHOLD_CACHE["thresholds"] = dict(adjusted)
+    _LIVE_PLAY_THRESHOLD_CACHE["meta"] = dict(meta)
+    return adjusted, meta
+
+
+def _save_play_threshold_report(report: dict) -> None:
+    if not isinstance(report, dict):
+        return
+    _safe_model_dir()
+    PLAY_THRESHOLDS_FILE.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    _PLAY_THRESHOLD_CACHE["mtime"] = _play_thresholds_mtime()
+    _PLAY_THRESHOLD_CACHE["report"] = report
+    _PLAY_THRESHOLD_CACHE["thresholds"] = dict(report.get("thresholds", DEFAULT_PLAY_THRESHOLDS))
+
+
+def _play_model_policy_mtime() -> float | None:
+    try:
+        return PLAY_MODEL_POLICY_FILE.stat().st_mtime
+    except Exception:
+        return None
+
+
+def _load_play_model_policy_report() -> dict:
+    mtime = _play_model_policy_mtime()
+    if _PLAY_MODEL_POLICY_CACHE.get("mtime") == mtime and _PLAY_MODEL_POLICY_CACHE.get("report"):
+        return dict(_PLAY_MODEL_POLICY_CACHE.get("report", {}))
+    if not PLAY_MODEL_POLICY_FILE.exists():
+        report = {
+            "updated_at": None,
+            "mode": "default",
+            "policy": json.loads(json.dumps(DEFAULT_PLAY_MODEL_POLICY)),
+            "validation": {},
+            "metrics": {},
+        }
+        _PLAY_MODEL_POLICY_CACHE["mtime"] = None
+        _PLAY_MODEL_POLICY_CACHE["policy"] = json.loads(json.dumps(DEFAULT_PLAY_MODEL_POLICY))
+        _PLAY_MODEL_POLICY_CACHE["report"] = report
+        return report
+    try:
+        report = json.loads(PLAY_MODEL_POLICY_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        report = {}
+    if not isinstance(report, dict):
+        report = {}
+    policy = report.get("policy")
+    if not isinstance(policy, dict):
+        policy = json.loads(json.dumps(DEFAULT_PLAY_MODEL_POLICY))
+        report["policy"] = policy
+    report.setdefault("mode", "calibrated")
+    report.setdefault("validation", {})
+    report.setdefault("metrics", {})
+    _PLAY_MODEL_POLICY_CACHE["mtime"] = mtime
+    _PLAY_MODEL_POLICY_CACHE["policy"] = json.loads(json.dumps(policy))
+    _PLAY_MODEL_POLICY_CACHE["report"] = report
+    return report
+
+
+def _save_play_model_policy_report(report: dict) -> None:
+    if not isinstance(report, dict):
+        return
+    _safe_model_dir()
+    PLAY_MODEL_POLICY_FILE.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    _PLAY_MODEL_POLICY_CACHE["mtime"] = _play_model_policy_mtime()
+    _PLAY_MODEL_POLICY_CACHE["policy"] = json.loads(json.dumps(report.get("policy", DEFAULT_PLAY_MODEL_POLICY)))
+    _PLAY_MODEL_POLICY_CACHE["report"] = report
+
+
+def get_play_model_policy_status() -> dict:
+    report = _load_play_model_policy_report()
+    policy = report.get("policy", {})
+    normalized = json.loads(json.dumps(DEFAULT_PLAY_MODEL_POLICY))
+    if isinstance(policy, dict):
+        for key, value in policy.items():
+            if key in normalized and isinstance(value, dict):
+                normalized[key].update(value)
+    return {
+        "updated_at": report.get("updated_at"),
+        "mode": report.get("mode", "default"),
+        "policy": normalized,
+        "validation": report.get("validation", {}),
+        "metrics": report.get("metrics", {}),
+    }
+
+
+def _current_play_model_policy() -> dict:
+    return get_play_model_policy_status().get("policy", json.loads(json.dumps(DEFAULT_PLAY_MODEL_POLICY)))
+
+
+def _bayes_calibration_mtime() -> float | None:
+    try:
+        return BAYES_CALIBRATION_FILE.stat().st_mtime
+    except Exception:
+        return None
+
+
+def _normalize_bayes_calibration_config(config: dict | None) -> dict[str, float | str | bool]:
+    normalized = dict(DEFAULT_BAYES_CALIBRATION)
+    if not isinstance(config, dict):
+        return normalized
+    normalized["enabled"] = bool(config.get("enabled", DEFAULT_BAYES_CALIBRATION["enabled"]))
+    normalized["prior_source"] = str(config.get("prior_source", DEFAULT_BAYES_CALIBRATION["prior_source"])).strip() or "market"
+    normalized["prior_strength"] = max(1.0, _safe_float(config.get("prior_strength"), default=24.0))
+    normalized["model_strength"] = max(1.0, _safe_float(config.get("model_strength"), default=56.0))
+    normalized["uncertainty_gain"] = _clamp(_safe_float(config.get("uncertainty_gain"), default=0.55), 0.0, 2.0)
+    normalized["draw_bias_scale"] = _clamp(_safe_float(config.get("draw_bias_scale"), default=0.18), 0.0, 2.0)
+    normalized["min_probability"] = _clamp(_safe_float(config.get("min_probability"), default=0.02), 0.0, 0.32)
+    return normalized
+
+
+def _load_bayes_calibration_report() -> dict:
+    mtime = _bayes_calibration_mtime()
+    if _BAYES_CALIBRATION_CACHE.get("mtime") == mtime and _BAYES_CALIBRATION_CACHE.get("report"):
+        return dict(_BAYES_CALIBRATION_CACHE.get("report", {}))
+    if not BAYES_CALIBRATION_FILE.exists():
+        report = {
+            "updated_at": None,
+            "mode": "default",
+            "config": dict(DEFAULT_BAYES_CALIBRATION),
+            "league_overrides": {},
+            "metrics": {},
+            "validation": {},
+        }
+        _BAYES_CALIBRATION_CACHE["mtime"] = None
+        _BAYES_CALIBRATION_CACHE["config"] = dict(DEFAULT_BAYES_CALIBRATION)
+        _BAYES_CALIBRATION_CACHE["report"] = report
+        return report
+    try:
+        report = json.loads(BAYES_CALIBRATION_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        report = {}
+    if not isinstance(report, dict):
+        report = {}
+    config = _normalize_bayes_calibration_config(report.get("config"))
+    report["config"] = config
+    league_overrides = report.get("league_overrides")
+    normalized_overrides: dict[str, dict] = {}
+    if isinstance(league_overrides, dict):
+        for league_key, payload in league_overrides.items():
+            if not isinstance(league_key, str) or not isinstance(payload, dict):
+                continue
+            normalized_overrides[normalize_text(league_key)] = {
+                **payload,
+                "enabled": bool(payload.get("enabled", False)),
+                "config": _normalize_bayes_calibration_config(payload.get("config")),
+            }
+    report["league_overrides"] = normalized_overrides
+    report.setdefault("mode", "calibrated")
+    report.setdefault("metrics", {})
+    report.setdefault("validation", {})
+    _BAYES_CALIBRATION_CACHE["mtime"] = mtime
+    _BAYES_CALIBRATION_CACHE["config"] = dict(config)
+    _BAYES_CALIBRATION_CACHE["report"] = report
+    return report
+
+
+def get_bayes_calibration_status() -> dict:
+    report = _load_bayes_calibration_report()
+    config = _normalize_bayes_calibration_config(report.get("config"))
+    league_overrides = report.get("league_overrides", {})
+    active_override_count = 0
+    if isinstance(league_overrides, dict):
+        active_override_count = sum(
+            1 for payload in league_overrides.values() if isinstance(payload, dict) and payload.get("enabled")
+        )
+    return {
+        "updated_at": report.get("updated_at"),
+        "mode": report.get("mode", "default"),
+        "config": config,
+        "league_overrides": league_overrides if isinstance(league_overrides, dict) else {},
+        "league_override_count": active_override_count,
+        "default_config": dict(DEFAULT_BAYES_CALIBRATION),
+        "metrics": report.get("metrics", {}),
+        "validation": report.get("validation", {}),
+    }
+
+
+def _current_bayes_calibration_config(league: str | None = None) -> dict[str, float | str | bool]:
+    status = get_bayes_calibration_status()
+    config = status.get("config", {})
+    if not isinstance(config, dict):
+        config = dict(DEFAULT_BAYES_CALIBRATION)
+    normalized_global = _normalize_bayes_calibration_config(config)
+    league_key = normalize_text(league or "")
+    if league_key:
+        overrides = status.get("league_overrides", {})
+        if isinstance(overrides, dict):
+            payload = overrides.get(league_key)
+            if isinstance(payload, dict) and bool(payload.get("enabled")):
+                override_config = payload.get("config")
+                if isinstance(override_config, dict):
+                    return _normalize_bayes_calibration_config(override_config)
+    return normalized_global
+
+
+def _save_bayes_calibration_report(report: dict) -> None:
+    if not isinstance(report, dict):
+        return
+    _safe_model_dir()
+    BAYES_CALIBRATION_FILE.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    _BAYES_CALIBRATION_CACHE["mtime"] = _bayes_calibration_mtime()
+    _BAYES_CALIBRATION_CACHE["report"] = dict(report)
+    _BAYES_CALIBRATION_CACHE["config"] = _normalize_bayes_calibration_config(report.get("config"))
+
+
+def _sample_item_to_match(item: dict) -> AppMatch | None:
+    if not isinstance(item, dict):
+        return None
+    features = item.get("features")
+    meta = item.get("meta")
+    if not isinstance(features, dict) or not isinstance(meta, dict):
+        return None
+    match_date = normalize_text(meta.get("match_date", ""))
+    match_time = normalize_text(meta.get("match_time", "")) or "00:00"
+    league = normalize_text(meta.get("league", ""))
+    home_team = normalize_text(meta.get("home_team", ""))
+    away_team = normalize_text(meta.get("away_team", ""))
+    if not match_date or not league or not home_team or not away_team:
+        return None
+    return AppMatch(
+        home_team=home_team,
+        away_team=away_team,
+        league=league,
+        match_time=match_time,
+        match_date=match_date,
+        odds_home=_safe_float(features.get("odds_home"), default=2.2),
+        odds_draw=_safe_float(features.get("odds_draw"), default=3.1),
+        odds_away=_safe_float(features.get("odds_away"), default=2.8),
+        handicap_line=_safe_float(meta.get("handicap_line"), default=0.0),
+        opening_odds_home=_safe_float(meta.get("opening_odds_home"), default=_safe_float(features.get("opening_odds_home"), default=0.0)),
+        opening_odds_draw=_safe_float(meta.get("opening_odds_draw"), default=_safe_float(features.get("opening_odds_draw"), default=0.0)),
+        opening_odds_away=_safe_float(meta.get("opening_odds_away"), default=_safe_float(features.get("opening_odds_away"), default=0.0)),
+        return_rate=_safe_float(meta.get("return_rate"), default=_safe_float(features.get("return_rate"), default=0.0)),
+        kelly_home=_safe_float(meta.get("kelly_home"), default=_safe_float(features.get("kelly_home"), default=0.0)),
+        kelly_draw=_safe_float(meta.get("kelly_draw"), default=_safe_float(features.get("kelly_draw"), default=0.0)),
+        kelly_away=_safe_float(meta.get("kelly_away"), default=_safe_float(features.get("kelly_away"), default=0.0)),
+        source="historical:sample",
+        source_id=normalize_text(item.get("match_id", "")),
+    )
+
+
+def _sample_item_prediction(item: dict) -> dict | None:
+    match = _sample_item_to_match(item)
+    if match is None:
+        return None
+    features = item.get("features", {})
+    recent_form = {
+        key: _safe_float(features.get(key), default=0.0)
+        for key in XGBOOST_MODEL.FEATURE_ORDER
+        if key.startswith("home_recent_") or key.startswith("away_recent_") or key.startswith("recent_")
+    }
+    return _predict_match_with_inputs(
+        match=match,
+        home_rating=_safe_float(features.get("home_rating"), default=ELO_ENGINE.base_rating),
+        away_rating=_safe_float(features.get("away_rating"), default=ELO_ENGINE.base_rating),
+        league_strength=_safe_float(features.get("league_strength"), default=0.92),
+        recent_form_features=recent_form,
+    )
+
+
+def _actual_htft_label_from_meta(meta: dict) -> str | None:
+    if not isinstance(meta, dict):
+        return None
+    home_ht = _safe_int(meta.get("home_ht_goals"))
+    away_ht = _safe_int(meta.get("away_ht_goals"))
+    home_ft = _safe_int(meta.get("home_goals"))
+    away_ft = _safe_int(meta.get("away_goals"))
+    if None in {home_ht, away_ht, home_ft, away_ft}:
+        return None
+    first_half = _result_label(int(home_ht), int(away_ht))
+    full_time = _result_label(int(home_ft), int(away_ft))
+    mapping = {"主胜": "胜", "平局": "平", "客胜": "负", "涓昏儨": "胜", "骞冲眬": "平", "瀹㈣儨": "负"}
+    return f"{mapping.get(first_half, '-')} / {mapping.get(full_time, '-')}"
+
+
+def _collect_play_observations(validation_items: list[dict]) -> tuple[dict[str, list[dict]], dict]:
+    observations = {key: [] for key in DEFAULT_PLAY_THRESHOLDS}
+    skipped = 0
+    for item in validation_items:
+        prediction = _sample_item_prediction(item)
+        meta = item.get("meta", {}) if isinstance(item.get("meta"), dict) else {}
+        if not isinstance(prediction, dict) or not isinstance(meta, dict):
+            skipped += 1
+            continue
+        home_goals = _safe_int(meta.get("home_goals"))
+        away_goals = _safe_int(meta.get("away_goals"))
+        if home_goals is None or away_goals is None:
+            skipped += 1
+            continue
+        result = _result_label(int(home_goals), int(away_goals))
+        predicted_handicap_display, predicted_handicap_label, handicap_confidence = _extract_handicap_prediction(prediction)
+        handicap_result_label = _handicap_label_from_key(
+            _handicap_outcome_key(int(home_goals), int(away_goals), _safe_float(meta.get("handicap_line"), default=0.0))
+        )
+        total_goals_pick, total_goals_value, total_goals_confidence = _extract_total_goals_prediction(prediction)
+        score_pick, score_confidence = _extract_score_prediction(prediction)
+        htft_pick, htft_confidence = _extract_htft_prediction(prediction)
+        actual_score = f"{int(home_goals)}-{int(away_goals)}"
+        actual_htft = _actual_htft_label_from_meta(meta)
+
+        observations["1x2"].append(
+            {
+                "confidence": _safe_float(prediction.get("confidence"), default=0.0),
+                "is_hit": bool(prediction.get("recommendation") == result),
+            }
+        )
+        observations["handicap"].append(
+            {
+                "confidence": _safe_float(handicap_confidence, default=0.0),
+                "is_hit": bool(predicted_handicap_label == handicap_result_label) if predicted_handicap_label else False,
+            }
+        )
+        observations["total_goals"].append(
+            {
+                "confidence": _safe_float(total_goals_confidence, default=0.0),
+                "is_hit": bool(total_goals_value == int(home_goals) + int(away_goals)) if total_goals_value is not None else False,
+            }
+        )
+        observations["score"].append(
+            {
+                "confidence": _safe_float(score_confidence, default=0.0),
+                "is_hit": bool(score_pick == actual_score) if score_pick else False,
+            }
+        )
+        if actual_htft:
+            observations["htft"].append(
+                {
+                    "confidence": _safe_float(htft_confidence, default=0.0),
+                    "is_hit": bool(htft_pick == actual_htft) if htft_pick else False,
+                }
+            )
+    return observations, {"skipped": skipped}
+
+
+def _select_play_threshold(
+    play_name: str,
+    observations: list[dict],
+    default_threshold: float,
+    min_selected: int = 120,
+    min_coverage: float = 0.12,
+) -> dict:
+    cleaned = [
+        {
+            "confidence": _safe_float(item.get("confidence"), default=0.0),
+            "is_hit": bool(item.get("is_hit")),
+        }
+        for item in observations
+        if isinstance(item, dict)
+    ]
+    total = len(cleaned)
+    if total <= 0:
+        return {
+            "threshold": default_threshold,
+            "accuracy": 0.0,
+            "coverage": 0.0,
+            "selected": 0,
+            "reason": "no_observations",
+        }
+    candidates = sorted({round(item["confidence"], 2) for item in cleaned})
+    if round(default_threshold, 2) not in candidates:
+        candidates.append(round(default_threshold, 2))
+        candidates.sort()
+
+    baseline_selected = [item for item in cleaned if item["confidence"] >= default_threshold]
+    baseline_accuracy = (
+        sum(1 for item in baseline_selected if item["is_hit"]) / len(baseline_selected)
+        if baseline_selected else 0.0
+    )
+    best = {
+        "threshold": float(default_threshold),
+        "accuracy": baseline_accuracy,
+        "coverage": len(baseline_selected) / total if total else 0.0,
+        "selected": len(baseline_selected),
+        "reason": "default",
+    }
+    for threshold in candidates:
+        selected = [item for item in cleaned if item["confidence"] >= threshold]
+        selected_count = len(selected)
+        coverage = selected_count / total if total else 0.0
+        if selected_count < min_selected or coverage < min_coverage:
+            continue
+        accuracy = sum(1 for item in selected if item["is_hit"]) / selected_count
+        if accuracy > best["accuracy"] + 1e-9 or (
+            abs(accuracy - best["accuracy"]) <= 1e-9 and coverage > best["coverage"] + 1e-9
+        ) or (
+            abs(accuracy - best["accuracy"]) <= 1e-9
+            and abs(coverage - best["coverage"]) <= 1e-9
+            and threshold > best["threshold"]
+        ):
+            best = {
+                "threshold": float(threshold),
+                "accuracy": accuracy,
+                "coverage": coverage,
+                "selected": selected_count,
+                "reason": "optimized",
+            }
+    return {
+        "threshold": round(float(best["threshold"]), 2),
+        "accuracy": round(float(best["accuracy"]), 6),
+        "coverage": round(float(best["coverage"]), 6),
+        "selected": int(best["selected"]),
+        "reason": best["reason"],
+    }
+
+
+def calibrate_play_thresholds_now(
+    validation_ratio: float = 0.20,
+    min_validation_samples: int = 1000,
+    write_report: bool = True,
+) -> dict:
+    train_items, validation_items = _validation_split_samples(
+        validation_ratio=validation_ratio,
+        min_validation_samples=min_validation_samples,
+    )
+    if not train_items or not validation_items:
+        return {
+            "calibrated": False,
+            "reason": "insufficient_validation_split",
+            "status": get_play_threshold_status(),
+        }
+
+    observations, extra = _collect_play_observations(validation_items)
+    thresholds: dict[str, float] = {}
+    metrics: dict[str, dict] = {}
+    for play_name, default_threshold in DEFAULT_PLAY_THRESHOLDS.items():
+        result = _select_play_threshold(play_name, observations.get(play_name, []), default_threshold)
+        thresholds[play_name] = float(result["threshold"])
+        metrics[play_name] = {
+            "threshold": float(result["threshold"]),
+            "accuracy": float(result["accuracy"]),
+            "coverage": float(result["coverage"]),
+            "selected": int(result["selected"]),
+            "total": len(observations.get(play_name, [])),
+            "reason": result["reason"],
+        }
+
+    dates = [
+        normalize_text(item.get("meta", {}).get("match_date", ""))
+        for item in validation_items
+        if isinstance(item.get("meta"), dict)
+    ]
+    dates = [item for item in dates if item]
+    report = {
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "mode": "calibrated",
+        "thresholds": thresholds,
+        "metrics": metrics,
+        "validation": {
+            "sample_count": len(validation_items),
+            "train_sample_count": len(train_items),
+            "date_start": min(dates) if dates else None,
+            "date_end": max(dates) if dates else None,
+            "ratio": round(len(validation_items) / max(len(train_items) + len(validation_items), 1), 4),
+            "skipped": int(extra.get("skipped", 0)),
+        },
+    }
+    _save_play_threshold_report(report)
+
+    report_path = None
+    if write_report:
+        REPORT_DIR.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        report_path = REPORT_DIR / f"play_thresholds_backtest_{timestamp}.md"
+        lines = [
+            "# Play Threshold Calibration Report",
+            "",
+            f"- Generated At: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"- Validation Samples: {report['validation']['sample_count']}",
+            f"- Train Samples: {report['validation']['train_sample_count']}",
+            f"- Validation Window: {report['validation']['date_start']} -> {report['validation']['date_end']}",
+            "",
+            "| Play | Threshold | Accuracy | Coverage | Selected | Total |",
+            "|---|---:|---:|---:|---:|---:|",
+        ]
+        for play_name in ("1x2", "handicap", "total_goals", "htft", "score"):
+            item = metrics.get(play_name, {})
+            lines.append(
+                f"| {play_name} | {float(item.get('threshold', 0) or 0):.2f} | {float(item.get('accuracy', 0) or 0):.2%} | {float(item.get('coverage', 0) or 0):.2%} | {int(item.get('selected', 0) or 0)} | {int(item.get('total', 0) or 0)} |"
+            )
+        report_path.write_text("\n".join(lines), encoding="utf-8")
+
+    return {
+        "calibrated": True,
+        "reason": "ok",
+        "thresholds": thresholds,
+        "metrics": metrics,
+        "validation": report["validation"],
+        "report_path": str(report_path) if report_path else None,
+        "status": get_play_threshold_status(),
+    }
+
+
+def _collect_settlement_play_metrics(settlements: list[dict]) -> dict[str, dict]:
+    specs = {
+        "1x2": ("is_correct", "prediction_confidence"),
+        "handicap": ("handicap_is_correct", "handicap_confidence"),
+        "total_goals": ("total_goals_is_correct", "total_goals_confidence"),
+        "score": ("score_is_correct", "score_confidence"),
+    }
+    metrics: dict[str, dict] = {}
+    for play_name, (hit_key, conf_key) in specs.items():
+        rows: list[tuple[bool, float]] = []
+        for item in settlements:
+            if not isinstance(item, dict):
+                continue
+            hit = item.get(hit_key)
+            if not isinstance(hit, bool):
+                continue
+            confidence = _safe_float(item.get(conf_key), default=0.0)
+            if confidence <= 0.0 or confidence > 1.0:
+                confidence = _safe_float(item.get("prediction_confidence"), default=0.0)
+            if confidence <= 0.0 or confidence > 1.0:
+                confidence = 0.0
+            rows.append((hit, confidence))
+        sample_count = len(rows)
+        hit_count = sum(1 for hit, _ in rows if hit)
+        hit_rate = (hit_count / sample_count) if sample_count > 0 else 0.0
+        expected_values = [confidence for _, confidence in rows if confidence > 0.0]
+        confidence_values = [confidence for _, confidence in rows if confidence > 0.0]
+        expected_hit_rate = (sum(expected_values) / len(expected_values)) if expected_values else 0.0
+        metrics[play_name] = {
+            "sample_count": sample_count,
+            "hit_count": hit_count,
+            "hit_rate": round(hit_rate, 6),
+            "expected_count": len(expected_values),
+            "expected_hit_rate": round(expected_hit_rate, 6),
+            "ev_bias": round((hit_rate - expected_hit_rate) if expected_values else 0.0, 6),
+            "confidence_values": confidence_values,
+        }
+
+    if "htft" not in metrics:
+        metrics["htft"] = {
+            "sample_count": 0,
+            "hit_count": 0,
+            "hit_rate": 0.0,
+            "expected_count": 0,
+            "expected_hit_rate": 0.0,
+            "ev_bias": 0.0,
+            "reason": "not_settled",
+            "confidence_values": [],
+        }
+    return metrics
+
+
+def calibrate_play_thresholds_by_settlement_now(
+    *,
+    limit: int = 500,
+    min_samples: int = 18,
+    weak_ev_bias: float = -0.08,
+    strong_ev_bias: float = 0.08,
+    step: float = 0.02,
+    max_step_levels: int = 4,
+    min_coverage: float = 0.18,
+    write_report: bool = True,
+) -> dict:
+    settlements = get_recent_settlements(limit=max(0, int(limit)))
+    if not settlements:
+        return {
+            "calibrated": False,
+            "reason": "no_settlements",
+            "thresholds": _current_play_thresholds(),
+            "metrics": {},
+            "validation": {"source": "settlements", "sample_count": 0},
+            "status": get_play_threshold_status(),
+        }
+
+    current_thresholds = _current_play_thresholds()
+    observed = _collect_settlement_play_metrics(settlements)
+    next_thresholds = dict(current_thresholds)
+    metrics: dict[str, dict] = {}
+    changed_count = 0
+    usable_plays = 0
+
+    for play_name, current_threshold in current_thresholds.items():
+        item = dict(observed.get(play_name, {}))
+        sample_count = int(item.get("sample_count", 0) or 0)
+        hit_rate = _safe_float(item.get("hit_rate"), default=0.0)
+        expected_hit_rate = _safe_float(item.get("expected_hit_rate"), default=0.0)
+        ev_bias = _safe_float(item.get("ev_bias"), default=0.0)
+        delta = 0.0
+        action = "hold"
+        reason = "stable"
+
+        if sample_count < max(1, int(min_samples)):
+            reason = "insufficient_samples"
+        elif play_name == "htft":
+            reason = "not_settled"
+        else:
+            usable_plays += 1
+            if ev_bias <= float(weak_ev_bias):
+                severity = max(1, min(int(max_step_levels), 1 + int(abs(ev_bias - weak_ev_bias) / 0.04)))
+                delta = float(step) * severity
+                action = "raise"
+                reason = "negative_ev_bias"
+            elif ev_bias >= float(strong_ev_bias):
+                delta = -float(step)
+                action = "lower"
+                reason = "positive_ev_bias"
+
+        min_thr, max_thr = PLAY_THRESHOLD_RANGE.get(play_name, (0.0, 1.0))
+        new_threshold = max(float(min_thr), min(float(max_thr), float(current_threshold) + delta))
+        confidence_values = [float(value) for value in item.get("confidence_values", []) if _safe_float(value, 0.0) > 0.0]
+        if confidence_values and sample_count > 0 and delta > 0.0:
+            floor = max(0.0, min(1.0, float(min_coverage)))
+            min_selected = max(1, int(sample_count * floor + 0.9999))
+            if min_selected < sample_count:
+                ordered = sorted(confidence_values)
+                coverage_limit = ordered[max(0, len(ordered) - min_selected)]
+                new_threshold = min(new_threshold, max(float(current_threshold), float(coverage_limit)))
+        new_threshold = round(new_threshold, 2)
+        delta_applied = round(new_threshold - float(current_threshold), 2)
+        if abs(delta_applied) > 1e-9:
+            changed_count += 1
+
+        next_thresholds[play_name] = new_threshold
+        coverage = 1.0 if sample_count > 0 else 0.0
+        metrics[play_name] = {
+            "threshold": new_threshold,
+            "old_threshold": round(float(current_threshold), 2),
+            "delta": delta_applied,
+            "accuracy": round(hit_rate, 6),
+            "coverage": coverage,
+            "selected": sample_count,
+            "total": sample_count,
+            "expected_hit_rate": round(expected_hit_rate, 6),
+            "ev_bias": round(ev_bias, 6),
+            "hit_count": int(item.get("hit_count", 0) or 0),
+            "sample_count": sample_count,
+            "action": action,
+            "reason": reason,
+        }
+
+    mode = "bucket_tuned" if changed_count > 0 else "bucket_tuned_no_change"
+    report = {
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "mode": mode,
+        "thresholds": next_thresholds,
+        "metrics": metrics,
+        "validation": {
+            "source": "settlements",
+            "sample_count": len(settlements),
+            "window": int(limit),
+            "min_samples": int(min_samples),
+            "weak_ev_bias": round(float(weak_ev_bias), 4),
+            "strong_ev_bias": round(float(strong_ev_bias), 4),
+            "step": round(float(step), 4),
+            "min_coverage": round(float(min_coverage), 4),
+            "usable_play_count": usable_plays,
+            "changed_play_count": changed_count,
+        },
+    }
+    _save_play_threshold_report(report)
+
+    report_path = None
+    if write_report:
+        REPORT_DIR.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        report_path = REPORT_DIR / f"play_thresholds_bucket_tuning_{timestamp}.md"
+        lines = [
+            "# Play Threshold Bucket Tuning Report",
+            "",
+            f"- Generated At: {report['updated_at']}",
+            f"- Settlements Window: {int(limit)}",
+            f"- Settlement Samples: {len(settlements)}",
+            f"- Min Samples Per Play: {int(min_samples)}",
+            f"- Weak EV Bias Threshold: {float(weak_ev_bias):+.2%}",
+            f"- Strong EV Bias Threshold: {float(strong_ev_bias):+.2%}",
+            f"- Min Coverage Floor: {float(min_coverage):.1%}",
+            f"- Applied Changes: {changed_count}",
+            "",
+            "| Play | Old | New | Delta | Hit Rate | Expected Hit | EV Bias | Samples | Action | Reason |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---|---|",
+        ]
+        for play_name in ("1x2", "handicap", "total_goals", "score", "htft"):
+            item = metrics.get(play_name, {})
+            lines.append(
+                f"| {play_name} | {float(item.get('old_threshold', 0) or 0):.2f} | {float(item.get('threshold', 0) or 0):.2f} | "
+                f"{float(item.get('delta', 0) or 0):+.2f} | {float(item.get('accuracy', 0) or 0):.2%} | "
+                f"{float(item.get('expected_hit_rate', 0) or 0):.2%} | {float(item.get('ev_bias', 0) or 0):+.2%} | "
+                f"{int(item.get('sample_count', 0) or 0)} | {item.get('action', '-')} | {item.get('reason', '-')} |"
+            )
+        report_path.write_text("\n".join(lines), encoding="utf-8")
+
+    return {
+        "calibrated": changed_count > 0,
+        "reason": "ok" if changed_count > 0 else "no_significant_bucket_gap",
+        "thresholds": next_thresholds,
+        "metrics": metrics,
+        "validation": report["validation"],
+        "report_path": str(report_path) if report_path else None,
+        "status": get_play_threshold_status(),
+    }
+
+
+def _load_recent_prediction_records(limit: int = 240) -> list[dict]:
+    snapshot_records = STATE_STORE.load_prediction_snapshots()
+    rows: list[dict] = []
+    for record in snapshot_records.values():
+        if not isinstance(record, dict):
+            continue
+        prediction = record.get("prediction")
+        if not isinstance(prediction, dict):
+            continue
+        rows.append(
+            {
+                "saved_at": normalize_text(record.get("saved_at", "")),
+                "prediction": prediction,
+            }
+        )
+    rows.sort(key=lambda item: str(item.get("saved_at", "")))
+    if limit > 0 and len(rows) > limit:
+        rows = rows[-limit:]
+    return rows
+
+
+def _simulate_single_coverage_from_predictions(
+    rows: list[dict],
+    thresholds: dict[str, float],
+    play_policy: dict[str, dict],
+) -> dict:
+    specs = {
+        "1x2": ("confidence", None),
+        "handicap": ("handicap_confidence", None),
+        "total_goals": ("total_goals_confidence", None),
+        "score": ("score_confidence", None),
+        "htft": ("htft_confidence", None),
+    }
+    analyzed = len(rows)
+    if analyzed <= 0:
+        return {
+            "analyzed_count": 0,
+            "single_match_count": 0,
+            "single_coverage": 0.0,
+            "single_pick_count": 0,
+            "avg_single_picks": 0.0,
+            "by_play_match_count": {key: 0 for key in specs},
+            "by_play_pick_count": {key: 0 for key in specs},
+        }
+
+    single_match_count = 0
+    single_pick_count = 0
+    by_play_match_ids: dict[str, set[int]] = {key: set() for key in specs}
+    by_play_pick_count: dict[str, int] = {key: 0 for key in specs}
+
+    for idx, row in enumerate(rows):
+        prediction = row.get("prediction", {})
+        if not isinstance(prediction, dict):
+            continue
+        has_single = False
+        for play_name, (confidence_key, _unused) in specs.items():
+            policy = play_policy.get(play_name, {}) if isinstance(play_policy, dict) else {}
+            if not bool(policy.get("single_enabled", True)):
+                continue
+            threshold = _safe_float(thresholds.get(play_name), default=DEFAULT_PLAY_THRESHOLDS.get(play_name, 0.0))
+            confidence = _safe_float(prediction.get(confidence_key), default=0.0)
+            if confidence <= 0.0 or confidence > 1.0:
+                continue
+            if confidence >= threshold:
+                has_single = True
+                single_pick_count += 1
+                by_play_pick_count[play_name] += 1
+                by_play_match_ids[play_name].add(idx)
+        if has_single:
+            single_match_count += 1
+
+    by_play_match_count = {key: len(value) for key, value in by_play_match_ids.items()}
+    single_coverage = single_match_count / analyzed
+    avg_single_picks = single_pick_count / analyzed
+    return {
+        "analyzed_count": analyzed,
+        "single_match_count": single_match_count,
+        "single_coverage": round(single_coverage, 6),
+        "single_pick_count": single_pick_count,
+        "avg_single_picks": round(avg_single_picks, 6),
+        "by_play_match_count": by_play_match_count,
+        "by_play_pick_count": by_play_pick_count,
+    }
+
+
+def _coverage_distance(metrics: dict, target_coverage: float, target_avg_picks: float) -> float:
+    coverage = _safe_float(metrics.get("single_coverage"), default=0.0)
+    avg_picks = _safe_float(metrics.get("avg_single_picks"), default=0.0)
+    return abs(coverage - target_coverage) + 0.35 * abs(avg_picks - target_avg_picks)
+
+
+def calibrate_play_thresholds_coverage_guardrail_now(
+    *,
+    snapshot_limit: int = 240,
+    min_predictions: int = 12,
+    target_min_coverage: float = 0.30,
+    target_max_coverage: float = 0.72,
+    target_max_avg_picks: float = 1.85,
+    step: float = 0.02,
+    max_step_levels: int = 4,
+    write_report: bool = True,
+) -> dict:
+    rows = _load_recent_prediction_records(limit=max(0, int(snapshot_limit)))
+    if len(rows) < max(1, int(min_predictions)):
+        return {
+            "calibrated": False,
+            "reason": "insufficient_predictions",
+            "thresholds": _current_play_thresholds(),
+            "validation": {
+                "source": "prediction_snapshots",
+                "prediction_count": len(rows),
+                "min_predictions": int(min_predictions),
+            },
+            "status": get_play_threshold_status(),
+        }
+
+    current_thresholds = _current_play_thresholds()
+    play_policy = _current_play_policy()
+    baseline = _simulate_single_coverage_from_predictions(rows, current_thresholds, play_policy)
+    current_cov = _safe_float(baseline.get("single_coverage"), default=0.0)
+    current_avg_picks = _safe_float(baseline.get("avg_single_picks"), default=0.0)
+
+    direction = 0
+    reason = "stable"
+    if current_cov < float(target_min_coverage):
+        direction = -1
+        reason = "coverage_too_low"
+    elif current_cov > float(target_max_coverage) or current_avg_picks > float(target_max_avg_picks):
+        direction = 1
+        reason = "coverage_too_high"
+
+    target_cov = (float(target_min_coverage) + float(target_max_coverage)) / 2.0
+    target_avg = min(float(target_max_avg_picks), 1.60)
+    best = {
+        "thresholds": dict(current_thresholds),
+        "metrics": baseline,
+        "level": 0,
+        "distance": _coverage_distance(baseline, target_cov, target_avg),
+    }
+
+    candidate_rows: list[dict] = []
+    if direction != 0:
+        for level in range(1, max(1, int(max_step_levels)) + 1):
+            candidate: dict[str, float] = {}
+            delta = float(step) * level * direction
+            for play_name, value in current_thresholds.items():
+                policy = play_policy.get(play_name, {}) if isinstance(play_policy, dict) else {}
+                if not bool(policy.get("single_enabled", True)):
+                    candidate[play_name] = round(float(value), 2)
+                    continue
+                lo, hi = PLAY_THRESHOLD_RANGE.get(play_name, (0.0, 1.0))
+                adjusted = max(float(lo), min(float(hi), float(value) + delta))
+                candidate[play_name] = round(adjusted, 2)
+            metrics = _simulate_single_coverage_from_predictions(rows, candidate, play_policy)
+            distance = _coverage_distance(metrics, target_cov, target_avg)
+            row = {"level": level, "thresholds": candidate, "metrics": metrics, "distance": round(distance, 6)}
+            candidate_rows.append(row)
+
+            cov = _safe_float(metrics.get("single_coverage"), default=0.0)
+            avg = _safe_float(metrics.get("avg_single_picks"), default=0.0)
+            in_band = (cov >= float(target_min_coverage) and cov <= float(target_max_coverage) and avg <= float(target_max_avg_picks))
+            if in_band:
+                best = {"thresholds": candidate, "metrics": metrics, "level": level, "distance": distance}
+                break
+            if distance < float(best["distance"]) - 1e-9:
+                best = {"thresholds": candidate, "metrics": metrics, "level": level, "distance": distance}
+
+    next_thresholds = dict(best["thresholds"])
+    changed = any(abs(_safe_float(next_thresholds.get(k), 0.0) - _safe_float(current_thresholds.get(k), 0.0)) > 1e-9 for k in current_thresholds)
+
+    metrics = {}
+    for play_name in current_thresholds:
+        metrics[play_name] = {
+            "old_threshold": round(float(current_thresholds.get(play_name, 0.0)), 2),
+            "threshold": round(float(next_thresholds.get(play_name, 0.0)), 2),
+            "delta": round(float(next_thresholds.get(play_name, 0.0)) - float(current_thresholds.get(play_name, 0.0)), 2),
+            "match_count": int(best["metrics"].get("by_play_match_count", {}).get(play_name, 0) if isinstance(best["metrics"], dict) else 0),
+            "pick_count": int(best["metrics"].get("by_play_pick_count", {}).get(play_name, 0) if isinstance(best["metrics"], dict) else 0),
+        }
+
+    report = {
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "mode": "coverage_guardrail",
+        "thresholds": next_thresholds,
+        "metrics": metrics,
+        "validation": {
+            "source": "prediction_snapshots",
+            "prediction_count": len(rows),
+            "target_min_coverage": round(float(target_min_coverage), 4),
+            "target_max_coverage": round(float(target_max_coverage), 4),
+            "target_max_avg_picks": round(float(target_max_avg_picks), 4),
+            "base_single_coverage": round(current_cov, 4),
+            "base_avg_single_picks": round(current_avg_picks, 4),
+            "final_single_coverage": round(_safe_float(best["metrics"].get("single_coverage"), 0.0), 4),
+            "final_avg_single_picks": round(_safe_float(best["metrics"].get("avg_single_picks"), 0.0), 4),
+            "direction": direction,
+            "reason": reason,
+            "selected_level": int(best["level"]),
+            "changed_play_count": sum(1 for item in metrics.values() if abs(_safe_float(item.get("delta"), 0.0)) > 1e-9),
+        },
+    }
+    _save_play_threshold_report(report)
+
+    report_path = None
+    if write_report:
+        REPORT_DIR.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        report_path = REPORT_DIR / f"play_thresholds_coverage_guardrail_{timestamp}.md"
+        lines = [
+            "# Play Threshold Coverage Guardrail Report",
+            "",
+            f"- Generated At: {report['updated_at']}",
+            f"- Prediction Samples: {len(rows)}",
+            f"- Baseline Coverage: {current_cov:.2%}",
+            f"- Baseline Avg Picks: {current_avg_picks:.2f}",
+            f"- Final Coverage: {_safe_float(best['metrics'].get('single_coverage'), 0.0):.2%}",
+            f"- Final Avg Picks: {_safe_float(best['metrics'].get('avg_single_picks'), 0.0):.2f}",
+            f"- Direction: {direction}",
+            f"- Reason: {reason}",
+            f"- Selected Level: {int(best['level'])}",
+            "",
+            "## Threshold Update",
+            "",
+            "| Play | Old | New | Delta | Match Coverage | Pick Count |",
+            "|---|---:|---:|---:|---:|---:|",
+        ]
+        for play_name in ("1x2", "handicap", "total_goals", "score", "htft"):
+            item = metrics.get(play_name, {})
+            lines.append(
+                f"| {play_name} | {float(item.get('old_threshold', 0) or 0):.2f} | {float(item.get('threshold', 0) or 0):.2f} | "
+                f"{float(item.get('delta', 0) or 0):+.2f} | {int(item.get('match_count', 0) or 0)} | {int(item.get('pick_count', 0) or 0)} |"
+            )
+        if candidate_rows:
+            lines.extend(
+                [
+                    "",
+                    "## Candidate Levels",
+                    "",
+                    "| Level | Coverage | Avg Picks | Distance |",
+                    "|---:|---:|---:|---:|",
+                ]
+            )
+            for candidate in candidate_rows:
+                row_metrics = candidate.get("metrics", {})
+                lines.append(
+                    f"| {int(candidate.get('level', 0) or 0)} | "
+                    f"{_safe_float(row_metrics.get('single_coverage'), 0.0):.2%} | "
+                    f"{_safe_float(row_metrics.get('avg_single_picks'), 0.0):.2f} | "
+                    f"{_safe_float(candidate.get('distance'), 0.0):.4f} |"
+                )
+        report_path.write_text("\n".join(lines), encoding="utf-8")
+
+    return {
+        "calibrated": bool(changed),
+        "reason": "ok" if changed else "no_guardrail_change_needed",
+        "thresholds": next_thresholds,
+        "metrics": metrics,
+        "validation": report["validation"],
+        "report_path": str(report_path) if report_path else None,
+        "status": get_play_threshold_status(),
+    }
+
+
+def run_ensemble_backtest(
+    validation_ratio: float = 0.20,
+    min_validation_samples: int = 1000,
+    write_report: bool = True,
+) -> dict:
+    train_items, validation_items = _validation_split_samples(
+        validation_ratio=validation_ratio,
+        min_validation_samples=min_validation_samples,
+    )
+    if not train_items or not validation_items:
+        return {
+            "ok": False,
+            "reason": "insufficient_validation_split",
+        }
+
+    component_rows, extra = _build_validation_component_rows(train_items, validation_items)
+    if not component_rows:
+        return {
+            "ok": False,
+            "reason": "no_validation_rows",
+        }
+
+    default_metrics = _evaluate_ensemble_scheme(component_rows, DEFAULT_ENSEMBLE_WEIGHTS)
+    calibrated_status = get_ensemble_weight_status()
+    calibrated_weights = calibrated_status.get("weights", DEFAULT_ENSEMBLE_WEIGHTS)
+    league_weights = calibrated_status.get("league_weights", {})
+    calibrated_metrics = _evaluate_ensemble_scheme(component_rows, calibrated_weights)
+    league_specific_metrics = _evaluate_league_aware_scheme(component_rows, calibrated_weights, league_weights)
+    stage4_runtime_metrics = _evaluate_prediction_scheme_from_payloads(validation_items, "ensemble_probabilities")
+    stage5_specialist_metrics = _evaluate_prediction_scheme_from_payloads(validation_items, "probabilities")
+    improvement = {
+        "logloss_delta": round(default_metrics["logloss"] - calibrated_metrics["logloss"], 6),
+        "brier_delta": round(default_metrics["brier"] - calibrated_metrics["brier"], 6),
+        "accuracy_delta": round(calibrated_metrics["accuracy"] - default_metrics["accuracy"], 6),
+    }
+    league_improvement = {
+        "logloss_delta": round(default_metrics["logloss"] - league_specific_metrics["logloss"], 6),
+        "brier_delta": round(default_metrics["brier"] - league_specific_metrics["brier"], 6),
+        "accuracy_delta": round(league_specific_metrics["accuracy"] - default_metrics["accuracy"], 6),
+    }
+    stage5_improvement = {
+        "logloss_delta": round(stage4_runtime_metrics["logloss"] - stage5_specialist_metrics["logloss"], 6),
+        "brier_delta": round(stage4_runtime_metrics["brier"] - stage5_specialist_metrics["brier"], 6),
+        "accuracy_delta": round(stage5_specialist_metrics["accuracy"] - stage4_runtime_metrics["accuracy"], 6),
+    }
+
+    dates = [row.get("match_date") for row in component_rows if row.get("match_date")]
+    result = {
+        "ok": True,
+        "reason": "ok",
+        "validation": {
+            "sample_count": len(component_rows),
+            "train_sample_count": len(train_items),
+            "date_start": min(dates) if dates else None,
+            "date_end": max(dates) if dates else None,
+            "ratio": round(len(component_rows) / max(len(train_items) + len(component_rows), 1), 4),
+            **extra,
+        },
+        "default": default_metrics,
+        "calibrated": calibrated_metrics,
+        "league_specific": league_specific_metrics,
+        "stage4_runtime": stage4_runtime_metrics,
+        "stage5_specialist": stage5_specialist_metrics,
+        "improvement": improvement,
+        "league_improvement": league_improvement,
+        "stage5_improvement": stage5_improvement,
+    }
+
+    report_path = None
+    if write_report:
+        REPORT_DIR.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        report_path = REPORT_DIR / f"ensemble_backtest_{timestamp}.md"
+        lines = [
+            "# Ensemble Backtest Report",
+            "",
+            f"- Generated At: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"- Validation Samples: {result['validation']['sample_count']}",
+            f"- Train Samples: {result['validation']['train_sample_count']}",
+            f"- Validation Window: {result['validation']['date_start']} -> {result['validation']['date_end']}",
+            "",
+            "| Scheme | Weights | Logloss | Brier | Accuracy |",
+            "|---|---|---:|---:|---:|",
+            f"| Default | market={default_metrics['weights']['market']:.1%}, elo={default_metrics['weights']['elo']:.1%}, poisson={default_metrics['weights']['poisson']:.1%}, xgb={default_metrics['weights']['xgboost']:.1%} | {default_metrics['logloss']:.6f} | {default_metrics['brier']:.6f} | {default_metrics['accuracy']:.2%} |",
+            f"| Calibrated | market={calibrated_metrics['weights']['market']:.1%}, elo={calibrated_metrics['weights']['elo']:.1%}, poisson={calibrated_metrics['weights']['poisson']:.1%}, xgb={calibrated_metrics['weights']['xgboost']:.1%} | {calibrated_metrics['logloss']:.6f} | {calibrated_metrics['brier']:.6f} | {calibrated_metrics['accuracy']:.2%} |",
+            f"| League Aware | global=market {calibrated_metrics['weights']['market']:.1%}, elo {calibrated_metrics['weights']['elo']:.1%}, poisson {calibrated_metrics['weights']['poisson']:.1%}, xgb {calibrated_metrics['weights']['xgboost']:.1%}; overrides={len(league_weights) if isinstance(league_weights, dict) else 0} | {league_specific_metrics['logloss']:.6f} | {league_specific_metrics['brier']:.6f} | {league_specific_metrics['accuracy']:.2%} |",
+            f"| Stage4 Runtime | calibrated+league | {stage4_runtime_metrics['logloss']:.6f} | {stage4_runtime_metrics['brier']:.6f} | {stage4_runtime_metrics['accuracy']:.2%} |",
+            f"| Stage5 Specialists | calibrated+league+specialists | {stage5_specialist_metrics['logloss']:.6f} | {stage5_specialist_metrics['brier']:.6f} | {stage5_specialist_metrics['accuracy']:.2%} |",
+            "",
+            "## Improvement",
+            "",
+            f"- Logloss Delta: {improvement['logloss_delta']:+.6f}",
+            f"- Brier Delta: {improvement['brier_delta']:+.6f}",
+            f"- Accuracy Delta: {improvement['accuracy_delta']:+.2%}",
+            f"- League-Aware Logloss Delta: {league_improvement['logloss_delta']:+.6f}",
+            f"- League-Aware Brier Delta: {league_improvement['brier_delta']:+.6f}",
+            f"- League-Aware Accuracy Delta: {league_improvement['accuracy_delta']:+.2%}",
+            f"- Stage5 Logloss Delta: {stage5_improvement['logloss_delta']:+.6f}",
+            f"- Stage5 Brier Delta: {stage5_improvement['brier_delta']:+.6f}",
+            f"- Stage5 Accuracy Delta: {stage5_improvement['accuracy_delta']:+.2%}",
+            "",
+            "## Draw Behavior",
+            "",
+            f"- Stage4 Draw Picks: {stage4_runtime_metrics['draw_picks']} (hit rate {stage4_runtime_metrics['draw_hit_rate']:.2%})",
+            f"- Stage5 Draw Picks: {stage5_specialist_metrics['draw_picks']} (hit rate {stage5_specialist_metrics['draw_hit_rate']:.2%})",
+            "",
+        ]
+        report_path.write_text("\n".join(lines), encoding="utf-8")
+    result["report_path"] = str(report_path) if report_path else None
+    return result
+
+
+def _parse_total_goals_from_score_text(score_text: str) -> int | None:
+    text = str(score_text or "").strip()
+    if "-" not in text:
+        return None
+    try:
+        home_goals, away_goals = [int(part) for part in text.split("-", 1)]
+    except Exception:
+        return None
+    return home_goals + away_goals
+
+
+_REGULAR_SCORELINE_SET = {
+    "0-0",
+    "1-0",
+    "0-1",
+    "1-1",
+    "2-0",
+    "0-2",
+    "2-1",
+    "1-2",
+    "2-2",
+    "3-0",
+    "0-3",
+    "3-1",
+    "1-3",
+}
+
+
+def _scoreline_bucket(score_text: str | None) -> str:
+    text = str(score_text or "").strip()
+    if not text or "-" not in text:
+        return "volatile"
+    if text in _REGULAR_SCORELINE_SET:
+        return "regular"
+    try:
+        home_goals, away_goals = [int(part) for part in text.split("-", 1)]
+    except Exception:
+        return "volatile"
+    total_goals = home_goals + away_goals
+    goal_diff = abs(home_goals - away_goals)
+    if total_goals <= 3 and goal_diff <= 2 and max(home_goals, away_goals) <= 2:
+        return "regular"
+    return "volatile"
+
+
+def _merge_scoreline_model_outputs(
+    base_output: dict | None,
+    volatile_output: dict | None,
+) -> tuple[dict, bool]:
+    base = dict(base_output) if isinstance(base_output, dict) else {}
+    volatile = dict(volatile_output) if isinstance(volatile_output, dict) else {}
+    base_label = str(base.get("label") or "").strip()
+    volatile_label = str(volatile.get("label") or "").strip()
+    base_conf = _safe_float(base.get("confidence"), default=0.0)
+    volatile_conf = _safe_float(volatile.get("confidence"), default=0.0)
+    if not volatile.get("model_ready") or not volatile_label or volatile_label == "OTHER":
+        return base, False
+    if _scoreline_bucket(volatile_label) != "volatile":
+        return base, False
+    if not base.get("model_ready") or not base_label or base_label == "OTHER":
+        return base, False
+    if _scoreline_bucket(base_label) != "volatile":
+        return base, False
+    if volatile_label != base_label:
+        return base, False
+    if volatile_conf >= max(base_conf, 0.08):
+        candidate = dict(volatile)
+        candidate["source_model"] = "volatile"
+        return candidate, True
+    return base, False
+
+
+def _poisson_baseline_handicap_prediction(prediction: dict, handicap_line: float) -> str | None:
+    poisson = prediction.get("poisson", {}) if isinstance(prediction, dict) else {}
+    distribution = poisson.get("score_distribution", []) if isinstance(poisson, dict) else []
+    probabilities = {"home": 0.0, "draw": 0.0, "away": 0.0}
+    for item in distribution:
+        score_text = str(item.get("score", ""))
+        if "-" not in score_text:
+            continue
+        try:
+            home_goals, away_goals = [int(part) for part in score_text.split("-", 1)]
+        except Exception:
+            continue
+        key = _handicap_outcome_key(home_goals, away_goals, handicap_line)
+        probabilities[key] += _safe_float(item.get("probability"), default=0.0)
+    if max(probabilities.values()) <= 0.0:
+        return None
+    return _handicap_label_from_key(max(probabilities, key=probabilities.get))
+
+
+def _record_play_backtest_hit(bucket: dict[str, float], predicted: object, actual: object) -> None:
+    if predicted is None or actual is None:
+        return
+    bucket["total"] += 1
+    if str(predicted) == str(actual):
+        bucket["hits"] += 1
+
+
+def _model_total_goals_pick(prediction: dict | None) -> int | None:
+    if not isinstance(prediction, dict):
+        return None
+    model_output = prediction.get("total_goals_model")
+    if not isinstance(model_output, dict) or not model_output.get("model_ready"):
+        return None
+    return _safe_int(model_output.get("label"))
+
+
+def _model_scoreline_pick(prediction: dict | None) -> str | None:
+    if not isinstance(prediction, dict):
+        return None
+    model_output = prediction.get("scoreline_model")
+    if not isinstance(model_output, dict) or not model_output.get("model_ready"):
+        return None
+    label = str(model_output.get("label", "")).strip()
+    if not label or label == "OTHER":
+        return None
+    return label
+
+
+def _prediction_recommendation_key(prediction: dict | None) -> str | None:
+    if not isinstance(prediction, dict):
+        return None
+    recommendation = str(prediction.get("recommendation", "")).strip()
+    mapping = {"主胜": "home", "平局": "draw", "客胜": "away"}
+    return mapping.get(recommendation)
+
+
+def _scoreline_policy_thresholds(scoreline_policy: dict | None, bucket: str) -> dict[str, float | bool]:
+    defaults = DEFAULT_PLAY_MODEL_POLICY.get("scoreline", {})
+    policy = scoreline_policy if isinstance(scoreline_policy, dict) else {}
+    prefix = "regular" if bucket == "regular" else "volatile"
+    legacy_same = _safe_float(
+        policy.get("same_outcome_min_confidence"),
+        default=_safe_float(defaults.get(f"{prefix}_same_outcome_min_confidence"), default=0.09),
+    )
+    legacy_cross_enabled = bool(policy.get("cross_outcome_enabled", defaults.get(f"{prefix}_cross_outcome_enabled", False)))
+    legacy_cross = _safe_float(
+        policy.get("cross_outcome_min_confidence"),
+        default=_safe_float(defaults.get(f"{prefix}_cross_outcome_min_confidence"), default=0.14),
+    )
+    return {
+        "bucket": prefix,
+        "same_outcome_min_confidence": _safe_float(
+            policy.get(f"{prefix}_same_outcome_min_confidence"),
+            default=legacy_same,
+        ),
+        "cross_outcome_enabled": bool(
+            policy.get(f"{prefix}_cross_outcome_enabled", legacy_cross_enabled)
+        ),
+        "cross_outcome_min_confidence": _safe_float(
+            policy.get(f"{prefix}_cross_outcome_min_confidence"),
+            default=legacy_cross,
+        ),
+    }
+
+
+def _scoreline_takeover_decision(
+    label: str | None,
+    confidence: float,
+    recommendation_key: str | None,
+    scoreline_policy: dict | None,
+) -> tuple[bool, str | None, float, str]:
+    if not label:
+        return False, None, 0.0, "volatile"
+    bucket = _scoreline_bucket(label)
+    thresholds = _scoreline_policy_thresholds(scoreline_policy, bucket)
+    label_outcome_key = _score_outcome_key(label)
+    if recommendation_key and label_outcome_key == recommendation_key:
+        if confidence < _safe_float(thresholds.get("same_outcome_min_confidence"), default=0.09):
+            return False, label, confidence, bucket
+        return True, label, confidence, bucket
+    if not bool(thresholds.get("cross_outcome_enabled", False)):
+        return False, label, confidence, bucket
+    if confidence < _safe_float(thresholds.get("cross_outcome_min_confidence"), default=0.14):
+        return False, label, confidence, bucket
+    return True, label, confidence, bucket
+
+
+def _scoreline_takeover_allowed(
+    prediction: dict | None,
+    scoreline_policy: dict | None,
+) -> tuple[bool, str | None, float, str]:
+    if not isinstance(prediction, dict):
+        return False, None, 0.0, "volatile"
+    label = _model_scoreline_pick(prediction)
+    if not label:
+        return False, None, 0.0, "volatile"
+    model_output = prediction.get("scoreline_model", {})
+    confidence = _safe_float(model_output.get("confidence"), default=0.0) if isinstance(model_output, dict) else 0.0
+    recommendation_key = _prediction_recommendation_key(prediction)
+    return _scoreline_takeover_decision(
+        label=label,
+        confidence=confidence,
+        recommendation_key=recommendation_key,
+        scoreline_policy=scoreline_policy,
+    )
+
+
+def _simulate_play_model_policy(
+    prediction: dict | None,
+    policy: dict | None,
+) -> dict[str, object]:
+    if not isinstance(prediction, dict):
+        return {
+            "total_goals_value": None,
+            "score_recommendation": None,
+            "total_goals_model_takeover": False,
+            "scoreline_model_takeover": False,
+        }
+    normalized_policy = json.loads(json.dumps(DEFAULT_PLAY_MODEL_POLICY))
+    if isinstance(policy, dict):
+        for key, value in policy.items():
+            if key in normalized_policy and isinstance(value, dict):
+                normalized_policy[key].update(value)
+
+    recommendation_key = _prediction_recommendation_key(prediction)
+    score_distribution = (prediction.get("poisson") or {}).get("score_distribution", [])
+    total_goals_value = _safe_int(prediction.get("pre_play_model_total_goals_value"))
+    total_goals_confidence = _safe_float(prediction.get("pre_play_model_total_goals_confidence"), default=0.0)
+    score_recommendation = str(prediction.get("pre_play_model_score_recommendation") or "").strip() or None
+    score_confidence = _safe_float(prediction.get("pre_play_model_score_confidence"), default=0.0)
+
+    total_goals_policy = normalized_policy.get("total_goals", {})
+    total_goals_model_pick = _model_total_goals_pick(prediction)
+    total_goals_model_output = prediction.get("total_goals_model", {})
+    total_goals_model_confidence = _safe_float(
+        total_goals_model_output.get("confidence"),
+        default=0.0,
+    ) if isinstance(total_goals_model_output, dict) else 0.0
+    total_goals_takeover = bool(
+        bool(total_goals_policy.get("takeover_enabled"))
+        and total_goals_model_pick is not None
+        and total_goals_model_confidence >= _safe_float(total_goals_policy.get("min_confidence"), default=0.24)
+    )
+    if total_goals_takeover and total_goals_model_pick is not None:
+        total_goals_value = int(total_goals_model_pick)
+        total_goals_confidence = total_goals_model_confidence
+        aligned_score = _best_score_for_total_goals(
+            score_distribution,
+            total_goals=total_goals_value,
+            outcome_key=recommendation_key,
+        )
+        if isinstance(aligned_score, dict):
+            score_recommendation = str(aligned_score.get("score", "")).strip() or score_recommendation
+            score_confidence = _safe_float(aligned_score.get("probability"), default=score_confidence)
+
+    scoreline_policy = normalized_policy.get("scoreline", {})
+    scoreline_takeover, scoreline_label, scoreline_confidence, _ = _scoreline_takeover_allowed(
+        prediction,
+        scoreline_policy=scoreline_policy,
+    )
+    if scoreline_takeover and scoreline_label:
+        parsed_total_goals = _parse_total_goals_from_score_text(scoreline_label)
+        if not total_goals_takeover or parsed_total_goals == total_goals_value:
+            score_recommendation = scoreline_label
+            score_confidence = scoreline_confidence
+            if parsed_total_goals is not None:
+                total_goals_value = parsed_total_goals
+                total_goals_confidence = max(total_goals_confidence, scoreline_confidence)
+        else:
+            scoreline_takeover = False
+
+    return {
+        "total_goals_value": total_goals_value,
+        "total_goals_confidence": total_goals_confidence,
+        "score_recommendation": score_recommendation,
+        "score_confidence": score_confidence,
+        "total_goals_model_takeover": total_goals_takeover,
+        "scoreline_model_takeover": scoreline_takeover,
+    }
+
+
+def _finalize_play_backtest_bucket(bucket: dict[str, float]) -> dict[str, float | int]:
+    total = int(bucket.get("total", 0) or 0)
+    hits = int(bucket.get("hits", 0) or 0)
+    return {
+        "hits": hits,
+        "total": total,
+        "accuracy": round(hits / max(total, 1), 6),
+    }
+
+
+def calibrate_play_model_policy_now(
+    validation_ratio: float = 0.20,
+    min_validation_samples: int = 1000,
+) -> dict:
+    _, validation_items = _validation_split_samples(
+        validation_ratio=validation_ratio,
+        min_validation_samples=min_validation_samples,
+    )
+    if not validation_items:
+        return {"calibrated": False, "reason": "insufficient_validation_split"}
+
+    rows: list[dict] = []
+    for item in validation_items:
+        prediction = _sample_item_prediction(item)
+        meta = item.get("meta", {}) if isinstance(item.get("meta"), dict) else {}
+        if not isinstance(prediction, dict) or not isinstance(meta, dict):
+            continue
+        home_goals = _safe_int(meta.get("home_goals"))
+        away_goals = _safe_int(meta.get("away_goals"))
+        if home_goals is None or away_goals is None:
+            continue
+        rows.append(
+            {
+                "prediction": prediction,
+                "actual_score": f"{int(home_goals)}-{int(away_goals)}",
+                "actual_total_goals": int(home_goals) + int(away_goals),
+            }
+        )
+    if not rows:
+        return {"calibrated": False, "reason": "no_valid_rows"}
+
+    current_policy = _current_play_model_policy()
+    current_score_hits = 0
+    current_score_total = 0
+    current_total_goals_hits = 0
+    current_total_goals_total = 0
+    for row in rows:
+        current_output = _simulate_play_model_policy(row.get("prediction"), current_policy)
+        current_total_goals_pick = _safe_int(current_output.get("total_goals_value"))
+        current_score_pick = str(current_output.get("score_recommendation") or "").strip() or None
+        if current_total_goals_pick is not None:
+            current_total_goals_total += 1
+            if int(current_total_goals_pick) == int(row.get("actual_total_goals", -1)):
+                current_total_goals_hits += 1
+        if current_score_pick:
+            current_score_total += 1
+            if current_score_pick == row.get("actual_score"):
+                current_score_hits += 1
+
+    candidates: list[dict] = []
+    regular_same_candidates = [0.05, 0.07, 0.09]
+    regular_cross_candidates = [0.05, 0.07, 0.09, 0.11]
+    volatile_same_candidates = [0.05, 0.07, 0.09, 0.11, 0.13]
+    volatile_cross_candidates = [0.05, 0.07, 0.09, 0.11, 0.13]
+    total_goal_threshold_candidates = [0.18, 0.22, 0.26]
+    for regular_same_threshold in regular_same_candidates:
+        for regular_cross_enabled in (False, True):
+            for regular_cross_threshold in regular_cross_candidates:
+                for volatile_same_threshold in volatile_same_candidates:
+                    for volatile_cross_enabled in (False, True):
+                        for volatile_cross_threshold in volatile_cross_candidates:
+                            for total_goals_enabled in (False, True):
+                                for total_goal_threshold in total_goal_threshold_candidates:
+                                    candidate_policy = {
+                                        "total_goals": {
+                                            "takeover_enabled": total_goals_enabled,
+                                            "min_confidence": round(total_goal_threshold, 2),
+                                        },
+                                        "scoreline": {
+                                            "takeover_enabled": True,
+                                            "regular_same_outcome_min_confidence": round(regular_same_threshold, 2),
+                                            "regular_cross_outcome_enabled": regular_cross_enabled,
+                                            "regular_cross_outcome_min_confidence": round(regular_cross_threshold, 2),
+                                            "volatile_same_outcome_min_confidence": round(volatile_same_threshold, 2),
+                                            "volatile_cross_outcome_enabled": volatile_cross_enabled,
+                                            "volatile_cross_outcome_min_confidence": round(volatile_cross_threshold, 2),
+                                        },
+                                    }
+                                    score_hits = 0
+                                    score_covered = 0
+                                    total_goals_hits = 0
+                                    total_goals_covered = 0
+                                    for row in rows:
+                                        output = _simulate_play_model_policy(row.get("prediction"), candidate_policy)
+                                        total_goals_pick = _safe_int(output.get("total_goals_value"))
+                                        score_pick = str(output.get("score_recommendation") or "").strip() or None
+                                        if total_goals_pick is not None:
+                                            total_goals_covered += 1
+                                            if int(total_goals_pick) == int(row.get("actual_total_goals", -1)):
+                                                total_goals_hits += 1
+                                        if score_pick:
+                                            score_covered += 1
+                                            if score_pick == row.get("actual_score"):
+                                                score_hits += 1
+                                    score_accuracy = score_hits / max(score_covered, 1)
+                                    total_goals_accuracy = total_goals_hits / max(total_goals_covered, 1)
+                                    combined_hits = score_hits + total_goals_hits
+                                    candidates.append(
+                                        {
+                                            "regular_same_outcome_min_confidence": round(regular_same_threshold, 2),
+                                            "regular_cross_outcome_enabled": regular_cross_enabled,
+                                            "regular_cross_outcome_min_confidence": round(regular_cross_threshold, 2),
+                                            "volatile_same_outcome_min_confidence": round(volatile_same_threshold, 2),
+                                            "volatile_cross_outcome_enabled": volatile_cross_enabled,
+                                            "volatile_cross_outcome_min_confidence": round(volatile_cross_threshold, 2),
+                                            "total_goals_takeover_enabled": total_goals_enabled,
+                                            "total_goals_min_confidence": round(total_goal_threshold, 2),
+                                            "score_hits": score_hits,
+                                            "score_covered": score_covered,
+                                            "score_accuracy": round(score_accuracy, 6),
+                                            "total_goals_hits": total_goals_hits,
+                                            "total_goals_covered": total_goals_covered,
+                                            "total_goals_accuracy": round(total_goals_accuracy, 6),
+                                            "combined_hits": combined_hits,
+                                            "objective": combined_hits,
+                                        }
+                                    )
+
+    best = max(
+        candidates,
+        key=lambda item: (
+            int(item.get("combined_hits", 0)),
+            int(item.get("score_hits", 0)),
+            int(item.get("total_goals_hits", 0)),
+            float(item.get("score_accuracy", 0.0)),
+            float(item.get("total_goals_accuracy", 0.0)),
+            -float(item.get("regular_same_outcome_min_confidence", 0.0)),
+            -float(item.get("volatile_same_outcome_min_confidence", 0.0)),
+            -float(item.get("regular_cross_outcome_min_confidence", 0.0)),
+            -float(item.get("volatile_cross_outcome_min_confidence", 0.0)),
+        ),
+    )
+    policy = json.loads(json.dumps(DEFAULT_PLAY_MODEL_POLICY))
+    best_total_goals = {
+        "min_confidence": float(best.get("total_goals_min_confidence", 0.24)),
+        "hits": int(best.get("total_goals_hits", 0)),
+        "covered": int(best.get("total_goals_covered", 0)),
+        "accuracy": float(best.get("total_goals_accuracy", 0.0)),
+        "takeover_enabled": bool(best.get("total_goals_takeover_enabled", False)),
+    }
+    policy["total_goals"]["takeover_enabled"] = bool(best.get("total_goals_takeover_enabled", False))
+    policy["total_goals"]["min_confidence"] = float(best.get("total_goals_min_confidence", 0.24))
+    policy["scoreline"]["takeover_enabled"] = True
+    policy["scoreline"]["regular_same_outcome_min_confidence"] = float(best.get("regular_same_outcome_min_confidence", 0.07))
+    policy["scoreline"]["regular_cross_outcome_enabled"] = bool(best.get("regular_cross_outcome_enabled", True))
+    policy["scoreline"]["regular_cross_outcome_min_confidence"] = float(best.get("regular_cross_outcome_min_confidence", 0.11))
+    policy["scoreline"]["volatile_same_outcome_min_confidence"] = float(best.get("volatile_same_outcome_min_confidence", 0.13))
+    policy["scoreline"]["volatile_cross_outcome_enabled"] = bool(best.get("volatile_cross_outcome_enabled", False))
+    policy["scoreline"]["volatile_cross_outcome_min_confidence"] = float(best.get("volatile_cross_outcome_min_confidence", 0.17))
+
+    sample_dates = [
+        normalize_text(item.get("meta", {}).get("match_date", ""))
+        for item in validation_items
+        if isinstance(item.get("meta"), dict)
+    ]
+    sample_dates = [item for item in sample_dates if item]
+    report = {
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "mode": "calibrated",
+        "policy": policy,
+        "validation": {
+            "sample_count": len(rows),
+            "date_start": min(sample_dates) if sample_dates else None,
+            "date_end": max(sample_dates) if sample_dates else None,
+            "ratio": round(len(validation_items) / max(len(STATE_STORE.load_xgb_samples()), 1), 4),
+        },
+        "metrics": {
+            "scoreline_best": best,
+            "scoreline_top_candidates": sorted(
+                candidates,
+                key=lambda item: (
+                    -int(item.get("combined_hits", 0)),
+                    -int(item.get("score_hits", 0)),
+                    -int(item.get("total_goals_hits", 0)),
+                ),
+            )[:5],
+            "total_goals": {
+                "current_hits": current_total_goals_hits,
+                "current_total": current_total_goals_total,
+                "current_accuracy": round(current_total_goals_hits / max(current_total_goals_total, 1), 6),
+                "score_current_hits": current_score_hits,
+                "score_current_total": current_score_total,
+                "score_current_accuracy": round(current_score_hits / max(current_score_total, 1), 6),
+                "best": best_total_goals,
+                "takeover_enabled": bool(policy["total_goals"]["takeover_enabled"]),
+                "reason": "joint_best",
+            },
+        },
+    }
+    _save_play_model_policy_report(report)
+    return {
+        "calibrated": True,
+        "reason": "ok",
+        "policy": policy,
+        "validation": report["validation"],
+        "metrics": report["metrics"],
+        "status": get_play_model_policy_status(),
+    }
+
+
+def run_play_model_backtest(
+    validation_ratio: float = 0.20,
+    min_validation_samples: int = 1000,
+    write_report: bool = True,
+) -> dict:
+    _, validation_items = _validation_split_samples(
+        validation_ratio=validation_ratio,
+        min_validation_samples=min_validation_samples,
+    )
+    if not validation_items:
+        return {"ok": False, "reason": "insufficient_validation_split"}
+
+    metrics = {
+        "handicap_baseline": {"hits": 0, "total": 0},
+        "handicap_current": {"hits": 0, "total": 0},
+        "handicap_shadow": {"hits": 0, "total": 0},
+        "total_goals_baseline": {"hits": 0, "total": 0},
+        "total_goals_current": {"hits": 0, "total": 0},
+        "total_goals_shadow": {"hits": 0, "total": 0},
+        "total_goals_model": {"hits": 0, "total": 0},
+        "score_baseline": {"hits": 0, "total": 0},
+        "score_current": {"hits": 0, "total": 0},
+        "score_shadow": {"hits": 0, "total": 0},
+        "score_model": {"hits": 0, "total": 0},
+        "score_volatile_model": {"hits": 0, "total": 0},
+        "score_current_regular": {"hits": 0, "total": 0},
+        "score_current_volatile": {"hits": 0, "total": 0},
+        "score_model_regular": {"hits": 0, "total": 0},
+        "score_model_volatile": {"hits": 0, "total": 0},
+        "score_volatile_model_volatile": {"hits": 0, "total": 0},
+    }
+
+    for item in validation_items:
+        prediction = _sample_item_prediction(item)
+        meta = item.get("meta", {}) if isinstance(item.get("meta"), dict) else {}
+        if not isinstance(prediction, dict) or not isinstance(meta, dict):
+            continue
+        home_goals = _safe_int(meta.get("home_goals"))
+        away_goals = _safe_int(meta.get("away_goals"))
+        if home_goals is None or away_goals is None:
+            continue
+        actual_score = f"{int(home_goals)}-{int(away_goals)}"
+        actual_total_goals = int(home_goals) + int(away_goals)
+        handicap_line = _safe_float(meta.get("handicap_line"), default=0.0)
+        actual_handicap = _handicap_label_from_key(_handicap_outcome_key(int(home_goals), int(away_goals), handicap_line))
+
+        baseline_handicap = _poisson_baseline_handicap_prediction(prediction, handicap_line)
+        current_handicap = str(prediction.get("handicap_recommendation", "")).strip() or None
+        shadow_handicap_probs = prediction.get("handicap_specialist_probabilities", {})
+        shadow_handicap = None
+        if isinstance(shadow_handicap_probs, dict) and shadow_handicap_probs:
+            shadow_key = max(
+                ("home", "draw", "away"),
+                key=lambda key: _safe_float(shadow_handicap_probs.get(key), default=0.0),
+            )
+            shadow_handicap = _handicap_label_from_key(shadow_key)
+
+        poisson = prediction.get("poisson", {}) if isinstance(prediction.get("poisson"), dict) else {}
+        top_total_goals = poisson.get("top_total_goals", [])
+        baseline_total_goals = None
+        if isinstance(top_total_goals, list) and top_total_goals:
+            baseline_total_goals = _safe_int(top_total_goals[0].get("goals"))
+        _, current_total_goals, _ = _extract_total_goals_prediction(prediction)
+        shadow_total_goals = _parse_total_goals_from_score_text(prediction.get("score_specialist_candidate"))
+        model_total_goals = _model_total_goals_pick(prediction)
+
+        top_scores = poisson.get("top_scores", [])
+        baseline_score = None
+        if isinstance(top_scores, list) and top_scores:
+            baseline_score = str(top_scores[0].get("score", "")).strip() or None
+        current_score, _ = _extract_score_prediction(prediction)
+        shadow_score = str(prediction.get("score_specialist_candidate", "")).strip() or None
+        model_score = _model_scoreline_pick(prediction)
+        volatile_model_output = prediction.get("volatile_scoreline_model", {}) if isinstance(prediction, dict) else {}
+        volatile_model_score = None
+        if isinstance(volatile_model_output, dict) and volatile_model_output.get("model_ready"):
+            candidate_label = str(volatile_model_output.get("label", "")).strip()
+            if candidate_label and candidate_label != "OTHER":
+                volatile_model_score = candidate_label
+
+        _record_play_backtest_hit(metrics["handicap_baseline"], baseline_handicap, actual_handicap)
+        _record_play_backtest_hit(metrics["handicap_current"], current_handicap, actual_handicap)
+        _record_play_backtest_hit(metrics["handicap_shadow"], shadow_handicap, actual_handicap)
+        _record_play_backtest_hit(metrics["total_goals_baseline"], baseline_total_goals, actual_total_goals)
+        _record_play_backtest_hit(metrics["total_goals_current"], current_total_goals, actual_total_goals)
+        _record_play_backtest_hit(metrics["total_goals_shadow"], shadow_total_goals, actual_total_goals)
+        _record_play_backtest_hit(metrics["total_goals_model"], model_total_goals, actual_total_goals)
+        _record_play_backtest_hit(metrics["score_baseline"], baseline_score, actual_score)
+        _record_play_backtest_hit(metrics["score_current"], current_score, actual_score)
+        _record_play_backtest_hit(metrics["score_shadow"], shadow_score, actual_score)
+        _record_play_backtest_hit(metrics["score_model"], model_score, actual_score)
+        _record_play_backtest_hit(metrics["score_volatile_model"], volatile_model_score, actual_score)
+        if current_score:
+            _record_play_backtest_hit(
+                metrics[f"score_current_{_scoreline_bucket(current_score)}"],
+                current_score,
+                actual_score,
+            )
+        if model_score:
+            _record_play_backtest_hit(
+                metrics[f"score_model_{_scoreline_bucket(model_score)}"],
+                model_score,
+                actual_score,
+            )
+        if volatile_model_score and _scoreline_bucket(volatile_model_score) == "volatile":
+            _record_play_backtest_hit(
+                metrics["score_volatile_model_volatile"],
+                volatile_model_score,
+                actual_score,
+            )
+
+    finalized = {key: _finalize_play_backtest_bucket(value) for key, value in metrics.items()}
+    improvement = {
+        "handicap_shadow_delta": round(
+            float(finalized["handicap_shadow"]["accuracy"]) - float(finalized["handicap_current"]["accuracy"]),
+            6,
+        ),
+        "total_goals_shadow_delta": round(
+            float(finalized["total_goals_shadow"]["accuracy"]) - float(finalized["total_goals_current"]["accuracy"]),
+            6,
+        ),
+        "total_goals_model_delta": round(
+            float(finalized["total_goals_model"]["accuracy"]) - float(finalized["total_goals_current"]["accuracy"]),
+            6,
+        ),
+        "score_shadow_delta": round(
+            float(finalized["score_shadow"]["accuracy"]) - float(finalized["score_current"]["accuracy"]),
+            6,
+        ),
+        "score_model_delta": round(
+            float(finalized["score_model"]["accuracy"]) - float(finalized["score_current"]["accuracy"]),
+            6,
+        ),
+    }
+    dates = [
+        normalize_text(item.get("meta", {}).get("match_date", ""))
+        for item in validation_items
+        if isinstance(item.get("meta"), dict)
+    ]
+    dates = [item for item in dates if item]
+    result = {
+        "ok": True,
+        "reason": "ok",
+        "validation": {
+            "sample_count": len(validation_items),
+            "date_start": min(dates) if dates else None,
+            "date_end": max(dates) if dates else None,
+            "ratio": round(len(validation_items) / max(len(STATE_STORE.load_xgb_samples()), 1), 4),
+        },
+        "metrics": finalized,
+        "improvement": improvement,
+    }
+
+    report_path = None
+    if write_report:
+        REPORT_DIR.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        report_path = REPORT_DIR / f"play_model_backtest_{timestamp}.md"
+        lines = [
+            "# Play Model Backtest Report",
+            "",
+            f"- Generated At: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"- Validation Samples: {result['validation']['sample_count']}",
+            f"- Validation Window: {result['validation']['date_start']} -> {result['validation']['date_end']}",
+            "",
+            "| Play | Scheme | Hits | Total | Accuracy |",
+            "|---|---|---:|---:|---:|",
+        ]
+        for play_name, prefix in (("Handicap", "handicap"), ("Total Goals", "total_goals"), ("Score", "score")):
+            scheme_rows = [("Baseline", f"{prefix}_baseline"), ("Current", f"{prefix}_current"), ("Shadow", f"{prefix}_shadow")]
+            if prefix in {"total_goals", "score"}:
+                scheme_rows.append(("Model", f"{prefix}_model"))
+            if prefix == "score":
+                scheme_rows.append(("Volatile Model", "score_volatile_model"))
+            for scheme_name, key in scheme_rows:
+                item = finalized.get(key, {})
+                lines.append(
+                    f"| {play_name} | {scheme_name} | {int(item.get('hits', 0) or 0)} | {int(item.get('total', 0) or 0)} | {float(item.get('accuracy', 0) or 0):.2%} |"
+                )
+        lines.extend(
+            [
+                "",
+                "## Shadow Delta",
+                "",
+                f"- Handicap Shadow - Current: {improvement['handicap_shadow_delta']:+.2%}",
+                f"- Total Goals Shadow - Current: {improvement['total_goals_shadow_delta']:+.2%}",
+                f"- Total Goals Model - Current: {improvement['total_goals_model_delta']:+.2%}",
+                f"- Score Shadow - Current: {improvement['score_shadow_delta']:+.2%}",
+                f"- Score Model - Current: {improvement['score_model_delta']:+.2%}",
+                "",
+                "## Scoreline Buckets",
+                "",
+                f"- Current Regular: {int(finalized['score_current_regular']['hits'])}/{int(finalized['score_current_regular']['total'])} ({float(finalized['score_current_regular']['accuracy']):.2%})",
+                f"- Current Volatile: {int(finalized['score_current_volatile']['hits'])}/{int(finalized['score_current_volatile']['total'])} ({float(finalized['score_current_volatile']['accuracy']):.2%})",
+                f"- Model Regular: {int(finalized['score_model_regular']['hits'])}/{int(finalized['score_model_regular']['total'])} ({float(finalized['score_model_regular']['accuracy']):.2%})",
+                f"- Model Volatile: {int(finalized['score_model_volatile']['hits'])}/{int(finalized['score_model_volatile']['total'])} ({float(finalized['score_model_volatile']['accuracy']):.2%})",
+                f"- Volatile Model Volatile: {int(finalized['score_volatile_model_volatile']['hits'])}/{int(finalized['score_volatile_model_volatile']['total'])} ({float(finalized['score_volatile_model_volatile']['accuracy']):.2%})",
+            ]
+        )
+        report_path.write_text("\n".join(lines), encoding="utf-8")
+    result["report_path"] = str(report_path) if report_path else None
+    return result
+
+
+def _base_market_probs(match: AppMatch) -> tuple[float, float, float]:
+    market_home = 1.0 / max(match.odds_home, 1.01)
+    market_draw = 1.0 / max(match.odds_draw, 1.01)
+    market_away = 1.0 / max(match.odds_away, 1.01)
+    return _normalize_probs(market_home, market_draw, market_away)
+
+
+def _draw_market_score(
+    match: AppMatch,
+    probabilities: dict[str, float],
+    market_probabilities: dict[str, float],
+    poisson_probabilities: dict[str, float],
+    recent_form_features: dict[str, float],
+    home_rating: float,
+    away_rating: float,
+    expected_goals: float,
+) -> tuple[float, dict[str, float], str]:
+    rating_balance = _clamp(1.0 - abs(home_rating - away_rating) / 220.0)
+    market_balance = _clamp(1.0 - abs(probabilities.get("home", 0.0) - probabilities.get("away", 0.0)) / 0.22)
+    market_draw_signal = _clamp((market_probabilities.get("draw", 0.0) - 0.22) / 0.12)
+    ensemble_draw_signal = _clamp((probabilities.get("draw", 0.0) - 0.22) / 0.12)
+    poisson_draw_signal = _clamp((poisson_probabilities.get("draw", 0.0) - 0.20) / 0.12)
+    low_goal_signal = _clamp((2.85 - expected_goals) / 1.35)
+    handicap_balance = _clamp(1.0 - abs(_safe_float(match.handicap_line, default=0.0)) / 1.25)
+    recent_points_gap = abs(
+        _safe_float(recent_form_features.get("home_recent_points_pg"), default=0.0)
+        - _safe_float(recent_form_features.get("away_recent_points_pg"), default=0.0)
+    )
+    recent_goal_gap = abs(
+        _safe_float(recent_form_features.get("home_recent_goal_diff_pg"), default=0.0)
+        - _safe_float(recent_form_features.get("away_recent_goal_diff_pg"), default=0.0)
+    )
+    recent_balance = _clamp(1.0 - recent_points_gap / 1.6) * 0.6 + _clamp(1.0 - recent_goal_gap / 1.6) * 0.4
+    recent_balance = _clamp(recent_balance)
+
+    return_rate = _safe_float(match.return_rate, default=0.0)
+    if return_rate <= 0.0:
+        implied_total = sum(1.0 / max(value, 1.01) for value in (match.odds_home, match.odds_draw, match.odds_away))
+        return_rate = 1.0 / max(implied_total, 1e-9)
+    return_rate_signal = _clamp((return_rate - 0.88) / 0.10)
+
+    opening_draw = _safe_float(match.opening_odds_draw, default=0.0)
+    current_draw = _safe_float(match.odds_draw, default=0.0)
+    draw_odds_drop = 0.0
+    if opening_draw > 1.0 and current_draw > 1.0:
+        draw_odds_drop = _clamp((opening_draw - current_draw) / 0.45)
+
+    kelly_home = _safe_float(match.kelly_home, default=0.0)
+    kelly_draw = _safe_float(match.kelly_draw, default=0.0)
+    kelly_away = _safe_float(match.kelly_away, default=0.0)
+    kelly_draw_signal = 0.0
+    if min(kelly_home, kelly_draw, kelly_away) > 0.0:
+        peer_average = (kelly_home + kelly_away) / 2.0
+        kelly_draw_signal = _clamp((peer_average - kelly_draw) / 0.10 + 0.5)
+
+    signal_weights = {
+        "ensemble_draw": 0.24,
+        "market_draw": 0.16,
+        "poisson_draw": 0.14,
+        "rating_balance": 0.14,
+        "market_balance": 0.10,
+        "low_goal": 0.08,
+        "handicap_balance": 0.05,
+        "recent_balance": 0.05,
+        "return_rate": 0.03,
+        "draw_odds_drop": 0.03,
+        "kelly_draw": 0.08,
+    }
+    draw_signals = {
+        "ensemble_draw": round(ensemble_draw_signal, 4),
+        "market_draw": round(market_draw_signal, 4),
+        "poisson_draw": round(poisson_draw_signal, 4),
+        "rating_balance": round(rating_balance, 4),
+        "market_balance": round(market_balance, 4),
+        "low_goal": round(low_goal_signal, 4),
+        "handicap_balance": round(handicap_balance, 4),
+        "recent_balance": round(recent_balance, 4),
+        "return_rate": round(return_rate_signal, 4),
+        "draw_odds_drop": round(draw_odds_drop, 4),
+        "kelly_draw": round(kelly_draw_signal, 4),
+    }
+    draw_score = _clamp(
+        sum(_safe_float(draw_signals.get(key), default=0.0) * weight for key, weight in signal_weights.items())
+        + 0.02
+    )
+    if draw_score >= 0.72:
+        draw_grade = "博平"
+    elif draw_score >= 0.58:
+        draw_grade = "防平"
+    else:
+        draw_grade = "不防平"
+    return round(draw_score, 4), draw_signals, draw_grade
+
+
+def _side_market_score(
+    side: str,
+    match: AppMatch,
+    base_probabilities: dict[str, float],
+    market_probabilities: dict[str, float],
+    xgb_probabilities: dict[str, float],
+    recent_form_features: dict[str, float],
+    home_rating: float,
+    away_rating: float,
+    expected_goals: float,
+) -> tuple[float, dict[str, float]]:
+    is_home = side == "home"
+    current_side_odds = _safe_float(match.odds_home if is_home else match.odds_away, default=0.0)
+    opening_side_odds = _safe_float(match.opening_odds_home if is_home else match.opening_odds_away, default=0.0)
+    side_kelly = _safe_float(match.kelly_home if is_home else match.kelly_away, default=0.0)
+    peer_kelly_a = _safe_float(match.kelly_draw, default=0.0)
+    peer_kelly_b = _safe_float(match.kelly_away if is_home else match.kelly_home, default=0.0)
+
+    rating_diff = home_rating - away_rating
+    points_diff = _safe_float(recent_form_features.get("recent_points_diff"), default=0.0)
+    goal_diff = _safe_float(recent_form_features.get("recent_goal_diff_diff"), default=0.0)
+    handicap_line = _safe_float(match.handicap_line, default=0.0)
+    direction = 1.0 if is_home else -1.0
+
+    rating_signal = _clamp(0.5 + (rating_diff * direction) / 220.0)
+    recent_signal = _clamp(0.5 + (points_diff * direction) / 2.4 + (goal_diff * direction) / 3.6)
+    base_signal = _clamp((_safe_float(base_probabilities.get(side), default=0.0) - 0.26) / 0.22)
+    market_signal = _clamp((_safe_float(market_probabilities.get(side), default=0.0) - 0.26) / 0.22)
+    xgb_signal = _clamp((_safe_float(xgb_probabilities.get(side), default=0.0) - 0.26) / 0.22)
+
+    odds_drop_signal = 0.0
+    if opening_side_odds > 1.0 and current_side_odds > 1.0:
+        odds_drop_signal = _clamp((opening_side_odds - current_side_odds) / 0.65)
+
+    kelly_signal = 0.0
+    if min(side_kelly, peer_kelly_a, peer_kelly_b) > 0.0:
+        peer_average = (peer_kelly_a + peer_kelly_b) / 2.0
+        kelly_signal = _clamp((peer_average - side_kelly) / 0.10 + 0.5)
+
+    handicap_signal = (
+        _clamp((0.30 - handicap_line) / 1.8)
+        if is_home
+        else _clamp((handicap_line + 0.30) / 1.8)
+    )
+    goal_signal = _clamp((expected_goals - 2.2) / 1.2)
+
+    signals = {
+        "base": round(base_signal, 4),
+        "market": round(market_signal, 4),
+        "xgb": round(xgb_signal, 4),
+        "rating": round(rating_signal, 4),
+        "recent": round(recent_signal, 4),
+        "odds_drop": round(odds_drop_signal, 4),
+        "kelly": round(kelly_signal, 4),
+        "handicap": round(handicap_signal, 4),
+        "goal": round(goal_signal, 4),
+    }
+    weights = {
+        "base": 0.20,
+        "market": 0.12,
+        "xgb": 0.16,
+        "rating": 0.15,
+        "recent": 0.12,
+        "odds_drop": 0.08,
+        "kelly": 0.08,
+        "handicap": 0.06,
+        "goal": 0.03,
+    }
+    score = _clamp(sum(signals[key] * weights[key] for key in weights))
+    return round(score, 4), signals
+
+
+def _specialist_probability_fusion(
+    match: AppMatch,
+    base_probabilities: dict[str, float],
+    market_probabilities: dict[str, float],
+    poisson_probabilities: dict[str, float],
+    xgb_probabilities: dict[str, float],
+    recent_form_features: dict[str, float],
+    home_rating: float,
+    away_rating: float,
+    expected_goals: float,
+) -> dict[str, object]:
+    draw_score, draw_signals, draw_grade = _draw_market_score(
+        match=match,
+        probabilities=base_probabilities,
+        market_probabilities=market_probabilities,
+        poisson_probabilities=poisson_probabilities,
+        recent_form_features=recent_form_features,
+        home_rating=home_rating,
+        away_rating=away_rating,
+        expected_goals=expected_goals,
+    )
+    home_score, home_signals = _side_market_score(
+        "home",
+        match=match,
+        base_probabilities=base_probabilities,
+        market_probabilities=market_probabilities,
+        xgb_probabilities=xgb_probabilities,
+        recent_form_features=recent_form_features,
+        home_rating=home_rating,
+        away_rating=away_rating,
+        expected_goals=expected_goals,
+    )
+    away_score, away_signals = _side_market_score(
+        "away",
+        match=match,
+        base_probabilities=base_probabilities,
+        market_probabilities=market_probabilities,
+        xgb_probabilities=xgb_probabilities,
+        recent_form_features=recent_form_features,
+        home_rating=home_rating,
+        away_rating=away_rating,
+        expected_goals=expected_goals,
+    )
+
+    specialist_probs = _normalize_probs(
+        max(home_score, 0.05),
+        max(draw_score, 0.05),
+        max(away_score, 0.05),
+    )
+    specialist_probabilities = {
+        "home": round(specialist_probs[0], 4),
+        "draw": round(specialist_probs[1], 4),
+        "away": round(specialist_probs[2], 4),
+    }
+    specialist_peak = max(specialist_probabilities.values())
+    disagreement = max(
+        abs(specialist_probabilities[key] - _safe_float(base_probabilities.get(key), default=0.0))
+        for key in ("home", "draw", "away")
+    )
+    fusion_alpha = _clamp(0.06 + max(0.0, specialist_peak - 0.42) * 0.22 + disagreement * 0.18, 0.06, 0.22)
+    fused_probs = _normalize_probs(
+        (1.0 - fusion_alpha) * _safe_float(base_probabilities.get("home"), default=0.0)
+        + fusion_alpha * specialist_probabilities["home"],
+        (1.0 - fusion_alpha) * _safe_float(base_probabilities.get("draw"), default=0.0)
+        + fusion_alpha * specialist_probabilities["draw"],
+        (1.0 - fusion_alpha) * _safe_float(base_probabilities.get("away"), default=0.0)
+        + fusion_alpha * specialist_probabilities["away"],
+    )
+    return {
+        "draw_score": draw_score,
+        "draw_signals": draw_signals,
+        "draw_grade": draw_grade,
+        "specialist_scores": {"home": home_score, "draw": draw_score, "away": away_score},
+        "specialist_signals": {"home": home_signals, "draw": draw_signals, "away": away_signals},
+        "specialist_probabilities": specialist_probabilities,
+        "fusion_alpha": round(fusion_alpha, 4),
+        "fused_probabilities": {
+            "home": round(fused_probs[0], 4),
+            "draw": round(fused_probs[1], 4),
+            "away": round(fused_probs[2], 4),
+        },
+    }
+
+
+def _handicap_specialist_blend(
+    handicap_probabilities: dict[str, float],
+    specialist_scores: dict[str, float],
+    handicap_line: float,
+    expected_goals: float,
+) -> dict[str, object]:
+    home_score = _safe_float(specialist_scores.get("home"), default=0.0)
+    draw_score = _safe_float(specialist_scores.get("draw"), default=0.0)
+    away_score = _safe_float(specialist_scores.get("away"), default=0.0)
+    line_balance = _clamp(1.0 - abs(handicap_line) / 1.25)
+    home_bonus = _clamp((0.30 - handicap_line) / 1.8)
+    away_bonus = _clamp((handicap_line + 0.30) / 1.8)
+    draw_bonus = line_balance * _clamp((3.0 - expected_goals) / 1.8)
+    specialist_probs = _normalize_probs(
+        max(home_score * (0.78 + 0.22 * home_bonus), 0.05),
+        max(draw_score * (0.68 + 0.32 * draw_bonus), 0.05),
+        max(away_score * (0.78 + 0.22 * away_bonus), 0.05),
+    )
+    fusion_alpha = _clamp(0.08 + abs(handicap_line) * 0.04 + max(specialist_probs) * 0.08, 0.10, 0.22)
+    fused = _normalize_probs(
+        (1.0 - fusion_alpha) * _safe_float(handicap_probabilities.get("home"), default=0.0)
+        + fusion_alpha * specialist_probs[0],
+        (1.0 - fusion_alpha) * _safe_float(handicap_probabilities.get("draw"), default=0.0)
+        + fusion_alpha * specialist_probs[1],
+        (1.0 - fusion_alpha) * _safe_float(handicap_probabilities.get("away"), default=0.0)
+        + fusion_alpha * specialist_probs[2],
+    )
+    return {
+        "probabilities": {
+            "home": round(fused[0], 4),
+            "draw": round(fused[1], 4),
+            "away": round(fused[2], 4),
+        },
+        "specialist_probabilities": {
+            "home": round(specialist_probs[0], 4),
+            "draw": round(specialist_probs[1], 4),
+            "away": round(specialist_probs[2], 4),
+        },
+        "fusion_alpha": round(fusion_alpha, 4),
+    }
+
+
+def _select_score_with_specialist_bias(
+    score_distribution: list[dict],
+    recommendation_key: str,
+    specialist_scores: dict[str, float],
+    expected_goals: float,
+) -> tuple[dict, float]:
+    low_goal_index = _clamp((2.8 - expected_goals) / 1.5)
+    if not score_distribution:
+        return {"score": "-", "probability": 0.0}, round(low_goal_index, 4)
+    home_score = _safe_float(specialist_scores.get("home"), default=0.0)
+    draw_score = _safe_float(specialist_scores.get("draw"), default=0.0)
+    away_score = _safe_float(specialist_scores.get("away"), default=0.0)
+    ranked: list[tuple[float, dict]] = []
+    for item in score_distribution[:18]:
+        score_text = str(item.get("score", ""))
+        if "-" not in score_text:
+            continue
+        try:
+            home_goals, away_goals = [int(part) for part in score_text.split("-", 1)]
+        except Exception:
+            continue
+        base_prob = _safe_float(item.get("probability"), default=0.0)
+        total_goals = home_goals + away_goals
+        bonus = 0.0
+        outcome_key = _score_outcome_key(score_text)
+        if outcome_key == recommendation_key:
+            bonus += 0.024
+        if home_goals == away_goals:
+            bonus += draw_score * 0.05
+        elif home_goals > away_goals:
+            bonus += home_score * 0.04
+        else:
+            bonus += away_score * 0.04
+        if total_goals <= 2:
+            bonus += low_goal_index * 0.05
+        elif total_goals >= 4:
+            bonus -= low_goal_index * 0.02
+        ranked.append((base_prob + bonus, item))
+    ranked.sort(key=lambda pair: (-pair[0], str(pair[1].get("score", ""))))
+    if not ranked:
+        return score_distribution[0], round(low_goal_index, 4)
+    return ranked[0][1], round(low_goal_index, 4)
+
+
+def _resolved_ratings(
+    match: AppMatch,
+    ratings_map: dict[str, float],
+) -> tuple[float, float, dict[str, float]]:
+    market_home, market_draw, market_away = _base_market_probs(match)
+    league_strength = LEAGUE_STRENGTH.get(match.league, 0.92)
+    seeded = ELO_ENGINE.from_market(market_home, market_draw, market_away, league_strength)
+
+    home_rating = ratings_map.get(match.home_team)
+    away_rating = ratings_map.get(match.away_team)
+
+    if home_rating is None and away_rating is None:
+        home_rating = seeded.home_rating
+        away_rating = seeded.away_rating
+    elif home_rating is None:
+        home_rating = ELO_ENGINE.base_rating + (seeded.home_rating - seeded.away_rating) * 0.35
+    elif away_rating is None:
+        away_rating = ELO_ENGINE.base_rating - (seeded.home_rating - seeded.away_rating) * 0.35
+
+    ratings_map.setdefault(match.home_team, float(home_rating))
+    ratings_map.setdefault(match.away_team, float(away_rating))
+    return float(home_rating), float(away_rating), ratings_map
+
+
+def _recent_form_state_signature() -> tuple[float, float]:
+    try:
+        sample_mtime = STATE_STORE.xgb_samples_file.stat().st_mtime
+    except Exception:
+        sample_mtime = 0.0
+    try:
+        settlement_mtime = STATE_STORE.settlements_file.stat().st_mtime
+    except Exception:
+        settlement_mtime = 0.0
+    return sample_mtime, settlement_mtime
+
+
+def _recent_form_team_histories() -> dict[str, list[dict]]:
+    signature = _recent_form_state_signature()
+    cached_signature = _RECENT_FORM_CACHE.get("signature")
+    cached_histories = _RECENT_FORM_CACHE.get("team_histories")
+    if cached_signature == signature and isinstance(cached_histories, dict):
+        return cached_histories
+
+    team_histories = build_team_histories_from_state(
+        sample_items=STATE_STORE.load_xgb_samples(),
+        settlement_items=STATE_STORE.load_settlements(),
+    )
+    _RECENT_FORM_CACHE["signature"] = signature
+    _RECENT_FORM_CACHE["team_histories"] = team_histories
+    return team_histories
+
+
+def _recent_form_features_for_match(match: AppMatch) -> dict[str, float]:
+    return build_recent_form_feature_map(
+        team_histories=_recent_form_team_histories(),
+        home_team=match.home_team,
+        away_team=match.away_team,
+        cutoff_date=match.match_date,
+        cutoff_time=match.match_time,
+        match_id=match.match_id,
+    )
+
+
+def _predict_match_with_inputs(
+    match: AppMatch,
+    home_rating: float,
+    away_rating: float,
+    league_strength: float,
+    recent_form_features: dict[str, float],
+) -> dict:
+    market_home, market_draw, market_away = _base_market_probs(match)
+    market_probs = (market_home, market_draw, market_away)
+    market_probabilities = {"home": round(market_home, 4), "draw": round(market_draw, 4), "away": round(market_away, 4)}
+    context = EnsembleContext(
+        market_probs=market_probs,
+        home_rating=home_rating,
+        away_rating=away_rating,
+        market_draw_prob=market_draw,
+        league_strength=league_strength,
+        metadata={
+            "match_id": match.match_id,
+            "match_date": match.match_date,
+            "match_time": match.match_time,
+            "league": match.league,
+            "home_team": match.home_team,
+            "away_team": match.away_team,
+            "odds_home": match.odds_home,
+            "odds_draw": match.odds_draw,
+            "odds_away": match.odds_away,
+            "opening_odds_home": match.opening_odds_home,
+            "opening_odds_draw": match.opening_odds_draw,
+            "opening_odds_away": match.opening_odds_away,
+            "return_rate": match.return_rate,
+            "kelly_home": match.kelly_home,
+            "kelly_draw": match.kelly_draw,
+            "kelly_away": match.kelly_away,
+            **recent_form_features,
+        },
+    )
+
+    current_weights = _ensemble_weights_for_league(match.league)
+    ENSEMBLE_ENGINE.set_weights(current_weights)
+    ensemble_result = ENSEMBLE_ENGINE.predict(
+        context=context,
+        models=[MARKET_MODEL, ELO_MODEL, POISSON_MODEL, XGBOOST_MODEL],
+    )
+    components = ensemble_result.components
+
+    market_probs = components.get("market", None).probabilities if components.get("market") else market_probs
+    elo_probs = components.get("elo", None).probabilities if components.get("elo") else market_probs
+    poisson_probs = components.get("poisson", None).probabilities if components.get("poisson") else market_probs
+    xgb_probs = components.get("xgboost", None).probabilities if components.get("xgboost") else market_probs
+
+    market_probabilities = {"home": round(market_probs[0], 4), "draw": round(market_probs[1], 4), "away": round(market_probs[2], 4)}
+    elo_probabilities = {"home": round(elo_probs[0], 4), "draw": round(elo_probs[1], 4), "away": round(elo_probs[2], 4)}
+    poisson_probabilities = {
+        "home": round(poisson_probs[0], 4),
+        "draw": round(poisson_probs[1], 4),
+        "away": round(poisson_probs[2], 4),
+    }
+    xgb_probabilities = {
+        "home": round(xgb_probs[0], 4),
+        "draw": round(xgb_probs[1], 4),
+        "away": round(xgb_probs[2], 4),
+    }
+    xgb_component = components.get("xgboost")
+    xgb_features = xgb_component.metadata.get("xgb_features", {}) if xgb_component else {}
+    xgb_fallback = bool(xgb_component.metadata.get("xgb_fallback", True)) if xgb_component else True
+    xgb_model_ready = bool(xgb_component.metadata.get("xgb_model_ready", False)) if xgb_component else False
+    total_goals_model_output = TOTAL_GOALS_MODEL.predict_from_features(xgb_features if isinstance(xgb_features, dict) else {})
+    base_scoreline_model_output = SCORELINE_MODEL.predict_from_features(xgb_features if isinstance(xgb_features, dict) else {})
+    volatile_scoreline_model_output = VOLATILE_SCORELINE_MODEL.predict_from_features(xgb_features if isinstance(xgb_features, dict) else {})
+    scoreline_model_output, volatile_scoreline_override = _merge_scoreline_model_outputs(
+        base_output=base_scoreline_model_output,
+        volatile_output=volatile_scoreline_model_output,
+    )
+
+    poisson_output = components.get("poisson")
+    poisson = get_poisson_outcome(poisson_output) if poisson_output else None
+    if poisson is None:
+        poisson = POISSON_ENGINE.predict(
+            home_rating=home_rating,
+            away_rating=away_rating,
+            market_draw_prob=market_draw,
+            league_strength=league_strength,
+        )
+        poisson_probs = (poisson.home_win, poisson.draw, poisson.away_win)
+        poisson_probabilities = {
+            "home": round(poisson.home_win, 4),
+            "draw": round(poisson.draw, 4),
+            "away": round(poisson.away_win, 4),
+        }
+
+    ou_probabilities = {
+        "over_2_5": round(poisson.over_2_5, 4),
+        "under_2_5": round(poisson.under_2_5, 4),
+    }
+    ou_recommendation = "大2.5" if poisson.over_2_5 >= poisson.under_2_5 else "小2.5"
+    ou_confidence = max(poisson.over_2_5, poisson.under_2_5)
+    top_score = poisson.top_scores[0] if poisson.top_scores else {"score": "-", "probability": 0.0}
+    top_total_goals = poisson.top_total_goals[0] if poisson.top_total_goals else {"goals": 0, "probability": 0.0}
+    top_htft = poisson.htft_top[0] if poisson.htft_top else {"label": "-", "probability": 0.0}
+    handicap_line = _safe_float(match.handicap_line, default=0.0)
+    handicap_probabilities_raw = {"home": 0.0, "draw": 0.0, "away": 0.0}
+    for item in poisson.score_distribution:
+        score_text = str(item.get("score", ""))
+        if "-" not in score_text:
+            continue
+        try:
+            score_home, score_away = [int(part) for part in score_text.split("-", 1)]
+        except Exception:
+            continue
+        handicap_key = _handicap_outcome_key(score_home, score_away, handicap_line)
+        handicap_probabilities_raw[handicap_key] += _safe_float(item.get("probability"), default=0.0)
+    handicap_total = max(sum(handicap_probabilities_raw.values()), 1e-9)
+    handicap_probabilities = {
+        key: round(value / handicap_total, 4) for key, value in handicap_probabilities_raw.items()
+    }
+    handicap_pick_key = max(handicap_probabilities, key=handicap_probabilities.get)
+    handicap_recommendation = _handicap_label_from_key(handicap_pick_key)
+    handicap_display = _format_handicap_display(handicap_line, handicap_pick_key)
+    handicap_confidence = handicap_probabilities[handicap_pick_key]
+
+    blend_home, blend_draw, blend_away = ensemble_result.probabilities
+    ensemble_probabilities = {
+        "home": round(blend_home, 4),
+        "draw": round(blend_draw, 4),
+        "away": round(blend_away, 4),
+    }
+    specialist_result = _specialist_probability_fusion(
+        match=match,
+        base_probabilities=ensemble_probabilities,
+        market_probabilities=market_probabilities,
+        poisson_probabilities=poisson_probabilities,
+        xgb_probabilities=xgb_probabilities,
+        recent_form_features=recent_form_features,
+        home_rating=home_rating,
+        away_rating=away_rating,
+        expected_goals=poisson.home_lambda + poisson.away_lambda,
+    )
+    handicap_specialist = _handicap_specialist_blend(
+        handicap_probabilities=handicap_probabilities,
+        specialist_scores=specialist_result.get("specialist_scores", {}),
+        handicap_line=handicap_line,
+        expected_goals=poisson.home_lambda + poisson.away_lambda,
+    )
+    pre_bayes_probabilities = dict(specialist_result.get("fused_probabilities", ensemble_probabilities))
+    bayes_status = get_bayes_calibration_status()
+    bayes_overrides = bayes_status.get("league_overrides", {}) if isinstance(bayes_status, dict) else {}
+    bayes_league_key = normalize_text(match.league)
+    bayes_override_active = bool(
+        isinstance(bayes_overrides, dict)
+        and isinstance(bayes_overrides.get(bayes_league_key), dict)
+        and bayes_overrides.get(bayes_league_key, {}).get("enabled")
+    )
+    bayes_config = _current_bayes_calibration_config(match.league)
+    probabilities, bayes_calibration = calibrate_three_way_probabilities(
+        model_probabilities=pre_bayes_probabilities,
+        market_probabilities=market_probabilities,
+        config=bayes_config,
+    )
+    if isinstance(bayes_calibration, dict):
+        bayes_calibration["config_scope"] = "league_override" if bayes_override_active else "global"
+        bayes_calibration["league_key"] = bayes_league_key
+    bayes_probabilities = dict(probabilities)
+    final_probs = (
+        _safe_float(probabilities.get("home"), default=0.0),
+        _safe_float(probabilities.get("draw"), default=0.0),
+        _safe_float(probabilities.get("away"), default=0.0),
+    )
+
+    model_top_key = max(probabilities, key=probabilities.get)
+    recommendation = {"home": "主胜", "draw": "平局", "away": "客胜"}[model_top_key]
+    model_top_prob = probabilities[model_top_key]
+    ordered = sorted(probabilities.values(), reverse=True)
+    margin = ordered[0] - ordered[1]
+    aligned_score = top_score
+    for item in poisson.score_distribution:
+        if _score_outcome_key(str(item.get("score", ""))) == model_top_key:
+            aligned_score = item
+            break
+
+    low_goal_index = 0.0
+    aligned_total_goals_value = int(top_total_goals.get("goals", 0))
+    aligned_total_goals_prob = _safe_float(top_total_goals.get("probability"), default=0.0)
+    aligned_score_text = str(aligned_score.get("score", "-"))
+    if "-" in aligned_score_text:
+        try:
+            aligned_total_goals_value = sum(int(part) for part in aligned_score_text.split("-", 1))
+        except Exception:
+            aligned_total_goals_value = int(top_total_goals.get("goals", 0))
+        for total_item in poisson.total_goals_distribution:
+            try:
+                if int(total_item.get("goals", -1)) == aligned_total_goals_value:
+                    aligned_total_goals_prob = _safe_float(total_item.get("probability"), default=0.0)
+                    break
+            except Exception:
+                continue
+    aligned_htft = top_htft
+    htft_candidates = sorted(
+        (
+            {
+                "key": key,
+                "label": _htft_label_from_key(key),
+                "probability": _safe_float(probability, default=0.0),
+            }
+            for key, probability in poisson.htft_probabilities.items()
+            if key.split("_", 1)[1] == model_top_key
+        ),
+        key=lambda item: (-item["probability"], item["key"]),
+    )
+    if htft_candidates:
+        aligned_htft = htft_candidates[0]
+
+    total_goals_model_pick = _safe_int(total_goals_model_output.get("label"))
+    total_goals_model_confidence = _safe_float(total_goals_model_output.get("confidence"), default=0.0)
+    scoreline_model_pick = str(scoreline_model_output.get("label") or "").strip()
+    scoreline_model_confidence = _safe_float(scoreline_model_output.get("confidence"), default=0.0)
+    scoreline_model_bucket = _scoreline_bucket(scoreline_model_pick) if scoreline_model_pick else None
+
+    dist_market_elo = _model_distance(market_probs, elo_probs)
+    dist_market_poisson = _model_distance(market_probs, poisson_probs)
+    dist_elo_poisson = _model_distance(elo_probs, poisson_probs)
+    consistency = _clamp(1.0 - (dist_market_elo + dist_market_poisson + dist_elo_poisson) / 3.0)
+
+    entropy = _distribution_entropy(final_probs)
+    volatility = _model_distance(final_probs, market_probs)
+    poisson_peak = poisson.top_scores[0]["probability"] if poisson.top_scores else 0.0
+
+    market_top_key = max(market_probabilities, key=market_probabilities.get)
+    direction_shift = 0.20 if model_top_key != market_top_key else 0.0
+
+    upset_index = _clamp(
+        0.24
+        + direction_shift
+        + volatility * 0.50
+        + (1.0 - model_top_prob) * 0.26
+        + (0.20 - min(poisson_peak, 0.20)) * 0.40
+    )
+    stability_index = _clamp(
+        0.24 + consistency * 0.38 + model_top_prob * 0.24 + poisson_peak * 0.90 - entropy * 0.20
+    )
+    confidence_index = _clamp(0.20 + model_top_prob * 0.42 + margin * 0.42 + consistency * 0.16)
+    draw_score = _safe_float(specialist_result.get("draw_score"), default=0.0)
+    draw_signals = specialist_result.get("draw_signals", {})
+    draw_grade = str(specialist_result.get("draw_grade", "-"))
+    draw_takeover = bool(
+        draw_score >= 0.54
+        and (
+            probabilities["draw"] >= max(probabilities["home"], probabilities["away"]) - 0.08
+            or (
+                probabilities["draw"] >= 0.28
+                and draw_signals.get("market_balance", 0.0) >= 0.72
+                and draw_signals.get("low_goal", 0.0) >= 0.55
+            )
+        )
+    )
+    recommendation_key = "draw" if draw_takeover else model_top_key
+    recommendation = {"home": "主胜", "draw": "平局", "away": "客胜"}[recommendation_key]
+    recommendation_confidence_raw = _clamp(
+        max(confidence_index, draw_score) if recommendation_key == "draw" else confidence_index
+    )
+    recommendation_confidence, recommendation_confidence_calibration = _calibrate_recommendation_confidence(
+        recommendation_confidence_raw
+    )
+    score_specialist_candidate, low_goal_index = _select_score_with_specialist_bias(
+        poisson.score_distribution,
+        recommendation_key=recommendation_key,
+        specialist_scores=specialist_result.get("specialist_scores", {}),
+        expected_goals=poisson.home_lambda + poisson.away_lambda,
+    )
+    aligned_score = top_score
+    for item in poisson.score_distribution:
+        if _score_outcome_key(str(item.get("score", ""))) == recommendation_key:
+            aligned_score = item
+            break
+
+    aligned_total_goals_value = int(top_total_goals.get("goals", 0))
+    aligned_total_goals_prob = _safe_float(top_total_goals.get("probability"), default=0.0)
+    aligned_score_text = str(aligned_score.get("score", "-"))
+    if "-" in aligned_score_text:
+        try:
+            aligned_total_goals_value = sum(int(part) for part in aligned_score_text.split("-", 1))
+        except Exception:
+            aligned_total_goals_value = int(top_total_goals.get("goals", 0))
+        for total_item in poisson.total_goals_distribution:
+            try:
+                if int(total_item.get("goals", -1)) == aligned_total_goals_value:
+                    aligned_total_goals_prob = _safe_float(total_item.get("probability"), default=0.0)
+                    break
+            except Exception:
+                continue
+
+    aligned_htft = top_htft
+    htft_candidates = sorted(
+        (
+            {
+                "key": key,
+                "label": _htft_label_from_key(key),
+                "probability": _safe_float(probability, default=0.0),
+            }
+            for key, probability in poisson.htft_probabilities.items()
+            if key.split("_", 1)[1] == recommendation_key
+        ),
+        key=lambda item: (-item["probability"], item["key"]),
+    )
+    if htft_candidates:
+        aligned_htft = htft_candidates[0]
+
+    pre_play_model_total_goals_value = aligned_total_goals_value
+    pre_play_model_total_goals_confidence = aligned_total_goals_prob
+    pre_play_model_score_recommendation = aligned_score_text
+    pre_play_model_score_confidence = _safe_float(aligned_score.get("probability"), default=0.0)
+
+    play_model_policy = _current_play_model_policy()
+    total_goals_policy = play_model_policy.get("total_goals", {}) if isinstance(play_model_policy, dict) else {}
+    scoreline_policy = play_model_policy.get("scoreline", {}) if isinstance(play_model_policy, dict) else {}
+
+    total_goals_model_takeover = bool(
+        bool(total_goals_policy.get("takeover_enabled"))
+        and total_goals_model_output.get("model_ready")
+        and total_goals_model_pick is not None
+        and total_goals_model_confidence >= _safe_float(total_goals_policy.get("min_confidence"), default=0.24)
+    )
+    if total_goals_model_takeover and total_goals_model_pick is not None:
+        aligned_total_goals_value = int(total_goals_model_pick)
+        aligned_total_goals_prob = total_goals_model_confidence
+        aligned_score_from_total = _best_score_for_total_goals(
+            poisson.score_distribution,
+            total_goals=aligned_total_goals_value,
+            outcome_key=recommendation_key,
+        )
+        if isinstance(aligned_score_from_total, dict):
+            aligned_score = aligned_score_from_total
+            aligned_score_text = str(aligned_score.get("score", "-"))
+
+    scoreline_model_takeover, _, _, scoreline_takeover_bucket = _scoreline_takeover_decision(
+        label=scoreline_model_pick if scoreline_model_pick != "OTHER" else None,
+        confidence=scoreline_model_confidence,
+        recommendation_key=recommendation_key,
+        scoreline_policy=scoreline_policy,
+    )
+    scoreline_model_takeover = bool(
+        bool(scoreline_policy.get("takeover_enabled", True))
+        and scoreline_model_output.get("model_ready")
+        and scoreline_model_takeover
+        and (
+            not total_goals_model_takeover
+            or _parse_total_goals_from_score_text(scoreline_model_pick) == aligned_total_goals_value
+        )
+    )
+    if scoreline_model_takeover:
+        aligned_score_text = scoreline_model_pick
+        aligned_score = {
+            "score": aligned_score_text,
+            "probability": scoreline_model_confidence,
+        }
+        aligned_total_goals_from_score = _parse_total_goals_from_score_text(aligned_score_text)
+        if aligned_total_goals_from_score is not None:
+            aligned_total_goals_value = aligned_total_goals_from_score
+            aligned_total_goals_prob = max(aligned_total_goals_prob, scoreline_model_confidence)
+
+    strength = {
+        "home_rating": round(home_rating, 1),
+        "away_rating": round(away_rating, 1),
+        "rating_diff": round(home_rating - away_rating, 1),
+        "home_score": round(_strength_score(home_rating), 1),
+        "away_score": round(_strength_score(away_rating), 1),
+    }
+    indices = {
+        "upset_index": round(upset_index, 4),
+        "stability_index": round(stability_index, 4),
+        "confidence_index": round(confidence_index, 4),
+        "draw_index": round(draw_score, 4),
+        "specialist_index": round(_safe_float(specialist_result.get("fusion_alpha"), default=0.0), 4),
+    }
+    play_thresholds_base = _current_play_thresholds()
+    play_thresholds, play_threshold_adjustment = _runtime_dynamic_play_thresholds(play_thresholds_base)
+    play_pass = {
+        "1x2": round(recommendation_confidence, 4) >= _safe_float(play_thresholds.get("1x2"), default=0.0),
+        "handicap": round(handicap_confidence, 4) >= _safe_float(play_thresholds.get("handicap"), default=0.0),
+        "total_goals": round(aligned_total_goals_prob, 4) >= _safe_float(play_thresholds.get("total_goals"), default=0.0),
+        "score": round(_safe_float(aligned_score.get("probability"), default=0.0), 4) >= _safe_float(play_thresholds.get("score"), default=0.0),
+        "htft": round(_safe_float(aligned_htft.get("probability"), default=0.0), 4) >= _safe_float(play_thresholds.get("htft"), default=0.0),
+    }
+    play_policy = _current_play_policy()
+    play_catalog = {
+        "1x2": {
+            "play_type": "1x2",
+            "pick": recommendation,
+            "confidence": round(recommendation_confidence, 4),
+            "passed": bool(play_pass.get("1x2")),
+        },
+        "handicap": {
+            "play_type": "handicap",
+            "pick": handicap_display,
+            "confidence": round(handicap_confidence, 4),
+            "passed": bool(play_pass.get("handicap")),
+        },
+        "total_goals": {
+            "play_type": "total_goals",
+            "pick": _format_total_goals_label(aligned_total_goals_value),
+            "confidence": round(aligned_total_goals_prob, 4),
+            "passed": bool(play_pass.get("total_goals")),
+        },
+        "htft": {
+            "play_type": "htft",
+            "pick": str(aligned_htft.get("label", "-")),
+            "confidence": round(_safe_float(aligned_htft.get("probability"), default=0.0), 4),
+            "passed": bool(play_pass.get("htft")),
+        },
+        "score": {
+            "play_type": "score",
+            "pick": aligned_score_text,
+            "confidence": round(_safe_float(aligned_score.get("probability"), default=0.0), 4),
+            "passed": bool(play_pass.get("score")),
+        },
+    }
+    display_plays: list[dict] = []
+    single_play_recommendations: list[dict] = []
+    parlay_eligible_plays: list[dict] = []
+    blocked_plays: list[dict] = []
+    for play_type, policy in sorted(play_policy.items(), key=lambda item: int(item[1].get("priority", 99))):
+        item = dict(play_catalog.get(play_type, {"play_type": play_type, "pick": "-", "confidence": 0.0, "passed": False}))
+        item["single_enabled"] = bool(policy.get("single_enabled"))
+        item["parlay_enabled"] = bool(policy.get("parlay_enabled"))
+        item["display_enabled"] = bool(policy.get("display_enabled", True))
+        item["priority"] = int(policy.get("priority", 99))
+        if item["display_enabled"]:
+            display_plays.append(dict(item))
+        if item["passed"] and item["single_enabled"]:
+            single_play_recommendations.append(dict(item))
+        elif item["display_enabled"]:
+            blocked_plays.append(dict(item))
+        if item["passed"] and item["parlay_enabled"]:
+            parlay_eligible_plays.append(dict(item))
+    play_strategy = {
+        "single": single_play_recommendations,
+        "parlay": parlay_eligible_plays,
+        "display_only": [
+            dict(item)
+            for item in display_plays
+            if not item.get("single_enabled") and not item.get("parlay_enabled")
+        ],
+        "blocked": blocked_plays,
+    }
+
+    return {
+        "match_id": match.match_id,
+        "recommendation": recommendation,
+        "confidence": round(recommendation_confidence, 4),
+        "confidence_raw": round(recommendation_confidence_raw, 4),
+        "confidence_calibration": recommendation_confidence_calibration,
+        "risk_level": _risk_level_from_upset(upset_index),
+        "probabilities": {key: round(_safe_float(probabilities.get(key), default=0.0), 4) for key in ("home", "draw", "away")},
+        "pre_bayes_probabilities": {
+            key: round(_safe_float(pre_bayes_probabilities.get(key), default=0.0), 4) for key in ("home", "draw", "away")
+        },
+        "bayes_probabilities": {
+            key: round(_safe_float(bayes_probabilities.get(key), default=0.0), 4) for key in ("home", "draw", "away")
+        },
+        "bayes_calibration": bayes_calibration,
+        "ensemble_probabilities": ensemble_probabilities,
+        "market_probabilities": market_probabilities,
+        "elo_probabilities": elo_probabilities,
+        "poisson_probabilities": poisson_probabilities,
+        "xgb_probabilities": xgb_probabilities,
+        "specialist_probabilities": specialist_result.get("specialist_probabilities", {}),
+        "specialist_scores": specialist_result.get("specialist_scores", {}),
+        "specialist_signals": specialist_result.get("specialist_signals", {}),
+        "fusion_alpha": _safe_float(specialist_result.get("fusion_alpha"), default=0.0),
+        "handicap_specialist_probabilities": handicap_specialist.get("specialist_probabilities", {}),
+        "handicap_fusion_alpha": _safe_float(handicap_specialist.get("fusion_alpha"), default=0.0),
+        "low_goal_index": round(low_goal_index, 4),
+        "score_specialist_candidate": str(score_specialist_candidate.get("score", "-")) if isinstance(score_specialist_candidate, dict) else "-",
+        "score_specialist_confidence": round(_safe_float((score_specialist_candidate or {}).get("probability"), default=0.0), 4) if isinstance(score_specialist_candidate, dict) else 0.0,
+        "xgb_features": xgb_features,
+        "xgb_fallback": xgb_fallback,
+        "xgb_model_ready": xgb_model_ready,
+        "total_goals_model": total_goals_model_output,
+        "scoreline_model_base": base_scoreline_model_output,
+        "scoreline_model": scoreline_model_output,
+        "volatile_scoreline_model": volatile_scoreline_model_output,
+        "volatile_scoreline_override": volatile_scoreline_override,
+        "scoreline_model_bucket": scoreline_model_bucket,
+        "play_model_policy": play_model_policy,
+        "pre_play_model_total_goals_value": pre_play_model_total_goals_value,
+        "pre_play_model_total_goals_confidence": round(pre_play_model_total_goals_confidence, 4),
+        "pre_play_model_score_recommendation": pre_play_model_score_recommendation,
+        "pre_play_model_score_confidence": round(pre_play_model_score_confidence, 4),
+        "total_goals_model_takeover": total_goals_model_takeover,
+        "scoreline_model_takeover": scoreline_model_takeover,
+        "scoreline_model_takeover_bucket": scoreline_takeover_bucket if scoreline_model_takeover else None,
+        "recent_form_features": recent_form_features,
+        "ensemble_weights": ensemble_result.effective_weights,
+        "play_thresholds": play_thresholds,
+        "play_thresholds_base": play_thresholds_base,
+        "play_threshold_adjustment": play_threshold_adjustment,
+        "play_policy": play_policy,
+        "play_pass": play_pass,
+        "draw_score": round(draw_score, 4),
+        "draw_signals": draw_signals,
+        "draw_grade": draw_grade,
+        "draw_takeover": draw_takeover,
+        "play_strategy": play_strategy,
+        "single_play_recommendations": single_play_recommendations,
+        "parlay_eligible_plays": parlay_eligible_plays,
+        "display_plays": display_plays,
+        "blocked_plays": blocked_plays,
+        "ou_probabilities": ou_probabilities,
+        "ou_recommendation": ou_recommendation,
+        "ou_confidence": round(ou_confidence, 4),
+        "handicap_line": round(handicap_line, 2),
+        "handicap_probabilities": handicap_probabilities,
+        "handicap_recommendation": handicap_recommendation,
+        "handicap_display": handicap_display,
+        "handicap_confidence": round(handicap_confidence, 4),
+        "total_goals_value": aligned_total_goals_value,
+        "total_goals_recommendation": _format_total_goals_label(aligned_total_goals_value),
+        "total_goals_confidence": round(aligned_total_goals_prob, 4),
+        "score_recommendation": aligned_score_text,
+        "score_confidence": round(_safe_float(aligned_score.get("probability"), default=0.0), 4),
+        "htft_recommendation": str(aligned_htft.get("label", "-")),
+        "htft_confidence": round(_safe_float(aligned_htft.get("probability"), default=0.0), 4),
+        "expected_goals": round(poisson.home_lambda + poisson.away_lambda, 2),
+        "source": match.source,
+        "model": "V24-Stage5(Ensemble+Specialists+Bayes:Market+ELO+Poisson+XGBv0)",
+        "elo": strength,
+        "indices": indices,
+        "poisson": {
+            "home_lambda": round(poisson.home_lambda, 3),
+            "away_lambda": round(poisson.away_lambda, 3),
+            "over_2_5": round(poisson.over_2_5, 4),
+            "under_2_5": round(poisson.under_2_5, 4),
+            "btts_yes": round(poisson.btts_yes, 4),
+            "btts_no": round(poisson.btts_no, 4),
+            "score_distribution": poisson.score_distribution,
+            "top_scores": poisson.top_scores,
+            "total_goals_distribution": poisson.total_goals_distribution,
+            "top_total_goals": poisson.top_total_goals,
+            "best_total_goals": poisson.best_total_goals,
+            "best_total_goals_prob": round(poisson.best_total_goals_prob, 4),
+            "halftime_probabilities": {
+                key: round(value, 4) for key, value in poisson.halftime_probabilities.items()
+            },
+            "htft_probabilities": {key: round(value, 4) for key, value in poisson.htft_probabilities.items()},
+            "htft_top": poisson.htft_top,
+            "best_htft": poisson.best_htft,
+            "best_htft_prob": round(poisson.best_htft_prob, 4),
+        },
+    }
+
+
+def predict_match(match: AppMatch) -> dict:
+    ratings_map = STATE_STORE.load_ratings()
+    had_home = match.home_team in ratings_map
+    had_away = match.away_team in ratings_map
+    home_rating, away_rating, ratings_map = _resolved_ratings(match, ratings_map)
+    if not (had_home and had_away):
+        STATE_STORE.save_ratings(ratings_map)
+
+    league_strength = LEAGUE_STRENGTH.get(match.league, 0.92)
+    recent_form_features = _recent_form_features_for_match(match)
+    return _predict_match_with_inputs(
+        match=match,
+        home_rating=home_rating,
+        away_rating=away_rating,
+        league_strength=league_strength,
+        recent_form_features=recent_form_features,
+    )
+
+
+def persist_prediction_snapshot(match: AppMatch, prediction: dict) -> None:
+    if not isinstance(prediction, dict):
+        return
+    market_snapshot = _market_snapshot_fields_from_match(match)
+    record = {
+        "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "match": serialize_match(match),
+        "prediction": prediction,
+        "market_snapshot": market_snapshot,
+    }
+    STATE_STORE.upsert_prediction_snapshot(match.match_id, record)
+    persist_market_snapshot(match)
+
+
+def load_prediction_snapshot_cache() -> dict[str, dict]:
+    snapshots = STATE_STORE.load_prediction_snapshots()
+    cache: dict[str, dict] = {}
+    for match_id, record in snapshots.items():
+        if not isinstance(record, dict):
+            continue
+        prediction = record.get("prediction")
+        if isinstance(prediction, dict):
+            cache[match_id] = prediction
+    return cache
+
+
+def get_prediction_snapshot_migration_report() -> dict:
+    return STATE_STORE.load_snapshot_migration_report()
+
+
+def load_c1_comparison_marks_cache() -> dict[str, dict]:
+    return STATE_STORE.load_c1_comparison_marks()
+
+
+def save_c1_comparison_marks_cache(items: dict[str, dict]) -> None:
+    STATE_STORE.save_c1_comparison_marks(items)
+
+
+def migrate_prediction_snapshots(max_unresolved: int = 50) -> dict:
+    report = {
+        "total_snapshots": 0,
+        "already_bound": 0,
+        "resolved": 0,
+        "resolved_exact": 0,
+        "resolved_team_only": 0,
+        "skipped_non_titan": 0,
+        "invalid_records": 0,
+        "unresolved": 0,
+        "unresolved_items": [],
+    }
+
+    snapshots = STATE_STORE.load_prediction_snapshots()
+    report["total_snapshots"] = len(snapshots)
+    if not snapshots or MatchFetcherTitan is None:
+        STATE_STORE.save_snapshot_migration_report(report)
+        return report
+
+    try:
+        titan_items = MatchFetcherTitan(debug=False)._load_schedule_matches()
+    except Exception:
+        titan_items = []
+
+    exact_map: dict[tuple[str, str, str, str], list[str]] = {}
+    team_map: dict[tuple[str, str, str], list[str]] = {}
+    candidate_payload: dict[str, dict] = {}
+    for item in titan_items:
+        source_id = normalize_text(getattr(item, "match_id", ""))
+        if not source_id:
+            continue
+        match_date = normalize_text(getattr(item, "match_date", ""))
+        league = normalize_text(getattr(item, "league", ""))
+        home_team = normalize_text(getattr(item, "home_team", ""))
+        away_team = normalize_text(getattr(item, "away_team", ""))
+        exact_map.setdefault(_snapshot_lookup_key(match_date, league, home_team, away_team), []).append(source_id)
+        team_map.setdefault(_snapshot_lookup_team_key(match_date, home_team, away_team), []).append(source_id)
+        candidate_payload[source_id] = {
+            "match_date": match_date,
+            "league": league,
+            "home_team": home_team,
+            "away_team": away_team,
+        }
+
+    changed = False
+    for snapshot_match_id, snapshot_record in snapshots.items():
+        if not isinstance(snapshot_record, dict):
+            report["invalid_records"] += 1
+            continue
+        snapshot_match = snapshot_record.get("match")
+        if not isinstance(snapshot_match, dict):
+            report["invalid_records"] += 1
+            continue
+
+        snapshot_source = normalize_text(snapshot_match.get("source", ""))
+        if snapshot_source and "titan" not in snapshot_source.lower():
+            report["skipped_non_titan"] += 1
+            continue
+
+        source_id = normalize_text(snapshot_match.get("source_id", ""))
+        if source_id:
+            report["already_bound"] += 1
+            continue
+
+        app_match = _app_match_from_payload(snapshot_match, source=snapshot_source or "snapshot:titan")
+        if app_match is None:
+            report["invalid_records"] += 1
+            continue
+
+        exact_ids = exact_map.get(
+            _snapshot_lookup_key(app_match.match_date, app_match.league, app_match.home_team, app_match.away_team),
+            [],
+        )
+        team_ids = team_map.get(
+            _snapshot_lookup_team_key(app_match.match_date, app_match.home_team, app_match.away_team),
+            [],
+        )
+
+        resolved_id = ""
+        resolved_strategy = ""
+        if len(exact_ids) == 1:
+            resolved_id = exact_ids[0]
+            resolved_strategy = "exact"
+            report["resolved_exact"] += 1
+        elif len(team_ids) == 1:
+            resolved_id = team_ids[0]
+            resolved_strategy = "team_only"
+            report["resolved_team_only"] += 1
+
+        if resolved_id:
+            snapshot_match["source_id"] = resolved_id
+            snapshot_record["match"] = snapshot_match
+            snapshot_record["migration"] = {
+                "status": "resolved",
+                "strategy": resolved_strategy,
+                "resolved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "candidate": candidate_payload.get(resolved_id, {}),
+            }
+            snapshots[snapshot_match_id] = snapshot_record
+            report["resolved"] += 1
+            changed = True
+            continue
+
+        report["unresolved"] += 1
+        snapshot_record["migration"] = {
+            "status": "unresolved",
+            "resolved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        snapshots[snapshot_match_id] = snapshot_record
+        changed = True
+        if len(report["unresolved_items"]) < max_unresolved:
+            report["unresolved_items"].append(
+                {
+                    "match_id": snapshot_match_id,
+                    "match_date": app_match.match_date,
+                    "league": app_match.league,
+                    "home_team": app_match.home_team,
+                    "away_team": app_match.away_team,
+                }
+            )
+
+    if changed:
+        STATE_STORE.save_prediction_snapshots(snapshots)
+    STATE_STORE.save_snapshot_migration_report(report)
+    return report
+
+
+def settle_match_result(
+    match: AppMatch,
+    home_goals: int,
+    away_goals: int,
+    prediction: dict | None = None,
+) -> dict:
+    enrich_match_from_market_snapshot_store(match)
+    ratings_map = STATE_STORE.load_ratings()
+    home_rating, away_rating, ratings_map = _resolved_ratings(match, ratings_map)
+
+    league_strength = LEAGUE_STRENGTH.get(match.league, 0.92)
+    update = ELO_ENGINE.update_from_result(
+        home_rating=home_rating,
+        away_rating=away_rating,
+        home_goals=home_goals,
+        away_goals=away_goals,
+        league_strength=league_strength,
+    )
+
+    ratings_map[match.home_team] = round(update.home_after, 4)
+    ratings_map[match.away_team] = round(update.away_after, 4)
+    STATE_STORE.save_ratings(ratings_map)
+
+    result = _result_label(home_goals, away_goals)
+    predicted = prediction.get("recommendation") if prediction else None
+    is_correct = bool(predicted == result) if predicted else None
+    total_goals = int(home_goals) + int(away_goals)
+    predicted_total_goals, predicted_total_goals_value, total_goals_confidence = _extract_total_goals_prediction(
+        prediction
+    )
+    total_goals_is_correct = bool(predicted_total_goals_value == total_goals) if predicted_total_goals_value is not None else None
+    predicted_score, score_confidence = _extract_score_prediction(prediction)
+    actual_score = f"{int(home_goals)}-{int(away_goals)}"
+    score_is_correct = bool(predicted_score == actual_score) if predicted_score else None
+    predicted_htft, htft_confidence = _extract_htft_prediction(prediction)
+    handicap_line = _safe_float(match.handicap_line, default=0.0)
+    handicap_result_key = _handicap_outcome_key(home_goals, away_goals, handicap_line)
+    handicap_result = _format_handicap_display(handicap_line, handicap_result_key)
+    predicted_handicap_display, predicted_handicap_label, handicap_confidence = _extract_handicap_prediction(prediction)
+    handicap_is_correct = bool(predicted_handicap_label == _handicap_label_from_key(handicap_result_key)) if predicted_handicap_label else None
+    ou_line = 2.5
+    ou_result = _ou_result_label(total_goals, line=ou_line)
+    predicted_ou, ou_confidence = _extract_ou_prediction(prediction, line=ou_line)
+    ou_is_correct = bool(predicted_ou == ou_result) if predicted_ou else None
+
+    settlement = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "match_id": match.match_id,
+        "match_date": match.match_date,
+        "match_time": match.match_time,
+        "league": match.league,
+        "home_team": match.home_team,
+        "away_team": match.away_team,
+        "home_goals": int(home_goals),
+        "away_goals": int(away_goals),
+        "result": result,
+        "predicted": predicted,
+        "is_correct": is_correct,
+        "prediction_confidence": round(_safe_float(prediction.get("confidence"), 0.0), 4) if prediction else None,
+        "total_goals": total_goals,
+        "predicted_total_goals": predicted_total_goals,
+        "total_goals_confidence": round(total_goals_confidence, 4) if total_goals_confidence is not None else None,
+        "total_goals_is_correct": total_goals_is_correct,
+        "predicted_score": predicted_score,
+        "score_confidence": round(score_confidence, 4) if score_confidence is not None else None,
+        "score_is_correct": score_is_correct,
+        "predicted_htft": predicted_htft,
+        "htft_confidence": round(htft_confidence, 4) if htft_confidence is not None else None,
+        "handicap_line": round(handicap_line, 2),
+        "handicap_result": handicap_result,
+        "predicted_handicap": predicted_handicap_display,
+        "handicap_confidence": round(handicap_confidence, 4) if handicap_confidence is not None else None,
+        "handicap_is_correct": handicap_is_correct,
+        "ou_line": ou_line,
+        "ou_result": ou_result,
+        "predicted_ou": predicted_ou,
+        "ou_confidence": round(ou_confidence, 4) if ou_confidence is not None else None,
+        "ou_is_correct": ou_is_correct,
+        "opening_odds_home": round(_safe_float(match.opening_odds_home, 0.0), 4),
+        "opening_odds_draw": round(_safe_float(match.opening_odds_draw, 0.0), 4),
+        "opening_odds_away": round(_safe_float(match.opening_odds_away, 0.0), 4),
+        "return_rate": round(_safe_float(match.return_rate, 0.0), 4),
+        "kelly_home": round(_safe_float(match.kelly_home, 0.0), 4),
+        "kelly_draw": round(_safe_float(match.kelly_draw, 0.0), 4),
+        "kelly_away": round(_safe_float(match.kelly_away, 0.0), 4),
+        "home_rating_before": round(update.home_before, 2),
+        "away_rating_before": round(update.away_before, 2),
+        "home_rating_after": round(update.home_after, 2),
+        "away_rating_after": round(update.away_after, 2),
+        "home_delta": round(update.delta_home, 2),
+        "away_delta": round(update.delta_away, 2),
+    }
+    STATE_STORE.append_settlement(settlement)
+
+    if prediction:
+        xgb_features = prediction.get("xgb_features")
+        result_label = _result_to_label(result)
+        if isinstance(xgb_features, dict) and result_label is not None:
+            STATE_STORE.append_xgb_sample(
+                {
+                    "timestamp": settlement["timestamp"],
+                    "match_id": match.match_id,
+                    "features": xgb_features,
+                    "label": result_label,
+                    "meta": {
+                        "source": "live_settlement",
+                        "match_date": match.match_date,
+                        "match_time": match.match_time,
+                        "league": match.league,
+                        "home_team": match.home_team,
+                        "away_team": match.away_team,
+                        "home_goals": int(home_goals),
+                        "away_goals": int(away_goals),
+                        "handicap_line": round(handicap_line, 2),
+                        "opening_odds_home": round(_safe_float(match.opening_odds_home, 0.0), 4),
+                        "opening_odds_draw": round(_safe_float(match.opening_odds_draw, 0.0), 4),
+                        "opening_odds_away": round(_safe_float(match.opening_odds_away, 0.0), 4),
+                        "return_rate": round(_safe_float(match.return_rate, 0.0), 4),
+                        "kelly_home": round(_safe_float(match.kelly_home, 0.0), 4),
+                        "kelly_draw": round(_safe_float(match.kelly_draw, 0.0), 4),
+                        "kelly_away": round(_safe_float(match.kelly_away, 0.0), 4),
+                    },
+                }
+            )
+
+    # 结算完成后移除待结算快照，避免重复占用状态空间。
+    STATE_STORE.pop_prediction_snapshot(match.match_id)
+    auto_settle_pending_parlays()
+
+    return settlement
+
+
+def get_recent_settlements(limit: int = 20) -> list[dict]:
+    items = STATE_STORE.load_settlements()
+    if limit <= 0:
+        return items
+    return items[-limit:]
+
+
+def auto_settle_finished_matches(
+    prediction_cache: dict[str, dict] | None = None,
+    lookback_days: int = 2,
+) -> dict:
+    migrate_prediction_snapshots()
+    lookback_days = max(0, min(int(lookback_days), 7))
+    summary = {
+        "fetched_finished": 0,
+        "already_settled": 0,
+        "new_settled": 0,
+        "new_parlay_settled": 0,
+        "skipped": 0,
+        "snapshot_predictions": 0,
+        "snapshot_result_hits": 0,
+        "snapshot_checked": 0,
+        "lookback_days": lookback_days,
+        "source": "none",
+        "messages": [],
+        "items": [],
+        "parlay_items": [],
+        "gate": {},
+    }
+
+    if MatchFetcherTitan is None:
+        summary["messages"].append("Titan 抓取器不可用，无法自动回收赛果。")
+        return summary
+
+    try:
+        fetcher = MatchFetcherTitan(debug=False)
+        if hasattr(fetcher, "get_recent_finished_matches"):
+            finished_matches = fetcher.get_recent_finished_matches(lookback_days=lookback_days)
+        else:
+            finished_matches = fetcher.get_today_finished_matches()
+    except Exception as exc:
+        summary["messages"].append(f"自动回收赛果失败: {exc}")
+        return summary
+
+    summary["fetched_finished"] = len(finished_matches)
+    summary["source"] = "live:titan"
+
+    settled_ids = {str(item.get("match_id", "")) for item in STATE_STORE.load_settlements() if item.get("match_id")}
+    snapshot_records = STATE_STORE.load_prediction_snapshots()
+    candidate_ids: set[str] = set()
+    candidates: list[tuple[AppMatch, int, int, dict | None]] = []
+
+    def in_lookback_window(match_date: str) -> bool:
+        try:
+            dt = datetime.strptime(match_date, "%Y-%m-%d").date()
+        except Exception:
+            return False
+        today = datetime.now().date()
+        return (today - dt).days in range(0, lookback_days + 1)
+
+    def append_candidate(
+        app_match: AppMatch,
+        home_goals: int | None,
+        away_goals: int | None,
+        snapshot_record: dict | None,
+    ) -> None:
+        if app_match.match_id in settled_ids:
+            summary["already_settled"] += 1
+            return
+        if app_match.match_id in candidate_ids:
+            return
+        if home_goals is None or away_goals is None:
+            summary["skipped"] += 1
+            return
+        candidates.append((app_match, int(home_goals), int(away_goals), snapshot_record))
+        candidate_ids.add(app_match.match_id)
+
+    for item in finished_matches:
+        app_match = AppMatch(
+            home_team=item.home_team,
+            away_team=item.away_team,
+            league=item.league,
+            match_time=item.match_time,
+            match_date=item.match_date,
+            odds_home=item.odds_home,
+            odds_draw=item.odds_draw,
+            odds_away=item.odds_away,
+            handicap_line=_safe_float(getattr(item, "handicap_line", 0.0), default=0.0),
+            source="live:titan:result",
+            source_id=item.match_id,
+        )
+        snapshot_record = snapshot_records.get(app_match.match_id)
+        if isinstance(snapshot_record, dict):
+            snapshot_match = snapshot_record.get("match")
+            if isinstance(snapshot_match, dict):
+                # 完场赔率可能为空，优先回填赛前快照里的赔率与开赛时间。
+                app_match.odds_home = _safe_float(snapshot_match.get("odds_home"), app_match.odds_home)
+                app_match.odds_draw = _safe_float(snapshot_match.get("odds_draw"), app_match.odds_draw)
+                app_match.odds_away = _safe_float(snapshot_match.get("odds_away"), app_match.odds_away)
+                app_match.handicap_line = _safe_float(snapshot_match.get("handicap_line"), app_match.handicap_line)
+                match_time = normalize_text(snapshot_match.get("match_time", ""))
+                if match_time:
+                    app_match.match_time = match_time
+        append_candidate(app_match, item.home_goals, item.away_goals, snapshot_record)
+
+    # 兜底: 对重启后丢失于主赛事流中的比赛，按快照保存的 Titan schedule_id 回查赛果。
+    for snapshot_match_id, snapshot_record in snapshot_records.items():
+        if snapshot_match_id in settled_ids or snapshot_match_id in candidate_ids:
+            continue
+        if not isinstance(snapshot_record, dict):
+            continue
+        snapshot_match = snapshot_record.get("match")
+        app_match = _app_match_from_payload(snapshot_match, source="snapshot:titan:result")
+        if app_match is None or not in_lookback_window(app_match.match_date):
+            continue
+        snapshot_source = normalize_text(snapshot_match.get("source", "") if isinstance(snapshot_match, dict) else "")
+        if "titan" not in snapshot_source.lower():
+            continue
+        schedule_id = normalize_text(snapshot_match.get("source_id", "") if isinstance(snapshot_match, dict) else "")
+        if not schedule_id or not hasattr(fetcher, "get_result_by_schedule_id"):
+            continue
+        summary["snapshot_checked"] += 1
+        result = fetcher.get_result_by_schedule_id(schedule_id)
+        if not isinstance(result, dict) or not result.get("is_finished"):
+            continue
+        app_match.source = "snapshot:titan:analysisheader"
+        app_match.source_id = schedule_id
+        append_candidate(app_match, result.get("home_goals"), result.get("away_goals"), snapshot_record)
+        summary["snapshot_result_hits"] += 1
+
+    if not candidates:
+        parlay_summary = auto_settle_pending_parlays()
+        summary["new_parlay_settled"] = parlay_summary.get("new_settled", 0)
+        summary["parlay_items"] = parlay_summary.get("items", [])
+        summary["gate"] = get_gate_metrics(window=20)
+        summary["messages"].append(
+            f"最近 {lookback_days} 天未发现可自动结算的新完场比赛（快照回查 {summary['snapshot_checked']} 场，命中 {summary['snapshot_result_hits']} 场）。"
+        )
+        return summary
+
+    prediction_bank: dict[str, dict] = {}
+    for app_match, _home_goals, _away_goals, snapshot_record in candidates:
+        cached = prediction_cache.get(app_match.match_id) if prediction_cache else None
+        if isinstance(cached, dict):
+            prediction_bank[app_match.match_id] = cached
+            continue
+        snapshot_prediction = snapshot_record.get("prediction") if isinstance(snapshot_record, dict) else None
+        if isinstance(snapshot_prediction, dict):
+            prediction_bank[app_match.match_id] = snapshot_prediction
+            summary["snapshot_predictions"] += 1
+            continue
+        prediction_bank[app_match.match_id] = predict_match(app_match)
+
+    for app_match, home_goals, away_goals, _snapshot_record in candidates:
+        prediction = prediction_bank.get(app_match.match_id)
+        settlement = settle_match_result(
+            match=app_match,
+            home_goals=home_goals,
+            away_goals=away_goals,
+            prediction=prediction,
+        )
+        summary["items"].append(settlement)
+        summary["new_settled"] += 1
+
+    parlay_summary = auto_settle_pending_parlays()
+    summary["new_parlay_settled"] = parlay_summary.get("new_settled", 0)
+    summary["parlay_items"] = parlay_summary.get("items", [])
+    summary["gate"] = get_gate_metrics(window=20)
+
+    summary["messages"].append(
+        f"自动回收完成(近{lookback_days}天): 主源完场 {summary['fetched_finished']} 场, 快照回查命中 {summary['snapshot_result_hits']} 场, 新增单场结算 {summary['new_settled']} 场, 新增二串一结算 {summary['new_parlay_settled']} 场, 预测快照命中 {summary['snapshot_predictions']} 场。"
+    )
+    return summary
+
+
+def get_xgb_training_status() -> dict:
+    return XGBOOST_MODEL.get_training_status()
+
+
+def train_xgb_v0_now(force_min_samples: int | None = None) -> dict:
+    return XGBOOST_MODEL.train_now(force_min_samples=force_min_samples)
+
+
+def get_play_model_training_status() -> dict:
+    return {
+        "total_goals": TOTAL_GOALS_MODEL.get_training_status(),
+        "scoreline": SCORELINE_MODEL.get_training_status(),
+        "volatile_scoreline": VOLATILE_SCORELINE_MODEL.get_training_status(),
+    }
+
+
+def train_play_models_now(force_min_samples: int | None = None) -> dict:
+    total_goals = TOTAL_GOALS_MODEL.train_now(force_min_samples=force_min_samples)
+    scoreline = SCORELINE_MODEL.train_now(force_min_samples=force_min_samples)
+    volatile_scoreline = VOLATILE_SCORELINE_MODEL.train_now(force_min_samples=force_min_samples)
+    return {
+        "trained": bool(total_goals.get("trained")) or bool(scoreline.get("trained")) or bool(volatile_scoreline.get("trained")),
+        "reason": "ok" if bool(total_goals.get("trained")) or bool(scoreline.get("trained")) or bool(volatile_scoreline.get("trained")) else "no_model_trained",
+        "total_goals": total_goals,
+        "scoreline": scoreline,
+        "volatile_scoreline": volatile_scoreline,
+        "status": get_play_model_training_status(),
+    }
+
+
+def _export_report_v2(matches: list[AppMatch], predictions: dict[str, dict]) -> Path:
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_path = REPORT_DIR / f"recommendation_report_{timestamp}.md"
+
+    lines = [
+        "# V24 瓒崇悆鎺ㄨ崘鎶ュ憡",
+        "",
+        f"- 鐢熸垚鏃堕棿: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- 鍦烘鏁伴噺: {len(matches)}",
+        "",
+        "| 鏃ユ湡 | 鏃堕棿 | 鑱旇禌 | 瀵归樀 | 鎺ㄨ崘 | 鎬昏繘鐞冮娴? | 鍗婂叏鍦洪娴? | 姣斿垎棰勬祴 | 缃俊搴? | 鍐烽棬鎸囨暟 |",
+        "|---|---|---|---|---|---|---|---|---:|---:|",
+    ]
+
+    for match in matches:
+        prediction = predictions.get(match.match_id) or predict_match(match)
+        total_goals_pick, _, _ = _extract_total_goals_prediction(prediction)
+        score_pick, _ = _extract_score_prediction(prediction)
+        htft_pick, _ = _extract_htft_prediction(prediction)
+        lines.append(
+            f"| {match.match_date} | {match.match_time} | {match.league} | "
+            f"{match.home_team} vs {match.away_team} | {prediction['recommendation']} | "
+            f"{total_goals_pick or '-'} | "
+            f"{htft_pick or '-'} | "
+            f"{score_pick or '-'} | "
+            f"{prediction['confidence']:.1%} | {prediction.get('indices', {}).get('upset_index', 0):.1%} |"
+        )
+
+    report_path.write_text("\n".join(lines), encoding="utf-8")
+    return report_path
+
+
+def export_report(matches: list[AppMatch], predictions: dict[str, dict]) -> Path:
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_path = REPORT_DIR / f"recommendation_report_{timestamp}.md"
+
+    lines = [
+        "# V24 足球推荐报告",
+        "",
+        f"- 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- 场次数量: {len(matches)}",
+        "",
+        "| 日期 | 时间 | 联赛 | 对阵 | 推荐 | O/U推荐 | 置信度 | 最可能比分 | 大2.5概率 | 冷门指数 |",
+        "|---|---|---|---|---|---|---:|---|---:|---:|",
+    ]
+
+    for match in matches:
+        prediction = predictions.get(match.match_id) or predict_match(match)
+        poisson = prediction.get("poisson", {})
+        top_scores = poisson.get("top_scores", [])
+        best_score = top_scores[0]["score"] if top_scores else "-"
+        lines.append(
+            f"| {match.match_date} | {match.match_time} | {match.league} | "
+            f"{match.home_team} vs {match.away_team} | {prediction['recommendation']} | "
+            f"{prediction.get('ou_recommendation', '-')} | "
+            f"{prediction['confidence']:.1%} | {best_score} | "
+            f"{poisson.get('over_2_5', 0):.1%} | {prediction.get('indices', {}).get('upset_index', 0):.1%} |"
+        )
+
+    report_path.write_text("\n".join(lines), encoding="utf-8")
+    return report_path
+
+
+def _export_report_v3(matches: list[AppMatch], predictions: dict[str, dict]) -> Path:
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_path = REPORT_DIR / f"recommendation_report_{timestamp}.md"
+
+    lines = [
+        "# V24 Recommendation Report",
+        "",
+        f"- Generated At: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- Match Count: {len(matches)}",
+        "",
+        "| Date | Time | League | Match | 1X2 | Handicap | Total Goals | HT/FT | Score | Confidence | Upset |",
+        "|---|---|---|---|---|---|---|---|---|---:|---:|",
+    ]
+
+    for match in matches:
+        prediction = predictions.get(match.match_id) or predict_match(match)
+        handicap_pick = prediction.get("handicap_display") or prediction.get("handicap_recommendation") or "-"
+        total_goals_pick, _, _ = _extract_total_goals_prediction(prediction)
+        score_pick, _ = _extract_score_prediction(prediction)
+        htft_pick, _ = _extract_htft_prediction(prediction)
+        lines.append(
+            f"| {match.match_date} | {match.match_time} | {match.league} | "
+            f"{match.home_team} vs {match.away_team} | {prediction['recommendation']} | "
+            f"{handicap_pick} | "
+            f"{total_goals_pick or '-'} | "
+            f"{htft_pick or '-'} | "
+            f"{score_pick or '-'} | "
+            f"{prediction['confidence']:.1%} | {prediction.get('indices', {}).get('upset_index', 0):.1%} |"
+        )
+
+    report_path.write_text("\n".join(lines), encoding="utf-8")
+    return report_path
+
+
+def serialize_match(match: AppMatch) -> dict:
+    return asdict(match)
+
+
+export_report = _export_report_v3

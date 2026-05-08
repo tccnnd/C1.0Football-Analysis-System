@@ -1,0 +1,112 @@
+from __future__ import annotations
+
+import sys
+import unittest
+from pathlib import Path
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+SRC_ROOT = PROJECT_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from v24_app.ui_modules import (
+    build_c1_availability_provider_status_lines,
+    build_c1_snapshot_import_message_text,
+    build_c1_snapshot_import_status_text,
+    build_c1_sync_message_text,
+    build_c1_sync_status_text,
+    build_c1_template_export_message_text,
+    build_c1_template_export_status_text,
+    should_auto_rerun_shadow_after_import,
+    should_auto_rerun_shadow_after_sync,
+)
+
+
+class UIC1AvailabilityFlowModuleTests(unittest.TestCase):
+    def test_template_export_texts(self) -> None:
+        self.assertEqual(build_c1_template_export_status_text(12), "C1 阵容模板已导出 | 12 行")
+        msg = build_c1_template_export_message_text(12, "E:/APP/ELO/reports/a.csv")
+        self.assertIn("行数: 12", msg)
+        self.assertIn("a.csv", msg)
+
+    def test_import_and_sync_texts(self) -> None:
+        self.assertEqual(
+            build_c1_snapshot_import_status_text(30, 18),
+            "C1 阵容快照已导入 | 行 30 | 键 18",
+        )
+        import_msg = build_c1_snapshot_import_message_text(
+            {"source": "x.csv", "imported_rows": 30, "written_keys": 18, "snapshot_file": "snap.json"}
+        )
+        self.assertIn("来源: x.csv", import_msg)
+        self.assertIn("写入键数: 18", import_msg)
+        self.assertEqual(build_c1_sync_status_text(40, 21), "C1 阵容源已同步 | 行 40 | 键 21")
+        sync_msg = build_c1_sync_message_text({"total_rows": 40, "total_keys": 21, "snapshot_file": "snap.json"})
+        self.assertIn("导入行数: 40", sync_msg)
+        self.assertIn("存储: snap.json", sync_msg)
+
+    def test_should_auto_rerun_rules(self) -> None:
+        self.assertTrue(should_auto_rerun_shadow_after_import(has_matches=True, imported_rows=1))
+        self.assertFalse(should_auto_rerun_shadow_after_import(has_matches=True, imported_rows=0))
+        self.assertFalse(should_auto_rerun_shadow_after_import(has_matches=False, imported_rows=5))
+        self.assertTrue(should_auto_rerun_shadow_after_sync(has_matches=True))
+        self.assertFalse(should_auto_rerun_shadow_after_sync(has_matches=False))
+
+    def test_provider_status_lines(self) -> None:
+        lines = build_c1_availability_provider_status_lines(
+            [
+                {
+                    "provider_name": "api-football",
+                    "status": "ok",
+                    "rows": 123,
+                    "source_path": "E:/APP/ELO/data/a.csv",
+                },
+                {
+                    "provider_name": "manual",
+                    "status": "missing",
+                    "rows": 0,
+                    "url": "https://example.com",
+                },
+            ]
+        )
+        self.assertEqual(lines[0], "C1 阵容源状态")
+        self.assertIn("api-football: ok | rows=123", lines[1])
+        self.assertIn("https://example.com", lines[2])
+
+    def test_provider_status_lines_with_sync_summary(self) -> None:
+        lines = build_c1_availability_provider_status_lines(
+            [
+                {
+                    "provider_name": "__sync_summary__",
+                    "is_sync_summary": True,
+                    "last_sync_at": "2026-04-07 14:30:00",
+                    "total_rows": 80,
+                    "total_keys": 240,
+                    "failed_providers": 0,
+                },
+                {
+                    "provider_name": "api_football_primary",
+                    "status": "ready",
+                    "rows": 80,
+                    "url": "https://v3.football.api-sports.io",
+                    "resolve_enabled": False,
+                    "last_sync_status": "imported",
+                    "last_imported_rows": 80,
+                    "last_written_keys": 240,
+                    "fixture_total": 158,
+                    "fixture_issue_count": 92,
+                    "fixture_limit": 132,
+                    "last_sync_at": "2026-04-07 14:30:00",
+                },
+            ]
+        )
+        joined = "\n".join(lines)
+        self.assertIn("最近同步: 2026-04-07 14:30:00", joined)
+        self.assertIn("上次同步: status=imported | rows=80 | keys=240", joined)
+        self.assertIn("API样本: total=158 | issue=92 | limit=132", joined)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,38 @@
+version: c1.phase1
+
+thresholds:
+  info_quality_warning: 0.55
+  info_quality_critical: 0.35
+  lineup_required_within_hours: 2
+  lineup_freshness_warning_hours: 12
+  missing_elo_loss_warning: 0.08
+  high_confidence_min: 0.68
+  low_info_high_confidence_quality_max: 0.50
+  odds_move_against_model_warning: 0.08
+  line_move_against_model_warning: 0.08
+  market_divergence_soft: 0.12
+  market_divergence_hard: 0.22
+  injury_conflict_hard: 0.70
+  chaos_score_observe: 0.55
+  chaos_score_block: 0.82
+  circuit_breaker_losing_streak: 5
+
+decision_rules:
+  observe_min_soft_conflicts: 3
+
+feature_rules:
+  freshness_hours_cap: 24
+  info_quality_weights:
+    context_completeness: 0.28
+    odds_snapshot_quality: 0.24
+    team_availability_quality: 0.18
+    freshness_score: 0.18
+    source_reliability: 0.12
+  chaos_weights:
+    market_divergence: 0.24
+    odds_move_against_model: 0.18
+    line_move_against_model: 0.16
+    injury_conflict_score: 0.18
+    schedule_pressure: 0.10
+    weather_risk: 0.08
+    lineup_penalty: 0.06

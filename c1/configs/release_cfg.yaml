@@ -1,0 +1,18 @@
+allowed_governance_actions:
+  - APPROVE
+
+allowed_plays:
+  - 1x2
+  - totals
+
+min_confidence: 0.30
+
+fallback:
+  enabled: true
+  allowed_plays:
+    - 1x2
+    - handicap
+  min_confidence: 0.30
+  min_ev: -0.25
+  handicap_min_side_gap: 0.06
+  handicap_max_draw_prob: 0.34

@@ -1,0 +1,11 @@
+# config/500_config.json
+{
+  "enabled": true,
+  "update_interval": 300,
+  "max_retries": 3,
+  "timeout": 10,
+  "proxy": null,
+  "debug": false,
+  "save_raw_data": true,
+  "data_dir": "data/500_odds"
+}

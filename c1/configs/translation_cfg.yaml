@@ -1,0 +1,20 @@
+version: c1.phase5
+
+one_x_two:
+  min_confidence: 0.58
+  min_ev: -0.02
+  draw_min_probability: 0.30
+
+handicap:
+  supported_line_abs_max: 2.25
+  min_cover_edge: 0.28
+  min_side_gap: 0.05
+  draw_prob_max_for_side: 0.31
+  rating_diff_scale: 0.55
+  side_strength_scale: 1.65
+  draw_drag_scale: 0.75
+
+totals:
+  default_line: 2.5
+  default_expected_goals: 2.5
+  min_total_edge: 0.22

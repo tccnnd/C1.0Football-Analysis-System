@@ -1,0 +1,38 @@
+{
+  "league_alias_zh_to_en": {
+    "意甲": "Serie A",
+    "英足总杯": "FA Cup",
+    "德甲": "Bundesliga",
+    "西甲": "La Liga",
+    "沙特联": "Pro League",
+    "法甲": "Ligue 1",
+    "葡超": "Primeira Liga",
+    "美职业": "Major League Soccer",
+    "澳超": "A-League",
+    "韩K联": "K League 1",
+    "日职联": "J1 League",
+    "荷甲": "Eredivisie",
+    "德乙": "2. Bundesliga",
+    "瑞典超": "Allsvenskan"
+  },
+  "team_alias_zh_to_en": {
+    "圣何塞地震": "San Jose Earthquakes",
+    "圣地亚哥": "San Diego FC",
+    "汉诺威96": "Hannover 96",
+    "埃弗斯堡": "Elversberg",
+    "菲尔特": "Greuther Furth",
+    "帕德博恩": "Paderborn",
+    "索尔纳": "AIK",
+    "哈尔姆斯塔德": "Halmstad",
+    "福伦丹": "Volendam",
+    "费耶诺德": "Feyenoord",
+    "昂热": "Angers",
+    "里昂": "Lyon",
+    "洛里昂": "Lorient",
+    "巴黎FC": "Paris FC",
+    "FC东京": "FC Tokyo",
+    "町田泽维亚": "Machida Zelvia",
+    "川崎前锋": "Kawasaki Frontale",
+    "浦和红钻": "Urawa Red Diamonds"
+  }
+}
