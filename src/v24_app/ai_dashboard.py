@@ -6,6 +6,7 @@ import re
 import threading
 import tkinter as tk
 import time
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -1149,6 +1150,7 @@ class SmartMatchDashboard:
     def open_review_center(self) -> None:
         settlements = list(reversed(get_recent_settlements(limit=200)))
         summary = self._settlement_summary(settlements)
+        trend = self._settlement_trend_summary(settlements)
 
         shell = self._page_shell(
             "\u590d\u76d8\u4e2d\u5fc3",
@@ -1192,6 +1194,16 @@ class SmartMatchDashboard:
             ("\u5927\u5c0f\u7403\u547d\u4e2d", summary["ou"], YELLOW),
         ]:
             self._detail_metric(top, label, value, color)
+
+        trend_frame = tk.Frame(shell, bg=BG)
+        trend_frame.pack(fill=tk.X, pady=(0, 16))
+        for label, value, color in [
+            ("\u4e3b\u8981\u504f\u5dee", trend["top_bias"], YELLOW if trend["top_bias"] != "-" else TEXT),
+            ("\u6700\u4e0d\u7a33\u5b9a\u73a9\u6cd5", trend["weakest_play"], RED if trend["weakest_play"] != "-" else TEXT),
+            ("\u9ad8\u7f6e\u4fe1\u5931\u8bef", str(trend["high_conf_misses"]), RED if trend["high_conf_misses"] else GREEN),
+            ("\u8c03\u6743\u91cd\u70b9", trend["priority"], "#7aa2ff"),
+        ]:
+            self._detail_metric(trend_frame, label, str(value), color)
 
         body = tk.Frame(shell, bg=BG)
         body.pack(fill=tk.BOTH, expand=True)
@@ -1292,6 +1304,69 @@ class SmartMatchDashboard:
             "handicap": self._hit_rate_text(settlements, "handicap_is_correct"),
             "ou": self._hit_rate_text(settlements, "ou_is_correct"),
         }
+
+    def _settlement_trend_summary(self, settlements: list[dict]) -> dict[str, object]:
+        recent = settlements[:80]
+        if not recent:
+            return {
+                "top_bias": "-",
+                "weakest_play": "-",
+                "high_conf_misses": 0,
+                "priority": "\u7b49\u5f85\u6837\u672c",
+            }
+
+        bias_counter: Counter[str] = Counter()
+        for item in recent:
+            for tag in self._settlement_bias_tags(item):
+                if tag != "\u65e0\u660e\u663e\u504f\u5dee":
+                    bias_counter[tag] += 1
+        top_bias = "-"
+        if bias_counter:
+            tag, count = bias_counter.most_common(1)[0]
+            top_bias = f"{tag} {count}\u6b21"
+
+        play_keys = [
+            ("1X2", "is_correct"),
+            ("\u8ba9\u7403", "handicap_is_correct"),
+            ("\u5927\u5c0f\u7403", "ou_is_correct"),
+            ("\u6bd4\u5206", "score_is_correct"),
+        ]
+        weakest_play = "-"
+        weakest_rate = 1.1
+        for label, key in play_keys:
+            values = [bool(item.get(key)) for item in recent if isinstance(item, dict) and item.get(key) is not None]
+            if not values:
+                continue
+            rate = sum(1 for value in values if value) / len(values)
+            if rate < weakest_rate:
+                weakest_rate = rate
+                weakest_play = f"{label} {rate:.1%}"
+
+        high_conf_misses = sum(
+            1
+            for item in recent
+            if item.get("is_correct") is False and float(item.get("prediction_confidence", 0) or 0) >= 0.6
+        )
+        priority = self._trend_priority_text(top_bias, weakest_play, high_conf_misses)
+        return {
+            "top_bias": top_bias,
+            "weakest_play": weakest_play,
+            "high_conf_misses": high_conf_misses,
+            "priority": priority,
+        }
+
+    def _trend_priority_text(self, top_bias: str, weakest_play: str, high_conf_misses: int) -> str:
+        if high_conf_misses:
+            return "\u964d\u4f4e\u9ad8\u7f6e\u4fe1\u5355\u5411\u6743\u91cd"
+        if "\u5927\u5c0f\u7403" in weakest_play or "\u8fdb\u7403" in top_bias:
+            return "\u4f18\u5316\u603b\u8fdb\u7403\u671f\u671b"
+        if "\u8ba9\u7403" in weakest_play or "\u8ba9\u7403" in top_bias:
+            return "\u590d\u6838\u8ba9\u7403\u76d8\u4e00\u81f4\u6027"
+        if "\u5e73\u5c40" in top_bias:
+            return "\u589e\u52a0\u5e73\u5c40\u4fdd\u62a4"
+        if "\u6bd4\u5206" in weakest_play or "\u6bd4\u5206" in top_bias:
+            return "\u964d\u4f4e\u7cbe\u786e\u6bd4\u5206\u6743\u91cd"
+        return "\u7ef4\u6301\u5f53\u524d\u6743\u91cd"
 
     def _hit_rate_text(self, settlements: list[dict], key: str) -> str:
         values = [bool(item.get(key)) for item in settlements if isinstance(item, dict) and item.get(key) is not None]
