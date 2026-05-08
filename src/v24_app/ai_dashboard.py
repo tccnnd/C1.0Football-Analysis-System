@@ -459,8 +459,9 @@ class SmartMatchDashboard:
         tk.Label(header, text="重点赛事", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 14, "bold")).pack(side=tk.LEFT)
         tk.Label(header, text="查看全部 ›", bg=PANEL, fg="#7692ff", font=("Microsoft YaHei UI", 10, "bold")).pack(side=tk.RIGHT)
 
-        self.match_list = tk.Frame(matches_card, bg=PANEL)
-        self.match_list.pack(fill=tk.X, padx=18, pady=(0, 14))
+        self.match_list = tk.Frame(matches_card, bg=PANEL, height=208)
+        self.match_list.pack(fill=tk.X, padx=18, pady=(0, 10))
+        self.match_list.pack_propagate(False)
 
         charts = tk.Frame(content, bg=BG)
         charts.pack(fill=tk.BOTH, expand=True)
@@ -606,7 +607,7 @@ class SmartMatchDashboard:
                 {"high": 0, "medium": 1, "low": 2}[_risk_key(row.prediction.get("risk_level"))],
                 -float(row.prediction.get("confidence", 0) or 0),
             ),
-        )[:6]
+        )[:3]
 
         if not ranked:
             tk.Label(self.match_list, text="暂无通过校验的赛事数据", bg=PANEL, fg=MUTED, font=("Microsoft YaHei UI", 11)).pack(anchor=tk.W, pady=20)
@@ -619,11 +620,11 @@ class SmartMatchDashboard:
         match = row.match
         pred = row.prediction
         frame = tk.Frame(self.match_list, bg=PANEL_2, highlightbackground="#172638", highlightthickness=1)
-        frame.pack(fill=tk.X, pady=5)
+        frame.pack(fill=tk.X, pady=3)
         frame.configure(cursor="hand2")
 
         left = tk.Frame(frame, bg=PANEL_2)
-        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=18, pady=12)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=18, pady=8)
         tk.Label(left, text=match.league, bg=PANEL_2, fg="#6d8dff", font=("Microsoft YaHei UI", 9, "bold")).pack(anchor=tk.W)
         tk.Label(left, text=f"{match.home_team} vs {match.away_team}", bg=PANEL_2, fg=TEXT, font=("Microsoft YaHei UI", 12, "bold")).pack(anchor=tk.W, pady=(4, 2))
         tk.Label(left, text=f"开赛时间：{match.match_date} {match.match_time}", bg=PANEL_2, fg=MUTED, font=("Microsoft YaHei UI", 9)).pack(anchor=tk.W)
@@ -634,7 +635,7 @@ class SmartMatchDashboard:
             ("推荐策略", _strategy_text(pred), TEXT, 168),
         ]:
             block = tk.Frame(frame, bg=PANEL_2, width=width)
-            block.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 6), pady=12)
+            block.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 6), pady=8)
             block.pack_propagate(False)
             tk.Label(block, text=title, bg=PANEL_2, fg=MUTED, font=("Microsoft YaHei UI", 9)).pack(anchor=tk.W)
             tk.Label(block, text=value, bg=PANEL_2, fg=color, font=("Microsoft YaHei UI", 12, "bold"), wraplength=width - 8, justify=tk.LEFT).pack(anchor=tk.W, pady=(8, 0))
