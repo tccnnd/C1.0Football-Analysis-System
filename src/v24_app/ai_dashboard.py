@@ -563,6 +563,10 @@ class SmartMatchDashboard:
         self.risk_chart = self._chart_card(charts, "风险分布")
         self.conf_chart = self._chart_card(charts, "置信度分布")
 
+        self._refresh_matches()
+        self._draw_risk_chart()
+        self._draw_confidence_chart()
+
         footer = tk.Label(content, textvariable=self.status_var, bg=BG, fg=MUTED, font=("Microsoft YaHei UI", 9))
         footer.pack(anchor=tk.W, pady=(10, 0))
 
