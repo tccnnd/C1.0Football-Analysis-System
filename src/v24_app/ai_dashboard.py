@@ -307,6 +307,8 @@ class SmartMatchDashboard:
         self.last_loaded_at = "-"
         self.last_refresh_seconds: float | None = None
         self.event_log: list[tuple[str, str, str]] = []
+        self.current_nav_index = 1
+        self.nav_items: list[tuple[tk.Frame, list[tk.Label]]] = []
         settings = _load_dashboard_settings()
         self.auto_refresh_enabled = tk.BooleanVar(value=bool(settings.get("auto_refresh_enabled", False)))
         self.auto_refresh_interval_min = tk.IntVar(value=max(3, min(int(settings.get("auto_refresh_interval_min", 10) or 10), 120)))
@@ -393,23 +395,42 @@ class SmartMatchDashboard:
                 command = self.open_data_center
             elif index == 6:
                 command = self.open_system_settings
-            self._nav_item(icon, text, active, command=command)
+            self._nav_item(index, icon, text, active, command=command)
 
-    def _nav_item(self, icon: str, text: str, active: bool, command=None) -> None:
+    def _nav_item(self, index: int, icon: str, text: str, active: bool, command=None) -> None:
         bg = "#4051c8" if active else SIDEBAR
         item = tk.Frame(self.sidebar, bg=bg, height=48)
         item.pack(fill=tk.X, padx=16, pady=4)
         item.pack_propagate(False)
-        tk.Label(item, text=icon, bg=bg, fg=TEXT, font=("Microsoft YaHei UI", 13)).pack(side=tk.LEFT, padx=(16, 12))
-        tk.Label(item, text=text, bg=bg, fg=TEXT, font=("Microsoft YaHei UI", 11, "bold" if active else "normal")).pack(side=tk.LEFT)
+        icon_label = tk.Label(item, text=icon, bg=bg, fg=TEXT, font=("Microsoft YaHei UI", 13))
+        icon_label.pack(side=tk.LEFT, padx=(16, 12))
+        text_label = tk.Label(item, text=text, bg=bg, fg=TEXT, font=("Microsoft YaHei UI", 11, "bold" if active else "normal"))
+        text_label.pack(side=tk.LEFT)
+        self.nav_items.append((item, [icon_label, text_label]))
         if command is not None:
+            wrapped = lambda: self._select_nav(index, command)
             item.configure(cursor="hand2")
-            item.bind("<Button-1>", lambda _event: command())
+            item.bind("<Button-1>", lambda _event: wrapped())
             for child in item.winfo_children():
                 child.configure(cursor="hand2")
-                child.bind("<Button-1>", lambda _event: command())
+                child.bind("<Button-1>", lambda _event: wrapped())
+
+    def _select_nav(self, index: int, command) -> None:
+        self.current_nav_index = index
+        self._refresh_nav_highlight()
+        command()
+
+    def _refresh_nav_highlight(self) -> None:
+        for index, (item, labels) in enumerate(self.nav_items):
+            active = index == self.current_nav_index
+            bg = "#4051c8" if active else SIDEBAR
+            item.configure(bg=bg)
+            for label in labels:
+                label.configure(bg=bg, font=("Microsoft YaHei UI", 11 if label is labels[1] else 13, "bold" if active and label is labels[1] else "normal"))
 
     def _build_main(self) -> None:
+        self.current_nav_index = 1
+        self._refresh_nav_highlight()
         self._clear_main()
         content = tk.Frame(self.main, bg=BG)
         content.pack(fill=tk.BOTH, expand=True, padx=20, pady=24)
