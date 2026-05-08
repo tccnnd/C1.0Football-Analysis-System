@@ -307,7 +307,7 @@ class SmartMatchDashboard:
         self.last_loaded_at = "-"
         self.last_refresh_seconds: float | None = None
         self.event_log: list[tuple[str, str, str]] = []
-        self.current_nav_index = 1
+        self.current_nav_index = 0
         self.nav_items: list[tuple[tk.Frame, list[tk.Label]]] = []
         settings = _load_dashboard_settings()
         self.auto_refresh_enabled = tk.BooleanVar(value=bool(settings.get("auto_refresh_enabled", False)))
@@ -338,7 +338,7 @@ class SmartMatchDashboard:
         self.main.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         self._build_sidebar()
-        self._build_main()
+        self.show_home_overview()
 
     def _clear_main(self) -> None:
         for child in self.main.winfo_children():
@@ -383,7 +383,9 @@ class SmartMatchDashboard:
         ]
         for index, (icon, text, active) in enumerate(nav):
             command = None
-            if index in (0, 1):
+            if index == 0:
+                command = self.show_home_overview
+            elif index == 1:
                 command = self._build_main
             elif index == 2:
                 command = self.open_monitor_center
@@ -427,6 +429,78 @@ class SmartMatchDashboard:
             item.configure(bg=bg)
             for label in labels:
                 label.configure(bg=bg, font=("Microsoft YaHei UI", 11 if label is labels[1] else 13, "bold" if active and label is labels[1] else "normal"))
+
+    def show_home_overview(self) -> None:
+        self.current_nav_index = 0
+        self._refresh_nav_highlight()
+        content = self._page_shell(
+            "\u9996\u9875\u6982\u89c8",
+            "\u8d5b\u4e8b\u5206\u6790\u603b\u89c8\u3001\u98ce\u9669\u6458\u8981\u548c\u7cfb\u7edf\u72b6\u6001",
+        )
+
+        actions = tk.Frame(content, bg=BG)
+        actions.pack(fill=tk.X, pady=(0, 18))
+        tk.Button(
+            actions,
+            text="\u8fdb\u5165\u8d5b\u4e8b\u5206\u6790",
+            command=lambda: self._select_nav(1, self._build_main),
+            bg=BLUE,
+            fg="white",
+            activebackground="#3d5ee7",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=18,
+            pady=7,
+        ).pack(side=tk.LEFT)
+        tk.Button(
+            actions,
+            text="\u5237\u65b0\u6570\u636e",
+            command=self.refresh,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground=TEXT,
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=18,
+            pady=7,
+        ).pack(side=tk.LEFT, padx=(10, 0))
+
+        cards = tk.Frame(content, bg=BG)
+        cards.pack(fill=tk.X, pady=(0, 18))
+        self._metric_card(cards, "\u4eca\u65e5\u8d5b\u4e8b", self.summary_vars["matches"], "\u573a", TEXT)
+        self._metric_card(cards, "\u98ce\u9669\u9884\u8b66", self.summary_vars["alerts"], "\u6b21", RED)
+        self._metric_card(cards, "\u5386\u53f2\u80dc\u7387", self.summary_vars["hit_rate"], "", "#7aa2ff")
+        report_count = tk.StringVar(value=str(len(list(REPORT_DIR.glob("ai_match_report_*.md"))) if REPORT_DIR.exists() else 0))
+        self._metric_card(cards, "\u5206\u6790\u62a5\u544a", report_count, "\u4efd", TEXT)
+
+        body = tk.Frame(content, bg=BG)
+        body.pack(fill=tk.BOTH, expand=True)
+        left = self._card(body, PANEL)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 14))
+        right = self._card(body, PANEL)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        tk.Label(left, text="\u7cfb\u7edf\u72b6\u6001", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
+        for label, value in [
+            ("\u6570\u636e\u6e90", self.data_source),
+            ("\u6700\u8fd1\u52a0\u8f7d", self.last_loaded_at),
+            ("\u6700\u8fd1\u8017\u65f6", f"{self.last_refresh_seconds:.2f}s" if self.last_refresh_seconds is not None else "-"),
+            ("\u5e73\u5747\u7f6e\u4fe1\u5ea6", self._average_confidence()),
+            ("\u81ea\u52a8\u5237\u65b0", "\u5df2\u5f00\u542f" if self.auto_refresh_enabled.get() else "\u5df2\u5173\u95ed"),
+        ]:
+            self._kv_row(left, label, value)
+
+        tk.Label(right, text="\u5feb\u6377\u5165\u53e3", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
+        shortcuts = [
+            ("\u8d5b\u4e8b\u5206\u6790", "\u67e5\u770b\u91cd\u70b9\u8d5b\u4e8b\u3001\u98ce\u9669\u548c\u7f6e\u4fe1\u5ea6\u5206\u5e03", lambda: self._select_nav(1, self._build_main)),
+            ("\u590d\u76d8\u4e2d\u5fc3", "\u56de\u6536\u8d5b\u679c\u5e76\u67e5\u770b\u547d\u4e2d\u7387\u4e0e\u9ad8\u7f6e\u4fe1\u5931\u8bef", self.open_review_center),
+            ("\u76d1\u63a7\u4e2d\u5fc3", "\u67e5\u770b Agent \u72b6\u6001\u3001\u8fd0\u884c\u65e5\u5fd7\u548c\u8017\u65f6", self.open_monitor_center),
+            ("\u6570\u636e\u4e2d\u5fc3", "\u67e5\u770b\u6570\u636e\u6587\u4ef6\u3001\u6a21\u578b\u548c\u7f13\u5b58\u72b6\u6001", self.open_data_center),
+        ]
+        for title, body_text, command in shortcuts:
+            self._shortcut_row(right, title, body_text, command)
 
     def _build_main(self) -> None:
         self.current_nav_index = 1
@@ -504,6 +578,25 @@ class SmartMatchDashboard:
         line.pack(pady=(0, 18))
         tk.Label(line, textvariable=value, bg=PANEL, fg=color, font=("Microsoft YaHei UI", 24, "bold")).pack(side=tk.LEFT)
         tk.Label(line, text=suffix, bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 11, "bold")).pack(side=tk.LEFT, padx=(5, 0), pady=(8, 0))
+
+    def _shortcut_row(self, parent: tk.Widget, title: str, body: str, command) -> None:
+        frame = tk.Frame(parent, bg=PANEL_2, highlightbackground="#172638", highlightthickness=1)
+        frame.pack(fill=tk.X, padx=18, pady=7)
+        frame.configure(cursor="hand2")
+        tk.Label(frame, text=title, bg=PANEL_2, fg=TEXT, font=("Microsoft YaHei UI", 11, "bold")).pack(anchor=tk.W, padx=14, pady=(10, 3))
+        tk.Label(
+            frame,
+            text=body,
+            bg=PANEL_2,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 9),
+            justify=tk.LEFT,
+            wraplength=360,
+        ).pack(anchor=tk.W, padx=14, pady=(0, 10))
+        frame.bind("<Button-1>", lambda _event: command())
+        for child in frame.winfo_children():
+            child.configure(cursor="hand2")
+            child.bind("<Button-1>", lambda _event: command())
 
     def _chart_card(self, parent: tk.Widget, title: str) -> tk.Canvas:
         frame = self._card(parent, PANEL)
