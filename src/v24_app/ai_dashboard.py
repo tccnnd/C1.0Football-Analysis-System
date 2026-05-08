@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import json
 import re
 import threading
 import tkinter as tk
@@ -26,6 +27,7 @@ YELLOW = "#ffd84d"
 RED = "#ef5b57"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 REPORT_DIR = PROJECT_ROOT / "reports"
+SETTINGS_PATH = PROJECT_ROOT / "data" / "state" / "ai_dashboard_settings.json"
 
 
 @dataclass
@@ -199,6 +201,21 @@ def _mtime_text(path: Path) -> str:
         return "-"
 
 
+def _load_dashboard_settings() -> dict:
+    try:
+        if not SETTINGS_PATH.exists():
+            return {}
+        data = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_dashboard_settings(settings: dict) -> None:
+    SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SETTINGS_PATH.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 class SmartMatchDashboard:
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -212,8 +229,9 @@ class SmartMatchDashboard:
         self.last_loaded_at = "-"
         self.last_refresh_seconds: float | None = None
         self.event_log: list[tuple[str, str, str]] = []
-        self.auto_refresh_enabled = tk.BooleanVar(value=False)
-        self.auto_refresh_interval_min = tk.IntVar(value=10)
+        settings = _load_dashboard_settings()
+        self.auto_refresh_enabled = tk.BooleanVar(value=bool(settings.get("auto_refresh_enabled", False)))
+        self.auto_refresh_interval_min = tk.IntVar(value=max(3, min(int(settings.get("auto_refresh_interval_min", 10) or 10), 120)))
         self._auto_refresh_after_id: str | None = None
         self.status_var = tk.StringVar(value="正在加载赛事数据...")
         self.date_var = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
@@ -226,6 +244,7 @@ class SmartMatchDashboard:
 
         self._build_layout()
         self.refresh()
+        self._schedule_auto_refresh()
 
     def _build_layout(self) -> None:
         self.shell = tk.Frame(self.root, bg=BG)
@@ -385,6 +404,15 @@ class SmartMatchDashboard:
         self._schedule_auto_refresh()
 
     def _on_auto_refresh_changed(self) -> None:
+        interval = max(3, min(int(self.auto_refresh_interval_min.get()), 120))
+        self.auto_refresh_interval_min.set(interval)
+        _save_dashboard_settings(
+            {
+                "auto_refresh_enabled": bool(self.auto_refresh_enabled.get()),
+                "auto_refresh_interval_min": interval,
+                "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        )
         self._schedule_auto_refresh()
         if self.auto_refresh_enabled.get():
             self.status_var.set(f"\u81ea\u52a8\u5237\u65b0\u5df2\u5f00\u542f\uff0c\u95f4\u9694 {self.auto_refresh_interval_min.get()} \u5206\u949f")
@@ -999,6 +1027,7 @@ class SmartMatchDashboard:
             ("\u9879\u76ee\u76ee\u5f55", str(PROJECT_ROOT)),
             ("\u6570\u636e\u76ee\u5f55", str(PROJECT_ROOT / "data")),
             ("\u62a5\u544a\u76ee\u5f55", str(REPORT_DIR)),
+            ("\u8bbe\u7f6e\u6587\u4ef6", str(SETTINGS_PATH)),
         ]:
             self._kv_row(left, label, value)
 
