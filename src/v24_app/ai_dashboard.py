@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import math
+import re
 import threading
 import tkinter as tk
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from tkinter import messagebox
 
 from .core import AppMatch, fetch_matches_v24, get_recent_settlements, predict_match
@@ -21,6 +23,8 @@ BLUE = "#4f6ef7"
 GREEN = "#54d37c"
 YELLOW = "#ffd84d"
 RED = "#ef5b57"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+REPORT_DIR = PROJECT_ROOT / "reports"
 
 
 @dataclass
@@ -34,6 +38,25 @@ def _pct(value: object) -> str:
         return f"{float(value):.0%}"
     except Exception:
         return "-"
+
+
+def _pct1(value: object) -> str:
+    try:
+        return f"{float(value):.1%}"
+    except Exception:
+        return "-"
+
+
+def _num(value: object, digits: int = 2) -> str:
+    try:
+        return f"{float(value):.{digits}f}"
+    except Exception:
+        return "-"
+
+
+def _prob_text(probabilities: dict, key: str) -> str:
+    labels = {"home": "\u4e3b\u80dc", "draw": "\u5e73\u5c40", "away": "\u5ba2\u80dc"}
+    return f"{labels[key]} {_pct1(probabilities.get(key, 0))}"
 
 
 def _risk_key(label: object) -> str:
@@ -64,6 +87,78 @@ def _strategy_text(prediction: dict) -> str:
     if risk == "medium":
         return f"{pick} / {ou or score or '观察'}"
     return pick
+
+
+def _analysis_report(row: DashboardRow) -> str:
+    match = row.match
+    pred = row.prediction
+    indices = pred.get("indices", {}) if isinstance(pred.get("indices"), dict) else {}
+    probs = pred.get("probabilities", {}) if isinstance(pred.get("probabilities"), dict) else {}
+    market_probs = pred.get("market_probabilities", {}) if isinstance(pred.get("market_probabilities"), dict) else {}
+    risk = _risk_key(pred.get("risk_level"))
+
+    risk_reason = {
+        "high": "\u51b7\u95e8\u6307\u6570\u504f\u9ad8\uff0c\u5e02\u573a\u4e0e\u6a21\u578b\u53ef\u80fd\u5b58\u5728\u660e\u663e\u5206\u6b67\u3002",
+        "medium": "\u5b58\u5728\u4e00\u5b9a\u6ce2\u52a8\uff0c\u5efa\u8bae\u964d\u4f4e\u6743\u91cd\u5e76\u7ed3\u5408\u8d5b\u524d\u4fe1\u606f\u590d\u6838\u3002",
+        "low": "\u7efc\u5408\u6307\u6807\u76f8\u5bf9\u7a33\u5b9a\uff0c\u76ee\u524d\u6ca1\u6709\u89e6\u53d1\u660e\u663e\u98ce\u9669\u4fe1\u53f7\u3002",
+    }[risk]
+    market_line = ""
+    if market_probs:
+        market_line = (
+            "\n"
+            f"- \u5e02\u573a\u9690\u542b\u6982\u7387\uff1a"
+            f"{_prob_text(market_probs, 'home')} / {_prob_text(market_probs, 'draw')} / {_prob_text(market_probs, 'away')}"
+        )
+
+    return (
+        f"\u5bf9\u9635\uff1a{match.home_team} vs {match.away_team}\n"
+        f"\u8054\u8d5b\uff1a{match.league}\n"
+        f"\u5f00\u8d5b\uff1a{match.match_date} {match.match_time}\n\n"
+        "\u6838\u5fc3\u7ed3\u8bba\n"
+        f"- \u63a8\u8350\u7b56\u7565\uff1a{_strategy_text(pred)}\n"
+        f"- \u98ce\u9669\u7b49\u7ea7\uff1a{_risk_label(pred.get('risk_level'))}\n"
+        f"- \u7efc\u5408\u7f6e\u4fe1\u5ea6\uff1a{_pct1(pred.get('confidence'))}\n"
+        f"- \u9884\u8ba1\u603b\u8fdb\u7403\uff1a{_num(pred.get('expected_goals'))}\n\n"
+        "\u6982\u7387\u5206\u5e03\n"
+        f"- {_prob_text(probs, 'home')} / {_prob_text(probs, 'draw')} / {_prob_text(probs, 'away')}"
+        f"{market_line}\n\n"
+        "\u73a9\u6cd5\u7ef4\u5ea6\n"
+        f"- \u5927\u5c0f\u7403\uff1a{pred.get('ou_recommendation', '-')} ({_pct1(pred.get('ou_confidence'))})\n"
+        f"- \u8ba9\u7403\uff1a{pred.get('handicap_recommendation', '-')} ({_pct1(pred.get('handicap_confidence'))})\n"
+        f"- \u6bd4\u5206\uff1a{pred.get('score_recommendation', '-')} ({_pct1(pred.get('score_confidence'))})\n"
+        f"- \u534a\u5168\u573a\uff1a{pred.get('htft_recommendation', '-')} ({_pct1(pred.get('htft_confidence'))})\n\n"
+        "\u98ce\u9669\u89e3\u8bfb\n"
+        f"- {risk_reason}\n"
+        f"- \u51b7\u95e8\u6307\u6570\uff1a{_pct1(indices.get('upset_index', 0))}\n"
+        f"- \u7a33\u5b9a\u6307\u6570\uff1a{_pct1(indices.get('stability_index', 0))}\n"
+        f"- \u4fe1\u5fc3\u6307\u6570\uff1a{_pct1(indices.get('confidence_index', 0))}\n\n"
+        "\u590d\u6838\u5efa\u8bae\n"
+        "- \u8d5b\u524d\u91cd\u70b9\u590d\u6838\u4f24\u505c\u3001\u9996\u53d1\u3001\u76d8\u53e3\u53d8\u5316\u548c\u5e02\u573a\u70ed\u5ea6\u3002\n"
+        "- \u82e5\u4e34\u573a\u76d8\u53e3\u4e0e\u6a21\u578b\u65b9\u5411\u6301\u7eed\u80cc\u79bb\uff0c\u5e94\u4e0b\u8c03\u7b56\u7565\u6743\u91cd\u3002"
+    )
+
+
+def _slug(text: str) -> str:
+    cleaned = re.sub(r"[^\w\u4e00-\u9fff-]+", "_", text, flags=re.UNICODE).strip("_")
+    return cleaned[:80] or "match"
+
+
+def _markdown_report(row: DashboardRow, generated_at: datetime | None = None) -> str:
+    now = generated_at or datetime.now()
+    match = row.match
+    pred = row.prediction
+    return (
+        f"# {match.home_team} vs {match.away_team} \u8d5b\u4e8b\u5206\u6790\u62a5\u544a\n\n"
+        f"- \u751f\u6210\u65f6\u95f4\uff1a{now.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"- \u8054\u8d5b\uff1a{match.league}\n"
+        f"- \u5f00\u8d5b\u65f6\u95f4\uff1a{match.match_date} {match.match_time}\n"
+        f"- \u6570\u636e\u6e90\uff1a{match.source}\n"
+        f"- \u98ce\u9669\u7b49\u7ea7\uff1a{_risk_label(pred.get('risk_level'))}\n"
+        f"- \u63a8\u8350\u7b56\u7565\uff1a{_strategy_text(pred)}\n"
+        f"- \u7f6e\u4fe1\u5ea6\uff1a{_pct1(pred.get('confidence'))}\n\n"
+        "## AI \u5206\u6790\n\n"
+        f"{_analysis_report(row)}\n"
+    )
 
 
 class SmartMatchDashboard:
@@ -122,21 +217,28 @@ class SmartMatchDashboard:
             ("▤", "数据中心", False),
             ("⚙", "系统设置", False),
         ]
-        for icon, text, active in nav:
-            self._nav_item(icon, text, active)
+        for index, (icon, text, active) in enumerate(nav):
+            command = self.open_history_reports if index == 3 else None
+            self._nav_item(icon, text, active, command=command)
 
         bottom = tk.Frame(self.sidebar, bg=SIDEBAR)
         bottom.pack(side=tk.BOTTOM, fill=tk.X, padx=24, pady=24)
         tk.Label(bottom, text="●  个人开发者", bg=SIDEBAR, fg=TEXT, font=("Microsoft YaHei UI", 10)).pack(anchor=tk.W, pady=(0, 12))
         tk.Label(bottom, text="⇱  退出登录", bg=SIDEBAR, fg=TEXT, font=("Microsoft YaHei UI", 10)).pack(anchor=tk.W)
 
-    def _nav_item(self, icon: str, text: str, active: bool) -> None:
+    def _nav_item(self, icon: str, text: str, active: bool, command=None) -> None:
         bg = "#4051c8" if active else SIDEBAR
         item = tk.Frame(self.sidebar, bg=bg, height=48)
         item.pack(fill=tk.X, padx=16, pady=4)
         item.pack_propagate(False)
         tk.Label(item, text=icon, bg=bg, fg=TEXT, font=("Microsoft YaHei UI", 13)).pack(side=tk.LEFT, padx=(16, 12))
         tk.Label(item, text=text, bg=bg, fg=TEXT, font=("Microsoft YaHei UI", 11, "bold" if active else "normal")).pack(side=tk.LEFT)
+        if command is not None:
+            item.configure(cursor="hand2")
+            item.bind("<Button-1>", lambda _event: command())
+            for child in item.winfo_children():
+                child.configure(cursor="hand2")
+                child.bind("<Button-1>", lambda _event: command())
 
     def _build_main(self) -> None:
         content = tk.Frame(self.main, bg=BG)
@@ -280,6 +382,7 @@ class SmartMatchDashboard:
         pred = row.prediction
         frame = tk.Frame(self.match_list, bg=PANEL_2, highlightbackground="#172638", highlightthickness=1)
         frame.pack(fill=tk.X, pady=5)
+        frame.configure(cursor="hand2")
 
         left = tk.Frame(frame, bg=PANEL_2)
         left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=18, pady=12)
@@ -297,6 +400,219 @@ class SmartMatchDashboard:
             block.pack_propagate(False)
             tk.Label(block, text=title, bg=PANEL_2, fg=MUTED, font=("Microsoft YaHei UI", 9)).pack(anchor=tk.W)
             tk.Label(block, text=value, bg=PANEL_2, fg=color, font=("Microsoft YaHei UI", 12, "bold"), wraplength=width - 8, justify=tk.LEFT).pack(anchor=tk.W, pady=(8, 0))
+
+        self._bind_detail_open(frame, row)
+
+    def _bind_detail_open(self, widget: tk.Widget, row: DashboardRow) -> None:
+        widget.bind("<Button-1>", lambda _event: self.open_match_detail(row))
+        try:
+            widget.configure(cursor="hand2")
+        except tk.TclError:
+            pass
+        for child in widget.winfo_children():
+            self._bind_detail_open(child, row)
+
+    def open_match_detail(self, row: DashboardRow) -> None:
+        title = f"{row.match.home_team} vs {row.match.away_team}"
+        win = tk.Toplevel(self.root)
+        win.title(title)
+        win.geometry("860x720")
+        win.minsize(760, 620)
+        win.configure(bg=BG)
+
+        shell = tk.Frame(win, bg=BG)
+        shell.pack(fill=tk.BOTH, expand=True, padx=22, pady=20)
+
+        top = tk.Frame(shell, bg=BG)
+        top.pack(fill=tk.X, pady=(0, 16))
+        tk.Label(top, text=title, bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 18, "bold")).pack(anchor=tk.W)
+        tk.Label(
+            top,
+            text=f"{row.match.league}  |  {row.match.match_date} {row.match.match_time}",
+            bg=BG,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 10),
+        ).pack(anchor=tk.W, pady=(6, 0))
+        tk.Button(
+            top,
+            text="\u4fdd\u5b58\u62a5\u544a",
+            command=lambda: self.save_match_report(row),
+            bg=BLUE,
+            fg="white",
+            activebackground="#3d5ee7",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=16,
+            pady=6,
+        ).pack(anchor=tk.E, pady=(0, 2))
+
+        summary = tk.Frame(shell, bg=BG)
+        summary.pack(fill=tk.X, pady=(0, 16))
+        pred = row.prediction
+        for label, value, color in [
+            ("\u98ce\u9669\u7b49\u7ea7", _risk_label(pred.get("risk_level")), _risk_color(pred.get("risk_level"))),
+            ("\u63a8\u8350\u7b56\u7565", _strategy_text(pred), TEXT),
+            ("\u7f6e\u4fe1\u5ea6", _pct1(pred.get("confidence")), "#7aa2ff"),
+            ("\u9884\u8ba1\u8fdb\u7403", _num(pred.get("expected_goals")), TEXT),
+        ]:
+            self._detail_metric(summary, label, value, color)
+
+        body = tk.Frame(shell, bg=BG)
+        body.pack(fill=tk.BOTH, expand=True)
+
+        left = self._card(body, PANEL)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 14))
+        tk.Label(left, text="\u6982\u7387\u4e0e\u98ce\u9669", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
+        self._draw_probability_panel(left, row)
+
+        right = self._card(body, PANEL)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tk.Label(right, text="AI \u5206\u6790\u62a5\u544a", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
+        text = tk.Text(
+            right,
+            wrap=tk.WORD,
+            bg=PANEL,
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10),
+            padx=16,
+            pady=8,
+        )
+        text.pack(fill=tk.BOTH, expand=True, padx=2, pady=(0, 14))
+        text.insert("1.0", _analysis_report(row))
+        text.configure(state=tk.DISABLED)
+
+    def save_match_report(self, row: DashboardRow) -> Path:
+        REPORT_DIR.mkdir(parents=True, exist_ok=True)
+        now = datetime.now()
+        name = f"ai_match_report_{now.strftime('%Y%m%d_%H%M%S')}_{_slug(row.match.home_team)}_vs_{_slug(row.match.away_team)}.md"
+        path = REPORT_DIR / name
+        path.write_text(_markdown_report(row, generated_at=now), encoding="utf-8")
+        self.status_var.set(f"\u62a5\u544a\u5df2\u4fdd\u5b58: {path.name}")
+        messagebox.showinfo("\u4fdd\u5b58\u62a5\u544a", f"\u5df2\u751f\u6210\u62a5\u544a:\n{path}")
+        return path
+
+    def open_history_reports(self) -> None:
+        REPORT_DIR.mkdir(parents=True, exist_ok=True)
+        files = sorted(REPORT_DIR.glob("ai_match_report_*.md"), key=lambda path: path.stat().st_mtime, reverse=True)
+
+        win = tk.Toplevel(self.root)
+        win.title("\u5386\u53f2\u62a5\u544a")
+        win.geometry("920x660")
+        win.minsize(760, 560)
+        win.configure(bg=BG)
+
+        shell = tk.Frame(win, bg=BG)
+        shell.pack(fill=tk.BOTH, expand=True, padx=22, pady=20)
+        tk.Label(shell, text="\u5386\u53f2\u62a5\u544a", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 18, "bold")).pack(anchor=tk.W)
+        tk.Label(shell, text=f"\u62a5\u544a\u76ee\u5f55: {REPORT_DIR}", bg=BG, fg=MUTED, font=("Microsoft YaHei UI", 9)).pack(anchor=tk.W, pady=(6, 14))
+
+        body = tk.Frame(shell, bg=BG)
+        body.pack(fill=tk.BOTH, expand=True)
+        left = self._card(body, PANEL)
+        left.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 14))
+        right = self._card(body, PANEL)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        listbox = tk.Listbox(
+            left,
+            bg=PANEL,
+            fg=TEXT,
+            selectbackground=BLUE,
+            selectforeground="white",
+            relief=tk.FLAT,
+            width=38,
+            font=("Microsoft YaHei UI", 10),
+            activestyle="none",
+        )
+        listbox.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        preview = tk.Text(
+            right,
+            wrap=tk.WORD,
+            bg=PANEL,
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10),
+            padx=16,
+            pady=12,
+        )
+        preview.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+
+        def show_file(index: int) -> None:
+            if index < 0 or index >= len(files):
+                return
+            path = files[index]
+            try:
+                content = path.read_text(encoding="utf-8")
+            except Exception as exc:
+                content = f"\u8bfb\u53d6\u5931\u8d25: {exc}"
+            preview.configure(state=tk.NORMAL)
+            preview.delete("1.0", tk.END)
+            preview.insert("1.0", content)
+            preview.configure(state=tk.DISABLED)
+
+        for path in files:
+            stamp = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+            listbox.insert(tk.END, f"{stamp}  {path.name}")
+
+        if files:
+            listbox.selection_set(0)
+            show_file(0)
+        else:
+            preview.insert("1.0", "\u6682\u65e0\u5355\u573a\u5206\u6790\u62a5\u544a\u3002")
+            preview.configure(state=tk.DISABLED)
+
+        listbox.bind("<<ListboxSelect>>", lambda _event: show_file(listbox.curselection()[0] if listbox.curselection() else -1))
+
+    def _detail_metric(self, parent: tk.Widget, label: str, value: str, color: str) -> None:
+        frame = self._card(parent, PANEL)
+        frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 12))
+        tk.Label(frame, text=label, bg=PANEL, fg=MUTED, font=("Microsoft YaHei UI", 9)).pack(anchor=tk.W, padx=14, pady=(12, 3))
+        tk.Label(frame, text=value, bg=PANEL, fg=color, font=("Microsoft YaHei UI", 14, "bold"), wraplength=150, justify=tk.LEFT).pack(anchor=tk.W, padx=14, pady=(0, 12))
+
+    def _draw_probability_panel(self, parent: tk.Widget, row: DashboardRow) -> None:
+        pred = row.prediction
+        probs = pred.get("probabilities", {}) if isinstance(pred.get("probabilities"), dict) else {}
+        indices = pred.get("indices", {}) if isinstance(pred.get("indices"), dict) else {}
+        items = [
+            ("\u4e3b\u80dc", probs.get("home", 0), "#7aa2ff"),
+            ("\u5e73\u5c40", probs.get("draw", 0), YELLOW),
+            ("\u5ba2\u80dc", probs.get("away", 0), GREEN),
+            ("\u51b7\u95e8", indices.get("upset_index", 0), RED),
+            ("\u7a33\u5b9a", indices.get("stability_index", 0), GREEN),
+            ("\u4fe1\u5fc3", indices.get("confidence_index", 0), "#7aa2ff"),
+        ]
+        for label, value, color in items:
+            self._bar_row(parent, label, float(value or 0), color)
+
+        plays = tk.Frame(parent, bg=PANEL)
+        plays.pack(fill=tk.X, padx=18, pady=(18, 8))
+        for label, value in [
+            ("\u5927\u5c0f\u7403", f"{pred.get('ou_recommendation', '-')}  {_pct1(pred.get('ou_confidence'))}"),
+            ("\u8ba9\u7403", f"{pred.get('handicap_recommendation', '-')}  {_pct1(pred.get('handicap_confidence'))}"),
+            ("\u53ef\u80fd\u6bd4\u5206", f"{pred.get('score_recommendation', '-')}  {_pct1(pred.get('score_confidence'))}"),
+            ("\u534a\u5168\u573a", f"{pred.get('htft_recommendation', '-')}  {_pct1(pred.get('htft_confidence'))}"),
+        ]:
+            line = tk.Frame(plays, bg=PANEL)
+            line.pack(fill=tk.X, pady=5)
+            tk.Label(line, text=label, bg=PANEL, fg=MUTED, font=("Microsoft YaHei UI", 10)).pack(side=tk.LEFT)
+            tk.Label(line, text=value, bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 10, "bold")).pack(side=tk.RIGHT)
+
+    def _bar_row(self, parent: tk.Widget, label: str, value: float, color: str) -> None:
+        row = tk.Frame(parent, bg=PANEL)
+        row.pack(fill=tk.X, padx=18, pady=7)
+        tk.Label(row, text=label, bg=PANEL, fg=MUTED, width=8, anchor=tk.W, font=("Microsoft YaHei UI", 10)).pack(side=tk.LEFT)
+        canvas = tk.Canvas(row, height=12, bg="#172233", bd=0, highlightthickness=0)
+        canvas.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 10))
+        canvas.update_idletasks()
+        width = max(canvas.winfo_width(), 180)
+        canvas.create_rectangle(0, 0, width, 12, fill="#172233", outline="")
+        canvas.create_rectangle(0, 0, max(2, width * max(0.0, min(value, 1.0))), 12, fill=color, outline="")
+        tk.Label(row, text=_pct1(value), bg=PANEL, fg=TEXT, width=7, anchor=tk.E, font=("Microsoft YaHei UI", 10, "bold")).pack(side=tk.RIGHT)
 
     def _risk_counts(self) -> dict[str, int]:
         counts = {"low": 0, "medium": 0, "high": 0}
