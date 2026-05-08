@@ -4,6 +4,7 @@ import math
 import re
 import threading
 import tkinter as tk
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -209,6 +210,8 @@ class SmartMatchDashboard:
         self.rows: list[DashboardRow] = []
         self.data_source = "-"
         self.last_loaded_at = "-"
+        self.last_refresh_seconds: float | None = None
+        self.event_log: list[tuple[str, str, str]] = []
         self.status_var = tk.StringVar(value="正在加载赛事数据...")
         self.date_var = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
         self.summary_vars = {
@@ -258,7 +261,9 @@ class SmartMatchDashboard:
         ]
         for index, (icon, text, active) in enumerate(nav):
             command = None
-            if index == 3:
+            if index == 2:
+                command = self.open_monitor_center
+            elif index == 3:
                 command = self.open_history_reports
             elif index == 5:
                 command = self.open_data_center
@@ -352,30 +357,41 @@ class SmartMatchDashboard:
         return canvas
 
     def refresh(self) -> None:
+        self._log_event("INFO", "\u5f00\u59cb\u5237\u65b0\u8d5b\u4e8b\u6570\u636e")
         self.status_var.set("正在聚合赛事数据并执行 AI 分析...")
         threading.Thread(target=self._load_worker, daemon=True).start()
 
     def _load_worker(self) -> None:
+        started = time.perf_counter()
         try:
             fetched = fetch_matches_v24(strict_today=True)
             rows = [DashboardRow(match, predict_match(match)) for match in fetched.matches]
-            self.root.after(0, lambda: self._apply_rows(rows, fetched.diagnostics.source))
+            elapsed = time.perf_counter() - started
+            self.root.after(0, lambda: self._apply_rows(rows, fetched.diagnostics.source, elapsed))
         except Exception as exc:
+            elapsed = time.perf_counter() - started
+            self.last_refresh_seconds = elapsed
             self.root.after(0, lambda: self._show_error(exc))
 
     def _show_error(self, exc: Exception) -> None:
+        self._log_event("ERROR", f"\u52a0\u8f7d\u5931\u8d25: {exc}")
         self.status_var.set(f"加载失败: {exc}")
         messagebox.showerror("加载失败", str(exc))
 
-    def _apply_rows(self, rows: list[DashboardRow], source: str) -> None:
+    def _apply_rows(self, rows: list[DashboardRow], source: str, elapsed: float | None = None) -> None:
         self.rows = rows
         self.data_source = source or "-"
         self.last_loaded_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.last_refresh_seconds = elapsed
         self.date_var.set(datetime.now().strftime("(%Y-%m-%d)"))
         self._refresh_metrics()
         self._refresh_matches()
         self._draw_risk_chart()
         self._draw_confidence_chart()
+        if elapsed is not None:
+            self._log_event("OK", f"\u5206\u6790\u5b8c\u6210: {len(rows)} \u573a | \u6570\u636e\u6e90 {source or '-'} | \u8017\u65f6 {elapsed:.2f}s")
+        else:
+            self._log_event("OK", f"\u5206\u6790\u5b8c\u6210: {len(rows)} \u573a | \u6570\u636e\u6e90 {source or '-'}")
         self.status_var.set(f"已完成 {len(rows)} 场赛事分析 | 数据源 {source or '-'}")
 
     def _refresh_metrics(self) -> None:
@@ -722,6 +738,92 @@ class SmartMatchDashboard:
         row.pack(fill=tk.X, padx=18, pady=7)
         tk.Label(row, text=label, bg=PANEL, fg=MUTED, width=18, anchor=tk.W, font=("Microsoft YaHei UI", 10)).pack(side=tk.LEFT)
         tk.Label(row, text=value, bg=PANEL, fg=TEXT, anchor=tk.W, justify=tk.LEFT, wraplength=320, font=("Microsoft YaHei UI", 10, "bold")).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+    def _log_event(self, level: str, message: str) -> None:
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.event_log.insert(0, (stamp, level, message))
+        self.event_log = self.event_log[:200]
+
+    def open_monitor_center(self) -> None:
+        win = tk.Toplevel(self.root)
+        win.title("\u76d1\u63a7\u4e2d\u5fc3")
+        win.geometry("960x680")
+        win.minsize(820, 560)
+        win.configure(bg=BG)
+
+        shell = tk.Frame(win, bg=BG)
+        shell.pack(fill=tk.BOTH, expand=True, padx=22, pady=20)
+        header = tk.Frame(shell, bg=BG)
+        header.pack(fill=tk.X)
+        tk.Label(header, text="\u76d1\u63a7\u4e2d\u5fc3", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 18, "bold")).pack(side=tk.LEFT)
+        tk.Button(
+            header,
+            text="\u5237\u65b0\u8d5b\u4e8b",
+            command=self.refresh,
+            bg=BLUE,
+            fg="white",
+            activebackground="#3d5ee7",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=18,
+            pady=7,
+        ).pack(side=tk.RIGHT)
+        tk.Label(
+            shell,
+            text="\u8fd0\u884c\u65e5\u5fd7\u3001\u5206\u6790\u8017\u65f6\u3001\u6570\u636e\u6e90\u548c\u98ce\u9669\u72b6\u6001",
+            bg=BG,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 10),
+        ).pack(anchor=tk.W, pady=(6, 16))
+
+        top = tk.Frame(shell, bg=BG)
+        top.pack(fill=tk.X, pady=(0, 16))
+        risk_counts = self._risk_counts()
+        metrics = [
+            ("\u6700\u8fd1\u8017\u65f6", f"{self.last_refresh_seconds:.2f}s" if self.last_refresh_seconds is not None else "-"),
+            ("\u6570\u636e\u6e90", self.data_source, "#7aa2ff"),
+            ("\u8d5b\u4e8b\u6570", str(len(self.rows)), TEXT),
+            ("\u9884\u8b66", str(risk_counts.get("high", 0)), RED),
+        ]
+        for label, value, color in metrics:
+            self._detail_metric(top, label, value, color)
+
+        body = tk.Frame(shell, bg=BG)
+        body.pack(fill=tk.BOTH, expand=True)
+        left = self._card(body, PANEL)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 14))
+        right = self._card(body, PANEL)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        tk.Label(left, text="Agent \u72b6\u6001", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
+        agent_rows = [
+            ("DataHunter", "\u5df2\u63a5\u5165" if self.rows else "\u7b49\u5f85\u6570\u636e"),
+            ("MarketEntropy", f"\u9ad8\u98ce\u9669 {risk_counts.get('high', 0)} / \u4e2d\u98ce\u9669 {risk_counts.get('medium', 0)}"),
+            ("Simulation", f"\u5df2\u63a8\u6f14 {len(self.rows)} \u573a"),
+            ("RiskGuardian", "\u6b63\u5e38" if risk_counts.get("high", 0) == 0 else "\u89e6\u53d1\u9884\u8b66"),
+            ("StrategyComposer", f"\u62a5\u544a {len(list(REPORT_DIR.glob('ai_match_report_*.md'))) if REPORT_DIR.exists() else 0} \u4efd"),
+        ]
+        for label, value in agent_rows:
+            self._kv_row(left, label, value)
+
+        tk.Label(right, text="\u8fd0\u884c\u65e5\u5fd7", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
+        logbox = tk.Listbox(
+            right,
+            bg=PANEL,
+            fg=TEXT,
+            selectbackground=BLUE,
+            selectforeground="white",
+            relief=tk.FLAT,
+            font=("Consolas", 10),
+            activestyle="none",
+        )
+        logbox.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
+        if not self.event_log:
+            logbox.insert(tk.END, "no events")
+        else:
+            for stamp, level, message in self.event_log:
+                logbox.insert(tk.END, f"{stamp} [{level}] {message}")
 
     def _detail_metric(self, parent: tk.Widget, label: str, value: str, color: str) -> None:
         frame = self._card(parent, PANEL)
