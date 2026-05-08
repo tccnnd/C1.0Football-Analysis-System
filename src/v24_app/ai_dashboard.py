@@ -364,6 +364,7 @@ class SmartMatchDashboard:
         self.last_refresh_seconds: float | None = None
         self.event_log: list[tuple[str, str, str]] = []
         self.current_nav_index = 0
+        self.show_all_matches = False
         self.nav_items: list[tuple[tk.Frame, list[tk.Label]]] = []
         settings = _load_dashboard_settings()
         self.auto_refresh_enabled = tk.BooleanVar(value=bool(settings.get("auto_refresh_enabled", False)))
@@ -608,12 +609,25 @@ class SmartMatchDashboard:
         matches_card.pack(fill=tk.X, pady=(0, 16))
         header = tk.Frame(matches_card, bg=PANEL)
         header.pack(fill=tk.X, padx=18, pady=(16, 8))
-        tk.Label(header, text="重点赛事", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 14, "bold")).pack(side=tk.LEFT)
-        tk.Label(header, text="查看全部 ›", bg=PANEL, fg="#7692ff", font=("Microsoft YaHei UI", 10, "bold")).pack(side=tk.RIGHT)
+        tk.Label(header, text="\u91cd\u70b9\u8d5b\u4e8b", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 14, "bold")).pack(side=tk.LEFT)
+        self.match_toggle_var = tk.StringVar(value="\u67e5\u770b\u5168\u90e8 \u203a")
+        toggle = tk.Label(header, textvariable=self.match_toggle_var, bg=PANEL, fg="#7692ff", font=("Microsoft YaHei UI", 10, "bold"), cursor="hand2")
+        toggle.pack(side=tk.RIGHT)
+        toggle.bind("<Button-1>", lambda _event: self._toggle_match_list())
 
-        self.match_list = tk.Frame(matches_card, bg=PANEL, height=208)
-        self.match_list.pack(fill=tk.X, padx=18, pady=(0, 10))
-        self.match_list.pack_propagate(False)
+        list_wrap = tk.Frame(matches_card, bg=PANEL, height=260)
+        list_wrap.pack(fill=tk.X, padx=18, pady=(0, 10))
+        list_wrap.pack_propagate(False)
+        self.match_canvas = tk.Canvas(list_wrap, bg=PANEL, bd=0, highlightthickness=0)
+        self.match_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.match_scrollbar = tk.Scrollbar(list_wrap, orient=tk.VERTICAL, command=self.match_canvas.yview)
+        self.match_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.match_canvas.configure(yscrollcommand=self.match_scrollbar.set)
+        self.match_list = tk.Frame(self.match_canvas, bg=PANEL)
+        self.match_canvas_window = self.match_canvas.create_window((0, 0), window=self.match_list, anchor=tk.NW)
+        self.match_list.bind("<Configure>", lambda _event: self.match_canvas.configure(scrollregion=self.match_canvas.bbox("all")))
+        self.match_canvas.bind("<Configure>", lambda event: self.match_canvas.itemconfigure(self.match_canvas_window, width=event.width))
+        self._bind_match_scroll(self.match_canvas)
 
         charts = tk.Frame(content, bg=BG)
         charts.pack(fill=tk.BOTH, expand=True)
@@ -776,6 +790,19 @@ class SmartMatchDashboard:
             return "-"
         return f"{hits / total:.1%}"
 
+    def _toggle_match_list(self) -> None:
+        self.show_all_matches = not self.show_all_matches
+        self._refresh_matches()
+
+    def _bind_match_scroll(self, widget: tk.Widget) -> None:
+        widget.bind("<MouseWheel>", self._on_match_mousewheel)
+        for child in widget.winfo_children():
+            self._bind_match_scroll(child)
+
+    def _on_match_mousewheel(self, event) -> None:
+        if self._widget_alive("match_canvas"):
+            self.match_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
     def _refresh_matches(self) -> None:
         for child in self.match_list.winfo_children():
             child.destroy()
@@ -786,7 +813,11 @@ class SmartMatchDashboard:
                 {"high": 0, "medium": 1, "low": 2}[_risk_key(row.prediction.get("risk_level"))],
                 -float(row.prediction.get("confidence", 0) or 0),
             ),
-        )[:3]
+        )
+        ranked = ranked if self.show_all_matches else ranked[:3]
+        if hasattr(self, "match_toggle_var"):
+            text = "\u6536\u8d77 \u2039" if self.show_all_matches else "\u67e5\u770b\u5168\u90e8 \u203a"
+            self.match_toggle_var.set(text)
 
         if not ranked:
             tk.Label(self.match_list, text="暂无通过校验的赛事数据", bg=PANEL, fg=MUTED, font=("Microsoft YaHei UI", 11)).pack(anchor=tk.W, pady=20)
@@ -794,6 +825,9 @@ class SmartMatchDashboard:
 
         for row in ranked:
             self._match_row(row)
+        if self._widget_alive("match_canvas"):
+            self.match_canvas.configure(scrollregion=self.match_canvas.bbox("all"))
+            self.match_canvas.yview_moveto(0)
 
     def _match_row(self, row: DashboardRow) -> None:
         match = row.match
@@ -820,6 +854,7 @@ class SmartMatchDashboard:
             tk.Label(block, text=value, bg=PANEL_2, fg=color, font=("Microsoft YaHei UI", 12, "bold"), wraplength=width - 8, justify=tk.LEFT).pack(anchor=tk.W, pady=(8, 0))
 
         self._bind_detail_open(frame, row)
+        self._bind_match_scroll(frame)
 
     def _bind_detail_open(self, widget: tk.Widget, row: DashboardRow) -> None:
         widget.bind("<Button-1>", lambda _event: self.open_match_detail(row))
