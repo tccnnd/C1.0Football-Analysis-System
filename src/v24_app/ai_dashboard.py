@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import messagebox
 
-from .core import AppMatch, fetch_matches_v24, get_recent_settlements, predict_match
+from .core import AppMatch, auto_settle_finished_matches, fetch_matches_v24, get_recent_settlements, predict_match
 
 
 BG = "#070d16"
@@ -317,6 +317,19 @@ class SmartMatchDashboard:
         title.pack(fill=tk.X)
         tk.Label(title, text="今日概览", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 17, "bold")).pack(side=tk.LEFT)
         tk.Label(title, textvariable=self.date_var, bg=BG, fg=MUTED, font=("Microsoft YaHei UI", 11)).pack(side=tk.LEFT, padx=(10, 0))
+        tk.Button(
+            title,
+            text="\u590d\u76d8\u4e2d\u5fc3",
+            command=self.open_review_center,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground=TEXT,
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=18,
+            pady=6,
+        ).pack(side=tk.RIGHT, padx=(8, 0))
         tk.Button(
             title,
             text="刷新",
@@ -884,6 +897,153 @@ class SmartMatchDashboard:
         else:
             for stamp, level, message in self.event_log:
                 logbox.insert(tk.END, f"{stamp} [{level}] {message}")
+
+    def open_review_center(self) -> None:
+        settlements = list(reversed(get_recent_settlements(limit=200)))
+        summary = self._settlement_summary(settlements)
+
+        win = tk.Toplevel(self.root)
+        win.title("\u590d\u76d8\u4e2d\u5fc3")
+        win.geometry("1020x720")
+        win.minsize(860, 600)
+        win.configure(bg=BG)
+
+        shell = tk.Frame(win, bg=BG)
+        shell.pack(fill=tk.BOTH, expand=True, padx=22, pady=20)
+        header = tk.Frame(shell, bg=BG)
+        header.pack(fill=tk.X)
+        tk.Label(header, text="\u590d\u76d8\u4e2d\u5fc3", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 18, "bold")).pack(side=tk.LEFT)
+        tk.Button(
+            header,
+            text="\u56de\u6536\u8d5b\u679c",
+            command=self.run_result_recovery,
+            bg=BLUE,
+            fg="white",
+            activebackground="#3d5ee7",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=18,
+            pady=7,
+        ).pack(side=tk.RIGHT)
+        tk.Label(
+            shell,
+            text="\u56de\u6536\u5b8c\u573a\u8d5b\u679c\uff0c\u68c0\u67e5\u547d\u4e2d\u7387\u3001\u73a9\u6cd5\u504f\u5dee\u548c\u9ad8\u7f6e\u4fe1\u5931\u8bef",
+            bg=BG,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 10),
+        ).pack(anchor=tk.W, pady=(6, 16))
+
+        top = tk.Frame(shell, bg=BG)
+        top.pack(fill=tk.X, pady=(0, 16))
+        for label, value, color in [
+            ("\u5df2\u7ed3\u7b97", str(summary["total"]), TEXT),
+            ("1X2 \u547d\u4e2d", summary["one_x_two"], GREEN),
+            ("\u8ba9\u7403\u547d\u4e2d", summary["handicap"], "#7aa2ff"),
+            ("\u5927\u5c0f\u7403\u547d\u4e2d", summary["ou"], YELLOW),
+        ]:
+            self._detail_metric(top, label, value, color)
+
+        body = tk.Frame(shell, bg=BG)
+        body.pack(fill=tk.BOTH, expand=True)
+        left = self._card(body, PANEL)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 14))
+        right = self._card(body, PANEL)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        tk.Label(left, text="\u6700\u8fd1\u590d\u76d8", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
+        listbox = tk.Listbox(
+            left,
+            bg=PANEL,
+            fg=TEXT,
+            selectbackground=BLUE,
+            selectforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10),
+            activestyle="none",
+        )
+        listbox.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
+        for item in settlements[:80]:
+            listbox.insert(tk.END, self._settlement_line(item))
+        if not settlements:
+            listbox.insert(tk.END, "\u6682\u65e0\u590d\u76d8\u7ed3\u7b97\u8bb0\u5f55")
+
+        tk.Label(right, text="\u504f\u5dee\u91cd\u70b9", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
+        misses = self._high_confidence_misses(settlements)
+        if misses:
+            for item in misses[:10]:
+                self._strategy_row(
+                    right,
+                    f"{item.get('home_team', '-')} vs {item.get('away_team', '-')}",
+                    f"\u7f6e\u4fe1\u5ea6 {_pct1(item.get('prediction_confidence'))} | \u9884\u6d4b {item.get('predicted', '-')} | \u5b9e\u9645 {item.get('result', '-')} | {item.get('home_goals', '-')}-{item.get('away_goals', '-')}",
+                )
+        else:
+            self._strategy_row(right, "\u9ad8\u7f6e\u4fe1\u5931\u8bef", "\u6682\u672a\u53d1\u73b0\u7f6e\u4fe1\u5ea6 >=60% \u4e14 1X2 \u5931\u8bef\u7684\u8bb0\u5f55")
+
+    def run_result_recovery(self) -> None:
+        self.status_var.set("\u6b63\u5728\u56de\u6536\u8d5b\u679c...")
+        self._log_event("INFO", "\u5f00\u59cb\u56de\u6536\u8d5b\u679c")
+        prediction_cache = {row.match.match_id: row.prediction for row in self.rows}
+
+        def worker() -> None:
+            started = time.perf_counter()
+            try:
+                result = auto_settle_finished_matches(prediction_cache=prediction_cache, lookback_days=2)
+            except Exception as exc:
+                self.root.after(0, lambda: self._finish_result_recovery_error(exc))
+                return
+            elapsed = time.perf_counter() - started
+            self.root.after(0, lambda: self._finish_result_recovery(result, elapsed))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_result_recovery(self, result: dict, elapsed: float) -> None:
+        new_settled = int(result.get("new_settled", 0) or 0)
+        fetched = int(result.get("fetched_finished", 0) or 0)
+        source = str(result.get("source", "-"))
+        message = f"\u8d5b\u679c\u56de\u6536\u5b8c\u6210: \u5b8c\u573a {fetched} | \u65b0\u7ed3\u7b97 {new_settled} | \u6570\u636e\u6e90 {source} | \u8017\u65f6 {elapsed:.2f}s"
+        self.status_var.set(message)
+        self._log_event("OK", message)
+        self.summary_vars["hit_rate"].set(self._historical_hit_rate())
+        detail = "\n".join(str(item) for item in result.get("messages", []) if item) or message
+        messagebox.showinfo("\u8d5b\u679c\u56de\u6536", detail)
+
+    def _finish_result_recovery_error(self, exc: Exception) -> None:
+        self.status_var.set(f"\u8d5b\u679c\u56de\u6536\u5931\u8d25: {exc}")
+        self._log_event("ERROR", f"\u8d5b\u679c\u56de\u6536\u5931\u8d25: {exc}")
+        messagebox.showerror("\u8d5b\u679c\u56de\u6536\u5931\u8d25", str(exc))
+
+    def _settlement_summary(self, settlements: list[dict]) -> dict[str, str | int]:
+        return {
+            "total": len(settlements),
+            "one_x_two": self._hit_rate_text(settlements, "is_correct"),
+            "handicap": self._hit_rate_text(settlements, "handicap_is_correct"),
+            "ou": self._hit_rate_text(settlements, "ou_is_correct"),
+        }
+
+    def _hit_rate_text(self, settlements: list[dict], key: str) -> str:
+        values = [bool(item.get(key)) for item in settlements if isinstance(item, dict) and item.get(key) is not None]
+        if not values:
+            return "-"
+        return f"{sum(1 for value in values if value) / len(values):.1%}"
+
+    def _settlement_line(self, item: dict) -> str:
+        hit = "\u547d\u4e2d" if item.get("is_correct") else "\u5931\u8bef"
+        return (
+            f"{item.get('match_date', '-')} {item.get('league', '-')} | "
+            f"{item.get('home_team', '-')} {item.get('home_goals', '-')}-{item.get('away_goals', '-')} {item.get('away_team', '-')} | "
+            f"\u9884\u6d4b {item.get('predicted', '-')} | {hit} | {_pct1(item.get('prediction_confidence'))}"
+        )
+
+    def _high_confidence_misses(self, settlements: list[dict]) -> list[dict]:
+        misses = [
+            item
+            for item in settlements
+            if isinstance(item, dict)
+            and item.get("is_correct") is False
+            and float(item.get("prediction_confidence", 0) or 0) >= 0.6
+        ]
+        return sorted(misses, key=lambda item: float(item.get("prediction_confidence", 0) or 0), reverse=True)
 
     def open_strategy_library(self) -> None:
         win = tk.Toplevel(self.root)
