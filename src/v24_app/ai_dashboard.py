@@ -11,7 +11,14 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import messagebox
 
-from .core import AppMatch, auto_settle_finished_matches, fetch_matches_v24, get_recent_settlements, predict_match
+from .core import (
+    AppMatch,
+    auto_settle_finished_matches,
+    fetch_matches_v24,
+    get_recent_settlements,
+    persist_prediction_snapshot,
+    predict_match,
+)
 
 
 BG = "#070d16"
@@ -294,6 +301,54 @@ def _save_dashboard_settings(settings: dict) -> None:
     SETTINGS_PATH.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _load_prediction_snapshot_records() -> dict[str, dict]:
+    path = PROJECT_ROOT / "data" / "state" / "prediction_snapshots.json"
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    items = payload.get("items", {})
+    return items if isinstance(items, dict) else {}
+
+
+def _parse_match_datetime(match: dict) -> datetime | None:
+    date_text = str(match.get("match_date") or "").strip()
+    time_text = str(match.get("match_time") or "").strip()
+    if not date_text:
+        return None
+    candidates = []
+    if time_text:
+        candidates.extend(
+            [
+                f"{date_text} {time_text}",
+                f"{date_text} {time_text[:5]}",
+            ]
+        )
+    candidates.append(date_text)
+    for candidate in candidates:
+        for fmt in ("%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M", "%Y-%m-%d", "%Y/%m/%d"):
+            try:
+                return datetime.strptime(candidate, fmt)
+            except ValueError:
+                continue
+    return None
+
+
+def _snapshot_status(match: dict, now: datetime | None = None) -> str:
+    kickoff = _parse_match_datetime(match)
+    if kickoff is None:
+        return "\u5f85\u590d\u76d8"
+    current = now or datetime.now()
+    hours_from_kickoff = (current - kickoff).total_seconds() / 3600
+    if hours_from_kickoff < 0:
+        return "\u5f85\u5f00\u8d5b"
+    if hours_from_kickoff <= 3:
+        return "\u8fdb\u884c\u4e2d"
+    return "\u5f85\u56de\u6536"
+
+
 class SmartMatchDashboard:
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -496,6 +551,7 @@ class SmartMatchDashboard:
         shortcuts = [
             ("\u8d5b\u4e8b\u5206\u6790", "\u67e5\u770b\u91cd\u70b9\u8d5b\u4e8b\u3001\u98ce\u9669\u548c\u7f6e\u4fe1\u5ea6\u5206\u5e03", lambda: self._select_nav(1, self._build_main)),
             ("\u590d\u76d8\u4e2d\u5fc3", "\u56de\u6536\u8d5b\u679c\u5e76\u67e5\u770b\u547d\u4e2d\u7387\u4e0e\u9ad8\u7f6e\u4fe1\u5931\u8bef", self.open_review_center),
+            ("\u8d5b\u524d\u5feb\u7167", "\u67e5\u770b\u5df2\u4fdd\u5b58\u7684\u8d5b\u524d\u9884\u6d4b\uff0c\u7b49\u5b8c\u573a\u540e\u8fdb\u884c\u590d\u76d8", self.open_snapshot_center),
             ("\u76d1\u63a7\u4e2d\u5fc3", "\u67e5\u770b Agent \u72b6\u6001\u3001\u8fd0\u884c\u65e5\u5fd7\u548c\u8017\u65f6", self.open_monitor_center),
             ("\u6570\u636e\u4e2d\u5fc3", "\u67e5\u770b\u6570\u636e\u6587\u4ef6\u3001\u6a21\u578b\u548c\u7f13\u5b58\u72b6\u6001", self.open_data_center),
         ]
@@ -658,7 +714,11 @@ class SmartMatchDashboard:
         started = time.perf_counter()
         try:
             fetched = fetch_matches_v24(strict_today=True)
-            rows = [DashboardRow(match, predict_match(match)) for match in fetched.matches]
+            rows = []
+            for match in fetched.matches:
+                prediction = predict_match(match)
+                persist_prediction_snapshot(match, prediction)
+                rows.append(DashboardRow(match, prediction))
             elapsed = time.perf_counter() - started
             self.root.after(0, lambda: self._apply_rows(rows, fetched.diagnostics.source, elapsed))
         except Exception as exc:
@@ -1109,6 +1169,19 @@ class SmartMatchDashboard:
             padx=18,
             pady=7,
         ).pack(side=tk.RIGHT)
+        tk.Button(
+            header,
+            text="\u8d5b\u524d\u5feb\u7167",
+            command=self.open_snapshot_center,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=18,
+            pady=7,
+        ).pack(side=tk.RIGHT, padx=(0, 10))
 
         top = tk.Frame(shell, bg=BG)
         top.pack(fill=tk.X, pady=(0, 16))
@@ -1220,6 +1293,184 @@ class SmartMatchDashboard:
             and float(item.get("prediction_confidence", 0) or 0) >= 0.6
         ]
         return sorted(misses, key=lambda item: float(item.get("prediction_confidence", 0) or 0), reverse=True)
+
+    def _pending_snapshot_rows(self) -> list[dict]:
+        snapshots = _load_prediction_snapshot_records()
+        settled_ids = {str(item.get("match_id", "")) for item in get_recent_settlements(limit=0) if item.get("match_id")}
+        rows: list[dict] = []
+        for match_id, record in snapshots.items():
+            if str(match_id) in settled_ids or not isinstance(record, dict):
+                continue
+            match = record.get("match", {})
+            prediction = record.get("prediction", {})
+            if not isinstance(match, dict) or not isinstance(prediction, dict):
+                continue
+            rows.append(
+                {
+                    "match_id": str(match_id),
+                    "saved_at": str(record.get("saved_at") or "-"),
+                    "match": match,
+                    "prediction": prediction,
+                    "market_snapshot": record.get("market_snapshot", {}),
+                    "status": _snapshot_status(match),
+                }
+            )
+        return sorted(rows, key=lambda item: str(item.get("saved_at") or ""), reverse=True)
+
+    def _snapshot_line(self, item: dict) -> str:
+        match = item.get("match", {}) if isinstance(item.get("match"), dict) else {}
+        prediction = item.get("prediction", {}) if isinstance(item.get("prediction"), dict) else {}
+        return (
+            f"{item.get('status', '-')} | {match.get('match_date', '-')} {match.get('match_time', '-')} | "
+            f"{match.get('league', '-')} | {match.get('home_team', '-')} vs {match.get('away_team', '-')} | "
+            f"{prediction.get('recommendation', '-')} | {_pct1(prediction.get('confidence'))}"
+        )
+
+    def _snapshot_detail_text(self, item: dict) -> str:
+        match = item.get("match", {}) if isinstance(item.get("match"), dict) else {}
+        prediction = item.get("prediction", {}) if isinstance(item.get("prediction"), dict) else {}
+        market = item.get("market_snapshot", {}) if isinstance(item.get("market_snapshot"), dict) else {}
+        probs = prediction.get("probabilities", {}) if isinstance(prediction.get("probabilities"), dict) else {}
+        indices = prediction.get("indices", {}) if isinstance(prediction.get("indices"), dict) else {}
+        return (
+            f"\u5feb\u7167\u65f6\u95f4: {item.get('saved_at', '-')}\n"
+            f"\u72b6\u6001: {item.get('status', '-')}\n"
+            f"\u8d5b\u4e8b: {match.get('home_team', '-')} vs {match.get('away_team', '-')}\n"
+            f"\u8054\u8d5b: {match.get('league', '-')}\n"
+            f"\u5f00\u8d5b: {match.get('match_date', '-')} {match.get('match_time', '-')}\n"
+            f"\u6765\u6e90: {match.get('source', '-')} / {match.get('source_id', '-')}\n\n"
+            f"\u63a8\u8350: {_strategy_text(prediction)}\n"
+            f"\u98ce\u9669: {_risk_label(prediction.get('risk_level'))}\n"
+            f"\u7f6e\u4fe1\u5ea6: {_pct1(prediction.get('confidence'))}\n"
+            f"\u9884\u8ba1\u603b\u8fdb\u7403: {_num(prediction.get('expected_goals'))}\n\n"
+            f"\u6982\u7387: {_prob_text(probs, 'home')} / {_prob_text(probs, 'draw')} / {_prob_text(probs, 'away')}\n"
+            f"\u51b7\u95e8\u6307\u6570: {_pct1(indices.get('upset_index', 0))}\n"
+            f"\u7a33\u5b9a\u6307\u6570: {_pct1(indices.get('stability_index', 0))}\n"
+            f"\u4fe1\u5fc3\u6307\u6570: {_pct1(indices.get('confidence_index', 0))}\n\n"
+            f"\u5927\u5c0f\u7403: {prediction.get('ou_recommendation', '-')} / {_pct1(prediction.get('ou_confidence'))}\n"
+            f"\u8ba9\u7403: {prediction.get('handicap_recommendation', '-')} / {_pct1(prediction.get('handicap_confidence'))}\n"
+            f"\u6bd4\u5206: {prediction.get('score_recommendation', '-')} / {_pct1(prediction.get('score_confidence'))}\n\n"
+            f"\u5feb\u7167\u76d8\u53e3: \u4e3b {market.get('odds_home', match.get('odds_home', '-'))} | "
+            f"\u5e73 {market.get('odds_draw', match.get('odds_draw', '-'))} | "
+            f"\u5ba2 {market.get('odds_away', match.get('odds_away', '-'))}"
+        )
+
+    def open_snapshot_center(self) -> None:
+        rows = self._pending_snapshot_rows()
+        total = len(rows)
+        pending_review = sum(1 for item in rows if item.get("status") == "\u5f85\u56de\u6536")
+        high_risk = sum(
+            1
+            for item in rows
+            if _risk_key((item.get("prediction") or {}).get("risk_level") if isinstance(item.get("prediction"), dict) else "") == "high"
+        )
+        confidences = [
+            float((item.get("prediction") or {}).get("confidence", 0) or 0)
+            for item in rows
+            if isinstance(item.get("prediction"), dict)
+        ]
+        avg_conf = f"{(sum(confidences) / len(confidences)):.1%}" if confidences else "-"
+
+        shell = self._page_shell(
+            "\u8d5b\u524d\u5feb\u7167",
+            "\u4fdd\u7559\u8d5b\u524d\u9884\u6d4b\u3001\u76d8\u53e3\u548c\u98ce\u9669\u72b6\u6001\uff0c\u7b49\u5b8c\u573a\u540e\u56de\u6536\u590d\u76d8",
+        )
+        header = tk.Frame(shell, bg=BG)
+        header.pack(fill=tk.X, pady=(0, 16))
+        tk.Button(
+            header,
+            text="\u56de\u6536\u8d5b\u679c",
+            command=self.run_result_recovery,
+            bg=BLUE,
+            fg="white",
+            activebackground="#3d5ee7",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=18,
+            pady=7,
+        ).pack(side=tk.RIGHT)
+        tk.Button(
+            header,
+            text="\u8fd4\u56de\u590d\u76d8\u4e2d\u5fc3",
+            command=self.open_review_center,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=18,
+            pady=7,
+        ).pack(side=tk.RIGHT, padx=(0, 10))
+
+        top = tk.Frame(shell, bg=BG)
+        top.pack(fill=tk.X, pady=(0, 16))
+        for label, value, color in [
+            ("\u5feb\u7167\u603b\u6570", str(total), TEXT),
+            ("\u5f85\u56de\u6536", str(pending_review), YELLOW if pending_review else GREEN),
+            ("\u9ad8\u98ce\u9669", str(high_risk), RED if high_risk else GREEN),
+            ("\u5e73\u5747\u7f6e\u4fe1", avg_conf, "#7aa2ff"),
+        ]:
+            self._detail_metric(top, label, value, color)
+
+        body = tk.Frame(shell, bg=BG)
+        body.pack(fill=tk.BOTH, expand=True)
+        left = self._card(body, PANEL)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 14))
+        right = self._card(body, PANEL)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        tk.Label(left, text="\u5f85\u590d\u76d8\u5217\u8868", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
+        listbox = tk.Listbox(
+            left,
+            bg=PANEL,
+            fg=TEXT,
+            selectbackground=BLUE,
+            selectforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10),
+            activestyle="none",
+        )
+        listbox.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
+
+        tk.Label(right, text="\u5feb\u7167\u8be6\u60c5", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
+        detail = tk.Text(
+            right,
+            bg=PANEL,
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief=tk.FLAT,
+            wrap=tk.WORD,
+            font=("Microsoft YaHei UI", 10),
+            height=18,
+        )
+        detail.pack(fill=tk.BOTH, expand=True, padx=18, pady=(0, 14))
+
+        def show_detail(index: int) -> None:
+            detail.configure(state=tk.NORMAL)
+            detail.delete("1.0", tk.END)
+            if not rows:
+                detail.insert(tk.END, "\u6682\u65e0\u8d5b\u524d\u5feb\u7167\u3002\u5237\u65b0\u8d5b\u4e8b\u540e\uff0c\u7cfb\u7edf\u4f1a\u81ea\u52a8\u4fdd\u5b58\u5f85\u590d\u76d8\u7684\u8d5b\u524d\u9884\u6d4b\u3002")
+            else:
+                detail.insert(tk.END, self._snapshot_detail_text(rows[index]))
+            detail.configure(state=tk.DISABLED)
+
+        for item in rows:
+            listbox.insert(tk.END, self._snapshot_line(item))
+        if rows:
+            listbox.selection_set(0)
+            show_detail(0)
+        else:
+            listbox.insert(tk.END, "\u6682\u65e0\u5f85\u590d\u76d8\u5feb\u7167")
+            show_detail(0)
+
+        def on_select(_event=None) -> None:
+            selection = listbox.curselection()
+            if selection and rows:
+                show_detail(int(selection[0]))
+
+        listbox.bind("<<ListboxSelect>>", on_select)
 
     def open_strategy_library(self) -> None:
         shell = self._page_shell(
