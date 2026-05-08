@@ -338,6 +338,26 @@ class SmartMatchDashboard:
         self._build_sidebar()
         self._build_main()
 
+    def _clear_main(self) -> None:
+        for child in self.main.winfo_children():
+            child.destroy()
+
+    def _page_shell(self, title: str, subtitle: str = "") -> tk.Frame:
+        self._clear_main()
+        shell = tk.Frame(self.main, bg=BG)
+        shell.pack(fill=tk.BOTH, expand=True, padx=22, pady=20)
+        tk.Label(shell, text=title, bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 18, "bold")).pack(anchor=tk.W)
+        if subtitle:
+            tk.Label(shell, text=subtitle, bg=BG, fg=MUTED, font=("Microsoft YaHei UI", 10)).pack(anchor=tk.W, pady=(6, 16))
+        return shell
+
+    def _widget_alive(self, name: str) -> bool:
+        widget = getattr(self, name, None)
+        try:
+            return bool(widget is not None and widget.winfo_exists())
+        except tk.TclError:
+            return False
+
     def _build_sidebar(self) -> None:
         header = tk.Frame(self.sidebar, bg=SIDEBAR)
         header.pack(fill=tk.X, padx=24, pady=(22, 28))
@@ -361,7 +381,9 @@ class SmartMatchDashboard:
         ]
         for index, (icon, text, active) in enumerate(nav):
             command = None
-            if index == 2:
+            if index in (0, 1):
+                command = self._build_main
+            elif index == 2:
                 command = self.open_monitor_center
             elif index == 3:
                 command = self.open_history_reports
@@ -388,6 +410,7 @@ class SmartMatchDashboard:
                 child.bind("<Button-1>", lambda _event: command())
 
     def _build_main(self) -> None:
+        self._clear_main()
         content = tk.Frame(self.main, bg=BG)
         content.pack(fill=tk.BOTH, expand=True, padx=20, pady=24)
 
@@ -536,9 +559,12 @@ class SmartMatchDashboard:
         self.last_refresh_seconds = elapsed
         self.date_var.set(datetime.now().strftime("(%Y-%m-%d)"))
         self._refresh_metrics()
-        self._refresh_matches()
-        self._draw_risk_chart()
-        self._draw_confidence_chart()
+        if self._widget_alive("match_list"):
+            self._refresh_matches()
+        if self._widget_alive("risk_chart"):
+            self._draw_risk_chart()
+        if self._widget_alive("conf_chart"):
+            self._draw_confidence_chart()
         if elapsed is not None:
             self._log_event("OK", f"\u5206\u6790\u5b8c\u6210: {len(rows)} \u573a | \u6570\u636e\u6e90 {source or '-'} | \u8017\u65f6 {elapsed:.2f}s")
         else:
@@ -626,25 +652,23 @@ class SmartMatchDashboard:
 
     def open_match_detail(self, row: DashboardRow) -> None:
         title = f"{row.match.home_team} vs {row.match.away_team}"
-        win = tk.Toplevel(self.root)
-        win.title(title)
-        win.geometry("860x720")
-        win.minsize(760, 620)
-        win.configure(bg=BG)
-
-        shell = tk.Frame(win, bg=BG)
-        shell.pack(fill=tk.BOTH, expand=True, padx=22, pady=20)
+        shell = self._page_shell(title, f"{row.match.league}  |  {row.match.match_date} {row.match.match_time}")
 
         top = tk.Frame(shell, bg=BG)
         top.pack(fill=tk.X, pady=(0, 16))
-        tk.Label(top, text=title, bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 18, "bold")).pack(anchor=tk.W)
-        tk.Label(
+        tk.Button(
             top,
-            text=f"{row.match.league}  |  {row.match.match_date} {row.match.match_time}",
-            bg=BG,
-            fg=MUTED,
-            font=("Microsoft YaHei UI", 10),
-        ).pack(anchor=tk.W, pady=(6, 0))
+            text="\u8fd4\u56de\u6982\u89c8",
+            command=self._build_main,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground=TEXT,
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=16,
+            pady=6,
+        ).pack(side=tk.LEFT)
         tk.Button(
             top,
             text="\u4fdd\u5b58\u62a5\u544a",
@@ -657,7 +681,7 @@ class SmartMatchDashboard:
             font=("Microsoft YaHei UI", 10, "bold"),
             padx=16,
             pady=6,
-        ).pack(anchor=tk.E, pady=(0, 2))
+        ).pack(side=tk.RIGHT)
 
         summary = tk.Frame(shell, bg=BG)
         summary.pack(fill=tk.X, pady=(0, 16))
@@ -710,16 +734,7 @@ class SmartMatchDashboard:
         REPORT_DIR.mkdir(parents=True, exist_ok=True)
         files = sorted(REPORT_DIR.glob("ai_match_report_*.md"), key=lambda path: path.stat().st_mtime, reverse=True)
 
-        win = tk.Toplevel(self.root)
-        win.title("\u5386\u53f2\u62a5\u544a")
-        win.geometry("920x660")
-        win.minsize(760, 560)
-        win.configure(bg=BG)
-
-        shell = tk.Frame(win, bg=BG)
-        shell.pack(fill=tk.BOTH, expand=True, padx=22, pady=20)
-        tk.Label(shell, text="\u5386\u53f2\u62a5\u544a", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 18, "bold")).pack(anchor=tk.W)
-        tk.Label(shell, text=f"\u62a5\u544a\u76ee\u5f55: {REPORT_DIR}", bg=BG, fg=MUTED, font=("Microsoft YaHei UI", 9)).pack(anchor=tk.W, pady=(6, 14))
+        shell = self._page_shell("\u5386\u53f2\u62a5\u544a", f"\u62a5\u544a\u76ee\u5f55: {REPORT_DIR}")
 
         body = tk.Frame(shell, bg=BG)
         body.pack(fill=tk.BOTH, expand=True)
@@ -781,22 +796,10 @@ class SmartMatchDashboard:
         listbox.bind("<<ListboxSelect>>", lambda _event: show_file(listbox.curselection()[0] if listbox.curselection() else -1))
 
     def open_data_center(self) -> None:
-        win = tk.Toplevel(self.root)
-        win.title("\u6570\u636e\u4e2d\u5fc3")
-        win.geometry("940x680")
-        win.minsize(800, 560)
-        win.configure(bg=BG)
-
-        shell = tk.Frame(win, bg=BG)
-        shell.pack(fill=tk.BOTH, expand=True, padx=22, pady=20)
-        tk.Label(shell, text="\u6570\u636e\u4e2d\u5fc3", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 18, "bold")).pack(anchor=tk.W)
-        tk.Label(
-            shell,
-            text="\u5f53\u524d\u6570\u636e\u6e90\u3001\u7f13\u5b58\u3001\u6a21\u578b\u72b6\u6001\u548c\u62a5\u544a\u4ea7\u7269",
-            bg=BG,
-            fg=MUTED,
-            font=("Microsoft YaHei UI", 10),
-        ).pack(anchor=tk.W, pady=(6, 16))
+        shell = self._page_shell(
+            "\u6570\u636e\u4e2d\u5fc3",
+            "\u5f53\u524d\u6570\u636e\u6e90\u3001\u7f13\u5b58\u3001\u6a21\u578b\u72b6\u6001\u548c\u62a5\u544a\u4ea7\u7269",
+        )
 
         top = tk.Frame(shell, bg=BG)
         top.pack(fill=tk.X, pady=(0, 16))
@@ -837,7 +840,7 @@ class SmartMatchDashboard:
         tk.Button(
             shell,
             text="\u5237\u65b0\u6570\u636e",
-            command=lambda: (win.destroy(), self.refresh()),
+            command=self.refresh,
             bg=BLUE,
             fg="white",
             activebackground="#3d5ee7",
@@ -896,17 +899,12 @@ class SmartMatchDashboard:
         self.event_log = self.event_log[:200]
 
     def open_monitor_center(self) -> None:
-        win = tk.Toplevel(self.root)
-        win.title("\u76d1\u63a7\u4e2d\u5fc3")
-        win.geometry("960x680")
-        win.minsize(820, 560)
-        win.configure(bg=BG)
-
-        shell = tk.Frame(win, bg=BG)
-        shell.pack(fill=tk.BOTH, expand=True, padx=22, pady=20)
+        shell = self._page_shell(
+            "\u76d1\u63a7\u4e2d\u5fc3",
+            "\u8fd0\u884c\u65e5\u5fd7\u3001\u5206\u6790\u8017\u65f6\u3001\u6570\u636e\u6e90\u548c\u98ce\u9669\u72b6\u6001",
+        )
         header = tk.Frame(shell, bg=BG)
         header.pack(fill=tk.X)
-        tk.Label(header, text="\u76d1\u63a7\u4e2d\u5fc3", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 18, "bold")).pack(side=tk.LEFT)
         tk.Button(
             header,
             text="\u5237\u65b0\u8d5b\u4e8b",
@@ -920,13 +918,6 @@ class SmartMatchDashboard:
             padx=18,
             pady=7,
         ).pack(side=tk.RIGHT)
-        tk.Label(
-            shell,
-            text="\u8fd0\u884c\u65e5\u5fd7\u3001\u5206\u6790\u8017\u65f6\u3001\u6570\u636e\u6e90\u548c\u98ce\u9669\u72b6\u6001",
-            bg=BG,
-            fg=MUTED,
-            font=("Microsoft YaHei UI", 10),
-        ).pack(anchor=tk.W, pady=(6, 16))
 
         top = tk.Frame(shell, bg=BG)
         top.pack(fill=tk.X, pady=(0, 16))
@@ -980,17 +971,12 @@ class SmartMatchDashboard:
         settlements = list(reversed(get_recent_settlements(limit=200)))
         summary = self._settlement_summary(settlements)
 
-        win = tk.Toplevel(self.root)
-        win.title("\u590d\u76d8\u4e2d\u5fc3")
-        win.geometry("1020x720")
-        win.minsize(860, 600)
-        win.configure(bg=BG)
-
-        shell = tk.Frame(win, bg=BG)
-        shell.pack(fill=tk.BOTH, expand=True, padx=22, pady=20)
+        shell = self._page_shell(
+            "\u590d\u76d8\u4e2d\u5fc3",
+            "\u56de\u6536\u5b8c\u573a\u8d5b\u679c\uff0c\u68c0\u67e5\u547d\u4e2d\u7387\u3001\u73a9\u6cd5\u504f\u5dee\u548c\u9ad8\u7f6e\u4fe1\u5931\u8bef",
+        )
         header = tk.Frame(shell, bg=BG)
         header.pack(fill=tk.X)
-        tk.Label(header, text="\u590d\u76d8\u4e2d\u5fc3", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 18, "bold")).pack(side=tk.LEFT)
         tk.Button(
             header,
             text="\u56de\u6536\u8d5b\u679c",
@@ -1004,13 +990,6 @@ class SmartMatchDashboard:
             padx=18,
             pady=7,
         ).pack(side=tk.RIGHT)
-        tk.Label(
-            shell,
-            text="\u56de\u6536\u5b8c\u573a\u8d5b\u679c\uff0c\u68c0\u67e5\u547d\u4e2d\u7387\u3001\u73a9\u6cd5\u504f\u5dee\u548c\u9ad8\u7f6e\u4fe1\u5931\u8bef",
-            bg=BG,
-            fg=MUTED,
-            font=("Microsoft YaHei UI", 10),
-        ).pack(anchor=tk.W, pady=(6, 16))
 
         top = tk.Frame(shell, bg=BG)
         top.pack(fill=tk.X, pady=(0, 16))
@@ -1124,22 +1103,10 @@ class SmartMatchDashboard:
         return sorted(misses, key=lambda item: float(item.get("prediction_confidence", 0) or 0), reverse=True)
 
     def open_strategy_library(self) -> None:
-        win = tk.Toplevel(self.root)
-        win.title("\u7b56\u7565\u5e93")
-        win.geometry("960x700")
-        win.minsize(820, 580)
-        win.configure(bg=BG)
-
-        shell = tk.Frame(win, bg=BG)
-        shell.pack(fill=tk.BOTH, expand=True, padx=22, pady=20)
-        tk.Label(shell, text="\u7b56\u7565\u5e93", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 18, "bold")).pack(anchor=tk.W)
-        tk.Label(
-            shell,
-            text="\u63a8\u8350\u7b56\u7565\u3001\u98ce\u9669\u89c4\u5219\u3001\u7f6e\u4fe1\u5ea6\u5206\u5c42\u548c\u73a9\u6cd5\u7ef4\u5ea6",
-            bg=BG,
-            fg=MUTED,
-            font=("Microsoft YaHei UI", 10),
-        ).pack(anchor=tk.W, pady=(6, 16))
+        shell = self._page_shell(
+            "\u7b56\u7565\u5e93",
+            "\u63a8\u8350\u7b56\u7565\u3001\u98ce\u9669\u89c4\u5219\u3001\u7f6e\u4fe1\u5ea6\u5206\u5c42\u548c\u73a9\u6cd5\u7ef4\u5ea6",
+        )
 
         top = tk.Frame(shell, bg=BG)
         top.pack(fill=tk.X, pady=(0, 16))
@@ -1201,22 +1168,10 @@ class SmartMatchDashboard:
         ).pack(anchor=tk.W, padx=14, pady=(0, 10))
 
     def open_system_settings(self) -> None:
-        win = tk.Toplevel(self.root)
-        win.title("\u7cfb\u7edf\u8bbe\u7f6e")
-        win.geometry("900x660")
-        win.minsize(760, 560)
-        win.configure(bg=BG)
-
-        shell = tk.Frame(win, bg=BG)
-        shell.pack(fill=tk.BOTH, expand=True, padx=22, pady=20)
-        tk.Label(shell, text="\u7cfb\u7edf\u8bbe\u7f6e", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 18, "bold")).pack(anchor=tk.W)
-        tk.Label(
-            shell,
-            text="\u672c\u5730\u8fd0\u884c\u53c2\u6570\u3001\u6570\u636e\u76ee\u5f55\u3001\u62a5\u544a\u76ee\u5f55\u548c\u98ce\u63a7\u9608\u503c\u8bf4\u660e",
-            bg=BG,
-            fg=MUTED,
-            font=("Microsoft YaHei UI", 10),
-        ).pack(anchor=tk.W, pady=(6, 16))
+        shell = self._page_shell(
+            "\u7cfb\u7edf\u8bbe\u7f6e",
+            "\u672c\u5730\u8fd0\u884c\u53c2\u6570\u3001\u6570\u636e\u76ee\u5f55\u3001\u62a5\u544a\u76ee\u5f55\u548c\u98ce\u63a7\u9608\u503c\u8bf4\u660e",
+        )
 
         body = tk.Frame(shell, bg=BG)
         body.pack(fill=tk.BOTH, expand=True)
