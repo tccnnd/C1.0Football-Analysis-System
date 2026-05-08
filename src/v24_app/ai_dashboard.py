@@ -1217,17 +1217,40 @@ class SmartMatchDashboard:
         if not settlements:
             listbox.insert(tk.END, "\u6682\u65e0\u590d\u76d8\u7ed3\u7b97\u8bb0\u5f55")
 
-        tk.Label(right, text="\u504f\u5dee\u91cd\u70b9", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
-        misses = self._high_confidence_misses(settlements)
-        if misses:
-            for item in misses[:10]:
-                self._strategy_row(
-                    right,
-                    f"{item.get('home_team', '-')} vs {item.get('away_team', '-')}",
-                    f"\u7f6e\u4fe1\u5ea6 {_pct1(item.get('prediction_confidence'))} | \u9884\u6d4b {item.get('predicted', '-')} | \u5b9e\u9645 {item.get('result', '-')} | {item.get('home_goals', '-')}-{item.get('away_goals', '-')}",
-                )
+        tk.Label(right, text="\u95ed\u73af\u590d\u76d8", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
+        detail = tk.Text(
+            right,
+            bg=PANEL,
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief=tk.FLAT,
+            wrap=tk.WORD,
+            font=("Microsoft YaHei UI", 10),
+            height=18,
+        )
+        detail.pack(fill=tk.BOTH, expand=True, padx=18, pady=(0, 14))
+
+        def show_settlement_detail(index: int) -> None:
+            detail.configure(state=tk.NORMAL)
+            detail.delete("1.0", tk.END)
+            if not settlements:
+                detail.insert(tk.END, "\u6682\u65e0\u5df2\u56de\u6536\u8d5b\u679c\u3002\u7b49\u6bd4\u8d5b\u5b8c\u573a\u540e\uff0c\u70b9\u51fb\u201c\u56de\u6536\u8d5b\u679c\u201d\u751f\u6210\u590d\u76d8\u95ed\u73af\u3002")
+            else:
+                detail.insert(tk.END, self._settlement_review_text(settlements[index]))
+            detail.configure(state=tk.DISABLED)
+
+        if settlements:
+            listbox.selection_set(0)
+            show_settlement_detail(0)
         else:
-            self._strategy_row(right, "\u9ad8\u7f6e\u4fe1\u5931\u8bef", "\u6682\u672a\u53d1\u73b0\u7f6e\u4fe1\u5ea6 >=60% \u4e14 1X2 \u5931\u8bef\u7684\u8bb0\u5f55")
+            show_settlement_detail(0)
+
+        def on_settlement_select(_event=None) -> None:
+            selection = listbox.curselection()
+            if selection and settlements:
+                show_settlement_detail(int(selection[0]))
+
+        listbox.bind("<<ListboxSelect>>", on_settlement_select)
 
     def run_result_recovery(self) -> None:
         self.status_var.set("\u6b63\u5728\u56de\u6536\u8d5b\u679c...")
@@ -1283,6 +1306,77 @@ class SmartMatchDashboard:
             f"{item.get('home_team', '-')} {item.get('home_goals', '-')}-{item.get('away_goals', '-')} {item.get('away_team', '-')} | "
             f"\u9884\u6d4b {item.get('predicted', '-')} | {hit} | {_pct1(item.get('prediction_confidence'))}"
         )
+
+    def _hit_label(self, value: object) -> str:
+        if value is True:
+            return "\u547d\u4e2d"
+        if value is False:
+            return "\u5931\u8bef"
+        return "\u65e0\u9884\u6d4b"
+
+    def _settlement_bias_tags(self, item: dict) -> list[str]:
+        tags: list[str] = []
+        confidence = float(item.get("prediction_confidence", 0) or 0)
+        if item.get("is_correct") is False and confidence >= 0.6:
+            tags.append("\u9ad8\u7f6e\u4fe1\u65b9\u5411\u9519\u8bef")
+        if item.get("is_correct") is False and item.get("result") == "\u5e73\u5c40":
+            tags.append("\u5e73\u5c40\u98ce\u9669\u4f4e\u4f30")
+        if item.get("ou_is_correct") is False:
+            tags.append("\u8fdb\u7403\u8282\u594f\u504f\u5dee")
+        if item.get("handicap_is_correct") is False:
+            tags.append("\u8ba9\u7403\u76d8\u504f\u5dee")
+        if item.get("score_is_correct") is False and float(item.get("score_confidence", 0) or 0) >= 0.1:
+            tags.append("\u6bd4\u5206\u8def\u5f84\u504f\u5dee")
+        if not tags:
+            tags.append("\u65e0\u660e\u663e\u504f\u5dee")
+        return tags
+
+    def _settlement_review_suggestions(self, tags: list[str]) -> list[str]:
+        suggestions: list[str] = []
+        if "\u9ad8\u7f6e\u4fe1\u65b9\u5411\u9519\u8bef" in tags:
+            suggestions.append("\u964d\u4f4e\u7c7b\u4f3c\u573a\u6b21\u7684\u5355\u4e00\u65b9\u5411\u6743\u91cd\uff0c\u4f18\u5148\u68c0\u67e5\u4e34\u573a\u4f24\u505c\u548c\u76d8\u53e3\u80cc\u79bb\u3002")
+        if "\u5e73\u5c40\u98ce\u9669\u4f4e\u4f30" in tags:
+            suggestions.append("\u589e\u52a0\u5747\u52bf\u6bd4\u8d5b\u7684\u5e73\u5c40\u4fdd\u62a4\u89c4\u5219\uff0c\u5f53\u80dc\u5e73\u8d1f\u6982\u7387\u5dee\u8ddd\u5c0f\u65f6\u81ea\u52a8\u964d\u6743\u3002")
+        if "\u8fdb\u7403\u8282\u594f\u504f\u5dee" in tags:
+            suggestions.append("\u590d\u6838\u5927\u5c0f\u7403\u6a21\u5757\u7684\u603b\u8fdb\u7403\u671f\u671b\uff0c\u628a\u8054\u8d5b\u8282\u594f\u548c\u8fd1\u671f\u653b\u9632\u72b6\u6001\u52a0\u5165\u6743\u91cd\u3002")
+        if "\u8ba9\u7403\u76d8\u504f\u5dee" in tags:
+            suggestions.append("\u68c0\u67e5\u8ba9\u7403\u7ebf\u548c\u6a21\u578b\u80dc\u5dee\u7684\u4e00\u81f4\u6027\uff0c\u76d8\u53e3\u4e0e\u6a21\u578b\u76f8\u53cd\u65f6\u6807\u8bb0\u4e3a\u89c2\u671b\u3002")
+        if "\u6bd4\u5206\u8def\u5f84\u504f\u5dee" in tags:
+            suggestions.append("\u6bd4\u5206\u53ea\u4f5c\u4e3a\u8f85\u52a9\u8def\u5f84\uff0c\u9ad8\u5206\u6563\u573a\u6b21\u4e0d\u5e94\u8f93\u51fa\u8fc7\u5f3a\u7684\u7cbe\u786e\u6bd4\u5206\u7ed3\u8bba\u3002")
+        if not suggestions:
+            suggestions.append("\u4fdd\u7559\u5f53\u524d\u7b56\u7565\u6743\u91cd\uff0c\u6301\u7eed\u7d2f\u79ef\u6837\u672c\u540e\u518d\u8c03\u6574\u3002")
+        return suggestions
+
+    def _settlement_review_text(self, item: dict) -> str:
+        tags = self._settlement_bias_tags(item)
+        suggestions = self._settlement_review_suggestions(tags)
+        actual_score = f"{item.get('home_goals', '-')}-{item.get('away_goals', '-')}"
+        lines = [
+            "\u8d5b\u524d\u5feb\u7167",
+            f"- \u8d5b\u4e8b: {item.get('home_team', '-')} vs {item.get('away_team', '-')}",
+            f"- \u8054\u8d5b: {item.get('league', '-')}",
+            f"- \u5f00\u8d5b: {item.get('match_date', '-')} {item.get('match_time', '-')}",
+            f"- \u9884\u6d4b\u65b9\u5411: {item.get('predicted', '-')}",
+            f"- \u7f6e\u4fe1\u5ea6: {_pct1(item.get('prediction_confidence'))}",
+            "",
+            "\u5b9e\u9645\u8d5b\u679c",
+            f"- \u6bd4\u5206: {actual_score}",
+            f"- \u7ed3\u679c: {item.get('result', '-')}",
+            f"- \u603b\u8fdb\u7403: {item.get('total_goals', '-')}",
+            "",
+            "\u73a9\u6cd5\u547d\u4e2d",
+            f"- 1X2: {self._hit_label(item.get('is_correct'))}",
+            f"- \u8ba9\u7403: {self._hit_label(item.get('handicap_is_correct'))} | \u9884\u6d4b {item.get('predicted_handicap', '-')} | \u5b9e\u9645 {item.get('handicap_result', '-')}",
+            f"- \u5927\u5c0f\u7403: {self._hit_label(item.get('ou_is_correct'))} | \u9884\u6d4b {item.get('predicted_ou', '-')} | \u5b9e\u9645 {item.get('ou_result', '-')}",
+            f"- \u6bd4\u5206: {self._hit_label(item.get('score_is_correct'))} | \u9884\u6d4b {item.get('predicted_score', '-')} | \u5b9e\u9645 {actual_score}",
+            "",
+            "\u504f\u5dee\u6807\u7b7e",
+            *[f"- {tag}" for tag in tags],
+            "",
+            "\u6539\u8fdb\u5efa\u8bae",
+            *[f"- {suggestion}" for suggestion in suggestions],
+        ]
+        return "\n".join(lines)
 
     def _high_confidence_misses(self, settlements: list[dict]) -> list[dict]:
         misses = [
