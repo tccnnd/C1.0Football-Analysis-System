@@ -377,6 +377,7 @@ class SmartMatchDashboard:
             "reports": tk.StringVar(value="0"),
             "alerts": tk.StringVar(value="0"),
             "hit_rate": tk.StringVar(value="-"),
+            "settlements": tk.StringVar(value="0"),
         }
 
         self._build_layout()
@@ -529,8 +530,7 @@ class SmartMatchDashboard:
         self._metric_card(cards, "\u4eca\u65e5\u8d5b\u4e8b", self.summary_vars["matches"], "\u573a", TEXT)
         self._metric_card(cards, "\u98ce\u9669\u9884\u8b66", self.summary_vars["alerts"], "\u6b21", RED)
         self._metric_card(cards, "\u5386\u53f2\u80dc\u7387", self.summary_vars["hit_rate"], "", "#7aa2ff")
-        report_count = tk.StringVar(value=str(len(list(REPORT_DIR.glob("ai_match_report_*.md"))) if REPORT_DIR.exists() else 0))
-        self._metric_card(cards, "\u5206\u6790\u62a5\u544a", report_count, "\u4efd", TEXT)
+        self._metric_card(cards, "\u5386\u53f2\u6837\u672c", self.summary_vars["settlements"], "\u573a", TEXT)
 
         body = tk.Frame(content, bg=BG)
         body.pack(fill=tk.BOTH, expand=True)
@@ -772,6 +772,7 @@ class SmartMatchDashboard:
         self.summary_vars["reports"].set(str(total))
         self.summary_vars["alerts"].set(str(alerts))
         self.summary_vars["hit_rate"].set(self._historical_hit_rate())
+        self.summary_vars["settlements"].set(str(self._historical_settlement_count()))
 
     def _historical_hit_rate(self) -> str:
         try:
@@ -789,6 +790,12 @@ class SmartMatchDashboard:
         if total == 0:
             return "-"
         return f"{hits / total:.1%}"
+
+    def _historical_settlement_count(self) -> int:
+        try:
+            return len(get_recent_settlements(limit=0))
+        except Exception:
+            return 0
 
     def _toggle_match_list(self) -> None:
         self.show_all_matches = not self.show_all_matches
