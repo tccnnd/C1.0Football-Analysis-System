@@ -1231,6 +1231,19 @@ class SmartMatchDashboard:
             padx=18,
             pady=7,
         ).pack(side=tk.RIGHT, padx=(0, 10))
+        tk.Button(
+            header,
+            text="\u51c6\u786e\u7387\u8bca\u65ad",
+            command=self.open_accuracy_diagnostics,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=18,
+            pady=7,
+        ).pack(side=tk.RIGHT, padx=(0, 10))
 
         top = tk.Frame(shell, bg=BG)
         top.pack(fill=tk.X, pady=(0, 16))
@@ -1351,6 +1364,176 @@ class SmartMatchDashboard:
             "handicap": self._hit_rate_text(settlements, "handicap_is_correct"),
             "ou": self._hit_rate_text(settlements, "ou_is_correct"),
         }
+
+    def open_accuracy_diagnostics(self) -> None:
+        settlements = list(reversed(get_recent_settlements(limit=200)))
+        diagnostics = self._accuracy_diagnostics(settlements)
+        shell = self._page_shell(
+            "\u51c6\u786e\u7387\u8bca\u65ad",
+            "\u6309\u7f6e\u4fe1\u5ea6\u3001\u9884\u6d4b\u65b9\u5411\u3001\u73a9\u6cd5\u548c\u8054\u8d5b\u62c6\u89e3\u5386\u53f2\u547d\u4e2d\u7387",
+        )
+        header = tk.Frame(shell, bg=BG)
+        header.pack(fill=tk.X, pady=(0, 16))
+        tk.Button(
+            header,
+            text="\u8fd4\u56de\u590d\u76d8\u4e2d\u5fc3",
+            command=self.open_review_center,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=18,
+            pady=7,
+        ).pack(side=tk.RIGHT)
+
+        top = tk.Frame(shell, bg=BG)
+        top.pack(fill=tk.X, pady=(0, 16))
+        for label, value, color in [
+            ("\u6837\u672c\u6570", str(diagnostics["sample_count"]), TEXT),
+            ("\u603b\u4f53 1X2", diagnostics["overall"], "#7aa2ff"),
+            ("\u9ad8\u7f6e\u4fe1 1X2", diagnostics["high_conf"], RED if diagnostics["high_conf_is_weak"] else GREEN),
+            ("\u4f18\u5316\u91cd\u70b9", diagnostics["priority"], YELLOW),
+        ]:
+            self._detail_metric(top, label, str(value), color)
+
+        body = tk.Frame(shell, bg=BG)
+        body.pack(fill=tk.BOTH, expand=True)
+        left = self._card(body, PANEL)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 14))
+        right = self._card(body, PANEL)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        tk.Label(left, text="\u5206\u5c42\u547d\u4e2d\u7387", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
+        for title, rows in [
+            ("\u7f6e\u4fe1\u5ea6", diagnostics["confidence"]),
+            ("\u9884\u6d4b\u65b9\u5411", diagnostics["direction"]),
+            ("\u8d5b\u679c\u7c7b\u578b", diagnostics["result"]),
+        ]:
+            self._strategy_row(left, title, "\n".join(rows) if rows else "\u6682\u65e0\u6837\u672c")
+
+        tk.Label(right, text="\u73a9\u6cd5\u4e0e\u8054\u8d5b", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
+        self._strategy_row(right, "\u73a9\u6cd5\u547d\u4e2d", "\n".join(diagnostics["plays"]) if diagnostics["plays"] else "\u6682\u65e0\u6837\u672c")
+        self._strategy_row(right, "\u8054\u8d5b Top 6", "\n".join(diagnostics["leagues"]) if diagnostics["leagues"] else "\u6682\u65e0\u6837\u672c")
+        self._strategy_row(right, "\u8bca\u65ad\u7ed3\u8bba", diagnostics["conclusion"])
+
+    def _accuracy_diagnostics(self, settlements: list[dict]) -> dict[str, object]:
+        recent = [item for item in settlements[:200] if isinstance(item, dict)]
+        confidence_groups = {
+            "\u9ad8\u7f6e\u4fe1 >=60%": lambda item: float(item.get("prediction_confidence", 0) or 0) >= 0.6,
+            "\u4e2d\u7f6e\u4fe1 45%-60%": lambda item: 0.45 <= float(item.get("prediction_confidence", 0) or 0) < 0.6,
+            "\u4f4e\u7f6e\u4fe1 <45%": lambda item: float(item.get("prediction_confidence", 0) or 0) < 0.45,
+        }
+        direction_groups = {
+            "\u4e3b\u80dc": lambda item: item.get("predicted") == "\u4e3b\u80dc",
+            "\u5e73\u5c40": lambda item: item.get("predicted") == "\u5e73\u5c40",
+            "\u5ba2\u80dc": lambda item: item.get("predicted") == "\u5ba2\u80dc",
+        }
+        result_groups = {
+            "\u5b9e\u9645\u4e3b\u80dc": lambda item: item.get("result") == "\u4e3b\u80dc",
+            "\u5b9e\u9645\u5e73\u5c40": lambda item: item.get("result") == "\u5e73\u5c40",
+            "\u5b9e\u9645\u5ba2\u80dc": lambda item: item.get("result") == "\u5ba2\u80dc",
+        }
+        plays = [
+            ("1X2", "is_correct"),
+            ("\u8ba9\u7403", "handicap_is_correct"),
+            ("\u5927\u5c0f\u7403", "ou_is_correct"),
+            ("\u6bd4\u5206", "score_is_correct"),
+        ]
+        confidence_rows = self._diagnostic_group_rows(recent, confidence_groups, "is_correct")
+        direction_rows = self._diagnostic_group_rows(recent, direction_groups, "is_correct")
+        result_rows = self._diagnostic_group_rows(recent, result_groups, "is_correct")
+        play_rows = [self._diagnostic_row(label, recent, key) for label, key in plays]
+        league_rows = self._league_diagnostic_rows(recent)
+        high_conf_items = [item for item in recent if confidence_groups["\u9ad8\u7f6e\u4fe1 >=60%"](item)]
+        high_conf_rate = self._hit_rate_value(high_conf_items, "is_correct")
+        weakest_play = self._weakest_diagnostic(play_rows)
+        priority = self._accuracy_priority(high_conf_rate, weakest_play)
+        return {
+            "sample_count": len(recent),
+            "overall": self._hit_rate_text(recent, "is_correct"),
+            "high_conf": self._hit_rate_text(high_conf_items, "is_correct"),
+            "high_conf_is_weak": high_conf_rate is not None and high_conf_rate < 0.5,
+            "priority": priority,
+            "confidence": confidence_rows,
+            "direction": direction_rows,
+            "result": result_rows,
+            "plays": play_rows,
+            "leagues": league_rows,
+            "conclusion": self._accuracy_conclusion(high_conf_rate, weakest_play, confidence_rows, direction_rows),
+        }
+
+    def _diagnostic_group_rows(self, items: list[dict], groups: dict[str, object], key: str) -> list[str]:
+        rows: list[str] = []
+        for label, predicate in groups.items():
+            group_items = [item for item in items if predicate(item)]
+            rows.append(self._diagnostic_row(label, group_items, key))
+        return rows
+
+    def _diagnostic_row(self, label: str, items: list[dict], key: str) -> str:
+        values = [bool(item.get(key)) for item in items if item.get(key) is not None]
+        if not values:
+            return f"{label}: - / 0\u573a"
+        rate = sum(1 for value in values if value) / len(values)
+        return f"{label}: {rate:.1%} / {len(values)}\u573a"
+
+    def _hit_rate_value(self, items: list[dict], key: str) -> float | None:
+        values = [bool(item.get(key)) for item in items if item.get(key) is not None]
+        if not values:
+            return None
+        return sum(1 for value in values if value) / len(values)
+
+    def _league_diagnostic_rows(self, items: list[dict]) -> list[str]:
+        buckets: dict[str, list[dict]] = {}
+        for item in items:
+            league = str(item.get("league") or "-")
+            buckets.setdefault(league, []).append(item)
+        rows = []
+        for league, league_items in sorted(buckets.items(), key=lambda pair: len(pair[1]), reverse=True)[:6]:
+            rows.append(self._diagnostic_row(league, league_items, "is_correct"))
+        return rows
+
+    def _weakest_diagnostic(self, rows: list[str]) -> str:
+        weakest = "-"
+        weakest_rate = 2.0
+        for row in rows:
+            try:
+                label, rest = row.split(":", 1)
+                rate_text = rest.strip().split("/", 1)[0].strip().rstrip("%")
+                rate = float(rate_text) / 100
+            except Exception:
+                continue
+            if rate < weakest_rate:
+                weakest_rate = rate
+                weakest = label
+        return weakest
+
+    def _accuracy_priority(self, high_conf_rate: float | None, weakest_play: str) -> str:
+        if high_conf_rate is not None and high_conf_rate < 0.5:
+            return "\u91cd\u6821\u51c6\u7f6e\u4fe1\u5ea6"
+        if weakest_play == "\u6bd4\u5206":
+            return "\u964d\u4f4e\u6bd4\u5206\u6743\u91cd"
+        if weakest_play == "\u5927\u5c0f\u7403":
+            return "\u4fee\u6b63\u8fdb\u7403\u671f\u671b"
+        if weakest_play == "\u8ba9\u7403":
+            return "\u590d\u6838\u76d8\u53e3\u6743\u91cd"
+        return "\u5206\u8054\u8d5b\u8c03\u6743"
+
+    def _accuracy_conclusion(
+        self,
+        high_conf_rate: float | None,
+        weakest_play: str,
+        confidence_rows: list[str],
+        direction_rows: list[str],
+    ) -> str:
+        parts = []
+        if high_conf_rate is not None and high_conf_rate < 0.5:
+            parts.append("\u9ad8\u7f6e\u4fe1\u6837\u672c\u547d\u4e2d\u7387\u4e0d\u8db3\uff0c\u8bf4\u660e\u5f53\u524d\u7f6e\u4fe1\u5ea6\u8fd8\u6ca1\u6709\u5f62\u6210\u6709\u6548\u7684\u8fc7\u6ee4\u80fd\u529b\u3002")
+        if weakest_play != "-":
+            parts.append(f"\u6700\u5f31\u73a9\u6cd5\u662f {weakest_play}\uff0c\u5e94\u5148\u964d\u6743\u6216\u6539\u4e3a\u8f85\u52a9\u53c2\u8003\u3002")
+        parts.append("\u4e0b\u4e00\u6b65\u5efa\u8bae\u4e0d\u662f\u6269\u5927\u9884\u6d4b\u8f93\u51fa\uff0c\u800c\u662f\u5148\u6309\u5206\u5c42\u7ed3\u679c\u8bbe\u7f6e\u8fc7\u6ee4\u95e8\u69db\u3002")
+        return "\n".join(parts)
 
     def _settlement_trend_summary(self, settlements: list[dict]) -> dict[str, object]:
         recent = settlements[:80]
