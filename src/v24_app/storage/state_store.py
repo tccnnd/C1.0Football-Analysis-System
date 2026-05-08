@@ -11,6 +11,7 @@ class StateStore:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.xgb_sample_limit = 50000
         self.ratings_file = self.state_dir / "elo_ratings.json"
+        self.national_team_ratings_file = self.state_dir / "national_team_elo_ratings.json"
         self.settlements_file = self.state_dir / "settlements.json"
         self.parlay_tickets_file = self.state_dir / "parlay_tickets.json"
         self.xgb_samples_file = self.state_dir / "xgb_training_samples.json"
@@ -20,21 +21,33 @@ class StateStore:
         self.c1_comparison_marks_file = self.state_dir / "c1_comparison_marks.json"
 
     def load_ratings(self) -> dict[str, float]:
-        if not self.ratings_file.exists():
+        return self._load_rating_file(self.ratings_file)
+
+    def save_ratings(self, ratings: dict[str, float]) -> None:
+        self._save_rating_file(self.ratings_file, ratings)
+
+    def load_national_team_ratings(self) -> dict[str, float]:
+        return self._load_rating_file(self.national_team_ratings_file)
+
+    def save_national_team_ratings(self, ratings: dict[str, float]) -> None:
+        self._save_rating_file(self.national_team_ratings_file, ratings)
+
+    def _load_rating_file(self, path: Path) -> dict[str, float]:
+        if not path.exists():
             return {}
         try:
-            payload = json.loads(self.ratings_file.read_text(encoding="utf-8"))
+            payload = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             return {}
         ratings = payload.get("ratings", {})
         return {str(team): float(value) for team, value in ratings.items()}
 
-    def save_ratings(self, ratings: dict[str, float]) -> None:
+    def _save_rating_file(self, path: Path, ratings: dict[str, float]) -> None:
         payload = {
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "ratings": ratings,
         }
-        self.ratings_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def load_settlements(self) -> list[dict]:
         if not self.settlements_file.exists():

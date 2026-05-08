@@ -106,6 +106,12 @@ def _competition_mode_label(prediction: dict) -> str:
     return "\u5e38\u89c4\u6a21\u5f0f"
 
 
+def _rating_pool_label(prediction: dict) -> str:
+    if prediction.get("rating_pool") == "national_team":
+        return "\u56fd\u5bb6\u961f ELO"
+    return "\u4ff1\u4e50\u90e8 ELO"
+
+
 def _world_cup_notice(prediction: dict) -> str:
     payload = prediction.get("world_cup_mode")
     if not isinstance(payload, dict) or not payload.get("enabled"):
@@ -118,6 +124,7 @@ def _world_cup_notice(prediction: dict) -> str:
         "\n\n\u4e16\u754c\u676f\u6a21\u5f0f\n"
         f"- \u8d5b\u5236\u9636\u6bb5\uff1a{phase}\n"
         f"- \u7f6e\u4fe1\u4e0a\u9650\uff1a{cap}\uff08{adjusted}\uff09\n"
+        "- \u8bc4\u5206\u6c60\uff1a\u56fd\u5bb6\u961f ELO\uff0c\u4e0d\u4e0e\u4ff1\u4e50\u90e8\u8bc4\u5206\u6df7\u7528\u3002\n"
         "- \u56fd\u5bb6\u961f\u6837\u672c\u7a00\u758f\uff0c\u9635\u5bb9\u3001\u8d5b\u7a0b\u5bc6\u5ea6\u548c\u79ef\u5206\u5f62\u52bf\u9700\u8981\u4f18\u5148\u590d\u6838\u3002\n"
         "- \u5c0f\u7ec4\u8d5b\u8981\u5173\u6ce8\u51c0\u80dc\u7403\u548c\u8f6e\u6362\uff0c\u6dd8\u6c70\u8d5b\u8981\u5173\u6ce8\u52a0\u65f6/\u70b9\u7403\u548c\u4fdd\u5b88\u7b56\u7565\u3002"
     )
@@ -942,6 +949,7 @@ class SmartMatchDashboard:
             ("\u63a8\u8350\u7b56\u7565", _strategy_text(pred), TEXT),
             ("\u7f6e\u4fe1\u5ea6", _pct1(pred.get("confidence")), "#7aa2ff"),
             ("\u8d5b\u4e8b\u6a21\u5f0f", _competition_mode_label(pred), YELLOW if pred.get("competition_mode") == "world_cup" else TEXT),
+            ("\u8bc4\u5206\u6c60", _rating_pool_label(pred), YELLOW if pred.get("rating_pool") == "national_team" else TEXT),
         ]:
             self._detail_metric(summary, label, value, color)
 

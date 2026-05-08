@@ -270,6 +270,23 @@ def is_world_cup_match(match: AppMatch) -> bool:
     return any(keyword in league for keyword in WORLD_CUP_LEAGUE_KEYWORDS)
 
 
+def _load_match_ratings(match: AppMatch) -> dict[str, float]:
+    if is_world_cup_match(match):
+        return STATE_STORE.load_national_team_ratings()
+    return STATE_STORE.load_ratings()
+
+
+def _save_match_ratings(match: AppMatch, ratings: dict[str, float]) -> None:
+    if is_world_cup_match(match):
+        STATE_STORE.save_national_team_ratings(ratings)
+        return
+    STATE_STORE.save_ratings(ratings)
+
+
+def _rating_pool_name(match: AppMatch) -> str:
+    return "national_team" if is_world_cup_match(match) else "club"
+
+
 def _world_cup_phase_hint(match: AppMatch) -> str:
     league = normalize_text(getattr(match, "league", ""))
     if any(text in league for text in ("淘汰", "1/8", "八分之一", "半决赛", "决赛")):
@@ -293,6 +310,7 @@ def _apply_world_cup_overlay(match: AppMatch, prediction: dict) -> dict:
     original_model = str(adjusted.get("model") or "")
     adjusted["model"] = f"{original_model}+WorldCupMode" if original_model else "WorldCupMode"
     adjusted["competition_mode"] = "world_cup"
+    adjusted["rating_pool"] = "national_team"
     adjusted["world_cup_mode"] = {
         "enabled": True,
         "phase": _world_cup_phase_hint(match),
@@ -5735,12 +5753,12 @@ def _predict_match_with_inputs(
 
 
 def predict_match(match: AppMatch) -> dict:
-    ratings_map = STATE_STORE.load_ratings()
+    ratings_map = _load_match_ratings(match)
     had_home = match.home_team in ratings_map
     had_away = match.away_team in ratings_map
     home_rating, away_rating, ratings_map = _resolved_ratings(match, ratings_map)
     if not (had_home and had_away):
-        STATE_STORE.save_ratings(ratings_map)
+        _save_match_ratings(match, ratings_map)
 
     league_strength = LEAGUE_STRENGTH.get(match.league, 0.92)
     recent_form_features = _recent_form_features_for_match(match)
@@ -5751,6 +5769,7 @@ def predict_match(match: AppMatch) -> dict:
         league_strength=league_strength,
         recent_form_features=recent_form_features,
     )
+    prediction["rating_pool"] = _rating_pool_name(match)
     return _apply_world_cup_overlay(match, prediction)
 
 
@@ -5926,7 +5945,7 @@ def settle_match_result(
     prediction: dict | None = None,
 ) -> dict:
     enrich_match_from_market_snapshot_store(match)
-    ratings_map = STATE_STORE.load_ratings()
+    ratings_map = _load_match_ratings(match)
     home_rating, away_rating, ratings_map = _resolved_ratings(match, ratings_map)
 
     league_strength = LEAGUE_STRENGTH.get(match.league, 0.92)
@@ -5940,7 +5959,7 @@ def settle_match_result(
 
     ratings_map[match.home_team] = round(update.home_after, 4)
     ratings_map[match.away_team] = round(update.away_after, 4)
-    STATE_STORE.save_ratings(ratings_map)
+    _save_match_ratings(match, ratings_map)
 
     result = _result_label(home_goals, away_goals)
     predicted = prediction.get("recommendation") if prediction else None
@@ -6010,6 +6029,7 @@ def settle_match_result(
         "away_rating_after": round(update.away_after, 2),
         "home_delta": round(update.delta_home, 2),
         "away_delta": round(update.delta_away, 2),
+        "rating_pool": _rating_pool_name(match),
     }
     STATE_STORE.append_settlement(settlement)
 
