@@ -233,6 +233,9 @@ class FetchDiagnostics:
     fixture_page_guard: bool = False
     cache_fresh: bool = False
     cache_exists: bool = False
+    cache_date: str = ""
+    cache_match_count: int = 0
+    cache_age_days: int | None = None
     fetched_at: str = ""
     messages: list[str] = field(default_factory=list)
     source_reports: list[dict] = field(default_factory=list)
@@ -787,7 +790,12 @@ def load_cached_payload() -> tuple[dict | None, FetchDiagnostics]:
         return None, diagnostics
 
     cache_date = normalize_text(payload.get("date", ""))
+    cache_matches = payload.get("matches", [])
+    diagnostics.cache_date = cache_date
+    diagnostics.cache_match_count = len(cache_matches) if isinstance(cache_matches, list) else 0
     today = datetime.now().strftime("%Y-%m-%d")
+    if _looks_like_date(cache_date):
+        diagnostics.cache_age_days = (datetime.now().date() - datetime.strptime(cache_date, "%Y-%m-%d").date()).days
     diagnostics.cache_fresh = cache_date == today
     if diagnostics.cache_fresh:
         diagnostics.add("发现当日缓存，可作为有效赛事源。")
@@ -839,7 +847,7 @@ def _persist_market_snapshots_with_diagnostics(matches: list[AppMatch], diagnost
         diagnostics.add(f"赛前市场快照已落盘: {saved} 条索引。")
 
 
-def fetch_matches_v24(strict_today: bool = True) -> FetchResult:
+def fetch_matches_v24(strict_today: bool = True, force_live: bool = False) -> FetchResult:
     diagnostics = FetchDiagnostics(
         source="none",
         fetched_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -848,43 +856,52 @@ def fetch_matches_v24(strict_today: bool = True) -> FetchResult:
     payload, cache_diagnostics = load_cached_payload()
     diagnostics.cache_exists = cache_diagnostics.cache_exists
     diagnostics.cache_fresh = cache_diagnostics.cache_fresh
+    diagnostics.cache_date = cache_diagnostics.cache_date
+    diagnostics.cache_match_count = cache_diagnostics.cache_match_count
+    diagnostics.cache_age_days = cache_diagnostics.cache_age_days
     diagnostics.messages.extend(cache_diagnostics.messages)
     cache_date_text = normalize_text(payload.get("date", "")) if payload else ""
 
-    stale_cache_matches: list[AppMatch] = []
-    stale_cache_messages: list[str] = []
-    if payload and payload.get("matches") and strict_today and not diagnostics.cache_fresh:
-        cache_age_days: int | None = None
-        if _looks_like_date(cache_date_text):
-            cache_age_days = (datetime.now().date() - datetime.strptime(cache_date_text, "%Y-%m-%d").date()).days
-
-        if cache_age_days is not None and 0 <= cache_age_days <= 2:
-            stale_cache_matches, stale_cache_messages = fixture_page_guard_from_items(
+    fallback_cache_matches: list[AppMatch] = []
+    fallback_cache_messages: list[str] = []
+    fallback_cache_source = "cache"
+    if payload and payload.get("matches"):
+        cache_age_days = diagnostics.cache_age_days
+        cache_can_fallback = diagnostics.cache_fresh or (
+            strict_today and cache_age_days is not None and 0 <= cache_age_days <= 2
+        )
+        if cache_can_fallback:
+            fallback_cache_source = "cache" if diagnostics.cache_fresh else "cache_stale"
+            fallback_cache_matches, fallback_cache_messages = fixture_page_guard_from_items(
                 payload.get("matches", []),
-                source="cache_stale",
+                source=fallback_cache_source,
             )
-            if stale_cache_matches:
-                diagnostics.add(
-                    f"检测到可回退缓存({cache_date_text})，若在线源不可用将自动启用。"
-                )
+            if fallback_cache_matches:
+                if diagnostics.cache_fresh:
+                    diagnostics.add(f"检测到当日缓存({cache_date_text})，在线源不可用时可回退。")
+                else:
+                    diagnostics.add(f"检测到可回退缓存({cache_date_text})，若在线源不可用将自动启用。")
 
-    def try_stale_fallback(reason: str) -> FetchResult | None:
-        if not stale_cache_matches:
+    def try_cache_fallback(reason: str) -> FetchResult | None:
+        if not fallback_cache_matches:
             return None
         diagnostics.fixture_source_guard = True
         diagnostics.fixture_page_guard = True
-        diagnostics.source = "cache_stale"
-        diagnostics.messages.extend(stale_cache_messages)
-        enrich_matches_from_market_snapshot_store(stale_cache_matches, diagnostics)
-        _enrich_matches_with_market_intent(stale_cache_matches, diagnostics)
-        _persist_market_snapshots_with_diagnostics(stale_cache_matches, diagnostics)
+        diagnostics.source = fallback_cache_source
+        diagnostics.messages.extend(fallback_cache_messages)
+        enrich_matches_from_market_snapshot_store(fallback_cache_matches, diagnostics)
+        _enrich_matches_with_market_intent(fallback_cache_matches, diagnostics)
+        _persist_market_snapshots_with_diagnostics(fallback_cache_matches, diagnostics)
+        cache_label = "当日缓存" if fallback_cache_source == "cache" else "最近缓存"
         diagnostics.add(
-            f"{reason}，已回退到最近缓存({cache_date_text})，共 {len(stale_cache_matches)} 场。"
+            f"{reason}，已回退到{cache_label}({cache_date_text})，共 {len(fallback_cache_matches)} 场。"
         )
-        return FetchResult(matches=stale_cache_matches, diagnostics=diagnostics)
+        return FetchResult(matches=fallback_cache_matches, diagnostics=diagnostics)
 
     if payload and payload.get("matches"):
-        if strict_today and not diagnostics.cache_fresh:
+        if force_live:
+            diagnostics.add("手动重试在线源: 本次跳过缓存优先读取。")
+        elif strict_today and not diagnostics.cache_fresh:
             diagnostics.add("fixture_source_guard 拒绝使用过期缓存。")
         else:
             diagnostics.fixture_source_guard = True
@@ -906,7 +923,7 @@ def fetch_matches_v24(strict_today: bool = True) -> FetchResult:
 
     if not fetchers:
         diagnostics.add("未加载到任何在线抓取器。")
-        fallback_result = try_stale_fallback("主数据源不可用")
+        fallback_result = try_cache_fallback("主数据源不可用")
         if fallback_result is not None:
             return fallback_result
         return FetchResult(matches=[], diagnostics=diagnostics)
@@ -1008,7 +1025,7 @@ def fetch_matches_v24(strict_today: bool = True) -> FetchResult:
         _persist_market_snapshots_with_diagnostics(merged_matches, diagnostics)
         return FetchResult(matches=merged_matches, diagnostics=diagnostics)
 
-    fallback_result = try_stale_fallback("所有在线源均不可用")
+    fallback_result = try_cache_fallback("所有在线源均不可用")
     if fallback_result is not None:
         return fallback_result
     return FetchResult(matches=[], diagnostics=diagnostics)

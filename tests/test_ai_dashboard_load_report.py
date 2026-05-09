@@ -17,6 +17,9 @@ if str(SRC_ROOT) not in sys.path:
 from v24_app.ai_dashboard import (
     _build_dashboard_rows,
     _build_match_load_report,
+    _cache_status_rows,
+    _cache_status_summary,
+    _cache_status_tone,
     _match_load_failure,
     _source_health_rows,
     _source_health_summary,
@@ -116,6 +119,26 @@ class AIDashboardLoadReportTests(unittest.TestCase):
         self.assertEqual(rows[1]["source"], "500")
         self.assertEqual(rows[1]["tone"], "warning")
         self.assertIn("raw 0 / valid 0", rows[1]["detail"])
+
+    def test_cache_status_summary_marks_fallback_cache(self) -> None:
+        report = _build_match_load_report(
+            fetched_count=2,
+            row_count=2,
+            failures=[],
+            source="cache_stale",
+            cache_exists=True,
+            cache_fresh=False,
+            cache_date="2026-05-08",
+            cache_match_count=2,
+            cache_age_days=2,
+            force_live=True,
+        )
+
+        self.assertEqual(_cache_status_summary(report), "已回退 2026-05-08 / 2 场")
+        self.assertEqual(_cache_status_tone(report), "warning")
+        rows = dict(_cache_status_rows(report))
+        self.assertEqual(rows["缓存日期"], "2026-05-08")
+        self.assertEqual(rows["本次强制在线"], "是")
 
     def test_build_match_load_report_marks_all_prediction_failures_failed(self) -> None:
         report = _build_match_load_report(

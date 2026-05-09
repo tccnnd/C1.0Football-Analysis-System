@@ -90,6 +90,12 @@ def _build_match_load_report(
     elapsed: float | None = None,
     source_messages: list[str] | None = None,
     source_reports: list[dict] | None = None,
+    cache_exists: bool = False,
+    cache_fresh: bool = False,
+    cache_date: str = "",
+    cache_match_count: int = 0,
+    cache_age_days: int | None = None,
+    force_live: bool = False,
 ) -> dict[str, object]:
     predict_failures = sum(1 for item in failures if item.get("stage") == "predict")
     snapshot_failures = sum(1 for item in failures if item.get("stage") == "snapshot")
@@ -106,6 +112,12 @@ def _build_match_load_report(
         "failures": list(failures),
         "source_messages": list(source_messages or []),
         "source_reports": [dict(item) for item in source_reports or [] if isinstance(item, dict)],
+        "cache_exists": bool(cache_exists),
+        "cache_fresh": bool(cache_fresh),
+        "cache_date": str(cache_date or ""),
+        "cache_match_count": max(0, int(cache_match_count or 0)),
+        "cache_age_days": cache_age_days,
+        "force_live": bool(force_live),
     }
 
 
@@ -172,6 +184,56 @@ def _source_health_summary(load_report: dict[str, object] | None) -> str:
     if rows:
         return "\u5728\u7ebf\u6e90\u4e0d\u53ef\u7528"
     return source
+
+
+def _cache_status_summary(load_report: dict[str, object] | None) -> str:
+    if not isinstance(load_report, dict):
+        return "-"
+    if not load_report.get("cache_exists"):
+        return "\u65e0\u7f13\u5b58"
+    cache_date = str(load_report.get("cache_date") or "-")
+    match_count = int(load_report.get("cache_match_count", 0) or 0)
+    source = str(load_report.get("source") or "")
+    if source == "cache_stale":
+        return f"\u5df2\u56de\u9000 {cache_date} / {match_count} \u573a"
+    if source == "cache":
+        return f"\u6b63\u5728\u4f7f\u7528\u5f53\u65e5\u7f13\u5b58 / {match_count} \u573a"
+    if load_report.get("cache_fresh"):
+        return f"\u5f53\u65e5\u7f13\u5b58\u53ef\u56de\u9000 / {match_count} \u573a"
+    age = load_report.get("cache_age_days")
+    if isinstance(age, int) and 0 <= age <= 2:
+        return f"\u6700\u8fd1\u7f13\u5b58\u53ef\u56de\u9000 {cache_date} / {match_count} \u573a"
+    return f"\u7f13\u5b58\u8fc7\u671f {cache_date} / {match_count} \u573a"
+
+
+def _cache_status_tone(load_report: dict[str, object] | None) -> str:
+    if not isinstance(load_report, dict) or not load_report.get("cache_exists"):
+        return "warning"
+    source = str(load_report.get("source") or "")
+    if source == "cache_stale":
+        return "warning"
+    if source == "cache":
+        return "info"
+    if load_report.get("cache_fresh"):
+        return "good"
+    age = load_report.get("cache_age_days")
+    if isinstance(age, int) and 0 <= age <= 2:
+        return "warning"
+    return "bad"
+
+
+def _cache_status_rows(load_report: dict[str, object] | None) -> list[tuple[str, str]]:
+    if not isinstance(load_report, dict):
+        return []
+    age = load_report.get("cache_age_days")
+    age_text = "-" if age is None else f"{age} \u5929"
+    return [
+        ("\u7f13\u5b58\u72b6\u6001", _cache_status_summary(load_report)),
+        ("\u7f13\u5b58\u65e5\u671f", str(load_report.get("cache_date") or "-")),
+        ("\u7f13\u5b58\u573a\u6b21", str(int(load_report.get("cache_match_count", 0) or 0))),
+        ("\u7f13\u5b58\u5e74\u9f84", age_text),
+        ("\u672c\u6b21\u5f3a\u5236\u5728\u7ebf", "\u662f" if load_report.get("force_live") else "\u5426"),
+    ]
 
 
 def _build_dashboard_rows(matches: list[AppMatch]) -> tuple[list[DashboardRow], list[dict[str, str]]]:
@@ -1131,10 +1193,14 @@ class SmartMatchDashboard:
         canvas.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 14))
         return canvas
 
-    def refresh(self) -> None:
-        self._log_event("INFO", "\u5f00\u59cb\u5237\u65b0\u8d5b\u4e8b\u6570\u636e")
-        self.status_var.set("正在聚合赛事数据并执行 AI 分析...")
-        threading.Thread(target=self._load_worker, daemon=True).start()
+    def refresh(self, force_live: bool = False) -> None:
+        if force_live:
+            self._log_event("INFO", "\u624b\u52a8\u91cd\u8bd5\u5728\u7ebf\u6570\u636e\u6e90")
+            self.status_var.set("\u6b63\u5728\u8df3\u8fc7\u7f13\u5b58\u5e76\u91cd\u8bd5\u5728\u7ebf\u6e90...")
+        else:
+            self._log_event("INFO", "\u5f00\u59cb\u5237\u65b0\u8d5b\u4e8b\u6570\u636e")
+            self.status_var.set("正在聚合赛事数据并执行 AI 分析...")
+        threading.Thread(target=self._load_worker, args=(force_live,), daemon=True).start()
 
     def _schedule_auto_refresh(self) -> None:
         if self._auto_refresh_after_id is not None:
@@ -1175,10 +1241,10 @@ class SmartMatchDashboard:
             self.status_var.set("\u81ea\u52a8\u5237\u65b0\u5df2\u5173\u95ed")
             self._log_event("INFO", "\u81ea\u52a8\u5237\u65b0\u5173\u95ed")
 
-    def _load_worker(self) -> None:
+    def _load_worker(self, force_live: bool = False) -> None:
         started = time.perf_counter()
         try:
-            fetched = fetch_matches_v24(strict_today=True)
+            fetched = fetch_matches_v24(strict_today=True, force_live=force_live)
         except Exception as exc:
             elapsed = time.perf_counter() - started
             self.last_refresh_seconds = elapsed
@@ -1195,6 +1261,12 @@ class SmartMatchDashboard:
             elapsed=elapsed,
             source_messages=fetched.diagnostics.messages,
             source_reports=fetched.diagnostics.source_reports,
+            cache_exists=fetched.diagnostics.cache_exists,
+            cache_fresh=fetched.diagnostics.cache_fresh,
+            cache_date=fetched.diagnostics.cache_date,
+            cache_match_count=fetched.diagnostics.cache_match_count,
+            cache_age_days=fetched.diagnostics.cache_age_days,
+            force_live=force_live,
         )
         self.root.after(
             0,
@@ -1571,9 +1643,12 @@ class SmartMatchDashboard:
         report_count = len(list(REPORT_DIR.glob("ai_match_report_*.md"))) if REPORT_DIR.exists() else 0
         load_report = self.last_load_diagnostics if isinstance(self.last_load_diagnostics, dict) else {}
         source_health = _source_health_summary(load_report)
+        cache_status = _cache_status_summary(load_report)
+        cache_tone = _cache_status_tone(load_report)
         metrics = [
             ("\u6570\u636e\u6e90", self.data_source, "#7aa2ff"),
             ("\u6e90\u5065\u5eb7", source_health, GREEN if "\u6b63\u5e38" in source_health or "\u5408\u5e76" in source_health else YELLOW),
+            ("\u7f13\u5b58\u56de\u9000", cache_status, self._tone_color(cache_tone)),
             ("\u4eca\u65e5\u8d5b\u4e8b", str(len(self.rows)), TEXT),
             ("\u9ad8\u98ce\u9669", str(risk_counts.get("high", 0)), RED),
             ("\u5386\u53f2\u62a5\u544a", str(report_count), TEXT),
@@ -1593,6 +1668,7 @@ class SmartMatchDashboard:
             ("\u9879\u76ee\u76ee\u5f55", str(PROJECT_ROOT)),
             ("\u6700\u8fd1\u52a0\u8f7d", self.last_loaded_at),
             ("\u6e90\u5065\u5eb7", source_health),
+            ("\u7f13\u5b58\u56de\u9000", cache_status),
             ("\u5f53\u524d\u6a21\u578b", self._dominant_model_name()),
             ("\u5e73\u5747\u7f6e\u4fe1\u5ea6", self._average_confidence()),
             ("\u62a5\u544a\u76ee\u5f55", str(REPORT_DIR)),
@@ -1611,6 +1687,10 @@ class SmartMatchDashboard:
             for row in source_rows:
                 self._kv_row(right, f"{row.get('source', '-')} / {row.get('status', '-')}", str(row.get("detail") or "-"))
 
+        tk.Label(left, text="\u7f13\u5b58\u56de\u9000", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
+        for label, value in _cache_status_rows(load_report):
+            self._kv_row(left, label, value)
+
         tk.Button(
             shell,
             text="\u5237\u65b0\u6570\u636e",
@@ -1624,6 +1704,19 @@ class SmartMatchDashboard:
             padx=18,
             pady=7,
         ).pack(anchor=tk.E, pady=(14, 0))
+        tk.Button(
+            shell,
+            text="\u91cd\u8bd5\u5728\u7ebf\u6e90",
+            command=lambda: self.refresh(force_live=True),
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=18,
+            pady=7,
+        ).pack(anchor=tk.E, pady=(8, 0))
 
     def _dominant_model_name(self) -> str:
         for row in self.rows:
@@ -1743,6 +1836,19 @@ class SmartMatchDashboard:
             padx=18,
             pady=7,
         ).pack(side=tk.RIGHT)
+        tk.Button(
+            header,
+            text="\u91cd\u8bd5\u5728\u7ebf\u6e90",
+            command=lambda: self.refresh(force_live=True),
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=18,
+            pady=7,
+        ).pack(side=tk.RIGHT, padx=(0, 10))
 
         top = tk.Frame(shell, bg=BG)
         top.pack(fill=tk.X, pady=(0, 16))
@@ -1752,10 +1858,13 @@ class SmartMatchDashboard:
         snapshot_failure_count = int(load_report.get("snapshot_failure_count", 0) or 0)
         fetched_count = int(load_report.get("fetched_count", len(self.rows)) or 0)
         source_health = _source_health_summary(load_report)
+        cache_status = _cache_status_summary(load_report)
+        cache_tone = _cache_status_tone(load_report)
         metrics = [
             ("\u6700\u8fd1\u8017\u65f6", f"{self.last_refresh_seconds:.2f}s" if self.last_refresh_seconds is not None else "-"),
             ("\u6570\u636e\u6e90", self.data_source, "#7aa2ff"),
             ("\u6e90\u5065\u5eb7", source_health, GREEN if "\u6b63\u5e38" in source_health or "\u5408\u5e76" in source_health else YELLOW),
+            ("\u7f13\u5b58\u56de\u9000", cache_status, self._tone_color(cache_tone)),
             ("\u52a0\u8f7d\u6210\u529f", f"{len(self.rows)}/{fetched_count}", GREEN if load_failure_count == 0 else YELLOW),
             ("\u52a0\u8f7d\u5931\u8d25", str(load_failure_count), RED if load_failure_count else GREEN),
             ("\u5feb\u7167\u5931\u8d25", str(snapshot_failure_count), YELLOW if snapshot_failure_count else GREEN),
@@ -1798,6 +1907,10 @@ class SmartMatchDashboard:
                     self._kv_row(left, title, body)
                 else:
                     self._alert_card(left, title, body, tone=tone)
+
+        tk.Label(left, text="\u7f13\u5b58\u56de\u9000", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
+        for label, value in _cache_status_rows(load_report):
+            self._kv_row(left, label, value)
 
         if self.load_failures:
             tk.Label(left, text="\u52a0\u8f7d\u5f02\u5e38", bg=PANEL, fg=YELLOW, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
