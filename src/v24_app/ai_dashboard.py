@@ -16,6 +16,7 @@ from .core import (
     AppMatch,
     apply_strategy_admission_policy_update,
     auto_settle_finished_matches,
+    build_result_recovery_snapshot_audit,
     fetch_matches_v24,
     get_high_accuracy_strategy_status,
     get_recent_settlements,
@@ -1110,6 +1111,33 @@ class SmartMatchDashboard:
     def _recovery_quality_alerts(self, limit: int = 80) -> list[dict[str, str]]:
         return build_result_recovery_quality_alerts(self._recovery_run_records(limit=limit))
 
+    def _result_recovery_snapshot_audit(self, lookback_days: int = 2) -> dict[str, object]:
+        try:
+            return build_result_recovery_snapshot_audit(
+                _load_prediction_snapshot_records(),
+                get_recent_settlements(limit=0),
+                lookback_days=lookback_days,
+            )
+        except Exception as exc:
+            self._log_event("ERROR", f"\u5feb\u7167\u53ef\u56de\u6536\u6027\u5ba1\u8ba1\u5931\u8d25: {exc}")
+            return {}
+
+    def _snapshot_audit_metrics(self, audit: dict[str, object]) -> list[tuple[str, str, str]]:
+        pending = int(audit.get("pending", 0) or 0)
+        recoverable = int(audit.get("recoverable_titan", 0) or 0)
+        missing_source = int(audit.get("missing_source_id", 0) or 0)
+        non_titan = int(audit.get("non_titan_source", 0) or 0)
+        out_window = int(audit.get("out_of_window", 0) or 0)
+        total = int(audit.get("total_snapshots", 0) or 0)
+        return [
+            ("\u5f85\u56de\u6536\u5feb\u7167", str(pending), TEXT),
+            ("\u53ef\u81ea\u52a8\u56de\u67e5", str(recoverable), GREEN if recoverable else YELLOW),
+            ("\u7f3a source_id", str(missing_source), RED if missing_source else GREEN),
+            ("\u975e Titan \u5feb\u7167", str(non_titan), YELLOW if non_titan else GREEN),
+            ("\u8d85\u51fa\u56de\u770b", str(out_window), YELLOW if out_window else TEXT),
+            ("\u5feb\u7167\u603b\u6570", str(total), "#7aa2ff"),
+        ]
+
     def _mark_stale_result_recovery_runs(self) -> None:
         try:
             records = get_result_recovery_runs(limit=0)
@@ -2002,6 +2030,7 @@ class SmartMatchDashboard:
         allowlist_summary = build_strategy_allowlist_settlement_summary(settlements)
         allowlist_tuning = build_strategy_allowlist_tuning_recommendation(settlements)
         recovery_summary = self._recovery_run_summary()
+        snapshot_audit = self._result_recovery_snapshot_audit(lookback_days=2)
 
         shell = self._page_shell(
             "\u590d\u76d8\u4e2d\u5fc3",
@@ -2075,6 +2104,11 @@ class SmartMatchDashboard:
             ("\u5e73\u5747\u56de\u6536\u8017\u65f6", str(recovery_summary.get("avg_elapsed_text") or "-"), "#7aa2ff"),
         ]:
             self._detail_metric(top, label, value, color)
+
+        audit_frame = tk.Frame(shell, bg=BG)
+        audit_frame.pack(fill=tk.X, pady=(0, 16))
+        for label, value, color in self._snapshot_audit_metrics(snapshot_audit):
+            self._detail_metric(audit_frame, label, value, color)
 
         trend_frame = tk.Frame(shell, bg=BG)
         trend_frame.pack(fill=tk.X, pady=(0, 16))
@@ -2166,6 +2200,7 @@ class SmartMatchDashboard:
         quality_alerts = build_result_recovery_quality_alerts(records)
         run_rows = build_result_recovery_run_rows(records, limit=50)
         latest_status = str(summary.get("latest_status") or "")
+        snapshot_audit = self._result_recovery_snapshot_audit(lookback_days=2)
 
         shell = self._page_shell(
             "\u56de\u6536\u8fd0\u884c\u8bb0\u5f55",
@@ -2228,6 +2263,11 @@ class SmartMatchDashboard:
             ("\u8d28\u91cf\u544a\u8b66", str(len(quality_alerts)), RED if any(item.get("severity") == "high" for item in quality_alerts) else YELLOW if quality_alerts else GREEN),
         ]:
             self._detail_metric(top, label, value, color)
+
+        audit_frame = tk.Frame(shell, bg=BG)
+        audit_frame.pack(fill=tk.X, pady=(0, 16))
+        for label, value, color in self._snapshot_audit_metrics(snapshot_audit):
+            self._detail_metric(audit_frame, label, value, color)
 
         body = tk.Frame(shell, bg=BG)
         body.pack(fill=tk.BOTH, expand=True)
