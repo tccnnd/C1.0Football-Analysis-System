@@ -19,12 +19,17 @@ from .core import (
     fetch_matches_v24,
     get_high_accuracy_strategy_status,
     get_recent_settlements,
+    get_result_recovery_runs,
     get_strategy_admission_policy_status,
     mark_strategy_allowlist_snapshots,
     persist_prediction_snapshot,
     predict_match,
+    record_result_recovery_run,
 )
 from .ui_modules import (
+    build_result_recovery_run_detail,
+    build_result_recovery_run_rows,
+    build_result_recovery_run_summary,
     build_high_accuracy_strategy_dashboard,
     build_strategy_allowlist_settlement_summary,
     build_strategy_allowlist_tuning_recommendation,
@@ -475,6 +480,7 @@ class SmartMatchDashboard:
         self.current_view = "home"
         self.result_recovery_running = False
         self.result_recovery_buttons: list[tk.Button] = []
+        self.result_recovery_run_record: dict[str, object] | None = None
         self.show_all_matches = False
         self.admission_filter = "all"
         self.admission_filter_buttons: dict[str, tk.Button] = {}
@@ -885,6 +891,77 @@ class SmartMatchDashboard:
                 continue
             live_buttons.append(button)
         self.result_recovery_buttons = live_buttons
+
+    def _recovery_run_records(self, limit: int = 80) -> list[dict]:
+        try:
+            return get_result_recovery_runs(limit=limit)
+        except Exception:
+            return []
+
+    def _recovery_run_summary(self) -> dict[str, object]:
+        return build_result_recovery_run_summary(self._recovery_run_records(limit=80))
+
+    def _record_result_recovery_run(self, record: dict[str, object]) -> None:
+        try:
+            record_result_recovery_run(record)
+        except Exception as exc:
+            self._log_event("ERROR", f"\u56de\u6536\u8fd0\u884c\u8bb0\u5f55\u5199\u5165\u5931\u8d25: {exc}")
+
+    def _begin_result_recovery_run_record(self) -> dict[str, object]:
+        now = datetime.now()
+        record: dict[str, object] = {
+            "run_id": now.strftime("%Y%m%d_%H%M%S_%f"),
+            "status": "running",
+            "trigger": "manual_ui",
+            "source_view": getattr(self, "current_view", "-"),
+            "started_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+            "lookback_days": 2,
+            "prediction_cache_count": len(self.rows),
+        }
+        self.result_recovery_run_record = dict(record)
+        self._record_result_recovery_run(record)
+        return record
+
+    def _finish_result_recovery_run_record(
+        self,
+        *,
+        status: str,
+        elapsed: float,
+        result: dict | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        record = dict(self.result_recovery_run_record or {})
+        if not record.get("run_id"):
+            record = self._begin_result_recovery_run_record()
+        result_payload = result if isinstance(result, dict) else {}
+        messages = result_payload.get("messages", [])
+        if not isinstance(messages, list):
+            messages = []
+        record.update(
+            {
+                "status": status,
+                "finished_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "elapsed_seconds": round(float(elapsed), 4),
+                "source": result_payload.get("source", "-"),
+                "fetched_finished": int(result_payload.get("fetched_finished", 0) or 0),
+                "restored_snapshots": int(result_payload.get("restored_snapshots", 0) or 0),
+                "new_settled": int(result_payload.get("new_settled", 0) or 0),
+                "new_parlay_settled": int(result_payload.get("new_parlay_settled", 0) or 0),
+                "already_settled": int(result_payload.get("already_settled", 0) or 0),
+                "skipped": int(result_payload.get("skipped", 0) or 0),
+                "snapshot_checked": int(result_payload.get("snapshot_checked", 0) or 0),
+                "snapshot_result_hits": int(result_payload.get("snapshot_result_hits", 0) or 0),
+                "snapshot_predictions": int(result_payload.get("snapshot_predictions", 0) or 0),
+                "lookback_days": int(result_payload.get("lookback_days", record.get("lookback_days", 2)) or 2),
+                "messages": [str(item) for item in messages if item],
+            }
+        )
+        if error is not None:
+            record["error"] = str(error)
+        elif status == "success":
+            record["error"] = ""
+        self.result_recovery_run_record = dict(record)
+        self._record_result_recovery_run(record)
 
     def _chart_card(self, parent: tk.Widget, title: str) -> tk.Canvas:
         frame = self._card(parent, PANEL)
@@ -1376,6 +1453,7 @@ class SmartMatchDashboard:
             ("500_config", PROJECT_ROOT / "config" / "500_config.json"),
             ("settlements", PROJECT_ROOT / "data" / "state" / "settlements.json"),
             ("prediction_snapshots", PROJECT_ROOT / "data" / "state" / "prediction_snapshots.json"),
+            ("result_recovery_runs", PROJECT_ROOT / "data" / "state" / "result_recovery_runs.json"),
             ("xgb_model", PROJECT_ROOT / "data" / "models" / "xgb_v0_match_outcome.json"),
         ]
         for label, path in key_files:
@@ -1411,6 +1489,8 @@ class SmartMatchDashboard:
             self.open_strategy_library()
         elif view == "accuracy":
             self.open_accuracy_diagnostics()
+        elif view == "recovery_runs":
+            self.open_recovery_run_center()
         elif view == "data":
             self.open_data_center()
         elif view == "match_analysis":
@@ -1427,12 +1507,26 @@ class SmartMatchDashboard:
         self._refresh_nav_highlight()
         release_alerts = self._release_recovery_alerts()
         release_alert_count = int(release_alerts.get("count", 0) or 0)
+        recovery_summary = self._recovery_run_summary()
         shell = self._page_shell(
             "\u76d1\u63a7\u4e2d\u5fc3",
             "\u8fd0\u884c\u65e5\u5fd7\u3001\u5206\u6790\u8017\u65f6\u3001\u6570\u636e\u6e90\u548c\u98ce\u9669\u72b6\u6001",
         )
         header = tk.Frame(shell, bg=BG)
         header.pack(fill=tk.X)
+        tk.Button(
+            header,
+            text="\u56de\u6536\u8fd0\u884c\u8bb0\u5f55",
+            command=self.open_recovery_run_center,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=18,
+            pady=7,
+        ).pack(side=tk.RIGHT, padx=(0, 10))
         tk.Button(
             header,
             text="\u5237\u65b0\u8d5b\u4e8b",
@@ -1456,6 +1550,8 @@ class SmartMatchDashboard:
             ("\u8d5b\u4e8b\u6570", str(len(self.rows)), TEXT),
             ("\u9884\u8b66", str(risk_counts.get("high", 0)), RED),
             ("\u653e\u884c\u5f85\u56de\u6536", str(release_alert_count), RED if release_alert_count else GREEN),
+            ("\u6700\u8fd1\u56de\u6536", str(recovery_summary.get("latest_status_label") or "-"), GREEN if recovery_summary.get("latest_status") == "success" else RED if recovery_summary.get("latest_status") == "failed" else YELLOW),
+            ("\u56de\u6536\u65b0\u7ed3\u7b97", str(recovery_summary.get("latest_new_settled", 0)), "#7aa2ff"),
         ]
         for label, value, color in metrics:
             self._detail_metric(top, label, value, color)
@@ -1511,6 +1607,7 @@ class SmartMatchDashboard:
         trend = self._settlement_trend_summary(settlements)
         allowlist_summary = build_strategy_allowlist_settlement_summary(settlements)
         allowlist_tuning = build_strategy_allowlist_tuning_recommendation(settlements)
+        recovery_summary = self._recovery_run_summary()
 
         shell = self._page_shell(
             "\u590d\u76d8\u4e2d\u5fc3",
@@ -1518,6 +1615,19 @@ class SmartMatchDashboard:
         )
         header = tk.Frame(shell, bg=BG)
         header.pack(fill=tk.X)
+        tk.Button(
+            header,
+            text="\u8fd0\u884c\u8bb0\u5f55",
+            command=self.open_recovery_run_center,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=18,
+            pady=7,
+        ).pack(side=tk.RIGHT, padx=(0, 10))
         recover_button = tk.Button(
             header,
             text="\u56de\u6536\u8d5b\u679c",
@@ -1567,6 +1677,8 @@ class SmartMatchDashboard:
             ("1X2 \u547d\u4e2d", summary["one_x_two"], GREEN),
             ("\u8ba9\u7403\u547d\u4e2d", summary["handicap"], "#7aa2ff"),
             ("\u5927\u5c0f\u7403\u547d\u4e2d", summary["ou"], YELLOW),
+            ("\u8fd1\u671f\u56de\u6536\u6210\u529f\u7387", str(recovery_summary.get("recent_success_rate_text") or "-"), GREEN if float(recovery_summary.get("recent_success_rate") or 0) >= 0.8 else YELLOW),
+            ("\u5e73\u5747\u56de\u6536\u8017\u65f6", str(recovery_summary.get("avg_elapsed_text") or "-"), "#7aa2ff"),
         ]:
             self._detail_metric(top, label, value, color)
 
@@ -1653,6 +1765,134 @@ class SmartMatchDashboard:
 
         listbox.bind("<<ListboxSelect>>", on_settlement_select)
 
+    def open_recovery_run_center(self) -> None:
+        self.current_view = "recovery_runs"
+        records = self._recovery_run_records(limit=80)
+        summary = build_result_recovery_run_summary(records)
+        run_rows = build_result_recovery_run_rows(records, limit=50)
+        latest_status = str(summary.get("latest_status") or "")
+
+        shell = self._page_shell(
+            "\u56de\u6536\u8fd0\u884c\u8bb0\u5f55",
+            "\u8bb0\u5f55\u6bcf\u6b21\u8d5b\u679c\u56de\u6536\u7684\u5f00\u59cb\u3001\u7ed3\u675f\u3001\u8017\u65f6\u3001\u65b0\u7ed3\u7b97\u548c\u5931\u8d25\u539f\u56e0",
+        )
+
+        header = tk.Frame(shell, bg=BG)
+        header.pack(fill=tk.X, pady=(0, 16))
+        refresh_button = tk.Button(
+            header,
+            text="\u56de\u6536\u8d5b\u679c",
+            command=self.run_result_recovery,
+            bg=BLUE,
+            fg="white",
+            activebackground="#3d5ee7",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=18,
+            pady=7,
+        )
+        self._register_result_recovery_button(refresh_button)
+        refresh_button.pack(side=tk.RIGHT)
+        tk.Button(
+            header,
+            text="\u5237\u65b0\u8bb0\u5f55",
+            command=self.open_recovery_run_center,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=18,
+            pady=7,
+        ).pack(side=tk.RIGHT, padx=(0, 10))
+        tk.Button(
+            header,
+            text="\u8fd4\u56de\u590d\u76d8\u4e2d\u5fc3",
+            command=self.open_review_center,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=18,
+            pady=7,
+        ).pack(side=tk.RIGHT, padx=(0, 10))
+
+        top = tk.Frame(shell, bg=BG)
+        top.pack(fill=tk.X, pady=(0, 16))
+        for label, value, color in [
+            ("\u8bb0\u5f55\u603b\u6570", str(summary.get("total", 0)), TEXT),
+            ("\u6700\u8fd1\u72b6\u6001", str(summary.get("latest_status_label") or "-"), GREEN if latest_status == "success" else RED if latest_status == "failed" else YELLOW),
+            ("\u8fd1 10 \u6b21\u6210\u529f\u7387", str(summary.get("recent_success_rate_text") or "-"), GREEN if float(summary.get("recent_success_rate") or 0) >= 0.8 else YELLOW),
+            ("\u5e73\u5747\u8017\u65f6", str(summary.get("avg_elapsed_text") or "-"), "#7aa2ff"),
+            ("\u7d2f\u8ba1\u65b0\u7ed3\u7b97", str(summary.get("total_new_settled", 0)), "#7aa2ff"),
+            ("\u5931\u8d25\u6b21\u6570", str(summary.get("failed_count", 0)), RED if int(summary.get("failed_count", 0) or 0) else GREEN),
+        ]:
+            self._detail_metric(top, label, value, color)
+
+        body = tk.Frame(shell, bg=BG)
+        body.pack(fill=tk.BOTH, expand=True)
+        left = self._card(body, PANEL)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 14))
+        right = self._card(body, PANEL)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        tk.Label(left, text="\u6700\u8fd1\u8fd0\u884c", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
+        listbox = tk.Listbox(
+            left,
+            bg=PANEL,
+            fg=TEXT,
+            selectbackground=BLUE,
+            selectforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10),
+            activestyle="none",
+        )
+        listbox.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
+
+        tk.Label(right, text="\u8fd0\u884c\u8be6\u60c5", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
+        detail = tk.Text(
+            right,
+            bg=PANEL,
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief=tk.FLAT,
+            wrap=tk.WORD,
+            font=("Microsoft YaHei UI", 10),
+            height=18,
+        )
+        detail.pack(fill=tk.BOTH, expand=True, padx=18, pady=(0, 14))
+
+        def show_detail(index: int) -> None:
+            detail.configure(state=tk.NORMAL)
+            detail.delete("1.0", tk.END)
+            if not run_rows:
+                detail.insert(tk.END, "\u6682\u65e0\u56de\u6536\u8fd0\u884c\u8bb0\u5f55\u3002\u70b9\u51fb\u201c\u56de\u6536\u8d5b\u679c\u201d\u540e\uff0c\u8fd9\u91cc\u4f1a\u4fdd\u7559\u6267\u884c\u8fc7\u7a0b\u548c\u7ed3\u679c\u3002")
+            elif index < 0 or index >= len(run_rows):
+                detail.insert(tk.END, build_result_recovery_run_detail(run_rows[0].get("record", {})))
+            else:
+                detail.insert(tk.END, build_result_recovery_run_detail(run_rows[index].get("record", {})))
+            detail.configure(state=tk.DISABLED)
+
+        for row in run_rows:
+            listbox.insert(tk.END, str(row.get("title") or "-"))
+        if run_rows:
+            listbox.selection_set(0)
+            show_detail(0)
+        else:
+            listbox.insert(tk.END, "\u6682\u65e0\u56de\u6536\u8fd0\u884c\u8bb0\u5f55")
+            show_detail(0)
+
+        def on_select(_event=None) -> None:
+            selection = listbox.curselection()
+            if selection and run_rows:
+                show_detail(int(selection[0]))
+
+        listbox.bind("<<ListboxSelect>>", on_select)
+
     def run_result_recovery(self) -> None:
         if self.result_recovery_running:
             message = "\u8d5b\u679c\u56de\u6536\u6b63\u5728\u8fd0\u884c\uff0c\u8bf7\u7b49\u5f53\u524d\u4efb\u52a1\u5b8c\u6210\u3002"
@@ -1661,16 +1901,20 @@ class SmartMatchDashboard:
             return
         self.result_recovery_running = True
         self._set_result_recovery_controls_state()
+        self._begin_result_recovery_run_record()
         self.status_var.set("\u6b63\u5728\u56de\u6536\u8d5b\u679c...")
         self._log_event("INFO", "\u5f00\u59cb\u56de\u6536\u8d5b\u679c")
         prediction_cache = {row.match.match_id: row.prediction for row in self.rows}
+        if getattr(self, "current_view", "") == "recovery_runs":
+            self.open_recovery_run_center()
 
         def worker() -> None:
             started = time.perf_counter()
             try:
                 result = auto_settle_finished_matches(prediction_cache=prediction_cache, lookback_days=2)
             except Exception as exc:
-                self.root.after(0, lambda: self._finish_result_recovery_error(exc))
+                elapsed = time.perf_counter() - started
+                self.root.after(0, lambda: self._finish_result_recovery_error(exc, elapsed))
                 return
             elapsed = time.perf_counter() - started
             self.root.after(0, lambda: self._finish_result_recovery(result, elapsed))
@@ -1682,6 +1926,7 @@ class SmartMatchDashboard:
         fetched = int(result.get("fetched_finished", 0) or 0)
         restored = int(result.get("restored_snapshots", 0) or 0)
         source = str(result.get("source", "-"))
+        self._finish_result_recovery_run_record(status="success", result=result, elapsed=elapsed)
         self.result_recovery_running = False
         self._set_result_recovery_controls_state()
         message = f"\u8d5b\u679c\u56de\u6536\u5b8c\u6210: \u5b8c\u573a {fetched} | \u4fee\u590d\u5feb\u7167 {restored} | \u65b0\u7ed3\u7b97 {new_settled} | \u6570\u636e\u6e90 {source} | \u8017\u65f6 {elapsed:.2f}s"
@@ -1692,7 +1937,8 @@ class SmartMatchDashboard:
         detail = "\n".join(str(item) for item in result.get("messages", []) if item) or message
         messagebox.showinfo("\u8d5b\u679c\u56de\u6536", detail)
 
-    def _finish_result_recovery_error(self, exc: Exception) -> None:
+    def _finish_result_recovery_error(self, exc: Exception, elapsed: float = 0.0) -> None:
+        self._finish_result_recovery_run_record(status="failed", elapsed=elapsed, error=exc)
         self.result_recovery_running = False
         self._set_result_recovery_controls_state()
         self.status_var.set(f"\u8d5b\u679c\u56de\u6536\u5931\u8d25: {exc}")

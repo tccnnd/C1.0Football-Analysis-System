@@ -7942,6 +7942,17 @@ def get_recent_settlements(limit: int = 20) -> list[dict]:
     return items[-limit:]
 
 
+def get_result_recovery_runs(limit: int = 50) -> list[dict]:
+    items = STATE_STORE.load_result_recovery_runs()
+    if limit <= 0:
+        return items
+    return items[-limit:]
+
+
+def record_result_recovery_run(record: dict, limit: int = 300) -> None:
+    STATE_STORE.upsert_result_recovery_run(record, limit=limit)
+
+
 def auto_settle_finished_matches(
     prediction_cache: dict[str, dict] | None = None,
     lookback_days: int = 2,

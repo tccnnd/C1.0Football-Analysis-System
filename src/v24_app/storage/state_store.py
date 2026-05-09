@@ -18,6 +18,7 @@ class StateStore:
         self.analysis_history_file = self.state_dir / "analysis_history.json"
         self.prediction_snapshots_file = self.state_dir / "prediction_snapshots.json"
         self.market_snapshots_file = self.state_dir / "market_snapshots.json"
+        self.result_recovery_runs_file = self.state_dir / "result_recovery_runs.json"
         self.snapshot_migration_report_file = self.state_dir / "prediction_snapshot_migration.json"
         self.c1_comparison_marks_file = self.state_dir / "c1_comparison_marks.json"
 
@@ -235,6 +236,50 @@ class StateStore:
             for key in stale_keys:
                 items.pop(key, None)
         self.save_market_snapshots(items)
+
+    def load_result_recovery_runs(self) -> list[dict]:
+        if not self.result_recovery_runs_file.exists():
+            return []
+        try:
+            payload = json.loads(self.result_recovery_runs_file.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        items = payload.get("items", [])
+        return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+
+    def save_result_recovery_runs(self, items: list[dict], limit: int = 300) -> None:
+        normalized = [item for item in items if isinstance(item, dict)]
+        if len(normalized) > limit:
+            normalized = normalized[-limit:]
+        payload = {
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "items": normalized,
+        }
+        self.result_recovery_runs_file.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def upsert_result_recovery_run(self, record: dict, limit: int = 300) -> None:
+        if not isinstance(record, dict):
+            return
+        run_id = str(record.get("run_id") or "").strip()
+        if not run_id:
+            return
+        items = self.load_result_recovery_runs()
+        next_items: list[dict] = []
+        merged = False
+        for item in items:
+            if str(item.get("run_id") or "") == run_id:
+                updated = dict(item)
+                updated.update(record)
+                next_items.append(updated)
+                merged = True
+            else:
+                next_items.append(item)
+        if not merged:
+            next_items.append(dict(record))
+        self.save_result_recovery_runs(next_items, limit=limit)
 
     def load_snapshot_migration_report(self) -> dict:
         if not self.snapshot_migration_report_file.exists():
