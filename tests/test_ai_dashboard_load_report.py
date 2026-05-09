@@ -14,7 +14,13 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from v24_app.ai_dashboard import _build_dashboard_rows, _build_match_load_report, _match_load_failure
+from v24_app.ai_dashboard import (
+    _build_dashboard_rows,
+    _build_match_load_report,
+    _match_load_failure,
+    _source_health_rows,
+    _source_health_summary,
+)
 from v24_app.core import AppMatch
 
 
@@ -89,6 +95,27 @@ class AIDashboardLoadReportTests(unittest.TestCase):
         self.assertEqual(report["snapshot_failure_count"], 1)
         self.assertEqual(report["source_messages"], ["source ok"])
         json.dumps(report, ensure_ascii=False)
+
+    def test_source_health_rows_show_degraded_secondary_source(self) -> None:
+        report = _build_match_load_report(
+            fetched_count=3,
+            row_count=3,
+            failures=[],
+            source="live:titan",
+            source_reports=[
+                {"source": "titan", "status": "ready", "raw_count": 3, "valid_count": 3, "coverage": 1.0, "health_score": 100},
+                {"source": "500", "status": "empty", "raw_count": 0, "valid_count": 0},
+            ],
+        )
+
+        rows = _source_health_rows(report)
+
+        self.assertEqual(_source_health_summary(report), "单源支撑 / 1 源异常")
+        self.assertEqual(rows[0]["source"], "titan")
+        self.assertEqual(rows[0]["tone"], "good")
+        self.assertEqual(rows[1]["source"], "500")
+        self.assertEqual(rows[1]["tone"], "warning")
+        self.assertIn("raw 0 / valid 0", rows[1]["detail"])
 
     def test_build_match_load_report_marks_all_prediction_failures_failed(self) -> None:
         report = _build_match_load_report(

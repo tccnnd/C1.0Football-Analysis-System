@@ -235,6 +235,7 @@ class FetchDiagnostics:
     cache_exists: bool = False
     fetched_at: str = ""
     messages: list[str] = field(default_factory=list)
+    source_reports: list[dict] = field(default_factory=list)
 
     def add(self, message: str) -> None:
         self.messages.append(message)
@@ -948,6 +949,8 @@ def fetch_matches_v24(strict_today: bool = True) -> FetchResult:
         )
         live_all_matches.extend(matches)
 
+    diagnostics.source_reports = [dict(item) for item in source_reports]
+
     if live_all_matches:
         merged_matches = dedupe_matches(live_all_matches)
         merged_count = len(merged_matches)
@@ -974,6 +977,7 @@ def fetch_matches_v24(strict_today: bool = True) -> FetchResult:
         primary_source = str(ready_reports[0].get("source", "")) if ready_reports else "unknown"
         diagnostics.fixture_page_guard = True
         diagnostics.source = f"live:{primary_source}" if len(ready_reports) <= 1 else f"live:hybrid(primary={primary_source})"
+        diagnostics.source_reports = [dict(item) for item in source_reports]
 
         for item in ready_reports:
             diagnostics.add(

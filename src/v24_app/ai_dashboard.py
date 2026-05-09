@@ -89,6 +89,7 @@ def _build_match_load_report(
     source: str,
     elapsed: float | None = None,
     source_messages: list[str] | None = None,
+    source_reports: list[dict] | None = None,
 ) -> dict[str, object]:
     predict_failures = sum(1 for item in failures if item.get("stage") == "predict")
     snapshot_failures = sum(1 for item in failures if item.get("stage") == "snapshot")
@@ -104,7 +105,73 @@ def _build_match_load_report(
         "elapsed": elapsed,
         "failures": list(failures),
         "source_messages": list(source_messages or []),
+        "source_reports": [dict(item) for item in source_reports or [] if isinstance(item, dict)],
     }
+
+
+def _source_health_rows(load_report: dict[str, object] | None) -> list[dict[str, str]]:
+    if not isinstance(load_report, dict):
+        return []
+    reports = load_report.get("source_reports", [])
+    if not isinstance(reports, list):
+        return []
+    rows: list[dict[str, str]] = []
+    status_labels = {
+        "ready": "\u6b63\u5e38",
+        "empty": "\u65e0\u8d5b\u4e8b",
+        "error": "\u5931\u8d25",
+        "guard_reject": "\u6821\u9a8c\u62d2\u7edd",
+    }
+    tones = {
+        "ready": "good",
+        "empty": "warning",
+        "error": "bad",
+        "guard_reject": "bad",
+    }
+    for item in reports:
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("status") or "-")
+        raw_count = int(item.get("raw_count", 0) or 0)
+        valid_count = int(item.get("valid_count", 0) or 0)
+        detail = f"raw {raw_count} / valid {valid_count}"
+        if "coverage" in item:
+            detail += f" / coverage {_pct1(item.get('coverage'))}"
+        if "health_score" in item:
+            detail += f" / score {int(item.get('health_score', 0) or 0)}"
+        if item.get("error"):
+            detail += f" / {item.get('error')}"
+        rows.append(
+            {
+                "source": str(item.get("source") or "-"),
+                "status": status_labels.get(status, status),
+                "detail": detail,
+                "tone": tones.get(status, "neutral"),
+            }
+        )
+    return rows
+
+
+def _source_health_summary(load_report: dict[str, object] | None) -> str:
+    if not isinstance(load_report, dict):
+        return "-"
+    source = str(load_report.get("source") or "-")
+    rows = _source_health_rows(load_report)
+    ready = sum(1 for row in rows if row.get("tone") == "good")
+    degraded = sum(1 for row in rows if row.get("tone") in {"warning", "bad"})
+    if source == "cache_stale":
+        return "\u5df2\u56de\u9000\u7f13\u5b58"
+    if source == "cache":
+        return "\u4f7f\u7528\u5f53\u65e5\u7f13\u5b58"
+    if source.startswith("live:hybrid"):
+        return f"\u591a\u6e90\u5408\u5e76 {ready} \u53ef\u7528"
+    if ready and degraded:
+        return f"\u5355\u6e90\u652f\u6491 / {degraded} \u6e90\u5f02\u5e38"
+    if ready:
+        return f"\u5728\u7ebf\u6e90\u6b63\u5e38 {ready}"
+    if rows:
+        return "\u5728\u7ebf\u6e90\u4e0d\u53ef\u7528"
+    return source
 
 
 def _build_dashboard_rows(matches: list[AppMatch]) -> tuple[list[DashboardRow], list[dict[str, str]]]:
@@ -1127,6 +1194,7 @@ class SmartMatchDashboard:
             source=fetched.diagnostics.source,
             elapsed=elapsed,
             source_messages=fetched.diagnostics.messages,
+            source_reports=fetched.diagnostics.source_reports,
         )
         self.root.after(
             0,
@@ -1501,8 +1569,11 @@ class SmartMatchDashboard:
         top.pack(fill=tk.X, pady=(0, 16))
         risk_counts = self._risk_counts()
         report_count = len(list(REPORT_DIR.glob("ai_match_report_*.md"))) if REPORT_DIR.exists() else 0
+        load_report = self.last_load_diagnostics if isinstance(self.last_load_diagnostics, dict) else {}
+        source_health = _source_health_summary(load_report)
         metrics = [
             ("\u6570\u636e\u6e90", self.data_source, "#7aa2ff"),
+            ("\u6e90\u5065\u5eb7", source_health, GREEN if "\u6b63\u5e38" in source_health or "\u5408\u5e76" in source_health else YELLOW),
             ("\u4eca\u65e5\u8d5b\u4e8b", str(len(self.rows)), TEXT),
             ("\u9ad8\u98ce\u9669", str(risk_counts.get("high", 0)), RED),
             ("\u5386\u53f2\u62a5\u544a", str(report_count), TEXT),
@@ -1521,6 +1592,7 @@ class SmartMatchDashboard:
         status_rows = [
             ("\u9879\u76ee\u76ee\u5f55", str(PROJECT_ROOT)),
             ("\u6700\u8fd1\u52a0\u8f7d", self.last_loaded_at),
+            ("\u6e90\u5065\u5eb7", source_health),
             ("\u5f53\u524d\u6a21\u578b", self._dominant_model_name()),
             ("\u5e73\u5747\u7f6e\u4fe1\u5ea6", self._average_confidence()),
             ("\u62a5\u544a\u76ee\u5f55", str(REPORT_DIR)),
@@ -1532,6 +1604,12 @@ class SmartMatchDashboard:
         data_rows = self._data_inventory_rows()
         for label, value in data_rows:
             self._kv_row(right, label, value)
+
+        source_rows = _source_health_rows(load_report)
+        if source_rows:
+            tk.Label(right, text="\u5728\u7ebf\u6e90\u72b6\u6001", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
+            for row in source_rows:
+                self._kv_row(right, f"{row.get('source', '-')} / {row.get('status', '-')}", str(row.get("detail") or "-"))
 
         tk.Button(
             shell,
@@ -1673,9 +1751,11 @@ class SmartMatchDashboard:
         load_failure_count = int(load_report.get("failure_count", 0) or 0)
         snapshot_failure_count = int(load_report.get("snapshot_failure_count", 0) or 0)
         fetched_count = int(load_report.get("fetched_count", len(self.rows)) or 0)
+        source_health = _source_health_summary(load_report)
         metrics = [
             ("\u6700\u8fd1\u8017\u65f6", f"{self.last_refresh_seconds:.2f}s" if self.last_refresh_seconds is not None else "-"),
             ("\u6570\u636e\u6e90", self.data_source, "#7aa2ff"),
+            ("\u6e90\u5065\u5eb7", source_health, GREEN if "\u6b63\u5e38" in source_health or "\u5408\u5e76" in source_health else YELLOW),
             ("\u52a0\u8f7d\u6210\u529f", f"{len(self.rows)}/{fetched_count}", GREEN if load_failure_count == 0 else YELLOW),
             ("\u52a0\u8f7d\u5931\u8d25", str(load_failure_count), RED if load_failure_count else GREEN),
             ("\u5feb\u7167\u5931\u8d25", str(snapshot_failure_count), YELLOW if snapshot_failure_count else GREEN),
@@ -1706,6 +1786,18 @@ class SmartMatchDashboard:
         ]
         for label, value in agent_rows:
             self._kv_row(left, label, value)
+
+        source_rows = _source_health_rows(load_report)
+        if source_rows:
+            tk.Label(left, text="\u6570\u636e\u6e90\u5065\u5eb7", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
+            for row in source_rows:
+                tone = str(row.get("tone") or "neutral")
+                title = f"{row.get('source', '-')} / {row.get('status', '-')}"
+                body = str(row.get("detail") or "-")
+                if tone == "good":
+                    self._kv_row(left, title, body)
+                else:
+                    self._alert_card(left, title, body, tone=tone)
 
         if self.load_failures:
             tk.Label(left, text="\u52a0\u8f7d\u5f02\u5e38", bg=PANEL, fg=YELLOW, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
