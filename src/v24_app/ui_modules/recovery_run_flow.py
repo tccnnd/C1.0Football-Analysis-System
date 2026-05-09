@@ -84,6 +84,79 @@ def build_result_recovery_run_summary(records: Sequence[Mapping[str, object]] | 
     }
 
 
+def build_result_recovery_quality_alerts(
+    records: Sequence[Mapping[str, object]] | object,
+    *,
+    failure_streak_threshold: int = 2,
+    no_settlement_window: int = 3,
+    elapsed_multiplier: float = 2.0,
+    min_elapsed_seconds: float = 10.0,
+) -> list[dict[str, str]]:
+    rows = _run_items(records)
+    completed = [item for item in rows if str(item.get("status") or "").lower() in {"success", "failed"}]
+    if not completed:
+        return []
+
+    alerts: list[dict[str, str]] = []
+    failure_streak = 0
+    for item in reversed(completed):
+        if str(item.get("status") or "").lower() == "failed":
+            failure_streak += 1
+        else:
+            break
+    if failure_streak >= max(1, int(failure_streak_threshold)):
+        latest = completed[-1]
+        alerts.append(
+            {
+                "severity": "high",
+                "title": f"\u8fde\u7eed\u56de\u6536\u5931\u8d25 {failure_streak} \u6b21",
+                "body": f"\u6700\u8fd1\u9519\u8bef: {latest.get('error') or '-'}",
+                "tone": "bad",
+            }
+        )
+
+    success_runs = [item for item in completed if str(item.get("status") or "").lower() == "success"]
+    recent_success = success_runs[-max(1, int(no_settlement_window)) :]
+    if len(recent_success) >= max(1, int(no_settlement_window)) and all(_safe_int(item.get("new_settled"), 0) == 0 for item in recent_success):
+        total_finished = sum(_safe_int(item.get("fetched_finished"), 0) for item in recent_success)
+        total_restored = sum(_safe_int(item.get("restored_snapshots"), 0) for item in recent_success)
+        alerts.append(
+            {
+                "severity": "medium",
+                "title": f"\u8fd1 {len(recent_success)} \u6b21\u56de\u6536\u65e0\u65b0\u7ed3\u7b97",
+                "body": f"\u671f\u95f4\u5b8c\u573a {total_finished} \u573a\uff0c\u4fee\u590d\u5feb\u7167 {total_restored} \u573a\u3002\u5efa\u8bae\u68c0\u67e5\u5feb\u7167\u7ed1\u5b9a\u548c\u8d5b\u679c\u6e90\u547d\u4e2d\u7387\u3002",
+                "tone": "warning",
+            }
+        )
+
+    elapsed_runs = [item for item in success_runs if _safe_float(item.get("elapsed_seconds"), default=-1.0) >= 0]
+    if len(elapsed_runs) >= 4:
+        latest = elapsed_runs[-1]
+        previous = elapsed_runs[-4:-1]
+        baseline = sum(_safe_float(item.get("elapsed_seconds"), 0.0) for item in previous) / len(previous)
+        latest_elapsed = _safe_float(latest.get("elapsed_seconds"), 0.0)
+        if baseline > 0 and latest_elapsed >= max(float(min_elapsed_seconds), baseline * float(elapsed_multiplier)):
+            alerts.append(
+                {
+                    "severity": "medium",
+                    "title": "\u56de\u6536\u8017\u65f6\u5f02\u5e38\u5347\u9ad8",
+                    "body": f"\u6700\u8fd1\u8017\u65f6 {_elapsed_text(latest_elapsed)}\uff0c\u524d 3 \u6b21\u5e73\u5747 {_elapsed_text(baseline)}\u3002\u5efa\u8bae\u68c0\u67e5\u8d5b\u679c\u6e90\u54cd\u5e94\u548c\u672c\u5730\u72b6\u6001\u6587\u4ef6\u3002",
+                    "tone": "warning",
+                }
+            )
+
+    if not alerts and str(rows[-1].get("status") or "").lower() == "running":
+        alerts.append(
+            {
+                "severity": "info",
+                "title": "\u56de\u6536\u4efb\u52a1\u6b63\u5728\u8fd0\u884c",
+                "body": f"\u5f00\u59cb\u65f6\u95f4: {rows[-1].get('started_at') or '-'}",
+                "tone": "info",
+            }
+        )
+    return alerts
+
+
 def build_result_recovery_run_rows(
     records: Sequence[Mapping[str, object]] | object,
     *,

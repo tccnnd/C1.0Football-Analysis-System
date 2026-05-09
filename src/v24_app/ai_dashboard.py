@@ -27,6 +27,7 @@ from .core import (
     record_result_recovery_run,
 )
 from .ui_modules import (
+    build_result_recovery_quality_alerts,
     build_result_recovery_run_detail,
     build_result_recovery_run_rows,
     build_result_recovery_run_summary,
@@ -872,6 +873,21 @@ class SmartMatchDashboard:
             pady=5,
         ).pack(side=tk.LEFT, padx=(8, 0))
 
+    def _alert_card(self, parent: tk.Widget, title: str, body: str, *, tone: str = "warning") -> None:
+        color = self._tone_color(tone)
+        frame = tk.Frame(parent, bg=PANEL_2, highlightbackground=color, highlightthickness=1)
+        frame.pack(fill=tk.X, padx=18, pady=7)
+        tk.Label(frame, text=title, bg=PANEL_2, fg=color, font=("Microsoft YaHei UI", 11, "bold")).pack(anchor=tk.W, padx=14, pady=(10, 3))
+        tk.Label(
+            frame,
+            text=body,
+            bg=PANEL_2,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 9),
+            justify=tk.LEFT,
+            wraplength=360,
+        ).pack(anchor=tk.W, padx=14, pady=(0, 10))
+
     def _register_result_recovery_button(self, button: tk.Button) -> None:
         self.result_recovery_buttons = [
             item for item in self.result_recovery_buttons if self._widget_alive_for(item)
@@ -900,6 +916,9 @@ class SmartMatchDashboard:
 
     def _recovery_run_summary(self) -> dict[str, object]:
         return build_result_recovery_run_summary(self._recovery_run_records(limit=80))
+
+    def _recovery_quality_alerts(self, limit: int = 80) -> list[dict[str, str]]:
+        return build_result_recovery_quality_alerts(self._recovery_run_records(limit=limit))
 
     def _record_result_recovery_run(self, record: dict[str, object]) -> None:
         try:
@@ -1508,6 +1527,7 @@ class SmartMatchDashboard:
         release_alerts = self._release_recovery_alerts()
         release_alert_count = int(release_alerts.get("count", 0) or 0)
         recovery_summary = self._recovery_run_summary()
+        recovery_quality_alerts = self._recovery_quality_alerts()
         shell = self._page_shell(
             "\u76d1\u63a7\u4e2d\u5fc3",
             "\u8fd0\u884c\u65e5\u5fd7\u3001\u5206\u6790\u8017\u65f6\u3001\u6570\u636e\u6e90\u548c\u98ce\u9669\u72b6\u6001",
@@ -1552,6 +1572,7 @@ class SmartMatchDashboard:
             ("\u653e\u884c\u5f85\u56de\u6536", str(release_alert_count), RED if release_alert_count else GREEN),
             ("\u6700\u8fd1\u56de\u6536", str(recovery_summary.get("latest_status_label") or "-"), GREEN if recovery_summary.get("latest_status") == "success" else RED if recovery_summary.get("latest_status") == "failed" else YELLOW),
             ("\u56de\u6536\u65b0\u7ed3\u7b97", str(recovery_summary.get("latest_new_settled", 0)), "#7aa2ff"),
+            ("\u56de\u6536\u544a\u8b66", str(len(recovery_quality_alerts)), RED if any(item.get("severity") == "high" for item in recovery_quality_alerts) else YELLOW if recovery_quality_alerts else GREEN),
         ]
         for label, value, color in metrics:
             self._detail_metric(top, label, value, color)
@@ -1581,6 +1602,11 @@ class SmartMatchDashboard:
             for row in rows:
                 if isinstance(row, dict):
                     self._release_recovery_action_card(left, str(row.get("title") or "-"), str(row.get("body") or "-"))
+
+        if recovery_quality_alerts:
+            tk.Label(left, text="\u56de\u6536\u8d28\u91cf\u544a\u8b66", bg=PANEL, fg=YELLOW, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
+            for alert in recovery_quality_alerts[:3]:
+                self._alert_card(left, str(alert.get("title") or "-"), str(alert.get("body") or "-"), tone=str(alert.get("tone") or "warning"))
 
         tk.Label(right, text="\u8fd0\u884c\u65e5\u5fd7", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
         logbox = tk.Listbox(
@@ -1769,6 +1795,7 @@ class SmartMatchDashboard:
         self.current_view = "recovery_runs"
         records = self._recovery_run_records(limit=80)
         summary = build_result_recovery_run_summary(records)
+        quality_alerts = build_result_recovery_quality_alerts(records)
         run_rows = build_result_recovery_run_rows(records, limit=50)
         latest_status = str(summary.get("latest_status") or "")
 
@@ -1830,6 +1857,7 @@ class SmartMatchDashboard:
             ("\u5e73\u5747\u8017\u65f6", str(summary.get("avg_elapsed_text") or "-"), "#7aa2ff"),
             ("\u7d2f\u8ba1\u65b0\u7ed3\u7b97", str(summary.get("total_new_settled", 0)), "#7aa2ff"),
             ("\u5931\u8d25\u6b21\u6570", str(summary.get("failed_count", 0)), RED if int(summary.get("failed_count", 0) or 0) else GREEN),
+            ("\u8d28\u91cf\u544a\u8b66", str(len(quality_alerts)), RED if any(item.get("severity") == "high" for item in quality_alerts) else YELLOW if quality_alerts else GREEN),
         ]:
             self._detail_metric(top, label, value, color)
 
@@ -1841,6 +1869,9 @@ class SmartMatchDashboard:
         right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         tk.Label(left, text="\u6700\u8fd1\u8fd0\u884c", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
+        if quality_alerts:
+            for alert in quality_alerts[:3]:
+                self._alert_card(left, str(alert.get("title") or "-"), str(alert.get("body") or "-"), tone=str(alert.get("tone") or "warning"))
         listbox = tk.Listbox(
             left,
             bg=PANEL,

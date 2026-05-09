@@ -13,6 +13,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from v24_app.ui_modules import (
+    build_result_recovery_quality_alerts,
     build_result_recovery_run_detail,
     build_result_recovery_run_rows,
     build_result_recovery_run_summary,
@@ -62,6 +63,36 @@ class UIRecoveryRunFlowModuleTests(unittest.TestCase):
         self.assertIn("运行 ID: run-1", detail)
         self.assertIn("新增结算: 3", detail)
         self.assertIn("- done", detail)
+
+    def test_quality_alerts_detect_failures_no_settlement_and_slow_runs(self) -> None:
+        failure_alerts = build_result_recovery_quality_alerts(
+            [
+                {"run_id": "1", "status": "success", "new_settled": 1, "elapsed_seconds": 2.0},
+                {"run_id": "2", "status": "failed", "error": "source timeout", "elapsed_seconds": 1.0},
+                {"run_id": "3", "status": "failed", "error": "source timeout", "elapsed_seconds": 1.0},
+            ]
+        )
+        self.assertEqual(failure_alerts[0]["severity"], "high")
+        self.assertIn("连续回收失败", failure_alerts[0]["title"])
+
+        no_settlement_alerts = build_result_recovery_quality_alerts(
+            [
+                {"run_id": "1", "status": "success", "new_settled": 0, "fetched_finished": 2, "elapsed_seconds": 1.0},
+                {"run_id": "2", "status": "success", "new_settled": 0, "fetched_finished": 3, "elapsed_seconds": 1.0},
+                {"run_id": "3", "status": "success", "new_settled": 0, "fetched_finished": 4, "elapsed_seconds": 1.0},
+            ]
+        )
+        self.assertTrue(any("无新结算" in item["title"] for item in no_settlement_alerts))
+
+        slow_alerts = build_result_recovery_quality_alerts(
+            [
+                {"run_id": "1", "status": "success", "new_settled": 1, "elapsed_seconds": 3.0},
+                {"run_id": "2", "status": "success", "new_settled": 1, "elapsed_seconds": 4.0},
+                {"run_id": "3", "status": "success", "new_settled": 1, "elapsed_seconds": 5.0},
+                {"run_id": "4", "status": "success", "new_settled": 1, "elapsed_seconds": 20.0},
+            ]
+        )
+        self.assertTrue(any("耗时异常" in item["title"] for item in slow_alerts))
 
 
 if __name__ == "__main__":
