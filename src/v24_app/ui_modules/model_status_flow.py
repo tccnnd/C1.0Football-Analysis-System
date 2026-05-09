@@ -352,6 +352,8 @@ def build_high_accuracy_strategy_backtest_message(result: Mapping[str, object] |
         "高准确率策略回测完成\n"
         + f"历史结算: {validation.get('settlement_count', 0)}\n"
         + f"策略记录: {validation.get('record_count', 0)}\n"
+        + f"结算记录: {validation.get('settlement_record_count', 0)}\n"
+        + f"历史市场记录: {validation.get('historical_record_count', 0)}\n"
         + f"候选策略: {validation.get('candidate_count', 0)}\n"
         + f"时间区间: {validation.get('date_start') or '-'} -> {validation.get('date_end') or '-'}\n\n"
         + f"选中玩法: {strategy.get('play_type', '-')}\n"

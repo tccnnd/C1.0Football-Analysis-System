@@ -126,6 +126,7 @@ class CorePlayThresholdBucketTuningTests(unittest.TestCase):
 
         with (
             patch("v24_app.core.get_recent_settlements", return_value=settlements),
+            patch("v24_app.core._xgb_market_strategy_records", return_value=[]),
             patch("v24_app.core._save_high_accuracy_strategy_report") as save_mock,
             patch("v24_app.core.get_high_accuracy_strategy_status", return_value={"enabled": True}),
         ):

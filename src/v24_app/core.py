@@ -4063,6 +4063,51 @@ def _settlement_strategy_records(settlements: list[dict]) -> list[dict]:
     return records
 
 
+def _xgb_market_strategy_records(limit: int = 50000) -> list[dict]:
+    label_to_result = {0: "主胜", 1: "平局", 2: "客胜"}
+    key_to_result = {"home": "主胜", "draw": "平局", "away": "客胜"}
+    records: list[dict] = []
+    samples = STATE_STORE.load_xgb_samples()
+    if limit > 0:
+        samples = samples[-int(limit):]
+    for item in samples:
+        if not isinstance(item, dict):
+            continue
+        features = item.get("features", {}) if isinstance(item.get("features"), dict) else {}
+        meta = item.get("meta", {}) if isinstance(item.get("meta"), dict) else {}
+        try:
+            label = int(item.get("label"))
+        except Exception:
+            continue
+        if label not in label_to_result:
+            continue
+        probabilities = {
+            "home": _safe_float(features.get("market_home"), default=0.0),
+            "draw": _safe_float(features.get("market_draw"), default=0.0),
+            "away": _safe_float(features.get("market_away"), default=0.0),
+        }
+        if max(probabilities.values()) <= 0.0:
+            continue
+        pick_key = max(probabilities, key=probabilities.get)
+        records.append(
+            {
+                "match_id": str(item.get("match_id") or ""),
+                "match_date": normalize_text(meta.get("match_date", "")),
+                "league": normalize_text(meta.get("league", "")) or "-",
+                "rating_pool": "club",
+                "play_type": "market_1x2",
+                "source_play_type": "market_1x2",
+                "pick": key_to_result.get(pick_key, "-"),
+                "confidence": round(_clamp(probabilities[pick_key]), 4),
+                "is_hit": key_to_result.get(pick_key) == label_to_result[label],
+                "return_rate": round(_safe_float(meta.get("return_rate"), default=_safe_float(features.get("return_rate"), default=0.0)), 4),
+                "handicap_abs": round(abs(_safe_float(meta.get("handicap_line"), default=0.0)), 2),
+                "sample_source": normalize_text(meta.get("source", "")) or "xgb_training_samples",
+            }
+        )
+    return records
+
+
 def _wilson_lower_bound(hits: int, total: int, z: float = 1.28) -> float:
     if total <= 0:
         return 0.0
@@ -4130,6 +4175,8 @@ def _write_high_accuracy_strategy_report(result: dict) -> str | None:
         f"- Generated At: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"- Settlement Samples: {validation.get('settlement_count', 0)}",
         f"- Strategy Records: {validation.get('record_count', 0)}",
+        f"- Settlement Records: {validation.get('settlement_record_count', 0)}",
+        f"- Historical Market Records: {validation.get('historical_record_count', 0)}",
         f"- Date Window: {validation.get('date_start') or '-'} -> {validation.get('date_end') or '-'}",
         "",
         "## Selected Strategy",
@@ -4224,17 +4271,21 @@ def _build_high_accuracy_strategy_pool(candidates: list[dict]) -> list[dict]:
 def run_high_accuracy_strategy_backtest(
     *,
     limit: int = 500,
+    historical_limit: int = 50000,
     min_samples: int = 18,
     min_coverage: float = 0.02,
     min_league_samples: int = 18,
     write_report: bool = True,
 ) -> dict:
     settlements = get_recent_settlements(limit=max(0, int(limit)))
-    records = _settlement_strategy_records(settlements)
+    settlement_records = _settlement_strategy_records(settlements)
+    historical_records = _xgb_market_strategy_records(limit=max(0, int(historical_limit)))
+    records = settlement_records + historical_records
     if not records:
         return {"ok": False, "reason": "no_strategy_records", "strategy": {}, "validation": {"settlement_count": len(settlements), "record_count": 0}}
 
     confidence_grid = {
+        "market_1x2": [0.34, 0.38, 0.42, 0.46, 0.50, 0.55, 0.60, 0.65, 0.70],
         "1x2": [0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70],
         "handicap": [0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75],
         "total_goals": [0.16, 0.18, 0.20, 0.24, 0.28, 0.32, 0.36],
@@ -4288,6 +4339,8 @@ def run_high_accuracy_strategy_backtest(
             "validation": {
                 "settlement_count": len(settlements),
                 "record_count": len(records),
+                "settlement_record_count": len(settlement_records),
+                "historical_record_count": len(historical_records),
                 "min_samples": int(min_samples),
                 "min_coverage": round(float(min_coverage), 4),
             },
@@ -4310,8 +4363,11 @@ def run_high_accuracy_strategy_backtest(
     validation = {
         "settlement_count": len(settlements),
         "record_count": len(records),
+        "settlement_record_count": len(settlement_records),
+        "historical_record_count": len(historical_records),
         "date_start": min(dates) if dates else None,
         "date_end": max(dates) if dates else None,
+        "historical_limit": int(historical_limit),
         "min_samples": int(min_samples),
         "min_coverage": round(float(min_coverage), 4),
         "min_league_samples": int(min_league_samples),
@@ -4384,6 +4440,21 @@ def _high_accuracy_strategy_match_single(
             "pick": prediction.get("ou_recommendation", "-"),
             "confidence": round(_safe_float(prediction.get("ou_confidence"), default=0.0), 4),
             "passed": True,
+        }
+    elif play_type == "market_1x2":
+        market_probabilities = prediction.get("market_probabilities", {}) if isinstance(prediction.get("market_probabilities"), dict) else {}
+        key_to_result = {"home": "主胜", "draw": "平局", "away": "客胜"}
+        if market_probabilities:
+            pick_key = max(("home", "draw", "away"), key=lambda key: _safe_float(market_probabilities.get(key), default=0.0))
+            confidence_value = _safe_float(market_probabilities.get(pick_key), default=0.0)
+        else:
+            pick_key = ""
+            confidence_value = 0.0
+        play_item = {
+            "play_type": "market_1x2",
+            "pick": key_to_result.get(pick_key, "-"),
+            "confidence": round(confidence_value, 4),
+            "passed": confidence_value > 0.0,
         }
     else:
         play_item = play_catalog.get(play_type, {}) if isinstance(play_catalog, dict) else {}
