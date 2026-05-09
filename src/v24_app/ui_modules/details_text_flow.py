@@ -208,6 +208,7 @@ def build_match_details_text(
 
     settlement_block = ""
     if settlement is not None:
+        high_summary = settlement.get("high_accuracy_strategy_summary") or "-"
         settlement_block = (
             "\n赛果结算\n"
             + f"- 比分: {settlement.get('home_goals', 0)}-{settlement.get('away_goals', 0)}\n"

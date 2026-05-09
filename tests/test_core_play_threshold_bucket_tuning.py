@@ -142,6 +142,51 @@ class CorePlayThresholdBucketTuningTests(unittest.TestCase):
         self.assertGreaterEqual(float(result["strategy"]["accuracy"]), 0.99)
         self.assertTrue(save_mock.called)
 
+    def test_settle_high_accuracy_strategy_results_marks_hits(self) -> None:
+        result = core._settle_high_accuracy_strategy_results(
+            {
+                "high_accuracy_strategy": {
+                    "enabled": True,
+                    "active_matches": [
+                        {
+                            "role": "primary",
+                            "play_type": "market_1x2",
+                            "scope": "global",
+                            "scope_value": "all",
+                            "pick": "主胜",
+                            "confidence": 0.72,
+                            "min_confidence": 0.70,
+                            "backtest_accuracy": 0.78,
+                            "backtest_samples": 120,
+                            "layer": {"data_layer": "historical_market"},
+                        },
+                        {
+                            "role": "backup",
+                            "play_type": "ou",
+                            "scope": "global",
+                            "scope_value": "all",
+                            "pick": "小2.5",
+                            "confidence": 0.54,
+                            "min_confidence": 0.52,
+                            "backtest_accuracy": 0.63,
+                            "backtest_samples": 27,
+                            "layer": {"data_layer": "app_settlement"},
+                        },
+                    ],
+                }
+            },
+            result="主胜",
+            total_goals=2,
+            actual_score="1-1",
+            handicap_result="-1 让负",
+            ou_result="小2.5",
+        )
+
+        self.assertEqual(result["active_count"], 2)
+        self.assertEqual(result["hit_count"], 2)
+        self.assertEqual(result["summary"], "2/2")
+        self.assertTrue(all(item["is_hit"] for item in result["items"]))
+
 
 if __name__ == "__main__":
     unittest.main()

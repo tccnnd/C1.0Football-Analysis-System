@@ -55,7 +55,8 @@ class UISettlementViewModuleTests(unittest.TestCase):
         self.assertEqual(row[2], "A vs B")
         self.assertEqual(row[3], "2:1")
         self.assertEqual(row[5], "Y")
-        self.assertIn("/ N", row[6])
+        self.assertEqual(row[6], "-")
+        self.assertIn("/ N", row[7])
 
     def test_build_parlay_settlement_row(self) -> None:
         row = build_parlay_settlement_row(

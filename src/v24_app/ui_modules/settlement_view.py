@@ -27,6 +27,7 @@ def build_single_settlement_row(item: Mapping[str, object], mark_text_fn: Callab
         f"{item.get('home_goals', '-')}:{item.get('away_goals', '-')}",
         item.get("predicted") or "-",
         mark_text_fn(item.get("is_correct")),
+        item.get("high_accuracy_strategy_summary") or "-",
         f"{item.get('predicted_handicap') or '-'} / {mark_text_fn(item.get('handicap_is_correct'))}",
         f"{item.get('predicted_total_goals') or '-'} / {item.get('total_goals', '-')}",
         f"{item.get('predicted_score') or '-'} / {mark_text_fn(item.get('score_is_correct'))}",
@@ -75,7 +76,7 @@ def show_recent_settlements_window(
     notebook.add(single_frame, text="单场结算")
     notebook.add(parlay_frame, text="二串一结算")
 
-    single_columns = ("time", "league", "match", "result", "pred", "hit", "handicap", "goals", "score")
+    single_columns = ("time", "league", "match", "result", "pred", "hit", "high_strategy", "handicap", "goals", "score")
     single_tree = ttk.Treeview(single_frame, columns=single_columns, show="headings")
     single_headings = {
         "time": "时间",
@@ -100,8 +101,8 @@ def show_recent_settlements_window(
         "score": 130,
     }
     for key in single_columns:
-        single_tree.heading(key, text=single_headings[key])
-        single_tree.column(key, width=single_widths[key], anchor=tk.CENTER)
+        single_tree.heading(key, text=single_headings.get(key, key))
+        single_tree.column(key, width=single_widths.get(key, 90), anchor=tk.CENTER)
     single_scroll = ttk.Scrollbar(single_frame, orient=tk.VERTICAL, command=single_tree.yview)
     single_tree.configure(yscrollcommand=single_scroll.set)
     single_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)

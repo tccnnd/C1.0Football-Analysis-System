@@ -4642,6 +4642,96 @@ def _high_accuracy_strategy_match_single(
     }
 
 
+def _high_accuracy_strategy_actual_for_play(
+    *,
+    play_type: str,
+    result: str,
+    total_goals: int,
+    actual_score: str,
+    handicap_result: str,
+    ou_result: str,
+) -> object:
+    if play_type in {"1x2", "market_1x2"}:
+        return result
+    if play_type == "handicap":
+        return handicap_result
+    if play_type == "ou":
+        return ou_result
+    if play_type == "total_goals":
+        return _format_total_goals_label(total_goals)
+    if play_type == "score":
+        return actual_score
+    return None
+
+
+def _high_accuracy_strategy_hit(play_type: str, pick: object, actual: object) -> bool | None:
+    pick_text = normalize_text(pick)
+    actual_text = normalize_text(actual)
+    if not pick_text or not actual_text:
+        return None
+    if play_type == "handicap":
+        return bool(pick_text == actual_text or pick_text.endswith(actual_text) or actual_text.endswith(pick_text))
+    return bool(pick_text == actual_text)
+
+
+def _settle_high_accuracy_strategy_results(
+    prediction: dict | None,
+    *,
+    result: str,
+    total_goals: int,
+    actual_score: str,
+    handicap_result: str,
+    ou_result: str,
+) -> dict:
+    if not isinstance(prediction, dict):
+        return {"items": [], "active_count": 0, "hit_count": 0, "summary": "-"}
+    high_strategy = prediction.get("high_accuracy_strategy", {})
+    if not isinstance(high_strategy, dict) or not high_strategy.get("enabled"):
+        return {"items": [], "active_count": 0, "hit_count": 0, "summary": "-"}
+    active_items = high_strategy.get("active_matches", [])
+    if not isinstance(active_items, list) or not active_items:
+        active_items = [high_strategy] if high_strategy.get("active") else []
+    settled_items: list[dict] = []
+    for item in active_items:
+        if not isinstance(item, dict):
+            continue
+        play_type = normalize_text(item.get("play_type", ""))
+        actual = _high_accuracy_strategy_actual_for_play(
+            play_type=play_type,
+            result=result,
+            total_goals=total_goals,
+            actual_score=actual_score,
+            handicap_result=handicap_result,
+            ou_result=ou_result,
+        )
+        is_hit = _high_accuracy_strategy_hit(play_type, item.get("pick"), actual)
+        layer = item.get("layer", {}) if isinstance(item.get("layer"), dict) else {}
+        settled_items.append(
+            {
+                "role": item.get("role", "-"),
+                "play_type": play_type,
+                "scope": item.get("scope", "-"),
+                "scope_value": item.get("scope_value", "-"),
+                "data_layer": layer.get("data_layer", "-"),
+                "pick": item.get("pick", "-"),
+                "actual": actual,
+                "confidence": round(_safe_float(item.get("confidence"), default=0.0), 4),
+                "min_confidence": round(_safe_float(item.get("min_confidence"), default=0.0), 2),
+                "backtest_accuracy": item.get("backtest_accuracy", 0.0),
+                "backtest_samples": item.get("backtest_samples", 0),
+                "is_hit": is_hit,
+            }
+        )
+    hit_count = sum(1 for item in settled_items if item.get("is_hit") is True)
+    summary = f"{hit_count}/{len(settled_items)}" if settled_items else "-"
+    return {
+        "items": settled_items,
+        "active_count": len(settled_items),
+        "hit_count": hit_count,
+        "summary": summary,
+    }
+
+
 def calibrate_play_thresholds_by_settlement_now(
     *,
     limit: int = 500,
@@ -7172,6 +7262,14 @@ def settle_match_result(
     ou_result = _ou_result_label(total_goals, line=ou_line)
     predicted_ou, ou_confidence = _extract_ou_prediction(prediction, line=ou_line)
     ou_is_correct = bool(predicted_ou == ou_result) if predicted_ou else None
+    high_accuracy_strategy_settlement = _settle_high_accuracy_strategy_results(
+        prediction,
+        result=result,
+        total_goals=total_goals,
+        actual_score=actual_score,
+        handicap_result=handicap_result,
+        ou_result=ou_result,
+    )
 
     settlement = {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -7214,6 +7312,10 @@ def settle_match_result(
         "predicted_ou": predicted_ou,
         "ou_confidence": round(ou_confidence, 4) if ou_confidence is not None else None,
         "ou_is_correct": ou_is_correct,
+        "high_accuracy_strategy_active_count": high_accuracy_strategy_settlement["active_count"],
+        "high_accuracy_strategy_hit_count": high_accuracy_strategy_settlement["hit_count"],
+        "high_accuracy_strategy_summary": high_accuracy_strategy_settlement["summary"],
+        "high_accuracy_strategy_items": high_accuracy_strategy_settlement["items"],
         "opening_odds_home": round(_safe_float(match.opening_odds_home, 0.0), 4),
         "opening_odds_draw": round(_safe_float(match.opening_odds_draw, 0.0), 4),
         "opening_odds_away": round(_safe_float(match.opening_odds_away, 0.0), 4),
