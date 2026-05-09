@@ -18,6 +18,7 @@ from v24_app.ui_modules import (
     build_high_accuracy_strategy_dashboard,
     build_high_accuracy_strategy_pool_rows,
     build_high_accuracy_strategy_settlement_summary,
+    build_strategy_evaluation_agent_summary,
     build_strategy_error_attribution_summary,
     build_strategy_allowlist_filename,
     build_strategy_allowlist_report_lines,
@@ -378,6 +379,42 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("jc_odds_drift", summary["reason_counts"])
         self.assertIn("\u9ad8\u7f6e\u4fe1\u5931\u8bef", summary["rows"][0]["body"])
 
+    def test_evaluation_agent_recommends_tightening_on_weak_settlements(self) -> None:
+        settlements = [
+            {
+                "league": "L1",
+                "home_team": f"A{index}",
+                "away_team": f"B{index}",
+                "strategy_allowlist_decision": "allow",
+                "is_correct": False,
+                "prediction_confidence": 0.72,
+                "high_accuracy_strategy_items": [
+                    {
+                        "data_layer": "jc_stratified_market",
+                        "play_type": "market_1x2",
+                        "pick": "HOME",
+                        "actual": "AWAY",
+                        "confidence": 0.72,
+                        "min_confidence": 0.65,
+                        "backtest_accuracy": 0.80,
+                        "backtest_samples": 206,
+                        "is_hit": False,
+                        "jc_bucket": {"dimension": "league_confidence_bucket", "bucket": "L1 | >=0.65", "wilson_lower": 0.75},
+                        "jc_live_feedback": {"status": "downgraded", "live_hit_rate": 0.30, "historical_wilson_lower": 0.75, "deviation": -0.50},
+                    }
+                ],
+            }
+            for index in range(5)
+        ]
+
+        evaluation = build_strategy_evaluation_agent_summary({"enabled": True}, settlements)
+
+        self.assertEqual(evaluation["agent"], "Evaluation Agent")
+        self.assertEqual(evaluation["status"], "tighten")
+        self.assertLess(evaluation["score"], 60)
+        self.assertIn("confidence_overstated", evaluation["memory_tags"])
+        self.assertTrue(any("\u6536\u7d27" in item["title"] for item in evaluation["recommendations"]))
+
     def test_settlement_summary_ignores_unknown_results_for_hit_rate(self) -> None:
         summary = build_high_accuracy_strategy_settlement_summary(
             [
@@ -518,6 +555,7 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         )
         payload_with_review = "\n".join(lines_with_review)
         self.assertIn("\u6700\u8fd1\u590d\u76d8\u9519\u56e0", payload_with_review)
+        self.assertIn("Evaluation Agent", payload_with_review)
         self.assertIn("\u9ad8\u7f6e\u4fe1\u5931\u8bef", payload_with_review)
 
     def test_strategy_allowlist_filename_is_timestamped(self) -> None:

@@ -550,6 +550,129 @@ def build_strategy_error_attribution_summary(
     }
 
 
+def build_strategy_evaluation_agent_summary(
+    status: Mapping[str, object] | object,
+    settlements: Sequence[Mapping[str, object]] | object,
+) -> dict[str, object]:
+    settlement_items = [item for item in settlements if isinstance(item, Mapping)] if isinstance(settlements, Sequence) else []
+    settlement_summary = build_high_accuracy_strategy_settlement_summary(settlement_items)
+    error_attribution = build_strategy_error_attribution_summary(settlement_items)
+    allowlist_summary = build_strategy_allowlist_settlement_summary(settlement_items)
+    jc_feedback = build_jc_bucket_feedback_summary(status, settlement_items)
+    known_count = _safe_int(settlement_summary.get("known_count"))
+    hit_rate = settlement_summary.get("hit_rate")
+    hit_rate_value = _safe_float(hit_rate, -1.0) if hit_rate is not None else -1.0
+    allow_rate = allowlist_summary.get("hit_rate")
+    allow_rate_value = _safe_float(allow_rate, -1.0) if allow_rate is not None else -1.0
+    reason_counts = _as_mapping(error_attribution.get("reason_counts"))
+    jc_status_counts = _as_mapping(jc_feedback.get("status_counts"))
+    downgraded_count = _safe_int(jc_status_counts.get("downgraded"))
+    watch_count = _safe_int(jc_status_counts.get("watch"))
+    high_conf_miss_count = _safe_int(reason_counts.get("high_confidence_miss"))
+    historical_gap_count = _safe_int(reason_counts.get("historical_gap"))
+    data_missing_count = _safe_int(reason_counts.get("data_missing"))
+    recommendations: list[dict[str, str]] = []
+    memory_tags: list[str] = []
+    score = 100
+    status_text = "healthy"
+
+    if known_count < 5:
+        status_text = "collecting"
+        score = 55
+        recommendations.append(
+            {
+                "title": "\u7ee7\u7eed\u79ef\u7d2f\u6837\u672c",
+                "body": f"\u5df2\u5224\u5b9a\u7b56\u7565\u6837\u672c {known_count} \u9879\uff0c\u6682\u4e0d\u5efa\u8bae\u6839\u636e\u5355\u6b21\u6ce2\u52a8\u8c03\u6574\u95e8\u69db\u3002",
+            }
+        )
+        memory_tags.append("sample_collecting")
+    if hit_rate_value >= 0 and hit_rate_value < 0.55:
+        status_text = "tighten"
+        score -= 25
+        recommendations.append(
+            {
+                "title": "\u6536\u7d27\u7b56\u7565\u51c6\u5165",
+                "body": f"\u7b56\u7565\u5b9e\u76d8\u547d\u4e2d {settlement_summary.get('summary_text')}\uff0c\u4f4e\u4e8e 55% \u89c2\u5bdf\u7ebf\uff0c\u5efa\u8bae\u63d0\u9ad8\u6b63\u5f0f\u653e\u884c\u95e8\u69db\u3002",
+            }
+        )
+        memory_tags.append("low_live_hit_rate")
+    if allow_rate_value >= 0 and allow_rate_value < 0.55:
+        status_text = "tighten"
+        score -= 15
+        recommendations.append(
+            {
+                "title": "\u590d\u6838\u653e\u884c\u6e05\u5355",
+                "body": f"\u653e\u884c\u547d\u4e2d {allowlist_summary.get('hit_rate_text')}\uff0c\u5efa\u8bae\u964d\u4f4e\u4e2d\u98ce\u9669\u573a\u6b21\u7684\u6b63\u5f0f\u653e\u884c\u6743\u91cd\u3002",
+            }
+        )
+        memory_tags.append("allowlist_underperforming")
+    if high_conf_miss_count:
+        status_text = "watch" if status_text == "healthy" else status_text
+        score -= min(20, high_conf_miss_count * 6)
+        recommendations.append(
+            {
+                "title": "\u6821\u51c6\u7f6e\u4fe1\u5ea6",
+                "body": f"\u51fa\u73b0 {high_conf_miss_count} \u9879\u9ad8\u7f6e\u4fe1\u5931\u8bef\uff0c\u5efa\u8bae\u4f18\u5148\u68c0\u67e5\u6982\u7387\u6821\u51c6\u548c\u8d5b\u524d\u98ce\u9669\u62e6\u622a\u3002",
+            }
+        )
+        memory_tags.append("confidence_overstated")
+    if historical_gap_count:
+        status_text = "watch" if status_text == "healthy" else status_text
+        score -= min(18, historical_gap_count * 5)
+        recommendations.append(
+            {
+                "title": "\u68c0\u67e5\u5386\u53f2\u7b56\u7565\u5931\u6548",
+                "body": f"\u5386\u53f2\u56de\u6d4b\u4e0e\u5b9e\u76d8\u80cc\u79bb {historical_gap_count} \u9879\uff0c\u5efa\u8bae\u5bf9\u8054\u8d5b/\u8d54\u7387/\u7f6e\u4fe1\u5206\u5c42\u91cd\u65b0\u56de\u6d4b\u3002",
+            }
+        )
+        memory_tags.append("historical_drift")
+    if downgraded_count or watch_count:
+        status_text = "watch" if status_text == "healthy" else status_text
+        score -= downgraded_count * 10 + watch_count * 4
+        recommendations.append(
+            {
+                "title": "\u7ef4\u6301JC\u6876\u89c2\u5bdf",
+                "body": f"JC \u7a33\u5b9a\u6876\u964d\u7ea7 {downgraded_count} / \u89c2\u5bdf {watch_count}\uff0c\u672a\u8fbe\u6062\u590d\u6761\u4ef6\u524d\u4e0d\u5efa\u8bae\u6062\u590d\u6b63\u5f0f\u653e\u884c\u3002",
+            }
+        )
+        memory_tags.append("jc_bucket_watch")
+    if data_missing_count:
+        score -= min(12, data_missing_count * 4)
+        recommendations.append(
+            {
+                "title": "\u4fee\u590d\u8d5b\u679c/\u5feb\u7167\u6570\u636e",
+                "body": f"\u5b58\u5728 {data_missing_count} \u9879\u6570\u636e\u7f3a\u5931\uff0c\u9700\u4f18\u5148\u68c0\u67e5\u8d5b\u524d\u5feb\u7167\u548c\u8d5b\u679c\u56de\u6536\u94fe\u8def\u3002",
+            }
+        )
+        memory_tags.append("data_quality_gap")
+    if not recommendations:
+        recommendations.append(
+            {
+                "title": "\u7ef4\u6301\u5f53\u524d\u7b56\u7565",
+                "body": "\u672a\u53d1\u73b0\u9700\u8981\u6536\u7d27\u7684\u4e3b\u8981\u9519\u56e0\uff0c\u7ee7\u7eed\u6309\u5f53\u524d\u51c6\u5165\u548c\u590d\u76d8\u89c4\u5219\u8fd0\u884c\u3002",
+            }
+        )
+        memory_tags.append("stable")
+
+    score = max(0, min(100, int(round(score))))
+    if score < 60 and status_text not in {"tighten", "collecting"}:
+        status_text = "watch"
+    return {
+        "agent": "Evaluation Agent",
+        "status": status_text,
+        "score": score,
+        "summary_text": (
+            f"\u6837\u672c {known_count} | \u7b56\u7565\u547d\u4e2d {settlement_summary.get('hit_rate_text')} | "
+            f"\u4e3b\u9519\u56e0 {error_attribution.get('top_reason')} | JC {jc_feedback.get('summary_text')}"
+        ),
+        "settlement_summary": settlement_summary,
+        "error_attribution": error_attribution,
+        "jc_bucket_feedback": jc_feedback,
+        "recommendations": recommendations[:6],
+        "memory_tags": memory_tags,
+    }
+
+
 def _build_high_accuracy_strategy_pool_rows_legacy(status: Mapping[str, object] | object) -> list[dict[str, str]]:
     resolved = _as_mapping(status)
     rows: list[dict[str, str]] = []
@@ -1257,16 +1380,26 @@ def build_strategy_allowlist_report_lines(
         lines.append("")
     error_attribution = build_strategy_error_attribution_summary(settlements or [])
     if _safe_int(error_attribution.get("miss_count")) or _safe_int(error_attribution.get("unknown_count")):
+        evaluation_agent = build_strategy_evaluation_agent_summary({}, settlements or [])
         lines.extend(
             [
                 "## \u6700\u8fd1\u590d\u76d8\u9519\u56e0",
                 "",
+                f"- Evaluation Agent: {evaluation_agent.get('status') or '-'} / {evaluation_agent.get('score') or '-'}",
+                f"- \u8bc4\u4f30\u6458\u8981: {evaluation_agent.get('summary_text') or '-'}",
                 f"- \u4e3b\u8981\u9519\u56e0: {error_attribution.get('top_reason') or '-'}",
                 f"- \u9519\u56e0\u9879: {_safe_int(error_attribution.get('miss_count'))}",
                 f"- \u5f85\u5224\u5b9a: {_safe_int(error_attribution.get('unknown_count'))}",
                 "",
             ]
         )
+        recommendations = evaluation_agent.get("recommendations", []) if isinstance(evaluation_agent.get("recommendations"), list) else []
+        if recommendations:
+            lines.extend(["### Evaluation Agent \u5efa\u8bae", ""])
+            for item in recommendations[:5]:
+                if isinstance(item, Mapping):
+                    lines.append(f"- {item.get('title') or '-'}: {item.get('body') or '-'}")
+            lines.append("")
         rows_payload = error_attribution.get("rows", []) if isinstance(error_attribution.get("rows"), list) else []
         for row in rows_payload[:5]:
             if not isinstance(row, Mapping):
@@ -1296,6 +1429,7 @@ def build_high_accuracy_strategy_dashboard(
     allowlist_summary = build_strategy_allowlist_settlement_summary(settlement_items)
     allowlist_tuning = build_strategy_allowlist_tuning_recommendation(settlement_items)
     jc_bucket_feedback = build_jc_bucket_feedback_summary(resolved, settlement_items)
+    evaluation_agent = build_strategy_evaluation_agent_summary(resolved, settlement_items)
     stable_count = sum(1 for item in pool if bool(_strategy_stability(item).get("stable")))
     primary_count = sum(1 for item in pool if str(item.get("role") or "") == "primary")
     backup_count = sum(1 for item in pool if str(item.get("role") or "") == "backup")
@@ -1320,6 +1454,15 @@ def build_high_accuracy_strategy_dashboard(
             "label": "\u7b56\u7565\u9519\u56e0",
             "value": str(error_attribution.get("top_reason") or "-"),
             "tone": "warning" if _safe_int(error_attribution.get("miss_count")) else "good",
+        },
+        {
+            "label": "Evaluation",
+            "value": f"{evaluation_agent.get('status', '-')} / {evaluation_agent.get('score', '-')}",
+            "tone": "bad"
+            if str(evaluation_agent.get("status") or "") == "tighten"
+            else "warning"
+            if str(evaluation_agent.get("status") or "") in {"watch", "collecting"}
+            else "good",
         },
         {
             "label": "JC\u7a33\u5b9a\u6876",
@@ -1387,6 +1530,7 @@ def build_high_accuracy_strategy_dashboard(
         "pool_rows": build_high_accuracy_strategy_pool_rows(resolved),
         "settlement_rows": build_high_accuracy_strategy_settlement_rows(settlement_items),
         "error_attribution": error_attribution,
+        "evaluation_agent": evaluation_agent,
         "jc_bucket_feedback": jc_bucket_feedback,
         "allowlist_settlement_rows": build_strategy_allowlist_settlement_rows(settlement_items),
         "validation_rows": validation_rows,

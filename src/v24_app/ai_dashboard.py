@@ -3384,6 +3384,17 @@ class SmartMatchDashboard:
             if isinstance(row, dict):
                 self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
 
+        evaluation_agent = dashboard.get("evaluation_agent", {}) if isinstance(dashboard.get("evaluation_agent"), dict) else {}
+        tk.Label(right, text="Evaluation Agent", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
+        self._strategy_row(
+            right,
+            f"{evaluation_agent.get('status', '-')} / score {evaluation_agent.get('score', '-')}",
+            str(evaluation_agent.get("summary_text") or "-"),
+        )
+        for item in evaluation_agent.get("recommendations", []) if isinstance(evaluation_agent.get("recommendations"), list) else []:
+            if isinstance(item, dict):
+                self._strategy_row(right, str(item.get("title") or "-"), str(item.get("body") or "-"))
+
         allowlist_summary = dashboard.get("allowlist_settlement_summary", {}) if isinstance(dashboard.get("allowlist_settlement_summary"), dict) else {}
         tk.Label(right, text="\u653e\u884c\u590d\u76d8\u7edf\u8ba1", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
         self._strategy_row(
