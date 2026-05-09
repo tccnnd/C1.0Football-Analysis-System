@@ -107,6 +107,40 @@ class CorePlayThresholdBucketTuningTests(unittest.TestCase):
         self.assertGreater(float(weak_rule["min_threshold"]), 0.56)
         self.assertTrue(save_mock.called)
 
+    def test_run_high_accuracy_strategy_backtest_selects_best_strategy(self) -> None:
+        settlements: list[dict] = []
+        for index in range(20):
+            settlements.append(
+                {
+                    "match_id": f"2026-04-{index + 1:02d}|测试联赛|A|B",
+                    "match_date": f"2026-04-{index + 1:02d}",
+                    "league": "测试联赛",
+                    "is_correct": index < 10,
+                    "prediction_confidence": 0.55,
+                    "handicap_is_correct": True,
+                    "handicap_confidence": 0.72,
+                    "total_goals_is_correct": index < 8,
+                    "total_goals_confidence": 0.22,
+                }
+            )
+
+        with (
+            patch("v24_app.core.get_recent_settlements", return_value=settlements),
+            patch("v24_app.core._save_high_accuracy_strategy_report") as save_mock,
+            patch("v24_app.core.get_high_accuracy_strategy_status", return_value={"enabled": True}),
+        ):
+            result = core.run_high_accuracy_strategy_backtest(
+                min_samples=12,
+                min_coverage=0.10,
+                min_league_samples=12,
+                write_report=False,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["strategy"]["play_type"], "handicap")
+        self.assertGreaterEqual(float(result["strategy"]["accuracy"]), 0.99)
+        self.assertTrue(save_mock.called)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -331,6 +331,39 @@ def build_play_model_backtest_success_message(result: Mapping[str, object] | obj
     )
 
 
+def build_high_accuracy_strategy_backtest_status_text(result: Mapping[str, object] | object) -> str:
+    resolved = result if isinstance(result, Mapping) else {}
+    ok = bool(resolved.get("ok"))
+    strategy = resolved.get("strategy", {}) if isinstance(resolved, Mapping) else {}
+    return (
+        f"高准确率策略{'完成' if ok else '失败'} | "
+        f"{strategy.get('play_type', '-')}@{float(strategy.get('min_confidence', 0) or 0):.2f} | "
+        f"acc {float(strategy.get('accuracy', 0) or 0):.2%}"
+    )
+
+
+def build_high_accuracy_strategy_backtest_message(result: Mapping[str, object] | object) -> str:
+    resolved = result if isinstance(result, Mapping) else {}
+    strategy = resolved.get("strategy", {}) if isinstance(resolved, Mapping) else {}
+    validation = resolved.get("validation", {}) if isinstance(resolved, Mapping) else {}
+    report_path = resolved.get("report_path") or "-"
+    return (
+        "高准确率策略回测完成\n"
+        + f"历史结算: {validation.get('settlement_count', 0)}\n"
+        + f"策略记录: {validation.get('record_count', 0)}\n"
+        + f"候选策略: {validation.get('candidate_count', 0)}\n"
+        + f"时间区间: {validation.get('date_start') or '-'} -> {validation.get('date_end') or '-'}\n\n"
+        + f"选中玩法: {strategy.get('play_type', '-')}\n"
+        + f"适用范围: {strategy.get('scope', '-')} / {strategy.get('scope_value', '-')}\n"
+        + f"最低置信度: {float(strategy.get('min_confidence', 0) or 0):.2f}\n"
+        + f"回测命中率: {float(strategy.get('accuracy', 0) or 0):.2%} ({int(strategy.get('hit_count', 0) or 0)}/{int(strategy.get('sample_count', 0) or 0)})\n"
+        + f"覆盖率: {float(strategy.get('coverage', 0) or 0):.2%}\n"
+        + f"保守下界: {float(strategy.get('wilson_lower', 0) or 0):.2%}\n"
+        + f"历史优势: {float(strategy.get('edge', 0) or 0):+.2%}\n\n"
+        + f"报告: {report_path}"
+    )
+
+
 def build_play_model_training_status_text(status: Mapping[str, object] | object) -> str:
     resolved = status if isinstance(status, Mapping) else {}
     total_goals = resolved.get("total_goals", {}) if isinstance(resolved, Mapping) else {}

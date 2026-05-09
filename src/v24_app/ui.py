@@ -51,6 +51,8 @@ from .ui_modules import (
     build_ensemble_backtest_apply_status_text,
     build_ensemble_backtest_success_message,
     build_ensemble_weight_status_text,
+    build_high_accuracy_strategy_backtest_message,
+    build_high_accuracy_strategy_backtest_status_text,
     build_model_training_overview_text,
     build_export_message_text,
     build_export_status_text,
@@ -159,6 +161,7 @@ from .core import (
     get_prediction_snapshot_migration_report,
     get_xgb_training_status,
     get_recent_settlements,
+    run_high_accuracy_strategy_backtest,
     load_c1_comparison_marks_cache,
     load_prediction_snapshot_cache,
     migrate_prediction_snapshots,
@@ -1419,6 +1422,26 @@ def _app_run_play_model_backtest(self) -> None:
     )
 
 
+def _app_apply_high_accuracy_strategy_backtest_result(self, result: dict) -> None:
+    ok = bool(result.get("ok"))
+    reason = result.get("reason", "-")
+    self.status_var.set(build_high_accuracy_strategy_backtest_status_text(result))
+    if not ok:
+        messagebox.showinfo("高准确率策略", f"回测未完成\n原因: {reason}")
+        return
+    messagebox.showinfo("高准确率策略", build_high_accuracy_strategy_backtest_message(result))
+
+
+def _app_run_high_accuracy_strategy_backtest(self) -> None:
+    self._run_background(
+        task_key="high_accuracy_strategy_backtest",
+        start_status="正在用历史数据搜索高准确率策略...",
+        worker=run_high_accuracy_strategy_backtest,
+        on_success=self._apply_high_accuracy_strategy_backtest_result,
+        error_title="高准确率策略失败",
+    )
+
+
 def _app_play_threshold_status_text(self) -> str:
     return build_play_threshold_status_text(get_play_threshold_status())
 
@@ -2125,6 +2148,7 @@ def _app_open_user_center_final(self) -> None:
         "calibrate_play_model_policy": self.calibrate_play_model_policy,
         "run_ensemble_backtest": self.run_ensemble_backtest,
         "run_play_model_backtest": self.run_play_model_backtest,
+        "run_high_accuracy_strategy_backtest": self.run_high_accuracy_strategy_backtest,
         "export_c1_availability_template": self.export_c1_availability_template,
         "import_c1_availability_snapshots": self.import_c1_availability_snapshots,
         "sync_c1_availability_sources": self.sync_c1_availability_sources,

@@ -59,6 +59,7 @@ USER_CENTER_LAYOUT: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         (
             ("权重回测", "run_ensemble_backtest"),
             ("玩法回测", "run_play_model_backtest"),
+            ("高准策略", "run_high_accuracy_strategy_backtest"),
         ),
     ),
     (

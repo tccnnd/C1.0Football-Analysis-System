@@ -52,6 +52,7 @@ class UIUserCenterModuleTests(unittest.TestCase):
             "calibrate_play_model_policy",
             "run_ensemble_backtest",
             "run_play_model_backtest",
+            "run_high_accuracy_strategy_backtest",
             "export_c1_availability_template",
             "import_c1_availability_snapshots",
             "sync_c1_availability_sources",
@@ -71,6 +72,7 @@ class UIUserCenterModuleTests(unittest.TestCase):
         self.assertEqual(sections[0][1][0][0], "分析选中")
         self.assertEqual(sections[1][1][2][0], "让球专项看板")
         self.assertEqual(sections[1][1][3][0], "导出让球14天日报")
+        self.assertEqual(sections[4][1][2][0], "高准策略")
         self.assertEqual(sections[-1][1][-1][0], "打开C1工作台")
 
 

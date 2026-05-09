@@ -20,6 +20,8 @@ FINAL_BINDING_MANIFEST: tuple[tuple[str, str], ...] = (
     ("run_ensemble_backtest", "_app_run_ensemble_backtest"),
     ("_apply_play_model_backtest_result", "_app_apply_play_model_backtest_result_v3"),
     ("run_play_model_backtest", "_app_run_play_model_backtest"),
+    ("_apply_high_accuracy_strategy_backtest_result", "_app_apply_high_accuracy_strategy_backtest_result"),
+    ("run_high_accuracy_strategy_backtest", "_app_run_high_accuracy_strategy_backtest"),
     ("_play_model_status_text", "_app_play_model_status_text_v3"),
     ("show_play_model_status", "_app_show_play_model_status_v2"),
     ("_apply_train_play_models_result", "_app_apply_train_play_models_result_v2"),

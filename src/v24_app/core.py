@@ -5,7 +5,7 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from itertools import product
-from math import log, log2
+from math import log, log2, sqrt
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -49,6 +49,7 @@ ENSEMBLE_WEIGHTS_FILE = PROJECT_DIR / "data" / "models" / "ensemble_weights_v1.j
 PLAY_THRESHOLDS_FILE = PROJECT_DIR / "data" / "models" / "play_thresholds_v1.json"
 PLAY_MODEL_POLICY_FILE = PROJECT_DIR / "data" / "models" / "play_model_policy_v1.json"
 BAYES_CALIBRATION_FILE = PROJECT_DIR / "data" / "models" / "bayes_calibration_v1.json"
+HIGH_ACCURACY_STRATEGY_FILE = PROJECT_DIR / "data" / "models" / "high_accuracy_strategy_v1.json"
 
 
 LEAGUE_STRENGTH = {
@@ -4022,6 +4023,340 @@ def calibrate_layered_filter_thresholds_now(
     }
 
 
+def _settlement_strategy_records(settlements: list[dict]) -> list[dict]:
+    specs = {
+        "1x2": ("is_correct", "prediction_confidence", "predicted"),
+        "handicap": ("handicap_is_correct", "handicap_confidence", "predicted_handicap"),
+        "total_goals": ("total_goals_is_correct", "total_goals_confidence", "predicted_total_goals"),
+        "ou": ("ou_is_correct", "ou_confidence", "predicted_ou"),
+        "score": ("score_is_correct", "score_confidence", "predicted_score"),
+    }
+    records: list[dict] = []
+    for item in settlements:
+        if not isinstance(item, dict):
+            continue
+        fallback_confidence = _safe_float(item.get("prediction_confidence"), default=0.0)
+        for play_type, (hit_key, confidence_key, pick_key) in specs.items():
+            hit = item.get(hit_key)
+            if not isinstance(hit, bool):
+                continue
+            confidence = _safe_float(item.get(confidence_key), default=0.0)
+            if confidence <= 0.0 or confidence > 1.0:
+                confidence = fallback_confidence
+            if confidence <= 0.0 or confidence > 1.0:
+                continue
+            records.append(
+                {
+                    "match_id": str(item.get("match_id") or ""),
+                    "match_date": normalize_text(item.get("match_date") or str(item.get("match_id") or "").split("|", 1)[0]),
+                    "league": normalize_text(item.get("league", "")) or "-",
+                    "rating_pool": normalize_text(item.get("rating_pool", "")) or "-",
+                    "play_type": play_type,
+                    "source_play_type": play_type,
+                    "pick": normalize_text(item.get(pick_key, "")) or "-",
+                    "confidence": round(_clamp(confidence), 4),
+                    "is_hit": bool(hit),
+                    "return_rate": round(_safe_float(item.get("return_rate"), default=0.0), 4),
+                    "handicap_abs": round(abs(_safe_float(item.get("handicap_line"), default=0.0)), 2),
+                }
+            )
+    return records
+
+
+def _wilson_lower_bound(hits: int, total: int, z: float = 1.28) -> float:
+    if total <= 0:
+        return 0.0
+    phat = hits / total
+    denominator = 1.0 + z * z / total
+    centre = phat + z * z / (2.0 * total)
+    margin = z * sqrt((phat * (1.0 - phat) + z * z / (4.0 * total)) / total)
+    return max(0.0, (centre - margin) / denominator)
+
+
+def _strategy_candidate_from_rows(
+    rows: list[dict],
+    *,
+    scope: str,
+    scope_value: str,
+    play_type: str,
+    min_confidence: float,
+    total_records: int,
+    min_samples: int,
+    min_coverage: float,
+) -> dict | None:
+    selected = [
+        row
+        for row in rows
+        if normalize_text(row.get("play_type", "")) == play_type
+        and _safe_float(row.get("confidence"), default=0.0) >= min_confidence
+    ]
+    total = len(selected)
+    if total < min_samples:
+        return None
+    coverage = total / max(total_records, 1)
+    if coverage < min_coverage:
+        return None
+    hits = sum(1 for row in selected if bool(row.get("is_hit")))
+    accuracy = hits / max(total, 1)
+    avg_confidence = sum(_safe_float(row.get("confidence"), default=0.0) for row in selected) / max(total, 1)
+    edge = accuracy - avg_confidence
+    return {
+        "scope": scope,
+        "scope_value": scope_value,
+        "play_type": play_type,
+        "min_confidence": round(min_confidence, 2),
+        "sample_count": total,
+        "hit_count": hits,
+        "accuracy": round(accuracy, 6),
+        "coverage": round(coverage, 6),
+        "avg_confidence": round(avg_confidence, 6),
+        "edge": round(edge, 6),
+        "wilson_lower": round(_wilson_lower_bound(hits, total), 6),
+    }
+
+
+def _write_high_accuracy_strategy_report(result: dict) -> str | None:
+    if not result.get("ok"):
+        return None
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_path = REPORT_DIR / f"high_accuracy_strategy_backtest_{timestamp}.md"
+    best = result.get("strategy", {}) if isinstance(result.get("strategy"), dict) else {}
+    candidates = result.get("top_candidates", []) if isinstance(result.get("top_candidates"), list) else []
+    validation = result.get("validation", {}) if isinstance(result.get("validation"), dict) else {}
+    lines = [
+        "# High Accuracy Strategy Backtest",
+        "",
+        f"- Generated At: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- Settlement Samples: {validation.get('settlement_count', 0)}",
+        f"- Strategy Records: {validation.get('record_count', 0)}",
+        f"- Date Window: {validation.get('date_start') or '-'} -> {validation.get('date_end') or '-'}",
+        "",
+        "## Selected Strategy",
+        "",
+        f"- Play Type: {best.get('play_type', '-')}",
+        f"- Scope: {best.get('scope', '-')} / {best.get('scope_value', '-')}",
+        f"- Min Confidence: {float(best.get('min_confidence', 0) or 0):.2f}",
+        f"- Backtest Accuracy: {float(best.get('accuracy', 0) or 0):.2%} ({int(best.get('hit_count', 0) or 0)}/{int(best.get('sample_count', 0) or 0)})",
+        f"- Coverage: {float(best.get('coverage', 0) or 0):.2%}",
+        f"- Wilson Lower: {float(best.get('wilson_lower', 0) or 0):.2%}",
+        f"- Edge: {float(best.get('edge', 0) or 0):+.2%}",
+        "",
+        "## Top Candidates",
+        "",
+        "| Rank | Scope | Play | Min Conf | Hits | Total | Accuracy | Coverage | Wilson Lower | Edge |",
+        "|---:|---|---|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for index, item in enumerate(candidates[:10], start=1):
+        lines.append(
+            f"| {index} | {item.get('scope', '-')}/{item.get('scope_value', '-')} | {item.get('play_type', '-')} | "
+            f"{float(item.get('min_confidence', 0) or 0):.2f} | {int(item.get('hit_count', 0) or 0)} | "
+            f"{int(item.get('sample_count', 0) or 0)} | {float(item.get('accuracy', 0) or 0):.2%} | "
+            f"{float(item.get('coverage', 0) or 0):.2%} | {float(item.get('wilson_lower', 0) or 0):.2%} | "
+            f"{float(item.get('edge', 0) or 0):+.2%} |"
+        )
+    report_path.write_text("\n".join(lines), encoding="utf-8")
+    return str(report_path)
+
+
+def _save_high_accuracy_strategy_report(report: dict) -> None:
+    HIGH_ACCURACY_STRATEGY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    HIGH_ACCURACY_STRATEGY_FILE.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def get_high_accuracy_strategy_status() -> dict:
+    if not HIGH_ACCURACY_STRATEGY_FILE.exists():
+        return {
+            "enabled": False,
+            "updated_at": None,
+            "strategy": {},
+            "validation": {},
+            "reason": "not_calibrated",
+        }
+    try:
+        payload = json.loads(HIGH_ACCURACY_STRATEGY_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {
+            "enabled": False,
+            "updated_at": None,
+            "strategy": {},
+            "validation": {},
+            "reason": "invalid_report",
+        }
+    if not isinstance(payload, dict):
+        payload = {}
+    return {
+        "enabled": bool(payload.get("enabled", False)),
+        "updated_at": payload.get("updated_at"),
+        "strategy": payload.get("strategy", {}) if isinstance(payload.get("strategy"), dict) else {},
+        "validation": payload.get("validation", {}) if isinstance(payload.get("validation"), dict) else {},
+        "top_candidates": payload.get("top_candidates", []) if isinstance(payload.get("top_candidates"), list) else [],
+        "reason": payload.get("reason", "ok"),
+    }
+
+
+def run_high_accuracy_strategy_backtest(
+    *,
+    limit: int = 500,
+    min_samples: int = 18,
+    min_coverage: float = 0.02,
+    min_league_samples: int = 18,
+    write_report: bool = True,
+) -> dict:
+    settlements = get_recent_settlements(limit=max(0, int(limit)))
+    records = _settlement_strategy_records(settlements)
+    if not records:
+        return {"ok": False, "reason": "no_strategy_records", "strategy": {}, "validation": {"settlement_count": len(settlements), "record_count": 0}}
+
+    confidence_grid = {
+        "1x2": [0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70],
+        "handicap": [0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75],
+        "total_goals": [0.16, 0.18, 0.20, 0.24, 0.28, 0.32, 0.36],
+        "ou": [0.50, 0.51, 0.52, 0.53, 0.54, 0.55],
+        "score": [0.08, 0.10, 0.12, 0.15, 0.18, 0.22],
+    }
+    candidates: list[dict] = []
+    total_records = len(records)
+    for play_type, thresholds in confidence_grid.items():
+        for threshold in thresholds:
+            candidate = _strategy_candidate_from_rows(
+                records,
+                scope="global",
+                scope_value="all",
+                play_type=play_type,
+                min_confidence=threshold,
+                total_records=total_records,
+                min_samples=max(1, int(min_samples)),
+                min_coverage=max(0.0, float(min_coverage)),
+            )
+            if candidate is not None:
+                candidates.append(candidate)
+
+    by_league: dict[str, list[dict]] = defaultdict(list)
+    for row in records:
+        by_league[normalize_text(row.get("league", "")) or "-"].append(row)
+    for league, league_rows in by_league.items():
+        if len(league_rows) < max(1, int(min_league_samples)):
+            continue
+        league_coverage = max(0.0, float(min_coverage) / 2.0)
+        for play_type, thresholds in confidence_grid.items():
+            for threshold in thresholds:
+                candidate = _strategy_candidate_from_rows(
+                    league_rows,
+                    scope="league",
+                    scope_value=league,
+                    play_type=play_type,
+                    min_confidence=threshold,
+                    total_records=total_records,
+                    min_samples=max(1, int(min_league_samples)),
+                    min_coverage=league_coverage,
+                )
+                if candidate is not None:
+                    candidates.append(candidate)
+
+    if not candidates:
+        return {
+            "ok": False,
+            "reason": "no_candidate_passed_constraints",
+            "strategy": {},
+            "validation": {
+                "settlement_count": len(settlements),
+                "record_count": len(records),
+                "min_samples": int(min_samples),
+                "min_coverage": round(float(min_coverage), 4),
+            },
+        }
+
+    candidates = sorted(
+        candidates,
+        key=lambda item: (
+            float(item.get("accuracy", 0.0)),
+            float(item.get("wilson_lower", 0.0)),
+            float(item.get("edge", 0.0)),
+            int(item.get("sample_count", 0)),
+            float(item.get("coverage", 0.0)),
+        ),
+        reverse=True,
+    )
+    best = dict(candidates[0])
+    dates = [normalize_text(row.get("match_date", "")) for row in records if normalize_text(row.get("match_date", ""))]
+    validation = {
+        "settlement_count": len(settlements),
+        "record_count": len(records),
+        "date_start": min(dates) if dates else None,
+        "date_end": max(dates) if dates else None,
+        "min_samples": int(min_samples),
+        "min_coverage": round(float(min_coverage), 4),
+        "min_league_samples": int(min_league_samples),
+        "candidate_count": len(candidates),
+    }
+    persisted = {
+        "enabled": True,
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "reason": "ok",
+        "strategy": best,
+        "validation": validation,
+        "top_candidates": candidates[:10],
+    }
+    _save_high_accuracy_strategy_report(persisted)
+    result = {
+        "ok": True,
+        "reason": "ok",
+        "strategy": best,
+        "validation": validation,
+        "top_candidates": candidates[:10],
+        "status": get_high_accuracy_strategy_status(),
+    }
+    result["report_path"] = _write_high_accuracy_strategy_report(result) if write_report else None
+    return result
+
+
+def _high_accuracy_strategy_match(match: AppMatch, prediction: dict, play_catalog: dict[str, dict]) -> dict:
+    status = get_high_accuracy_strategy_status()
+    strategy = status.get("strategy", {}) if isinstance(status, dict) else {}
+    if not bool(status.get("enabled")) or not isinstance(strategy, dict) or not strategy:
+        return {"enabled": False, "active": False, "reason": status.get("reason", "not_calibrated") if isinstance(status, dict) else "not_calibrated"}
+    play_type = normalize_text(strategy.get("play_type", ""))
+    if play_type == "ou":
+        play_item = {
+            "play_type": "ou",
+            "pick": prediction.get("ou_recommendation", "-"),
+            "confidence": round(_safe_float(prediction.get("ou_confidence"), default=0.0), 4),
+            "passed": True,
+        }
+    else:
+        play_item = play_catalog.get(play_type, {}) if isinstance(play_catalog, dict) else {}
+    confidence = _safe_float(play_item.get("confidence"), default=0.0)
+    min_confidence = _safe_float(strategy.get("min_confidence"), default=1.0)
+    scope = normalize_text(strategy.get("scope", "global"))
+    scope_value = normalize_text(strategy.get("scope_value", "all"))
+    league = normalize_text(match.league) or "-"
+    scope_ok = scope != "league" or scope_value == league
+    passed = bool(play_item.get("passed", False))
+    active = bool(scope_ok and passed and confidence >= min_confidence)
+    reason = "matched" if active else "below_strategy_gate"
+    if not scope_ok:
+        reason = "league_scope_mismatch"
+    elif not passed:
+        reason = "play_threshold_blocked"
+    return {
+        "enabled": True,
+        "active": active,
+        "reason": reason,
+        "play_type": play_type,
+        "pick": play_item.get("pick", "-"),
+        "confidence": round(confidence, 4),
+        "min_confidence": round(min_confidence, 2),
+        "scope": scope,
+        "scope_value": scope_value,
+        "backtest_accuracy": strategy.get("accuracy", 0.0),
+        "backtest_hits": strategy.get("hit_count", 0),
+        "backtest_samples": strategy.get("sample_count", 0),
+        "wilson_lower": strategy.get("wilson_lower", 0.0),
+        "updated_at": status.get("updated_at"),
+    }
+
+
 def calibrate_play_thresholds_by_settlement_now(
     *,
     limit: int = 500,
@@ -6108,6 +6443,15 @@ def _predict_match_with_inputs(
         ],
         "blocked": blocked_plays,
     }
+    high_accuracy_strategy = _high_accuracy_strategy_match(
+        match,
+        {
+            "play_strategy": play_strategy,
+            "ou_recommendation": ou_recommendation,
+            "ou_confidence": round(ou_confidence, 4),
+        },
+        play_catalog,
+    )
 
     return {
         "match_id": match.match_id,
@@ -6164,6 +6508,7 @@ def _predict_match_with_inputs(
         "layered_filter": layered_filter_meta,
         "play_policy": play_policy,
         "play_pass": play_pass,
+        "high_accuracy_strategy": high_accuracy_strategy,
         "draw_score": round(draw_score, 4),
         "draw_signals": draw_signals,
         "draw_grade": draw_grade,

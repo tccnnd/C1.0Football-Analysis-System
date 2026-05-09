@@ -204,6 +204,7 @@ def build_match_details_text(
     single_plays = play_strategy.get("single", [])
     parlay_plays = play_strategy.get("parlay", [])
     display_only_plays = play_strategy.get("display_only", [])
+    high_strategy = prediction.get("high_accuracy_strategy", {}) if isinstance(prediction.get("high_accuracy_strategy"), Mapping) else {}
 
     settlement_block = ""
     if settlement is not None:
@@ -226,6 +227,16 @@ def build_match_details_text(
         + f"- 串关可用: {_format_play_items(parlay_plays)}\n"
         + f"- 仅展示: {_format_play_items(display_only_plays)}"
     )
+    high_strategy_block = ""
+    if high_strategy.get("enabled"):
+        high_strategy_block = (
+            "\n\n高准确率策略\n"
+            + f"- 当前命中: {'是' if high_strategy.get('active') else '否'}\n"
+            + f"- 玩法: {high_strategy.get('play_type', '-')} | 选择: {high_strategy.get('pick', '-')}\n"
+            + f"- 置信度: {float(high_strategy.get('confidence', 0) or 0):.1%} / 门槛 {float(high_strategy.get('min_confidence', 0) or 0):.1%}\n"
+            + f"- 历史命中: {float(high_strategy.get('backtest_accuracy', 0) or 0):.1%} ({int(high_strategy.get('backtest_hits', 0) or 0)}/{int(high_strategy.get('backtest_samples', 0) or 0)})\n"
+            + f"- 原因: {high_strategy.get('reason', '-')}"
+        )
     confidence_block = _build_confidence_calibration_block(prediction)
     runtime_threshold_block = _build_runtime_threshold_block(prediction)
     release = release_row if isinstance(release_row, Mapping) else {}
@@ -275,6 +286,7 @@ def build_match_details_text(
         + f"- 客胜: {probs['away']:.1%}\n\n"
         + poisson_block_text
         + strategy_block
+        + high_strategy_block
         + confidence_block
         + runtime_threshold_block
         + release_block
