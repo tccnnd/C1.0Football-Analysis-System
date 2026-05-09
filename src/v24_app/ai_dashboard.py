@@ -1372,7 +1372,7 @@ class SmartMatchDashboard:
     def _release_recovery_alerts(self) -> dict[str, object]:
         return build_strategy_release_recovery_alerts(self._pending_snapshot_rows())
 
-    def _refresh_current_view_after_recovery(self) -> None:
+    def _refresh_current_view_after_release_state_change(self) -> None:
         self._refresh_metrics()
         view = getattr(self, "current_view", "")
         if view == "home":
@@ -1653,7 +1653,7 @@ class SmartMatchDashboard:
         self.status_var.set(message)
         self._log_event("OK", message)
         self.summary_vars["hit_rate"].set(self._historical_hit_rate())
-        self._refresh_current_view_after_recovery()
+        self._refresh_current_view_after_release_state_change()
         detail = "\n".join(str(item) for item in result.get("messages", []) if item) or message
         messagebox.showinfo("\u8d5b\u679c\u56de\u6536", detail)
 
@@ -2248,6 +2248,7 @@ class SmartMatchDashboard:
         )
         marked = int(link_summary.get("marked", 0) or 0)
         self.status_var.set(f"\u653e\u884c\u6e05\u5355\u5df2\u5bfc\u51fa: {path.name} | \u5f85\u56de\u6536 {marked} \u573a")
+        self._refresh_current_view_after_release_state_change()
         messagebox.showinfo("\u5bfc\u51fa\u653e\u884c\u6e05\u5355", f"\u5df2\u751f\u6210\u653e\u884c\u6e05\u5355:\n{path}\n\n\u5df2\u63a5\u5165\u590d\u76d8\u56de\u6536: {marked} \u573a")
         return path
 
