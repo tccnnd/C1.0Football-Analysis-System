@@ -22,6 +22,7 @@ from v24_app.ui_modules import (
     build_strategy_allowlist_report_lines,
     build_strategy_allowlist_settlement_rows,
     build_strategy_allowlist_settlement_summary,
+    build_strategy_allowlist_tuning_recommendation,
     select_strategy_allowlist_rows,
 )
 
@@ -325,6 +326,72 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("\u547d\u4e2d", rows[0]["title"])
         self.assertIn("strategy_allowlist_a.md", rows[0]["body"])
         self.assertIn("\u9ad8\u7f6e\u4fe1\u5931\u8bef", rows[1]["body"])
+
+    def test_strategy_allowlist_tuning_recommendation_tightens_weak_release_pool(self) -> None:
+        settlements = [
+            {
+                "strategy_allowlist_decision": "allow",
+                "is_correct": False,
+                "prediction_confidence": 0.71,
+                "handicap_is_correct": False,
+                "ou_is_correct": True,
+                "high_accuracy_strategy_active_count": 1,
+                "high_accuracy_strategy_hit_count": 0,
+            },
+            {
+                "strategy_allowlist_decision": "allow",
+                "is_correct": False,
+                "prediction_confidence": 0.64,
+                "handicap_is_correct": True,
+                "ou_is_correct": False,
+                "high_accuracy_strategy_active_count": 1,
+                "high_accuracy_strategy_hit_count": 0,
+            },
+            {
+                "strategy_allowlist_decision": "allow",
+                "is_correct": True,
+                "prediction_confidence": 0.62,
+                "handicap_is_correct": True,
+                "ou_is_correct": True,
+                "high_accuracy_strategy_active_count": 1,
+                "high_accuracy_strategy_hit_count": 1,
+            },
+            {
+                "strategy_allowlist_decision": "allow",
+                "is_correct": True,
+                "prediction_confidence": 0.58,
+                "handicap_is_correct": True,
+                "ou_is_correct": True,
+                "high_accuracy_strategy_active_count": 1,
+                "high_accuracy_strategy_hit_count": 1,
+            },
+            {
+                "strategy_allowlist_decision": "allow",
+                "is_correct": False,
+                "prediction_confidence": 0.52,
+                "handicap_is_correct": False,
+                "ou_is_correct": False,
+                "high_accuracy_strategy_active_count": 1,
+                "high_accuracy_strategy_hit_count": 0,
+            },
+        ]
+
+        recommendation = build_strategy_allowlist_tuning_recommendation(settlements)
+
+        self.assertEqual(recommendation["action"], "tighten")
+        self.assertGreater(recommendation["next_min_confidence"], 0.5)
+        self.assertEqual(recommendation["next_active_strategy_min"], 2)
+        self.assertIn("\u4ec5\u5141\u8bb8\u4f4e\u98ce\u9669", recommendation["risk_policy"])
+        self.assertTrue(recommendation["reasons"])
+
+    def test_strategy_allowlist_tuning_recommendation_waits_for_samples(self) -> None:
+        recommendation = build_strategy_allowlist_tuning_recommendation(
+            [{"strategy_allowlist_decision": "allow", "is_correct": True}]
+        )
+
+        self.assertEqual(recommendation["action"], "collect")
+        self.assertEqual(recommendation["next_min_confidence"], 0.5)
+        self.assertIn("\u4e0d\u8db3", "\n".join(recommendation["reasons"]))
 
 
 if __name__ == "__main__":

@@ -321,6 +321,7 @@ def build_strategy_allowlist_settlement_summary(settlements: Sequence[Mapping[st
         "handicap_hit_rate_text": _pct(_hit_rate(handicap_values)) if handicap_values else "-",
         "ou_hit_rate_text": _pct(_hit_rate(ou_values)) if ou_values else "-",
         "high_strategy_summary": f"{active_hits}/{active_total}" if active_total else "-",
+        "high_strategy_hit_rate": high_strategy_rate,
         "high_strategy_hit_rate_text": _pct(high_strategy_rate) if high_strategy_rate is not None else "-",
         "shadow_observed_count": shadow_count,
         "high_conf_misses": high_conf_misses,
@@ -354,6 +355,84 @@ def build_strategy_allowlist_settlement_rows(
         )
         rows.append({"title": title, "body": body})
     return rows
+
+
+def build_strategy_allowlist_tuning_recommendation(
+    settlements: Sequence[Mapping[str, object]] | object,
+    *,
+    base_min_confidence: float = 0.50,
+    base_active_strategy_min: int = 1,
+) -> dict[str, object]:
+    summary = build_strategy_allowlist_settlement_summary(settlements)
+    known_count = _safe_int(summary.get("known_count"))
+    hit_rate = summary.get("hit_rate")
+    hit_rate_value = _safe_float(hit_rate, 0.0) if hit_rate is not None else None
+    high_strategy_rate = summary.get("high_strategy_hit_rate")
+    high_strategy_value = _safe_float(high_strategy_rate, 0.0) if high_strategy_rate is not None else None
+    high_conf_misses = _safe_int(summary.get("high_conf_misses"))
+    reasons: list[str] = []
+    next_min_confidence = _safe_float(base_min_confidence)
+    next_active_strategy_min = max(1, _safe_int(base_active_strategy_min, 1))
+    risk_policy = "\u5141\u8bb8\u4f4e/\u4e2d\u98ce\u9669\uff0c\u9ad8\u98ce\u9669\u7ee7\u7eed\u963b\u65ad"
+    action = "collect"
+    label = "\u7ee7\u7eed\u79ef\u7d2f\u6837\u672c"
+    tone = "neutral"
+
+    if known_count < 5:
+        reasons.append(f"\u653e\u884c\u5df2\u7ed3\u7b97\u6837\u672c\u4ec5 {known_count} \u573a\uff0c\u4e0d\u8db3\u4ee5\u81ea\u52a8\u6539\u95e8\u69db\u3002")
+    elif (
+        (hit_rate_value is not None and hit_rate_value < 0.55)
+        or high_conf_misses >= max(2, known_count // 4)
+        or (high_strategy_value is not None and high_strategy_value < 0.60)
+    ):
+        action = "tighten"
+        label = "\u6536\u7d27\u6b63\u5f0f\u653e\u884c"
+        tone = "warning"
+        if hit_rate_value is not None and hit_rate_value < 0.55:
+            reasons.append(f"\u653e\u884c 1X2 \u547d\u4e2d\u7387 {summary.get('hit_rate_text')}\uff0c\u4f4e\u4e8e 55% \u89c2\u5bdf\u7ebf\u3002")
+            next_min_confidence += 0.05 if hit_rate_value >= 0.45 else 0.08
+        if high_conf_misses >= max(2, known_count // 4):
+            reasons.append(f"\u9ad8\u7f6e\u4fe1\u5931\u8bef {high_conf_misses} \u573a\uff0c\u8bf4\u660e\u5f53\u524d\u7f6e\u4fe1\u8fc7\u6ee4\u504f\u677e\u3002")
+            next_min_confidence += 0.03
+            risk_policy = "\u4ec5\u5141\u8bb8\u4f4e\u98ce\u9669\uff0c\u4e2d\u98ce\u9669\u964d\u4e3a\u89c2\u5bdf"
+        if high_strategy_value is not None and high_strategy_value < 0.60:
+            reasons.append(f"\u9ad8\u51c6\u7b56\u7565\u547d\u4e2d {summary.get('high_strategy_summary')}\uff0c\u5efa\u8bae\u589e\u52a0\u6b63\u5f0f\u7b56\u7565\u6570\u8981\u6c42\u3002")
+            next_active_strategy_min = max(next_active_strategy_min, 2)
+    elif hit_rate_value is not None and hit_rate_value >= 0.70 and (high_strategy_value is None or high_strategy_value >= 0.70):
+        action = "hold"
+        label = "\u7ef4\u6301\u95e8\u69db"
+        tone = "good"
+        reasons.append("\u653e\u884c\u547d\u4e2d\u548c\u9ad8\u51c6\u7b56\u7565\u8868\u73b0\u8fbe\u5230\u7a33\u5b9a\u533a\u95f4\uff0c\u6682\u4e0d\u653e\u5bbd\u8986\u76d6\u3002")
+    else:
+        action = "watch"
+        label = "\u5c0f\u5e45\u89c2\u5bdf"
+        tone = "neutral"
+        reasons.append("\u653e\u884c\u8868\u73b0\u672a\u8fbe\u5230\u653e\u5bbd\u6761\u4ef6\uff0c\u4f46\u4e5f\u672a\u89e6\u53d1\u660e\u663e\u6536\u7d27\u6761\u4ef6\u3002")
+
+    next_min_confidence = round(min(0.78, max(0.45, next_min_confidence)), 2)
+    if action in {"collect", "hold", "watch"}:
+        next_min_confidence = round(_safe_float(base_min_confidence), 2)
+
+    rows = [
+        ("\u52a8\u4f5c", label),
+        ("\u6837\u672c", f"{known_count} \u573a | \u653e\u884c\u547d\u4e2d {summary.get('hit_rate_text', '-')}"),
+        ("\u6700\u4f4e\u7f6e\u4fe1", f"{_safe_float(base_min_confidence):.2f} -> {next_min_confidence:.2f}"),
+        ("\u9ad8\u51c6\u7b56\u7565\u6570", f"{max(1, _safe_int(base_active_strategy_min, 1))} -> {next_active_strategy_min}"),
+        ("\u98ce\u9669\u9650\u5236", risk_policy),
+        ("\u89e6\u53d1\u539f\u56e0", "\n".join(reasons) if reasons else "-"),
+    ]
+    return {
+        "action": action,
+        "label": label,
+        "tone": tone,
+        "known_count": known_count,
+        "next_min_confidence": next_min_confidence,
+        "next_active_strategy_min": next_active_strategy_min,
+        "risk_policy": risk_policy,
+        "reasons": reasons,
+        "rows": rows,
+        "summary": summary,
+    }
 
 
 def select_strategy_allowlist_rows(rows: Sequence[object] | object) -> list[object]:
@@ -453,6 +532,7 @@ def build_high_accuracy_strategy_dashboard(
     breaker = _as_mapping(resolved.get("breaker"))
     settlement_summary = build_high_accuracy_strategy_settlement_summary(settlement_items)
     allowlist_summary = build_strategy_allowlist_settlement_summary(settlement_items)
+    allowlist_tuning = build_strategy_allowlist_tuning_recommendation(settlement_items)
     stable_count = sum(1 for item in pool if bool(_strategy_stability(item).get("stable")))
     primary_count = sum(1 for item in pool if str(item.get("role") or "") == "primary")
     backup_count = sum(1 for item in pool if str(item.get("role") or "") == "backup")
@@ -532,4 +612,5 @@ def build_high_accuracy_strategy_dashboard(
         "guidance_rows": guidance,
         "settlement_summary": settlement_summary,
         "allowlist_settlement_summary": allowlist_summary,
+        "allowlist_tuning": allowlist_tuning,
     }

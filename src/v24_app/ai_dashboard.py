@@ -25,6 +25,7 @@ from .core import (
 from .ui_modules import (
     build_high_accuracy_strategy_dashboard,
     build_strategy_allowlist_settlement_summary,
+    build_strategy_allowlist_tuning_recommendation,
     build_strategy_allowlist_filename,
     build_strategy_allowlist_report_lines,
     select_strategy_allowlist_rows,
@@ -1291,6 +1292,7 @@ class SmartMatchDashboard:
         summary = self._settlement_summary(settlements)
         trend = self._settlement_trend_summary(settlements)
         allowlist_summary = build_strategy_allowlist_settlement_summary(settlements)
+        allowlist_tuning = build_strategy_allowlist_tuning_recommendation(settlements)
 
         shell = self._page_shell(
             "\u590d\u76d8\u4e2d\u5fc3",
@@ -1368,6 +1370,7 @@ class SmartMatchDashboard:
             ("\u653e\u884c 1X2", allowlist_hit_rate, allowlist_hit_color),
             ("\u653e\u884c\u9ad8\u51c6", str(allowlist_summary.get("high_strategy_summary") or "-"), "#7aa2ff"),
             ("\u653e\u884c\u504f\u5dee", str(allowlist_summary.get("top_failure") or "-"), RED if allowlist_summary.get("top_failure") != "-" else TEXT),
+            ("\u8c03\u53c2\u5efa\u8bae", str(allowlist_tuning.get("label") or "-"), self._tone_color(str(allowlist_tuning.get("tone") or "neutral"))),
         ]:
             self._detail_metric(allowlist_frame, label, str(value), color)
 
@@ -2096,13 +2099,12 @@ class SmartMatchDashboard:
         content.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window_id, width=event.width))
 
-        tone_colors = {"good": GREEN, "warning": YELLOW, "bad": RED, "info": "#7aa2ff", "neutral": TEXT}
         top = tk.Frame(content, bg=BG)
         top.pack(fill=tk.X, pady=(0, 16))
         for metric in dashboard.get("metrics", []):
             if not isinstance(metric, dict):
                 continue
-            color = tone_colors.get(str(metric.get("tone") or "neutral"), TEXT)
+            color = self._tone_color(str(metric.get("tone") or "neutral"))
             self._detail_metric(top, str(metric.get("label") or "-"), str(metric.get("value") or "-"), color)
 
         body = tk.Frame(content, bg=BG)
@@ -2146,6 +2148,11 @@ class SmartMatchDashboard:
                 f"\u4e3b\u8981\u504f\u5dee: {allowlist_summary.get('top_failure', '-')}"
             ),
         )
+        allowlist_tuning = dashboard.get("allowlist_tuning", {}) if isinstance(dashboard.get("allowlist_tuning"), dict) else {}
+        tuning_rows = allowlist_tuning.get("rows", []) if isinstance(allowlist_tuning.get("rows"), list) else []
+        if tuning_rows:
+            tuning_body = "\n".join(f"{label}: {value}" for label, value in tuning_rows if isinstance(label, str))
+            self._strategy_row(right, f"\u653e\u884c\u95e8\u69db\u5efa\u8bae: {allowlist_tuning.get('label', '-')}", tuning_body)
         allowlist_settlement_rows = dashboard.get("allowlist_settlement_rows", [])
         if allowlist_settlement_rows:
             for row in allowlist_settlement_rows:
@@ -2291,6 +2298,9 @@ class SmartMatchDashboard:
         frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 12))
         tk.Label(frame, text=label, bg=PANEL, fg=MUTED, font=("Microsoft YaHei UI", 9)).pack(anchor=tk.W, padx=14, pady=(12, 3))
         tk.Label(frame, text=value, bg=PANEL, fg=color, font=("Microsoft YaHei UI", 14, "bold"), wraplength=150, justify=tk.LEFT).pack(anchor=tk.W, padx=14, pady=(0, 12))
+
+    def _tone_color(self, tone: str) -> str:
+        return {"good": GREEN, "warning": YELLOW, "bad": RED, "info": "#7aa2ff", "neutral": TEXT}.get(str(tone or "neutral"), TEXT)
 
     def _draw_probability_panel(self, parent: tk.Widget, row: DashboardRow) -> None:
         pred = row.prediction
