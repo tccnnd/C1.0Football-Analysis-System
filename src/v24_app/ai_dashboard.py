@@ -969,7 +969,7 @@ class SmartMatchDashboard:
             button.pack(side=tk.LEFT, padx=(0, 6))
             self.admission_filter_buttons[key] = button
 
-        self.match_list_wrap = tk.Frame(matches_card, bg=PANEL, height=205)
+        self.match_list_wrap = tk.Frame(matches_card, bg=PANEL, height=245)
         self.match_list_wrap.pack(fill=tk.X, padx=18, pady=(0, 10))
         self.match_list_wrap.pack_propagate(False)
         self.match_canvas = tk.Canvas(self.match_list_wrap, bg=PANEL, bd=0, highlightthickness=0)
@@ -1546,9 +1546,9 @@ class SmartMatchDashboard:
         if not self._widget_alive("match_list_wrap"):
             return
         if self.show_all_matches:
-            height = 255
+            height = 330
         else:
-            height = 88 if row_count <= 1 else 146 if row_count == 2 else 205
+            height = 112 if row_count <= 1 else 180 if row_count == 2 else 245
         self.match_list_wrap.configure(height=height)
 
     def _bind_match_scroll(self, widget: tk.Widget) -> None:
