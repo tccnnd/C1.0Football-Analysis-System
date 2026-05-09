@@ -57,6 +57,9 @@ HIGH_ACCURACY_STRATEGY_BREAKER_WINDOW = 30
 HIGH_ACCURACY_STRATEGY_RECOVERY_HITS = 2
 STRATEGY_ADMISSION_MIN_CONFIDENCE = 0.50
 STRATEGY_ADMISSION_BLOCK_CONFIDENCE = 0.40
+JC_STRATIFIED_MIN_RUNTIME_SAMPLES = 120
+JC_STRATIFIED_MIN_RUNTIME_ACCURACY = 0.68
+JC_STRATIFIED_MIN_RUNTIME_WILSON = 0.64
 DEFAULT_STRATEGY_ADMISSION_POLICY = {
     "min_confidence": STRATEGY_ADMISSION_MIN_CONFIDENCE,
     "block_confidence": STRATEGY_ADMISSION_BLOCK_CONFIDENCE,
@@ -4464,6 +4467,43 @@ def _save_jc_stratified_strategy_report(report: dict) -> None:
     JC_STRATIFIED_STRATEGY_FILE.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def get_jc_stratified_strategy_status() -> dict:
+    if not JC_STRATIFIED_STRATEGY_FILE.exists():
+        return {
+            "enabled": False,
+            "updated_at": None,
+            "reason": "not_calibrated",
+            "validation": {},
+            "best_bucket": {},
+            "top_buckets": [],
+        }
+    try:
+        payload = json.loads(JC_STRATIFIED_STRATEGY_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {
+            "enabled": False,
+            "updated_at": None,
+            "reason": "invalid_report",
+            "validation": {},
+            "best_bucket": {},
+            "top_buckets": [],
+        }
+    if not isinstance(payload, dict):
+        payload = {}
+    top_buckets = payload.get("top_buckets", [])
+    if not isinstance(top_buckets, list):
+        top_buckets = []
+    return {
+        "enabled": bool(payload.get("ok", False)),
+        "updated_at": payload.get("updated_at"),
+        "reason": payload.get("reason", "ok"),
+        "validation": payload.get("validation", {}) if isinstance(payload.get("validation"), dict) else {},
+        "best_bucket": payload.get("best_bucket", {}) if isinstance(payload.get("best_bucket"), dict) else {},
+        "top_buckets": top_buckets,
+        "report_path": payload.get("report_path"),
+    }
+
+
 def _write_jc_stratified_strategy_report(result: dict) -> str | None:
     if not result.get("ok"):
         return None
@@ -4939,6 +4979,118 @@ def _strategy_layer_summary(candidates: list[dict]) -> dict:
     return summary
 
 
+def _market_pick_context(match: AppMatch, prediction: dict) -> dict:
+    market_probabilities = prediction.get("market_probabilities", {}) if isinstance(prediction.get("market_probabilities"), dict) else {}
+    if market_probabilities:
+        pick_key = max(("home", "draw", "away"), key=lambda key: _safe_float(market_probabilities.get(key), default=0.0))
+        confidence = _safe_float(market_probabilities.get(pick_key), default=0.0)
+    else:
+        pick_key = ""
+        confidence = 0.0
+    pick_odds = {
+        "home": _safe_float(match.odds_home, default=0.0),
+        "draw": _safe_float(match.odds_draw, default=0.0),
+        "away": _safe_float(match.odds_away, default=0.0),
+    }.get(pick_key, 0.0)
+    league = normalize_text(match.league) or "-"
+    year = normalize_text(match.match_date)[:4] if len(normalize_text(match.match_date)) >= 4 else "-"
+    confidence_bucket = _confidence_bucket(confidence)
+    odds_bucket = _odds_bucket(pick_odds)
+    return {
+        "pick_key": pick_key,
+        "pick": {"home": "涓昏儨", "draw": "骞冲眬", "away": "瀹㈣儨"}.get(pick_key, "-"),
+        "confidence": round(_clamp(confidence), 4),
+        "pick_odds": round(_safe_float(pick_odds, default=0.0), 4),
+        "league": league,
+        "year": year,
+        "confidence_bucket": confidence_bucket,
+        "odds_bucket": odds_bucket,
+        "dimension_values": {
+            "global": "all",
+            "year": year,
+            "league": league,
+            "odds_bucket": odds_bucket,
+            "confidence_bucket": confidence_bucket,
+            "pick_side": pick_key or "-",
+            "league_odds_bucket": f"{league} | {odds_bucket}",
+            "league_confidence_bucket": f"{league} | {confidence_bucket}",
+        },
+    }
+
+
+def _jc_bucket_runtime_eligible(bucket: dict) -> bool:
+    if not isinstance(bucket, dict):
+        return False
+    stability = bucket.get("stability", {}) if isinstance(bucket.get("stability"), dict) else {}
+    return bool(
+        bool(stability.get("stable", False))
+        and int(_safe_int(bucket.get("sample_count"), 0) or 0) >= JC_STRATIFIED_MIN_RUNTIME_SAMPLES
+        and _safe_float(bucket.get("accuracy"), default=0.0) >= JC_STRATIFIED_MIN_RUNTIME_ACCURACY
+        and _safe_float(bucket.get("wilson_lower"), default=0.0) >= JC_STRATIFIED_MIN_RUNTIME_WILSON
+    )
+
+
+def _jc_bucket_min_confidence(bucket: dict) -> float:
+    dimension = normalize_text(bucket.get("dimension", ""))
+    bucket_text = normalize_text(bucket.get("bucket", ""))
+    if "confidence" not in dimension:
+        return 0.0
+    tail = bucket_text.rsplit("|", 1)[-1].strip()
+    if tail.startswith(">="):
+        return round(_safe_float(tail[2:], default=0.0), 2)
+    if "-" in tail:
+        return round(_safe_float(tail.split("-", 1)[0], default=0.0), 2)
+    if tail.startswith("<"):
+        return 0.0
+    return 0.0
+
+
+def _jc_stratified_runtime_strategies(match: AppMatch, prediction: dict) -> list[dict]:
+    status = get_jc_stratified_strategy_status()
+    if not bool(status.get("enabled")):
+        return []
+    context = _market_pick_context(match, prediction)
+    dimension_values = context.get("dimension_values", {}) if isinstance(context.get("dimension_values"), dict) else {}
+    top_buckets = status.get("top_buckets", []) if isinstance(status.get("top_buckets"), list) else []
+    strategies: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for bucket in top_buckets:
+        if not _jc_bucket_runtime_eligible(bucket):
+            continue
+        dimension = normalize_text(bucket.get("dimension", ""))
+        bucket_value = normalize_text(bucket.get("bucket", ""))
+        if not dimension or (dimension, bucket_value) in seen:
+            continue
+        if normalize_text(dimension_values.get(dimension, "")) != bucket_value:
+            continue
+        seen.add((dimension, bucket_value))
+        strategy = {
+            "role": "primary" if not strategies else "backup",
+            "scope": "jc_bucket",
+            "scope_value": bucket_value,
+            "dimension": dimension,
+            "play_type": "market_1x2",
+            "min_confidence": _jc_bucket_min_confidence(bucket),
+            "accuracy": bucket.get("accuracy", 0.0),
+            "hit_count": bucket.get("hit_count", 0),
+            "sample_count": bucket.get("sample_count", 0),
+            "wilson_lower": bucket.get("wilson_lower", 0.0),
+            "stability": bucket.get("stability", {}) if isinstance(bucket.get("stability"), dict) else {},
+            "layer": {
+                "data_layer": "jc_stratified_market",
+                "scope_layer": dimension,
+                "play_layer": "market_1x2",
+                "sample_sources": bucket.get("sample_sources", {}),
+            },
+            "breaker": {"breaker_on": False, "status": "active"},
+            "jc_bucket": bucket,
+            "jc_context": context,
+            "updated_at": status.get("updated_at"),
+        }
+        strategies.append(strategy)
+    return strategies
+
+
 def run_high_accuracy_strategy_backtest(
     *,
     limit: int = 500,
@@ -5090,10 +5242,17 @@ def _high_accuracy_strategy_match(match: AppMatch, prediction: dict, play_catalo
     status = get_high_accuracy_strategy_status()
     strategy = status.get("strategy", {}) if isinstance(status, dict) else {}
     strategy_pool = status.get("strategy_pool", []) if isinstance(status, dict) else []
+    jc_strategy_pool = _jc_stratified_runtime_strategies(match, prediction)
     if not bool(status.get("enabled")) or not isinstance(strategy, dict) or not strategy:
-        return {"enabled": False, "active": False, "reason": status.get("reason", "not_calibrated") if isinstance(status, dict) else "not_calibrated"}
+        if not jc_strategy_pool:
+            return {"enabled": False, "active": False, "reason": status.get("reason", "not_calibrated") if isinstance(status, dict) else "not_calibrated"}
+        status = {"enabled": True, "updated_at": jc_strategy_pool[0].get("updated_at"), "reason": "jc_stratified_runtime"}
+        strategy = jc_strategy_pool[0]
+        strategy_pool = jc_strategy_pool
+        jc_strategy_pool = []
     if not isinstance(strategy_pool, list) or not strategy_pool:
         strategy_pool = [{**strategy, "role": "primary"}]
+    strategy_pool = [item for item in strategy_pool if isinstance(item, dict)] + jc_strategy_pool
 
     def evaluate(item: dict) -> dict:
         result = _high_accuracy_strategy_match_single(
@@ -5164,7 +5323,21 @@ def _high_accuracy_strategy_match_single(
     scope = normalize_text(strategy.get("scope", "global"))
     scope_value = normalize_text(strategy.get("scope_value", "all"))
     league = normalize_text(match.league) or "-"
-    scope_ok = scope != "league" or scope_value == league
+    if scope == "jc_bucket":
+        context = _market_pick_context(match, prediction)
+        dimension = normalize_text(strategy.get("dimension", ""))
+        dimension_values = context.get("dimension_values", {}) if isinstance(context.get("dimension_values"), dict) else {}
+        scope_ok = bool(dimension and normalize_text(dimension_values.get(dimension, "")) == scope_value)
+        if play_type == "market_1x2":
+            play_item = {
+                "play_type": "market_1x2",
+                "pick": context.get("pick", "-"),
+                "confidence": context.get("confidence", 0.0),
+                "passed": bool(context.get("pick_key")),
+            }
+            confidence = _safe_float(play_item.get("confidence"), default=0.0)
+    else:
+        scope_ok = scope != "league" or scope_value == league
     passed = bool(play_item.get("passed", False))
     gate_matched = bool(scope_ok and passed and confidence >= min_confidence)
     active = gate_matched

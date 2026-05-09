@@ -20,10 +20,12 @@ PLAY_LABELS = {
 DATA_LAYER_LABELS = {
     "historical_market": "\u5386\u53f2\u5e02\u573a",
     "app_settlement": "APP \u7ed3\u7b97",
+    "jc_stratified_market": "\u7ade\u5f69\u5206\u5c42",
 }
 SCOPE_LABELS = {
     "global": "\u5168\u5c40",
     "league": "\u8054\u8d5b",
+    "jc_bucket": "\u7ade\u5f69\u7a33\u5b9a\u6876",
 }
 ADMISSION_DECISION_LABELS = {
     "allow": "\u6b63\u5f0f\u653e\u884c",

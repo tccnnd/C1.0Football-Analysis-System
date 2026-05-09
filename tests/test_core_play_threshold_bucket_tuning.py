@@ -317,7 +317,7 @@ class CorePlayThresholdBucketTuningTests(unittest.TestCase):
         with patch(
             "v24_app.core.get_high_accuracy_strategy_status",
             return_value={"enabled": True, "updated_at": "now", "strategy": strategy, "strategy_pool": [strategy]},
-        ):
+        ), patch("v24_app.core.get_jc_stratified_strategy_status", return_value={"enabled": False}):
             result = core._high_accuracy_strategy_match(
                 match,
                 {"market_probabilities": {"home": 0.80, "draw": 0.10, "away": 0.10}},
@@ -357,7 +357,7 @@ class CorePlayThresholdBucketTuningTests(unittest.TestCase):
         with patch(
             "v24_app.core.get_high_accuracy_strategy_status",
             return_value={"enabled": True, "updated_at": "now", "strategy": strategy, "strategy_pool": [strategy]},
-        ):
+        ), patch("v24_app.core.get_jc_stratified_strategy_status", return_value={"enabled": False}):
             result = core._high_accuracy_strategy_match(
                 match,
                 {"market_probabilities": {"home": 0.80, "draw": 0.10, "away": 0.10}},
@@ -368,6 +368,91 @@ class CorePlayThresholdBucketTuningTests(unittest.TestCase):
         self.assertEqual(result["active_count"], 1)
         self.assertEqual(result["active_matches"][0]["play_type"], "market_1x2")
         json.dumps(result, ensure_ascii=False)
+
+    def test_jc_stratified_bucket_can_activate_high_accuracy_strategy(self) -> None:
+        match = core.AppMatch(
+            home_team="A",
+            away_team="B",
+            league="Stable League",
+            match_time="12:00",
+            match_date="2026-05-09",
+            odds_home=1.24,
+            odds_draw=4.8,
+            odds_away=8.0,
+        )
+        jc_status = {
+            "enabled": True,
+            "updated_at": "now",
+            "top_buckets": [
+                {
+                    "dimension": "league_confidence_bucket",
+                    "bucket": "Stable League | >=0.65",
+                    "sample_count": 180,
+                    "hit_count": 145,
+                    "accuracy": 0.805,
+                    "wilson_lower": 0.75,
+                    "stability": {"stable": True, "stability_score": 0.8},
+                    "sample_sources": {"jc_results_csv": 180},
+                }
+            ],
+        }
+
+        with (
+            patch("v24_app.core.get_high_accuracy_strategy_status", return_value={"enabled": False, "reason": "not_calibrated"}),
+            patch("v24_app.core.get_jc_stratified_strategy_status", return_value=jc_status),
+        ):
+            result = core._high_accuracy_strategy_match(
+                match,
+                {"market_probabilities": {"home": 0.70, "draw": 0.20, "away": 0.10}},
+                {},
+            )
+
+        self.assertTrue(result["enabled"])
+        self.assertTrue(result["active"])
+        self.assertEqual(result["active_count"], 1)
+        self.assertEqual(result["active_matches"][0]["scope"], "jc_bucket")
+        self.assertEqual(result["active_matches"][0]["data_layer"], "jc_stratified_market")
+        self.assertEqual(result["active_matches"][0]["pick"], "涓昏儨")
+
+    def test_jc_stratified_bucket_requires_runtime_quality(self) -> None:
+        match = core.AppMatch(
+            home_team="A",
+            away_team="B",
+            league="Stable League",
+            match_time="12:00",
+            match_date="2026-05-09",
+            odds_home=1.24,
+            odds_draw=4.8,
+            odds_away=8.0,
+        )
+        jc_status = {
+            "enabled": True,
+            "updated_at": "now",
+            "top_buckets": [
+                {
+                    "dimension": "league_confidence_bucket",
+                    "bucket": "Stable League | >=0.65",
+                    "sample_count": 180,
+                    "hit_count": 115,
+                    "accuracy": 0.638,
+                    "wilson_lower": 0.60,
+                    "stability": {"stable": True, "stability_score": 0.8},
+                }
+            ],
+        }
+
+        with (
+            patch("v24_app.core.get_high_accuracy_strategy_status", return_value={"enabled": False, "reason": "not_calibrated"}),
+            patch("v24_app.core.get_jc_stratified_strategy_status", return_value=jc_status),
+        ):
+            result = core._high_accuracy_strategy_match(
+                match,
+                {"market_probabilities": {"home": 0.70, "draw": 0.20, "away": 0.10}},
+                {},
+            )
+
+        self.assertFalse(result["enabled"])
+        self.assertFalse(result["active"])
 
     def test_high_accuracy_strategy_match_does_not_self_reference_pool(self) -> None:
         strategy = {
@@ -395,7 +480,7 @@ class CorePlayThresholdBucketTuningTests(unittest.TestCase):
         with patch(
             "v24_app.core.get_high_accuracy_strategy_status",
             return_value={"enabled": True, "updated_at": "now", "strategy": strategy, "strategy_pool": [strategy]},
-        ):
+        ), patch("v24_app.core.get_jc_stratified_strategy_status", return_value={"enabled": False}):
             result = core._high_accuracy_strategy_match(
                 match,
                 {"market_probabilities": {"home": 0.80, "draw": 0.10, "away": 0.10}},
