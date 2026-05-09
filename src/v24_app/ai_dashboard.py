@@ -665,7 +665,7 @@ class SmartMatchDashboard:
             tk.Label(left, text="\u653e\u884c\u56de\u6536\u63d0\u9192", bg=PANEL, fg=RED, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
             first_alert = release_alerts.get("rows", [])[0] if isinstance(release_alerts.get("rows"), list) and release_alerts.get("rows") else {}
             body_text = str(first_alert.get("body") or release_alerts.get("summary") or "-") if isinstance(first_alert, dict) else str(release_alerts.get("summary") or "-")
-            self._shortcut_row(left, f"\u5f85\u56de\u6536 {alert_count} \u573a\u6b63\u5f0f\u653e\u884c", body_text, self.open_snapshot_center)
+            self._release_recovery_action_card(left, f"\u5f85\u56de\u6536 {alert_count} \u573a\u6b63\u5f0f\u653e\u884c", body_text)
 
         tk.Label(right, text="\u5feb\u6377\u5165\u53e3", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
         shortcuts = [
@@ -816,6 +816,48 @@ class SmartMatchDashboard:
         for child in frame.winfo_children():
             child.configure(cursor="hand2")
             child.bind("<Button-1>", lambda _event: command())
+
+    def _release_recovery_action_card(self, parent: tk.Widget, title: str, body: str) -> None:
+        frame = tk.Frame(parent, bg=PANEL_2, highlightbackground="#5f2b2b", highlightthickness=1)
+        frame.pack(fill=tk.X, padx=18, pady=7)
+        tk.Label(frame, text=title, bg=PANEL_2, fg=RED, font=("Microsoft YaHei UI", 11, "bold")).pack(anchor=tk.W, padx=14, pady=(10, 3))
+        tk.Label(
+            frame,
+            text=body,
+            bg=PANEL_2,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 9),
+            justify=tk.LEFT,
+            wraplength=360,
+        ).pack(anchor=tk.W, padx=14, pady=(0, 10))
+        actions = tk.Frame(frame, bg=PANEL_2)
+        actions.pack(fill=tk.X, padx=14, pady=(0, 12))
+        tk.Button(
+            actions,
+            text="\u7acb\u5373\u56de\u6536\u8d5b\u679c",
+            command=self.run_result_recovery,
+            bg=RED,
+            fg="white",
+            activebackground="#d94a46",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 9, "bold"),
+            padx=12,
+            pady=5,
+        ).pack(side=tk.LEFT)
+        tk.Button(
+            actions,
+            text="\u67e5\u770b\u5feb\u7167",
+            command=self.open_snapshot_center,
+            bg=PANEL,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 9, "bold"),
+            padx=12,
+            pady=5,
+        ).pack(side=tk.LEFT, padx=(8, 0))
 
     def _chart_card(self, parent: tk.Widget, title: str) -> tk.Canvas:
         frame = self._card(parent, PANEL)
@@ -1380,7 +1422,7 @@ class SmartMatchDashboard:
             rows = release_alerts.get("rows", []) if isinstance(release_alerts.get("rows"), list) else []
             for row in rows:
                 if isinstance(row, dict):
-                    self._strategy_row(left, str(row.get("title") or "-"), str(row.get("body") or "-"))
+                    self._release_recovery_action_card(left, str(row.get("title") or "-"), str(row.get("body") or "-"))
 
         tk.Label(right, text="\u8fd0\u884c\u65e5\u5fd7", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
         logbox = tk.Listbox(
