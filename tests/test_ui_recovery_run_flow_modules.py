@@ -52,6 +52,8 @@ class UIRecoveryRunFlowModuleTests(unittest.TestCase):
                 "restored_snapshots": 1,
                 "new_settled": 3,
                 "new_parlay_settled": 1,
+                "snapshot_recoverable": 2,
+                "snapshot_missing_source_id": 1,
                 "messages": ["done"],
             }
         ]
@@ -64,6 +66,8 @@ class UIRecoveryRunFlowModuleTests(unittest.TestCase):
         detail = build_result_recovery_run_detail(records[0])
         self.assertIn("运行 ID: run-1", detail)
         self.assertIn("新增结算: 3", detail)
+        self.assertIn("可自动回查: 2", detail)
+        self.assertIn("缺 source_id: 1", detail)
         self.assertIn("- done", detail)
 
     def test_quality_alerts_detect_failures_no_settlement_and_slow_runs(self) -> None:

@@ -276,6 +276,11 @@ def build_result_recovery_run_detail(record: Mapping[str, object] | object) -> s
         f"- \u5feb\u7167\u56de\u67e5: {_safe_int(item.get('snapshot_checked') or result.get('snapshot_checked'), 0)} / "
         f"{_safe_int(item.get('snapshot_result_hits') or result.get('snapshot_result_hits'), 0)}\n"
         f"- \u9884\u6d4b\u5feb\u7167\u547d\u4e2d: {_safe_int(item.get('snapshot_predictions') or result.get('snapshot_predictions'), 0)}\n\n"
+        f"\u5feb\u7167\u53ef\u56de\u6536\u6027:\n"
+        f"- \u53ef\u81ea\u52a8\u56de\u67e5: {_safe_int(item.get('snapshot_recoverable') or result.get('snapshot_recoverable'), 0)}\n"
+        f"- \u7f3a source_id: {_safe_int(item.get('snapshot_missing_source_id') or result.get('snapshot_missing_source_id'), 0)}\n"
+        f"- \u975e Titan \u5feb\u7167: {_safe_int(item.get('snapshot_non_titan_source') or result.get('snapshot_non_titan_source'), 0)}\n"
+        f"- \u8d85\u51fa\u56de\u770b\u7a97\u53e3: {_safe_int(item.get('snapshot_out_of_window') or result.get('snapshot_out_of_window'), 0)}\n\n"
         f"\u9519\u8bef:\n- {item.get('error') or '-'}\n\n"
         f"\u6d88\u606f:\n{message_text}"
     )

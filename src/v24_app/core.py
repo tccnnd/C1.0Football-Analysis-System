@@ -7689,6 +7689,95 @@ def load_prediction_snapshot_cache() -> dict[str, dict]:
     return cache
 
 
+def build_result_recovery_snapshot_audit(
+    snapshot_records: dict[str, dict],
+    settlements: list[dict],
+    *,
+    lookback_days: int = 2,
+    now: datetime | None = None,
+    item_limit: int = 20,
+) -> dict[str, object]:
+    lookback_days = max(0, min(int(lookback_days), 14))
+    current_date = (now or datetime.now()).date()
+    settled_ids = {str(item.get("match_id", "")) for item in settlements if isinstance(item, dict) and item.get("match_id")}
+    audit: dict[str, object] = {
+        "total_snapshots": 0,
+        "already_settled": 0,
+        "pending": 0,
+        "in_window": 0,
+        "out_of_window": 0,
+        "future": 0,
+        "invalid": 0,
+        "recoverable_titan": 0,
+        "missing_source_id": 0,
+        "non_titan_source": 0,
+        "missing_prediction": 0,
+        "lookback_days": lookback_days,
+        "items": [],
+    }
+    items: list[dict[str, object]] = []
+    for match_id, record in snapshot_records.items():
+        if not isinstance(record, dict):
+            audit["invalid"] = int(audit["invalid"]) + 1
+            continue
+        audit["total_snapshots"] = int(audit["total_snapshots"]) + 1
+        if match_id in settled_ids:
+            audit["already_settled"] = int(audit["already_settled"]) + 1
+            continue
+        match_payload = record.get("match")
+        if not isinstance(match_payload, dict):
+            audit["invalid"] = int(audit["invalid"]) + 1
+            continue
+        app_match = _app_match_from_payload(match_payload, source=str(match_payload.get("source") or "snapshot_audit"))
+        if app_match is None:
+            audit["invalid"] = int(audit["invalid"]) + 1
+            continue
+        try:
+            match_date = datetime.strptime(app_match.match_date, "%Y-%m-%d").date()
+        except Exception:
+            audit["invalid"] = int(audit["invalid"]) + 1
+            continue
+        age_days = (current_date - match_date).days
+        if age_days < 0:
+            audit["future"] = int(audit["future"]) + 1
+            continue
+        if age_days > lookback_days:
+            audit["out_of_window"] = int(audit["out_of_window"]) + 1
+            continue
+        audit["pending"] = int(audit["pending"]) + 1
+        audit["in_window"] = int(audit["in_window"]) + 1
+        prediction = record.get("prediction")
+        if not isinstance(prediction, dict):
+            audit["missing_prediction"] = int(audit["missing_prediction"]) + 1
+        source = normalize_text(match_payload.get("source", ""))
+        source_id = normalize_text(match_payload.get("source_id", ""))
+        if "titan" not in source.lower():
+            audit["non_titan_source"] = int(audit["non_titan_source"]) + 1
+            status = "non_titan_source"
+        elif not source_id:
+            audit["missing_source_id"] = int(audit["missing_source_id"]) + 1
+            status = "missing_source_id"
+        else:
+            audit["recoverable_titan"] = int(audit["recoverable_titan"]) + 1
+            status = "recoverable_titan"
+        if len(items) < max(0, int(item_limit)):
+            items.append(
+                {
+                    "match_id": match_id,
+                    "match_date": app_match.match_date,
+                    "league": app_match.league,
+                    "home_team": app_match.home_team,
+                    "away_team": app_match.away_team,
+                    "source": source or "-",
+                    "source_id": source_id,
+                    "age_days": age_days,
+                    "status": status,
+                }
+            )
+    audit["items"] = items
+    return audit
+
+
 def get_prediction_snapshot_migration_report() -> dict:
     return STATE_STORE.load_snapshot_migration_report()
 
@@ -8048,8 +8137,19 @@ def auto_settle_finished_matches(
     summary["fetched_finished"] = len(finished_matches)
     summary["source"] = "live:titan"
 
-    settled_ids = {str(item.get("match_id", "")) for item in STATE_STORE.load_settlements() if item.get("match_id")}
+    settlements = STATE_STORE.load_settlements()
+    settled_ids = {str(item.get("match_id", "")) for item in settlements if item.get("match_id")}
     snapshot_records = STATE_STORE.load_prediction_snapshots()
+    snapshot_audit = build_result_recovery_snapshot_audit(
+        snapshot_records,
+        settlements,
+        lookback_days=lookback_days,
+    )
+    summary["snapshot_audit"] = snapshot_audit
+    summary["snapshot_recoverable"] = int(snapshot_audit.get("recoverable_titan", 0) or 0)
+    summary["snapshot_missing_source_id"] = int(snapshot_audit.get("missing_source_id", 0) or 0)
+    summary["snapshot_out_of_window"] = int(snapshot_audit.get("out_of_window", 0) or 0)
+    summary["snapshot_non_titan_source"] = int(snapshot_audit.get("non_titan_source", 0) or 0)
     candidate_ids: set[str] = set()
     candidates: list[tuple[AppMatch, int, int, dict | None]] = []
 
@@ -8139,6 +8239,15 @@ def auto_settle_finished_matches(
         summary["messages"].append(
             f"最近 {lookback_days} 天未发现可自动结算的新完场比赛（修复快照 {summary['restored_snapshots']} 场，快照回查 {summary['snapshot_checked']} 场，命中 {summary['snapshot_result_hits']} 场）。"
         )
+        summary["messages"].append(
+            "快照审计: 待回收 {pending} 场，可自动回查 {recoverable} 场，缺 source_id {missing} 场，非 Titan {non_titan} 场，超出窗口 {out_window} 场。".format(
+                pending=int(snapshot_audit.get("pending", 0) or 0),
+                recoverable=int(snapshot_audit.get("recoverable_titan", 0) or 0),
+                missing=int(snapshot_audit.get("missing_source_id", 0) or 0),
+                non_titan=int(snapshot_audit.get("non_titan_source", 0) or 0),
+                out_window=int(snapshot_audit.get("out_of_window", 0) or 0),
+            )
+        )
         return summary
 
     prediction_bank: dict[str, dict] = {}
@@ -8172,6 +8281,15 @@ def auto_settle_finished_matches(
 
     summary["messages"].append(
         f"自动回收完成(近{lookback_days}天): 主源完场 {summary['fetched_finished']} 场, 修复快照 {summary['restored_snapshots']} 场, 快照回查命中 {summary['snapshot_result_hits']} 场, 新增单场结算 {summary['new_settled']} 场, 新增二串一结算 {summary['new_parlay_settled']} 场, 预测快照命中 {summary['snapshot_predictions']} 场。"
+    )
+    summary["messages"].append(
+        "快照审计: 待回收 {pending} 场，可自动回查 {recoverable} 场，缺 source_id {missing} 场，非 Titan {non_titan} 场，超出窗口 {out_window} 场。".format(
+            pending=int(snapshot_audit.get("pending", 0) or 0),
+            recoverable=int(snapshot_audit.get("recoverable_titan", 0) or 0),
+            missing=int(snapshot_audit.get("missing_source_id", 0) or 0),
+            non_titan=int(snapshot_audit.get("non_titan_source", 0) or 0),
+            out_window=int(snapshot_audit.get("out_of_window", 0) or 0),
+        )
     )
     return summary
 

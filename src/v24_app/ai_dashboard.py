@@ -1177,6 +1177,11 @@ class SmartMatchDashboard:
                 "snapshot_checked": int(result_payload.get("snapshot_checked", 0) or 0),
                 "snapshot_result_hits": int(result_payload.get("snapshot_result_hits", 0) or 0),
                 "snapshot_predictions": int(result_payload.get("snapshot_predictions", 0) or 0),
+                "snapshot_recoverable": int(result_payload.get("snapshot_recoverable", 0) or 0),
+                "snapshot_missing_source_id": int(result_payload.get("snapshot_missing_source_id", 0) or 0),
+                "snapshot_out_of_window": int(result_payload.get("snapshot_out_of_window", 0) or 0),
+                "snapshot_non_titan_source": int(result_payload.get("snapshot_non_titan_source", 0) or 0),
+                "snapshot_audit": result_payload.get("snapshot_audit", {}) if isinstance(result_payload.get("snapshot_audit"), dict) else {},
                 "lookback_days": int(result_payload.get("lookback_days", record.get("lookback_days", 2)) or 2),
                 "messages": [str(item) for item in messages if item],
             }
