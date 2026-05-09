@@ -15,6 +15,7 @@ class StateStore:
         self.settlements_file = self.state_dir / "settlements.json"
         self.parlay_tickets_file = self.state_dir / "parlay_tickets.json"
         self.xgb_samples_file = self.state_dir / "xgb_training_samples.json"
+        self.analysis_history_file = self.state_dir / "analysis_history.json"
         self.prediction_snapshots_file = self.state_dir / "prediction_snapshots.json"
         self.market_snapshots_file = self.state_dir / "market_snapshots.json"
         self.snapshot_migration_report_file = self.state_dir / "prediction_snapshot_migration.json"
@@ -111,6 +112,43 @@ class StateStore:
         current = self.load_xgb_samples()
         current.append(sample)
         self.save_xgb_samples(current, limit=limit)
+
+    def load_analysis_history(self) -> dict[str, dict]:
+        if not self.analysis_history_file.exists():
+            return {}
+        try:
+            payload = json.loads(self.analysis_history_file.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        items = payload.get("items", {})
+        if not isinstance(items, dict):
+            return {}
+        return {
+            str(match_id): record
+            for match_id, record in items.items()
+            if isinstance(match_id, str) and isinstance(record, dict)
+        }
+
+    def save_analysis_history(self, items: dict[str, dict]) -> None:
+        payload = {
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "items": items,
+        }
+        self.analysis_history_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def upsert_analysis_history(self, match_id: str, record: dict, limit: int = 5000) -> None:
+        if not match_id or not isinstance(record, dict):
+            return
+        items = self.load_analysis_history()
+        if match_id in items:
+            del items[match_id]
+        items[match_id] = record
+        if len(items) > limit:
+            overflow = len(items) - limit
+            stale_keys = list(items.keys())[:overflow]
+            for key in stale_keys:
+                items.pop(key, None)
+        self.save_analysis_history(items)
 
     def load_prediction_snapshots(self) -> dict[str, dict]:
         if not self.prediction_snapshots_file.exists():

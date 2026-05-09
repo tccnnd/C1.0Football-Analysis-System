@@ -1401,8 +1401,9 @@ class SmartMatchDashboard:
     def _finish_result_recovery(self, result: dict, elapsed: float) -> None:
         new_settled = int(result.get("new_settled", 0) or 0)
         fetched = int(result.get("fetched_finished", 0) or 0)
+        restored = int(result.get("restored_snapshots", 0) or 0)
         source = str(result.get("source", "-"))
-        message = f"\u8d5b\u679c\u56de\u6536\u5b8c\u6210: \u5b8c\u573a {fetched} | \u65b0\u7ed3\u7b97 {new_settled} | \u6570\u636e\u6e90 {source} | \u8017\u65f6 {elapsed:.2f}s"
+        message = f"\u8d5b\u679c\u56de\u6536\u5b8c\u6210: \u5b8c\u573a {fetched} | \u4fee\u590d\u5feb\u7167 {restored} | \u65b0\u7ed3\u7b97 {new_settled} | \u6570\u636e\u6e90 {source} | \u8017\u65f6 {elapsed:.2f}s"
         self.status_var.set(message)
         self._log_event("OK", message)
         self.summary_vars["hit_rate"].set(self._historical_hit_rate())

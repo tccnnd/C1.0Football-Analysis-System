@@ -8,6 +8,7 @@ def build_auto_settle_status_text(result: Mapping[str, object] | object) -> str:
     return (
         f"自动回收: 回看{int(resolved.get('lookback_days', 2) or 2)}天 | "
         f"完场{int(resolved.get('fetched_finished', 0) or 0)} | "
+        f"修复快照 {int(resolved.get('restored_snapshots', 0) or 0)} | "
         f"新增结算 {int(resolved.get('new_settled', 0) or 0)}"
     )
 
@@ -16,10 +17,13 @@ def build_auto_settle_popup_message(result: Mapping[str, object] | object) -> st
     resolved = result if isinstance(result, Mapping) else {}
     messages = resolved.get("messages", [])
     details = "\n".join(f"- {item}" for item in messages) if isinstance(messages, list) and messages else "- 无"
+    repair = resolved.get("snapshot_repair", {}) if isinstance(resolved, Mapping) else {}
     return (
         f"数据源: {resolved.get('source')}\n"
         + f"回看天数: {int(resolved.get('lookback_days', 2) or 2)}\n"
         + f"完场场次: {int(resolved.get('fetched_finished', 0) or 0)}\n"
+        + f"修复快照: {int(resolved.get('restored_snapshots', 0) or 0)}"
+        + f" / 检查分析历史 {int(repair.get('checked', 0) or 0)}\n"
         + f"新增结算: {int(resolved.get('new_settled', 0) or 0)}\n"
         + f"已结算跳过: {int(resolved.get('already_settled', 0) or 0)}\n"
         + f"其他跳过: {int(resolved.get('skipped', 0) or 0)}\n\n"

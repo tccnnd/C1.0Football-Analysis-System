@@ -5982,7 +5982,102 @@ def persist_prediction_snapshot(match: AppMatch, prediction: dict) -> None:
         "market_snapshot": market_snapshot,
     }
     STATE_STORE.upsert_prediction_snapshot(match.match_id, record)
+    STATE_STORE.upsert_analysis_history(match.match_id, record)
     persist_market_snapshot(match)
+
+
+def backfill_analysis_history_from_prediction_snapshots(max_backfilled: int = 5000) -> dict:
+    snapshots = STATE_STORE.load_prediction_snapshots()
+    history = STATE_STORE.load_analysis_history()
+    backfilled = 0
+    for match_id, record in snapshots.items():
+        if backfilled >= max(1, int(max_backfilled)):
+            break
+        if match_id in history or not isinstance(record, dict):
+            continue
+        prediction = record.get("prediction")
+        match_payload = record.get("match")
+        if not isinstance(prediction, dict) or not isinstance(match_payload, dict):
+            continue
+        history_record = dict(record)
+        history_record["backfilled_from"] = "prediction_snapshots"
+        history_record["backfilled_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        STATE_STORE.upsert_analysis_history(match_id, history_record)
+        backfilled += 1
+    return {
+        "snapshot_count": len(snapshots),
+        "history_count": len(history) + backfilled,
+        "backfilled": backfilled,
+    }
+
+
+def repair_prediction_snapshots_from_analysis_history(
+    lookback_days: int = 3,
+    max_restored: int = 100,
+) -> dict:
+    lookback_days = max(0, min(int(lookback_days), 14))
+    max_restored = max(1, int(max_restored))
+    snapshots = STATE_STORE.load_prediction_snapshots()
+    history = STATE_STORE.load_analysis_history()
+    settled_ids = {str(item.get("match_id", "")) for item in STATE_STORE.load_settlements() if item.get("match_id")}
+    today = datetime.now().date()
+    restored = 0
+    checked = 0
+    skipped_settled = 0
+    skipped_existing = 0
+    skipped_out_of_window = 0
+    restored_items: list[dict] = []
+
+    for match_id, record in reversed(list(history.items())):
+        if restored >= max_restored:
+            break
+        checked += 1
+        if match_id in snapshots:
+            skipped_existing += 1
+            continue
+        if match_id in settled_ids:
+            skipped_settled += 1
+            continue
+        if not isinstance(record, dict) or not isinstance(record.get("prediction"), dict):
+            continue
+        match_payload = record.get("match")
+        app_match = _app_match_from_payload(match_payload, source="analysis_history")
+        if app_match is None:
+            continue
+        try:
+            match_date = datetime.strptime(app_match.match_date, "%Y-%m-%d").date()
+        except Exception:
+            continue
+        age_days = (today - match_date).days
+        if age_days < 0 or age_days > lookback_days:
+            skipped_out_of_window += 1
+            continue
+        restored_record = dict(record)
+        restored_record["restored_from"] = "analysis_history"
+        restored_record["restored_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        STATE_STORE.upsert_prediction_snapshot(match_id, restored_record)
+        snapshots[match_id] = restored_record
+        restored += 1
+        if len(restored_items) < 10:
+            restored_items.append(
+                {
+                    "match_id": match_id,
+                    "match_date": app_match.match_date,
+                    "league": app_match.league,
+                    "home_team": app_match.home_team,
+                    "away_team": app_match.away_team,
+                }
+            )
+
+    return {
+        "checked": checked,
+        "restored": restored,
+        "skipped_existing": skipped_existing,
+        "skipped_settled": skipped_settled,
+        "skipped_out_of_window": skipped_out_of_window,
+        "lookback_days": lookback_days,
+        "items": restored_items,
+    }
 
 
 def load_prediction_snapshot_cache() -> dict[str, dict]:
@@ -6288,6 +6383,8 @@ def auto_settle_finished_matches(
     prediction_cache: dict[str, dict] | None = None,
     lookback_days: int = 2,
 ) -> dict:
+    history_backfill = backfill_analysis_history_from_prediction_snapshots()
+    repair_report = repair_prediction_snapshots_from_analysis_history(lookback_days=max(3, int(lookback_days)))
     migrate_prediction_snapshots()
     lookback_days = max(0, min(int(lookback_days), 7))
     summary = {
@@ -6300,6 +6397,9 @@ def auto_settle_finished_matches(
         "snapshot_result_hits": 0,
         "snapshot_checked": 0,
         "lookback_days": lookback_days,
+        "restored_snapshots": int(repair_report.get("restored", 0) or 0),
+        "snapshot_repair": repair_report,
+        "analysis_history_backfill": history_backfill,
         "source": "none",
         "messages": [],
         "items": [],
@@ -6413,7 +6513,7 @@ def auto_settle_finished_matches(
         summary["parlay_items"] = parlay_summary.get("items", [])
         summary["gate"] = get_gate_metrics(window=20)
         summary["messages"].append(
-            f"最近 {lookback_days} 天未发现可自动结算的新完场比赛（快照回查 {summary['snapshot_checked']} 场，命中 {summary['snapshot_result_hits']} 场）。"
+            f"最近 {lookback_days} 天未发现可自动结算的新完场比赛（修复快照 {summary['restored_snapshots']} 场，快照回查 {summary['snapshot_checked']} 场，命中 {summary['snapshot_result_hits']} 场）。"
         )
         return summary
 
@@ -6447,7 +6547,7 @@ def auto_settle_finished_matches(
     summary["gate"] = get_gate_metrics(window=20)
 
     summary["messages"].append(
-        f"自动回收完成(近{lookback_days}天): 主源完场 {summary['fetched_finished']} 场, 快照回查命中 {summary['snapshot_result_hits']} 场, 新增单场结算 {summary['new_settled']} 场, 新增二串一结算 {summary['new_parlay_settled']} 场, 预测快照命中 {summary['snapshot_predictions']} 场。"
+        f"自动回收完成(近{lookback_days}天): 主源完场 {summary['fetched_finished']} 场, 修复快照 {summary['restored_snapshots']} 场, 快照回查命中 {summary['snapshot_result_hits']} 场, 新增单场结算 {summary['new_settled']} 场, 新增二串一结算 {summary['new_parlay_settled']} 场, 预测快照命中 {summary['snapshot_predictions']} 场。"
     )
     return summary
 
