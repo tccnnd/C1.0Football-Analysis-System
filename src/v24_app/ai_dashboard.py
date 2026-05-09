@@ -933,8 +933,10 @@ class SmartMatchDashboard:
         self._metric_card(cards, "异常预警", self.summary_vars["alerts"], "次", RED)
         self._metric_card(cards, "胜率（历史）", self.summary_vars["hit_rate"], "", "#7aa2ff")
 
-        matches_card = self._card(content)
-        matches_card.pack(fill=tk.X, pady=(0, 16))
+        workspace = tk.Frame(content, bg=BG)
+        workspace.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+        matches_card = self._card(workspace)
+        matches_card.pack(fill=tk.BOTH, expand=True)
         header = tk.Frame(matches_card, bg=PANEL)
         header.pack(fill=tk.X, padx=18, pady=(16, 8))
         tk.Label(header, text="\u91cd\u70b9\u8d5b\u4e8b", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 14, "bold")).pack(side=tk.LEFT)
@@ -969,8 +971,8 @@ class SmartMatchDashboard:
             button.pack(side=tk.LEFT, padx=(0, 6))
             self.admission_filter_buttons[key] = button
 
-        self.match_list_wrap = tk.Frame(matches_card, bg=PANEL, height=245)
-        self.match_list_wrap.pack(fill=tk.X, padx=18, pady=(0, 10))
+        self.match_list_wrap = tk.Frame(matches_card, bg=PANEL, height=510)
+        self.match_list_wrap.pack(fill=tk.BOTH, expand=True, padx=18, pady=(0, 14))
         self.match_list_wrap.pack_propagate(False)
         self.match_canvas = tk.Canvas(self.match_list_wrap, bg=PANEL, bd=0, highlightthickness=0)
         self.match_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -983,8 +985,7 @@ class SmartMatchDashboard:
         self.match_canvas.bind("<Configure>", lambda event: self.match_canvas.itemconfigure(self.match_canvas_window, width=event.width))
         self._bind_match_scroll(self.match_canvas)
 
-        charts = tk.Frame(content, bg=BG)
-        charts.pack(fill=tk.BOTH, expand=True)
+        charts = tk.Frame(workspace, bg=BG)
         self.risk_chart = self._chart_card(charts, "风险分布")
         self.conf_chart = self._chart_card(charts, "置信度分布")
 
@@ -1546,9 +1547,9 @@ class SmartMatchDashboard:
         if not self._widget_alive("match_list_wrap"):
             return
         if self.show_all_matches:
-            height = 330
+            height = 560
         else:
-            height = 112 if row_count <= 1 else 180 if row_count == 2 else 245
+            height = 240 if row_count <= 1 else 360 if row_count == 2 else 510
         self.match_list_wrap.configure(height=height)
 
     def _bind_match_scroll(self, widget: tk.Widget) -> None:
