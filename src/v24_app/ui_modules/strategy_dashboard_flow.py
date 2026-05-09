@@ -437,6 +437,119 @@ def build_high_accuracy_strategy_settlement_summary(settlements: Sequence[Mappin
     }
 
 
+ERROR_ATTRIBUTION_LABELS = {
+    "data_missing": "\u6570\u636e\u7f3a\u5931",
+    "high_confidence_miss": "\u9ad8\u7f6e\u4fe1\u5931\u8bef",
+    "historical_gap": "\u5386\u53f2\u56de\u6d4b\u4e0e\u5b9e\u76d8\u80cc\u79bb",
+    "jc_wilson_breach": "JC\u8dcc\u7834Wilson",
+    "jc_odds_drift": "JC\u8d54\u7387\u6f02\u79fb",
+    "jc_confidence_drift": "JC\u7f6e\u4fe1\u6f02\u79fb",
+    "jc_live_downgraded": "JC\u7a33\u5b9a\u6876\u964d\u7ea7",
+    "small_sample": "\u6837\u672c\u4e0d\u8db3",
+    "shadow_observation": "\u89c2\u5bdf\u7b56\u7565\u5931\u8bef",
+    "unknown": "\u672a\u5b9a\u4e49\u9519\u56e0",
+}
+
+
+def _strategy_error_codes(settlement: Mapping[str, object], item: Mapping[str, object]) -> list[str]:
+    if item.get("is_hit") is None:
+        return ["data_missing"]
+    if item.get("is_hit") is not False:
+        return []
+    codes: list[str] = []
+    pick = str(item.get("pick") or "").strip()
+    actual = str(item.get("actual") or "").strip()
+    if not pick or not actual or pick == "-" or actual == "-":
+        codes.append("data_missing")
+    confidence = _safe_float(item.get("confidence"))
+    min_confidence = _safe_float(item.get("min_confidence"))
+    if confidence >= max(0.65, min_confidence):
+        codes.append("high_confidence_miss")
+    backtest_accuracy = _safe_float(item.get("backtest_accuracy") or item.get("accuracy"))
+    if backtest_accuracy >= 0.68:
+        codes.append("historical_gap")
+    sample_count = _safe_int(item.get("backtest_samples") or item.get("sample_count"))
+    if sample_count and sample_count < 120:
+        codes.append("small_sample")
+    if bool(item.get("is_shadow")) or bool(item.get("blocked_by_breaker")):
+        codes.append("shadow_observation")
+    if _is_jc_bucket_item(item):
+        feedback = _as_mapping(item.get("jc_live_feedback"))
+        bucket = _as_mapping(item.get("jc_bucket"))
+        status = str(feedback.get("status") or "").lower()
+        if status == "downgraded" or str(item.get("breaker_status") or "").lower() == "jc_live_downgraded":
+            codes.append("jc_live_downgraded")
+        wilson = _safe_float(feedback.get("historical_wilson_lower", bucket.get("wilson_lower")))
+        live_rate = feedback.get("live_hit_rate")
+        if live_rate is not None and _safe_float(live_rate) < wilson:
+            codes.append("jc_wilson_breach")
+        deviation = feedback.get("deviation")
+        if deviation is not None and _safe_float(deviation) <= -0.10:
+            codes.append("historical_gap")
+        context = _as_mapping(item.get("jc_context"))
+        live_odds = context.get("pick_odds")
+        historical_odds = bucket.get("avg_pick_odds")
+        if live_odds not in (None, "") and historical_odds not in (None, "") and abs(_safe_float(live_odds) - _safe_float(historical_odds)) >= 0.25:
+            codes.append("jc_odds_drift")
+        historical_confidence = bucket.get("avg_confidence")
+        if historical_confidence not in (None, "") and confidence + 0.05 < _safe_float(historical_confidence):
+            codes.append("jc_confidence_drift")
+    if not codes:
+        codes.append("unknown")
+    deduped: list[str] = []
+    for code in codes:
+        if code not in deduped:
+            deduped.append(code)
+    return deduped
+
+
+def build_strategy_error_attribution_summary(
+    settlements: Sequence[Mapping[str, object]] | object,
+    *,
+    limit: int = 8,
+) -> dict[str, object]:
+    settlement_items = [item for item in settlements if isinstance(item, Mapping)] if isinstance(settlements, Sequence) else []
+    rows: list[dict[str, str]] = []
+    counts: dict[str, int] = {}
+    miss_count = 0
+    unknown_count = 0
+    for settlement, item in _known_strategy_settlement_items(settlement_items):
+        codes = _strategy_error_codes(settlement, item)
+        if item.get("is_hit") is False:
+            miss_count += 1
+        elif item.get("is_hit") is None:
+            unknown_count += 1
+        else:
+            continue
+        for code in codes:
+            counts[code] = counts.get(code, 0) + 1
+        if item.get("is_hit") is False:
+            labels = [ERROR_ATTRIBUTION_LABELS.get(code, code) for code in codes]
+            labels_text = "\u3001".join(labels)
+            rows.append(
+                {
+                    "title": f"{settlement.get('league') or '-'} | {settlement.get('home_team') or '-'} vs {settlement.get('away_team') or '-'}",
+                    "body": (
+                        f"\u73a9\u6cd5: {_label(PLAY_LABELS, item.get('play_type'))} | \u9884\u6d4b {item.get('pick') or '-'} / \u5b9e\u9645 {item.get('actual') or '-'}\n"
+                        f"\u9519\u56e0: {labels_text}\n"
+                        f"\u7f6e\u4fe1: {_pct(item.get('confidence'))} | \u56de\u6d4b {_pct(item.get('backtest_accuracy') or item.get('accuracy'))} | \u6837\u672c {_safe_int(item.get('backtest_samples') or item.get('sample_count'))}"
+                    ),
+                }
+            )
+    ranked = sorted(counts.items(), key=lambda item: (-item[1], ERROR_ATTRIBUTION_LABELS.get(item[0], item[0])))
+    top_reason = "-"
+    if ranked:
+        top_reason = f"{ERROR_ATTRIBUTION_LABELS.get(ranked[0][0], ranked[0][0])} {ranked[0][1]}\u6b21"
+    return {
+        "miss_count": miss_count,
+        "unknown_count": unknown_count,
+        "reason_counts": dict(ranked),
+        "top_reason": top_reason,
+        "rows": rows[: max(0, int(limit))],
+        "summary_text": f"\u9519\u56e0 {miss_count}\u9879 | \u4e3b\u56e0 {top_reason}",
+    }
+
+
 def _build_high_accuracy_strategy_pool_rows_legacy(status: Mapping[str, object] | object) -> list[dict[str, str]]:
     resolved = _as_mapping(status)
     rows: list[dict[str, str]] = []
@@ -1154,6 +1267,7 @@ def build_high_accuracy_strategy_dashboard(
     validation = _as_mapping(resolved.get("validation"))
     breaker = _as_mapping(resolved.get("breaker"))
     settlement_summary = build_high_accuracy_strategy_settlement_summary(settlement_items)
+    error_attribution = build_strategy_error_attribution_summary(settlement_items)
     allowlist_summary = build_strategy_allowlist_settlement_summary(settlement_items)
     allowlist_tuning = build_strategy_allowlist_tuning_recommendation(settlement_items)
     jc_bucket_feedback = build_jc_bucket_feedback_summary(resolved, settlement_items)
@@ -1177,6 +1291,11 @@ def build_high_accuracy_strategy_dashboard(
             "tone": "neutral",
         },
         {"label": "\u771f\u5b9e\u547d\u4e2d", "value": str(settlement_summary.get("hit_rate_text") or "-"), "tone": hit_tone},
+        {
+            "label": "\u7b56\u7565\u9519\u56e0",
+            "value": str(error_attribution.get("top_reason") or "-"),
+            "tone": "warning" if _safe_int(error_attribution.get("miss_count")) else "good",
+        },
         {
             "label": "JC\u7a33\u5b9a\u6876",
             "value": str(jc_bucket_feedback.get("summary_text") or "-"),
@@ -1242,6 +1361,7 @@ def build_high_accuracy_strategy_dashboard(
         "metrics": metrics,
         "pool_rows": build_high_accuracy_strategy_pool_rows(resolved),
         "settlement_rows": build_high_accuracy_strategy_settlement_rows(settlement_items),
+        "error_attribution": error_attribution,
         "jc_bucket_feedback": jc_bucket_feedback,
         "allowlist_settlement_rows": build_strategy_allowlist_settlement_rows(settlement_items),
         "validation_rows": validation_rows,

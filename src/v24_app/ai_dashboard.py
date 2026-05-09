@@ -3369,6 +3369,17 @@ class SmartMatchDashboard:
         else:
             self._strategy_row(right, "\u5c1a\u65e0\u547d\u4e2d\u53cd\u9988", "\u8fd1\u671f\u7ed3\u7b97\u4e2d\u8fd8\u6ca1\u6709\u8bb0\u5f55\u5230\u9ad8\u51c6\u7b56\u7565\u547d\u4e2d\u9879\u3002\u540e\u7eed\u8d5b\u679c\u56de\u6536\u540e\u4f1a\u5728\u8fd9\u91cc\u663e\u793a\u3002")
 
+        error_attribution = dashboard.get("error_attribution", {}) if isinstance(dashboard.get("error_attribution"), dict) else {}
+        tk.Label(right, text="\u7b56\u7565\u9519\u56e0\u5f52\u7c7b", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
+        self._strategy_row(
+            right,
+            f"\u4e3b\u8981\u9519\u56e0: {error_attribution.get('top_reason', '-')}",
+            f"\u9519\u56e0\u9879 {error_attribution.get('miss_count', 0)} | \u5f85\u5224\u5b9a {error_attribution.get('unknown_count', 0)}",
+        )
+        for row in error_attribution.get("rows", []) if isinstance(error_attribution.get("rows"), list) else []:
+            if isinstance(row, dict):
+                self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
+
         allowlist_summary = dashboard.get("allowlist_settlement_summary", {}) if isinstance(dashboard.get("allowlist_settlement_summary"), dict) else {}
         tk.Label(right, text="\u653e\u884c\u590d\u76d8\u7edf\u8ba1", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
         self._strategy_row(

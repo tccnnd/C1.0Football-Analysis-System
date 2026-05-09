@@ -18,6 +18,7 @@ from v24_app.ui_modules import (
     build_high_accuracy_strategy_dashboard,
     build_high_accuracy_strategy_pool_rows,
     build_high_accuracy_strategy_settlement_summary,
+    build_strategy_error_attribution_summary,
     build_strategy_allowlist_filename,
     build_strategy_allowlist_report_lines,
     build_strategy_allowlist_settlement_rows,
@@ -332,6 +333,50 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertEqual(row["status"], "watch")
         self.assertEqual(row["recovery_status"], "eligible")
         self.assertIn("\u5df2\u8fbe\u5230\u6062\u590d\u6761\u4ef6 7/3", row["body"])
+
+    def test_strategy_error_attribution_classifies_jc_miss(self) -> None:
+        settlements = [
+            {
+                "league": "L1",
+                "home_team": "A",
+                "away_team": "B",
+                "high_accuracy_strategy_items": [
+                    {
+                        "data_layer": "jc_stratified_market",
+                        "play_type": "market_1x2",
+                        "pick": "HOME",
+                        "actual": "AWAY",
+                        "confidence": 0.72,
+                        "min_confidence": 0.65,
+                        "backtest_accuracy": 0.80,
+                        "backtest_samples": 206,
+                        "is_hit": False,
+                        "jc_bucket": {
+                            "dimension": "league_confidence_bucket",
+                            "bucket": "L1 | >=0.65",
+                            "wilson_lower": 0.75,
+                            "avg_pick_odds": 1.45,
+                            "avg_confidence": 0.80,
+                        },
+                        "jc_context": {"pick_odds": 1.95},
+                        "jc_live_feedback": {
+                            "status": "downgraded",
+                            "live_hit_rate": 0.30,
+                            "historical_wilson_lower": 0.75,
+                            "deviation": -0.50,
+                        },
+                    }
+                ],
+            }
+        ]
+
+        summary = build_strategy_error_attribution_summary(settlements)
+
+        self.assertEqual(summary["miss_count"], 1)
+        self.assertIn("high_confidence_miss", summary["reason_counts"])
+        self.assertIn("jc_live_downgraded", summary["reason_counts"])
+        self.assertIn("jc_odds_drift", summary["reason_counts"])
+        self.assertIn("\u9ad8\u7f6e\u4fe1\u5931\u8bef", summary["rows"][0]["body"])
 
     def test_settlement_summary_ignores_unknown_results_for_hit_rate(self) -> None:
         summary = build_high_accuracy_strategy_settlement_summary(
