@@ -679,6 +679,7 @@ class SmartMatchDashboard:
         settings = _load_dashboard_settings()
         self.auto_refresh_enabled = tk.BooleanVar(value=bool(settings.get("auto_refresh_enabled", False)))
         self.auto_refresh_interval_min = tk.IntVar(value=max(3, min(int(settings.get("auto_refresh_interval_min", 10) or 10), 120)))
+        self.result_recovery_lookback_days = max(2, min(int(settings.get("result_recovery_lookback_days", 2) or 2), 14))
         self._auto_refresh_after_id: str | None = None
         self.status_var = tk.StringVar(value="正在加载赛事数据...")
         self.date_var = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
@@ -1138,6 +1139,50 @@ class SmartMatchDashboard:
             ("\u5feb\u7167\u603b\u6570", str(total), "#7aa2ff"),
         ]
 
+    def _recovery_lookback_days(self) -> int:
+        return max(2, min(int(getattr(self, "result_recovery_lookback_days", 2) or 2), 14))
+
+    def _set_recovery_lookback_days(self, days: int) -> None:
+        allowed = [2, 7, 14]
+        value = int(days) if int(days) in allowed else 2
+        self.result_recovery_lookback_days = value
+        settings = _load_dashboard_settings()
+        settings.update(
+            {
+                "auto_refresh_enabled": bool(self.auto_refresh_enabled.get()),
+                "auto_refresh_interval_min": max(3, min(int(self.auto_refresh_interval_min.get()), 120)),
+                "result_recovery_lookback_days": value,
+                "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        )
+        _save_dashboard_settings(settings)
+        self._log_event("INFO", f"\u56de\u6536\u56de\u770b\u7a97\u53e3\u5207\u6362\u4e3a {value} \u5929")
+        if getattr(self, "current_view", "") == "recovery_runs":
+            self.open_recovery_run_center()
+        else:
+            self.open_review_center()
+
+    def _lookback_selector(self, parent: tk.Widget) -> None:
+        frame = tk.Frame(parent, bg=BG)
+        frame.pack(fill=tk.X, pady=(0, 12))
+        tk.Label(frame, text="\u56de\u6536\u56de\u770b", bg=BG, fg=MUTED, font=("Microsoft YaHei UI", 10, "bold")).pack(side=tk.LEFT)
+        current = self._recovery_lookback_days()
+        for days in [2, 7, 14]:
+            active = days == current
+            tk.Button(
+                frame,
+                text=f"{days}\u5929",
+                command=lambda value=days: self._set_recovery_lookback_days(value),
+                bg=BLUE if active else PANEL_2,
+                fg="white" if active else TEXT,
+                activebackground="#3d5ee7",
+                activeforeground="white",
+                relief=tk.FLAT,
+                font=("Microsoft YaHei UI", 9, "bold"),
+                padx=12,
+                pady=5,
+            ).pack(side=tk.LEFT, padx=(8, 0))
+
     def _mark_stale_result_recovery_runs(self) -> None:
         try:
             records = get_result_recovery_runs(limit=0)
@@ -1168,7 +1213,7 @@ class SmartMatchDashboard:
             "trigger": "manual_ui",
             "source_view": getattr(self, "current_view", "-"),
             "started_at": now.strftime("%Y-%m-%d %H:%M:%S"),
-            "lookback_days": 2,
+            "lookback_days": self._recovery_lookback_days(),
             "prediction_cache_count": len(self.rows),
         }
         self.result_recovery_run_record = dict(record)
@@ -2030,7 +2075,8 @@ class SmartMatchDashboard:
         allowlist_summary = build_strategy_allowlist_settlement_summary(settlements)
         allowlist_tuning = build_strategy_allowlist_tuning_recommendation(settlements)
         recovery_summary = self._recovery_run_summary()
-        snapshot_audit = self._result_recovery_snapshot_audit(lookback_days=2)
+        lookback_days = self._recovery_lookback_days()
+        snapshot_audit = self._result_recovery_snapshot_audit(lookback_days=lookback_days)
 
         shell = self._page_shell(
             "\u590d\u76d8\u4e2d\u5fc3",
@@ -2092,6 +2138,8 @@ class SmartMatchDashboard:
             padx=18,
             pady=7,
         ).pack(side=tk.RIGHT, padx=(0, 10))
+
+        self._lookback_selector(shell)
 
         top = tk.Frame(shell, bg=BG)
         top.pack(fill=tk.X, pady=(0, 16))
@@ -2200,7 +2248,8 @@ class SmartMatchDashboard:
         quality_alerts = build_result_recovery_quality_alerts(records)
         run_rows = build_result_recovery_run_rows(records, limit=50)
         latest_status = str(summary.get("latest_status") or "")
-        snapshot_audit = self._result_recovery_snapshot_audit(lookback_days=2)
+        lookback_days = self._recovery_lookback_days()
+        snapshot_audit = self._result_recovery_snapshot_audit(lookback_days=lookback_days)
 
         shell = self._page_shell(
             "\u56de\u6536\u8fd0\u884c\u8bb0\u5f55",
@@ -2250,6 +2299,8 @@ class SmartMatchDashboard:
             padx=18,
             pady=7,
         ).pack(side=tk.RIGHT, padx=(0, 10))
+
+        self._lookback_selector(shell)
 
         top = tk.Frame(shell, bg=BG)
         top.pack(fill=tk.X, pady=(0, 16))
@@ -2344,13 +2395,14 @@ class SmartMatchDashboard:
         self.status_var.set("\u6b63\u5728\u56de\u6536\u8d5b\u679c...")
         self._log_event("INFO", "\u5f00\u59cb\u56de\u6536\u8d5b\u679c")
         prediction_cache = {row.match.match_id: row.prediction for row in self.rows}
+        lookback_days = self._recovery_lookback_days()
         if getattr(self, "current_view", "") == "recovery_runs":
             self.open_recovery_run_center()
 
         def worker() -> None:
             started = time.perf_counter()
             try:
-                result = auto_settle_finished_matches(prediction_cache=prediction_cache, lookback_days=2)
+                result = auto_settle_finished_matches(prediction_cache=prediction_cache, lookback_days=lookback_days)
             except Exception as exc:
                 elapsed = time.perf_counter() - started
                 self.root.after(0, lambda: self._finish_result_recovery_error(exc, elapsed))
