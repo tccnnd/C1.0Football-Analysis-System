@@ -143,6 +143,60 @@ class CorePlayThresholdBucketTuningTests(unittest.TestCase):
         self.assertGreaterEqual(float(result["strategy"]["accuracy"]), 0.99)
         self.assertTrue(save_mock.called)
 
+    def test_run_jc_stratified_strategy_backtest_ranks_stable_bucket(self) -> None:
+        records: list[dict] = []
+        for index in range(30):
+            records.append(
+                {
+                    "match_id": f"jc-good-{index}",
+                    "match_date": f"2026-01-{(index % 28) + 1:02d}",
+                    "year": "2026",
+                    "league": "Stable League",
+                    "play_type": "market_1x2",
+                    "pick_side": "home",
+                    "confidence": 0.62,
+                    "confidence_bucket": "0.60-0.65",
+                    "pick_odds": 1.62,
+                    "odds_bucket": "1.51-1.80",
+                    "is_hit": index < 24,
+                    "sample_source": "jc_results_csv",
+                }
+            )
+        for index in range(30):
+            records.append(
+                {
+                    "match_id": f"jc-bad-{index}",
+                    "match_date": f"2026-02-{(index % 28) + 1:02d}",
+                    "year": "2026",
+                    "league": "Weak League",
+                    "play_type": "market_1x2",
+                    "pick_side": "away",
+                    "confidence": 0.40,
+                    "confidence_bucket": "0.38-0.42",
+                    "pick_odds": 2.9,
+                    "odds_bucket": "2.81-3.50",
+                    "is_hit": index < 10,
+                    "sample_source": "jc_results_csv",
+                }
+            )
+        records.append({**records[0], "match_id": "other-source", "sample_source": "historical_import"})
+
+        with (
+            patch("v24_app.core._xgb_market_strategy_records", return_value=records),
+            patch("v24_app.core._save_jc_stratified_strategy_report") as save_mock,
+            patch("v24_app.core._write_jc_stratified_strategy_report", return_value="reports/jc.md") as write_mock,
+        ):
+            result = core.run_jc_stratified_strategy_backtest(min_samples=10)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["validation"]["record_count"], 60)
+        self.assertEqual(result["validation"]["source_counts"]["jc_results_csv"], 60)
+        self.assertEqual(result["best_bucket"]["dimension"], "league")
+        self.assertEqual(result["best_bucket"]["bucket"], "Stable League")
+        self.assertGreater(float(result["best_bucket"]["accuracy"]), 0.75)
+        self.assertTrue(save_mock.called)
+        self.assertTrue(write_mock.called)
+
     def test_high_accuracy_strategy_breaker_pauses_consecutive_misses(self) -> None:
         strategy = {
             "role": "primary",

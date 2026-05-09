@@ -50,6 +50,7 @@ PLAY_THRESHOLDS_FILE = PROJECT_DIR / "data" / "models" / "play_thresholds_v1.jso
 PLAY_MODEL_POLICY_FILE = PROJECT_DIR / "data" / "models" / "play_model_policy_v1.json"
 BAYES_CALIBRATION_FILE = PROJECT_DIR / "data" / "models" / "bayes_calibration_v1.json"
 HIGH_ACCURACY_STRATEGY_FILE = PROJECT_DIR / "data" / "models" / "high_accuracy_strategy_v1.json"
+JC_STRATIFIED_STRATEGY_FILE = PROJECT_DIR / "data" / "models" / "jc_stratified_strategy_backtest_v1.json"
 STRATEGY_ADMISSION_POLICY_FILE = PROJECT_DIR / "data" / "models" / "strategy_admission_policy_v1.json"
 HIGH_ACCURACY_STRATEGY_BREAKER_THRESHOLD = 3
 HIGH_ACCURACY_STRATEGY_BREAKER_WINDOW = 30
@@ -4153,26 +4154,76 @@ def _xgb_market_strategy_records(limit: int = 50000) -> list[dict]:
             "draw": _safe_float(features.get("market_draw"), default=0.0),
             "away": _safe_float(features.get("market_away"), default=0.0),
         }
+        odds_by_side = {
+            "home": _safe_float(features.get("odds_home"), default=0.0),
+            "draw": _safe_float(features.get("odds_draw"), default=0.0),
+            "away": _safe_float(features.get("odds_away"), default=0.0),
+        }
         if max(probabilities.values()) <= 0.0:
             continue
         pick_key = max(probabilities, key=probabilities.get)
+        confidence = round(_clamp(probabilities[pick_key]), 4)
+        match_date = normalize_text(meta.get("match_date", ""))
         records.append(
             {
                 "match_id": str(item.get("match_id") or ""),
-                "match_date": normalize_text(meta.get("match_date", "")),
+                "match_date": match_date,
+                "year": match_date[:4] if len(match_date) >= 4 else "-",
                 "league": normalize_text(meta.get("league", "")) or "-",
                 "rating_pool": "club",
                 "play_type": "market_1x2",
                 "source_play_type": "market_1x2",
                 "pick": key_to_result.get(pick_key, "-"),
-                "confidence": round(_clamp(probabilities[pick_key]), 4),
+                "pick_side": pick_key,
+                "confidence": confidence,
+                "confidence_bucket": _confidence_bucket(confidence),
                 "is_hit": key_to_result.get(pick_key) == label_to_result[label],
+                "pick_odds": round(odds_by_side.get(pick_key, 0.0), 4),
+                "odds_bucket": _odds_bucket(odds_by_side.get(pick_key, 0.0)),
                 "return_rate": round(_safe_float(meta.get("return_rate"), default=_safe_float(features.get("return_rate"), default=0.0)), 4),
                 "handicap_abs": round(abs(_safe_float(meta.get("handicap_line"), default=0.0)), 2),
                 "sample_source": normalize_text(meta.get("source", "")) or "xgb_training_samples",
             }
         )
     return records
+
+
+def _odds_bucket(value: float | int | str | None) -> str:
+    odds = _safe_float(value, default=0.0)
+    if odds <= 0.0:
+        return "unknown"
+    if odds <= 1.50:
+        return "<=1.50"
+    if odds <= 1.80:
+        return "1.51-1.80"
+    if odds <= 2.20:
+        return "1.81-2.20"
+    if odds <= 2.80:
+        return "2.21-2.80"
+    if odds <= 3.50:
+        return "2.81-3.50"
+    return ">3.50"
+
+
+def _confidence_bucket(value: float | int | str | None) -> str:
+    confidence = _safe_float(value, default=0.0)
+    if confidence <= 0.0:
+        return "unknown"
+    if confidence < 0.38:
+        return "<0.38"
+    if confidence < 0.42:
+        return "0.38-0.42"
+    if confidence < 0.46:
+        return "0.42-0.46"
+    if confidence < 0.50:
+        return "0.46-0.50"
+    if confidence < 0.55:
+        return "0.50-0.55"
+    if confidence < 0.60:
+        return "0.55-0.60"
+    if confidence < 0.65:
+        return "0.60-0.65"
+    return ">=0.65"
 
 
 def _wilson_lower_bound(hits: int, total: int, z: float = 1.28) -> float:
@@ -4365,6 +4416,181 @@ def _write_high_accuracy_strategy_report(result: dict) -> str | None:
         )
     report_path.write_text("\n".join(lines), encoding="utf-8")
     return str(report_path)
+
+
+def _jc_stratified_bucket(rows: list[dict], *, dimension: str, bucket: str, min_samples: int) -> dict | None:
+    total = len(rows)
+    if total < max(1, int(min_samples)):
+        return None
+    hits = sum(1 for row in rows if bool(row.get("is_hit")))
+    accuracy = hits / max(total, 1)
+    avg_confidence = sum(_safe_float(row.get("confidence"), default=0.0) for row in rows) / max(total, 1)
+    avg_odds = sum(_safe_float(row.get("pick_odds"), default=0.0) for row in rows) / max(total, 1)
+    stability = _strategy_stability_from_rows(rows)
+    dates = [normalize_text(row.get("match_date", "")) for row in rows if normalize_text(row.get("match_date", ""))]
+    source_counts: dict[str, int] = defaultdict(int)
+    for row in rows:
+        source_counts[normalize_text(row.get("sample_source", "")) or "unknown"] += 1
+    return {
+        "dimension": dimension,
+        "bucket": bucket,
+        "sample_count": total,
+        "hit_count": hits,
+        "accuracy": round(accuracy, 6),
+        "avg_confidence": round(avg_confidence, 6),
+        "avg_pick_odds": round(avg_odds, 6),
+        "edge": round(accuracy - avg_confidence, 6),
+        "wilson_lower": round(_wilson_lower_bound(hits, total), 6),
+        "date_start": min(dates) if dates else None,
+        "date_end": max(dates) if dates else None,
+        "stability": stability,
+        "sample_sources": dict(sorted(source_counts.items())),
+    }
+
+
+def _jc_stratified_rank_key(item: dict) -> tuple[float, float, float, float, int]:
+    stability = item.get("stability", {}) if isinstance(item.get("stability"), dict) else {}
+    return (
+        1.0 if bool(stability.get("stable", False)) else 0.0,
+        float(item.get("wilson_lower", 0.0) or 0.0),
+        float(item.get("accuracy", 0.0) or 0.0),
+        float(stability.get("stability_score", 0.0) or 0.0),
+        int(item.get("sample_count", 0) or 0),
+    )
+
+
+def _save_jc_stratified_strategy_report(report: dict) -> None:
+    JC_STRATIFIED_STRATEGY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    JC_STRATIFIED_STRATEGY_FILE.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _write_jc_stratified_strategy_report(result: dict) -> str | None:
+    if not result.get("ok"):
+        return None
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_path = REPORT_DIR / f"jc_stratified_strategy_backtest_{timestamp}.md"
+    validation = result.get("validation", {}) if isinstance(result.get("validation"), dict) else {}
+    best = result.get("best_bucket", {}) if isinstance(result.get("best_bucket"), dict) else {}
+    rows = result.get("top_buckets", []) if isinstance(result.get("top_buckets"), list) else []
+    lines = [
+        "# JC Stratified Strategy Backtest",
+        "",
+        f"- Generated At: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- Source: {validation.get('source', '-')}",
+        f"- Records: {validation.get('record_count', 0)}",
+        f"- Date Window: {validation.get('date_start') or '-'} -> {validation.get('date_end') or '-'}",
+        f"- Min Samples: {validation.get('min_samples', 0)}",
+        f"- Bucket Count: {validation.get('bucket_count', 0)}",
+        f"- Stable Bucket Count: {validation.get('stable_bucket_count', 0)}",
+        "",
+        "## Best Bucket",
+        "",
+        f"- Dimension: {best.get('dimension', '-')}",
+        f"- Bucket: {best.get('bucket', '-')}",
+        f"- Accuracy: {float(best.get('accuracy', 0) or 0):.2%} ({int(best.get('hit_count', 0) or 0)}/{int(best.get('sample_count', 0) or 0)})",
+        f"- Wilson Lower: {float(best.get('wilson_lower', 0) or 0):.2%}",
+        f"- Avg Confidence: {float(best.get('avg_confidence', 0) or 0):.2%}",
+        f"- Avg Pick Odds: {float(best.get('avg_pick_odds', 0) or 0):.2f}",
+        f"- Edge: {float(best.get('edge', 0) or 0):+.2%}",
+        f"- Stability: {float((best.get('stability', {}) if isinstance(best.get('stability'), dict) else {}).get('stability_score', 0) or 0):.2%}",
+        "",
+        "## Top Buckets",
+        "",
+        "| Rank | Dimension | Bucket | Hits | Total | Accuracy | Wilson | Avg Conf | Avg Odds | Stable | Stability |",
+        "|---:|---|---|---:|---:|---:|---:|---:|---:|---|---:|",
+    ]
+    for index, item in enumerate(rows[:30], start=1):
+        stability = item.get("stability", {}) if isinstance(item.get("stability"), dict) else {}
+        lines.append(
+            f"| {index} | {item.get('dimension', '-')} | {item.get('bucket', '-')} | "
+            f"{int(item.get('hit_count', 0) or 0)} | {int(item.get('sample_count', 0) or 0)} | "
+            f"{float(item.get('accuracy', 0) or 0):.2%} | {float(item.get('wilson_lower', 0) or 0):.2%} | "
+            f"{float(item.get('avg_confidence', 0) or 0):.2%} | {float(item.get('avg_pick_odds', 0) or 0):.2f} | "
+            f"{bool(stability.get('stable', False))} | {float(stability.get('stability_score', 0) or 0):.2%} |"
+        )
+    report_path.write_text("\n".join(lines), encoding="utf-8")
+    return str(report_path)
+
+
+def run_jc_stratified_strategy_backtest(
+    *,
+    historical_limit: int = 50000,
+    source: str = "jc_results_csv",
+    min_samples: int = 120,
+    write_report: bool = True,
+) -> dict:
+    records = [
+        row
+        for row in _xgb_market_strategy_records(limit=max(0, int(historical_limit)))
+        if normalize_text(row.get("sample_source", "")) == source
+    ]
+    if not records:
+        return {
+            "ok": False,
+            "reason": "no_jc_strategy_records",
+            "validation": {"source": source, "record_count": 0},
+            "best_bucket": {},
+            "top_buckets": [],
+        }
+
+    dimensions: dict[str, Any] = {
+        "global": lambda row: "all",
+        "year": lambda row: normalize_text(row.get("year", "")) or "-",
+        "league": lambda row: normalize_text(row.get("league", "")) or "-",
+        "odds_bucket": lambda row: normalize_text(row.get("odds_bucket", "")) or "unknown",
+        "confidence_bucket": lambda row: normalize_text(row.get("confidence_bucket", "")) or "unknown",
+        "pick_side": lambda row: normalize_text(row.get("pick_side", "")) or "-",
+        "league_odds_bucket": lambda row: f"{normalize_text(row.get('league', '')) or '-'} | {normalize_text(row.get('odds_bucket', '')) or 'unknown'}",
+        "league_confidence_bucket": lambda row: f"{normalize_text(row.get('league', '')) or '-'} | {normalize_text(row.get('confidence_bucket', '')) or 'unknown'}",
+    }
+    buckets: list[dict] = []
+    for dimension, key_fn in dimensions.items():
+        grouped: dict[str, list[dict]] = defaultdict(list)
+        for row in records:
+            grouped[str(key_fn(row))].append(row)
+        for bucket, rows in grouped.items():
+            item = _jc_stratified_bucket(rows, dimension=dimension, bucket=bucket, min_samples=min_samples)
+            if item is not None:
+                buckets.append(item)
+
+    if not buckets:
+        return {
+            "ok": False,
+            "reason": "no_bucket_passed_constraints",
+            "validation": {"source": source, "record_count": len(records), "min_samples": int(min_samples)},
+            "best_bucket": {},
+            "top_buckets": [],
+        }
+
+    buckets = sorted(buckets, key=_jc_stratified_rank_key, reverse=True)
+    dates = [normalize_text(row.get("match_date", "")) for row in records if normalize_text(row.get("match_date", ""))]
+    source_counts: dict[str, int] = defaultdict(int)
+    for row in records:
+        source_counts[normalize_text(row.get("sample_source", "")) or "unknown"] += 1
+    stable_count = sum(1 for item in buckets if bool((item.get("stability", {}) if isinstance(item.get("stability"), dict) else {}).get("stable", False)))
+    validation = {
+        "source": source,
+        "record_count": len(records),
+        "min_samples": int(min_samples),
+        "historical_limit": int(historical_limit),
+        "bucket_count": len(buckets),
+        "stable_bucket_count": stable_count,
+        "date_start": min(dates) if dates else None,
+        "date_end": max(dates) if dates else None,
+        "source_counts": dict(sorted(source_counts.items())),
+    }
+    result = {
+        "ok": True,
+        "reason": "ok",
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "validation": validation,
+        "best_bucket": buckets[0],
+        "top_buckets": buckets[:30],
+    }
+    result["report_path"] = _write_jc_stratified_strategy_report(result) if write_report else None
+    _save_jc_stratified_strategy_report(result)
+    return result
 
 
 def _save_high_accuracy_strategy_report(report: dict) -> None:
