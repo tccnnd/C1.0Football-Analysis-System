@@ -679,8 +679,11 @@ class SmartMatchDashboard:
         settings = _load_dashboard_settings()
         self.auto_refresh_enabled = tk.BooleanVar(value=bool(settings.get("auto_refresh_enabled", False)))
         self.auto_refresh_interval_min = tk.IntVar(value=max(3, min(int(settings.get("auto_refresh_interval_min", 10) or 10), 120)))
+        self.auto_result_recovery_enabled = tk.BooleanVar(value=bool(settings.get("auto_result_recovery_enabled", False)))
+        self.auto_result_recovery_interval_min = tk.IntVar(value=max(5, min(int(settings.get("auto_result_recovery_interval_min", 15) or 15), 120)))
         self.result_recovery_lookback_days = max(2, min(int(settings.get("result_recovery_lookback_days", 2) or 2), 14))
         self._auto_refresh_after_id: str | None = None
+        self._auto_result_recovery_after_id: str | None = None
         self.status_var = tk.StringVar(value="正在加载赛事数据...")
         self.date_var = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
         self.summary_vars = {
@@ -695,6 +698,7 @@ class SmartMatchDashboard:
         self._build_layout()
         self.refresh()
         self._schedule_auto_refresh()
+        self._schedule_auto_result_recovery()
 
     def _build_layout(self) -> None:
         self.shell = tk.Frame(self.root, bg=BG)
@@ -1151,6 +1155,8 @@ class SmartMatchDashboard:
             {
                 "auto_refresh_enabled": bool(self.auto_refresh_enabled.get()),
                 "auto_refresh_interval_min": max(3, min(int(self.auto_refresh_interval_min.get()), 120)),
+                "auto_result_recovery_enabled": bool(self.auto_result_recovery_enabled.get()),
+                "auto_result_recovery_interval_min": max(5, min(int(self.auto_result_recovery_interval_min.get()), 120)),
                 "result_recovery_lookback_days": value,
                 "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             }
@@ -1205,12 +1211,12 @@ class SmartMatchDashboard:
         except Exception as exc:
             self._log_event("ERROR", f"\u56de\u6536\u8fd0\u884c\u8bb0\u5f55\u5199\u5165\u5931\u8d25: {exc}")
 
-    def _begin_result_recovery_run_record(self) -> dict[str, object]:
+    def _begin_result_recovery_run_record(self, trigger: str = "manual_ui") -> dict[str, object]:
         now = datetime.now()
         record: dict[str, object] = {
             "run_id": now.strftime("%Y%m%d_%H%M%S_%f"),
             "status": "running",
-            "trigger": "manual_ui",
+            "trigger": trigger,
             "source_view": getattr(self, "current_view", "-"),
             "started_at": now.strftime("%Y-%m-%d %H:%M:%S"),
             "lookback_days": self._recovery_lookback_days(),
@@ -1314,16 +1320,44 @@ class SmartMatchDashboard:
         self.refresh()
         self._schedule_auto_refresh()
 
+    def _schedule_auto_result_recovery(self) -> None:
+        if self._auto_result_recovery_after_id is not None:
+            try:
+                self.root.after_cancel(self._auto_result_recovery_after_id)
+            except Exception:
+                pass
+            self._auto_result_recovery_after_id = None
+        if not self.auto_result_recovery_enabled.get():
+            return
+        interval = max(5, min(int(self.auto_result_recovery_interval_min.get()), 120))
+        self.auto_result_recovery_interval_min.set(interval)
+        self._auto_result_recovery_after_id = self.root.after(interval * 60 * 1000, self._auto_result_recovery_tick)
+
+    def _auto_result_recovery_tick(self) -> None:
+        self._auto_result_recovery_after_id = None
+        if not self.auto_result_recovery_enabled.get():
+            return
+        if self.result_recovery_running:
+            self._schedule_auto_result_recovery()
+            return
+        self._log_event("INFO", "\u81ea\u52a8\u8d5b\u679c\u56de\u6536\u89e6\u53d1")
+        self.run_result_recovery(trigger="auto_timer", show_popup=False)
+
     def _on_auto_refresh_changed(self) -> None:
         interval = max(3, min(int(self.auto_refresh_interval_min.get()), 120))
         self.auto_refresh_interval_min.set(interval)
-        _save_dashboard_settings(
+        settings = _load_dashboard_settings()
+        settings.update(
             {
                 "auto_refresh_enabled": bool(self.auto_refresh_enabled.get()),
                 "auto_refresh_interval_min": interval,
+                "auto_result_recovery_enabled": bool(self.auto_result_recovery_enabled.get()),
+                "auto_result_recovery_interval_min": max(5, min(int(self.auto_result_recovery_interval_min.get()), 120)),
+                "result_recovery_lookback_days": self._recovery_lookback_days(),
                 "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             }
         )
+        _save_dashboard_settings(settings)
         self._schedule_auto_refresh()
         if self.auto_refresh_enabled.get():
             self.status_var.set(f"\u81ea\u52a8\u5237\u65b0\u5df2\u5f00\u542f\uff0c\u95f4\u9694 {self.auto_refresh_interval_min.get()} \u5206\u949f")
@@ -1331,6 +1365,29 @@ class SmartMatchDashboard:
         else:
             self.status_var.set("\u81ea\u52a8\u5237\u65b0\u5df2\u5173\u95ed")
             self._log_event("INFO", "\u81ea\u52a8\u5237\u65b0\u5173\u95ed")
+
+    def _on_auto_result_recovery_changed(self) -> None:
+        interval = max(5, min(int(self.auto_result_recovery_interval_min.get()), 120))
+        self.auto_result_recovery_interval_min.set(interval)
+        settings = _load_dashboard_settings()
+        settings.update(
+            {
+                "auto_refresh_enabled": bool(self.auto_refresh_enabled.get()),
+                "auto_refresh_interval_min": max(3, min(int(self.auto_refresh_interval_min.get()), 120)),
+                "auto_result_recovery_enabled": bool(self.auto_result_recovery_enabled.get()),
+                "auto_result_recovery_interval_min": interval,
+                "result_recovery_lookback_days": self._recovery_lookback_days(),
+                "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        )
+        _save_dashboard_settings(settings)
+        self._schedule_auto_result_recovery()
+        if self.auto_result_recovery_enabled.get():
+            self.status_var.set(f"\u81ea\u52a8\u8d5b\u679c\u56de\u6536\u5df2\u5f00\u542f\uff0c\u95f4\u9694 {self.auto_result_recovery_interval_min.get()} \u5206\u949f")
+            self._log_event("INFO", f"\u81ea\u52a8\u8d5b\u679c\u56de\u6536\u5f00\u542f: {self.auto_result_recovery_interval_min.get()} min")
+        else:
+            self.status_var.set("\u81ea\u52a8\u8d5b\u679c\u56de\u6536\u5df2\u5173\u95ed")
+            self._log_event("INFO", "\u81ea\u52a8\u8d5b\u679c\u56de\u6536\u5173\u95ed")
 
     def _load_worker(self, force_live: bool = False, cache_only: bool = False) -> None:
         started = time.perf_counter()
@@ -2265,6 +2322,14 @@ class SmartMatchDashboard:
 
         header = tk.Frame(shell, bg=BG)
         header.pack(fill=tk.X, pady=(0, 16))
+        auto_recovery_status = "开启" if self.auto_result_recovery_enabled.get() else "关闭"
+        tk.Label(
+            header,
+            text=f"\u81ea\u52a8\u56de\u6536: {auto_recovery_status} / {self.auto_result_recovery_interval_min.get()}min",
+            bg=BG,
+            fg=GREEN if self.auto_result_recovery_enabled.get() else MUTED,
+            font=("Microsoft YaHei UI", 10, "bold"),
+        ).pack(side=tk.LEFT)
         refresh_button = tk.Button(
             header,
             text="\u56de\u6536\u8d5b\u679c",
@@ -2390,7 +2455,7 @@ class SmartMatchDashboard:
 
         listbox.bind("<<ListboxSelect>>", on_select)
 
-    def run_result_recovery(self) -> None:
+    def run_result_recovery(self, trigger: str = "manual_ui", show_popup: bool = True) -> None:
         if self.result_recovery_running:
             message = "\u8d5b\u679c\u56de\u6536\u6b63\u5728\u8fd0\u884c\uff0c\u8bf7\u7b49\u5f53\u524d\u4efb\u52a1\u5b8c\u6210\u3002"
             self.status_var.set(message)
@@ -2398,9 +2463,9 @@ class SmartMatchDashboard:
             return
         self.result_recovery_running = True
         self._set_result_recovery_controls_state()
-        self._begin_result_recovery_run_record()
+        self._begin_result_recovery_run_record(trigger=trigger)
         self.status_var.set("\u6b63\u5728\u56de\u6536\u8d5b\u679c...")
-        self._log_event("INFO", "\u5f00\u59cb\u56de\u6536\u8d5b\u679c")
+        self._log_event("INFO", f"\u5f00\u59cb\u56de\u6536\u8d5b\u679c: {trigger}")
         prediction_cache = {row.match.match_id: row.prediction for row in self.rows}
         lookback_days = self._recovery_lookback_days()
         if getattr(self, "current_view", "") == "recovery_runs":
@@ -2412,14 +2477,14 @@ class SmartMatchDashboard:
                 result = auto_settle_finished_matches(prediction_cache=prediction_cache, lookback_days=lookback_days)
             except Exception as exc:
                 elapsed = time.perf_counter() - started
-                self.root.after(0, lambda: self._finish_result_recovery_error(exc, elapsed))
+                self.root.after(0, lambda exc=exc, elapsed=elapsed: self._finish_result_recovery_error(exc, elapsed, show_popup=show_popup))
                 return
             elapsed = time.perf_counter() - started
-            self.root.after(0, lambda: self._finish_result_recovery(result, elapsed))
+            self.root.after(0, lambda: self._finish_result_recovery(result, elapsed, show_popup=show_popup))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _finish_result_recovery(self, result: dict, elapsed: float) -> None:
+    def _finish_result_recovery(self, result: dict, elapsed: float, show_popup: bool = True) -> None:
         new_settled = int(result.get("new_settled", 0) or 0)
         fetched = int(result.get("fetched_finished", 0) or 0)
         restored = int(result.get("restored_snapshots", 0) or 0)
@@ -2433,15 +2498,19 @@ class SmartMatchDashboard:
         self.summary_vars["hit_rate"].set(self._historical_hit_rate())
         self._refresh_current_view_after_release_state_change()
         detail = "\n".join(str(item) for item in result.get("messages", []) if item) or message
-        messagebox.showinfo("\u8d5b\u679c\u56de\u6536", detail)
+        self._schedule_auto_result_recovery()
+        if show_popup:
+            messagebox.showinfo("\u8d5b\u679c\u56de\u6536", detail)
 
-    def _finish_result_recovery_error(self, exc: Exception, elapsed: float = 0.0) -> None:
+    def _finish_result_recovery_error(self, exc: Exception, elapsed: float = 0.0, show_popup: bool = True) -> None:
         self._finish_result_recovery_run_record(status="failed", elapsed=elapsed, error=exc)
         self.result_recovery_running = False
         self._set_result_recovery_controls_state()
         self.status_var.set(f"\u8d5b\u679c\u56de\u6536\u5931\u8d25: {exc}")
         self._log_event("ERROR", f"\u8d5b\u679c\u56de\u6536\u5931\u8d25: {exc}")
-        messagebox.showerror("\u8d5b\u679c\u56de\u6536\u5931\u8d25", str(exc))
+        self._schedule_auto_result_recovery()
+        if show_popup:
+            messagebox.showerror("\u8d5b\u679c\u56de\u6536\u5931\u8d25", str(exc))
 
     def _settlement_summary(self, settlements: list[dict]) -> dict[str, str | int]:
         return {
@@ -3348,10 +3417,44 @@ class SmartMatchDashboard:
             font=("Microsoft YaHei UI", 10),
         ).pack(side=tk.RIGHT)
 
+        recovery_control = tk.Frame(left, bg=PANEL)
+        recovery_control.pack(fill=tk.X, padx=18, pady=(4, 12))
+        tk.Checkbutton(
+            recovery_control,
+            text="\u542f\u7528\u81ea\u52a8\u8d5b\u679c\u56de\u6536",
+            variable=self.auto_result_recovery_enabled,
+            command=self._on_auto_result_recovery_changed,
+            bg=PANEL,
+            fg=TEXT,
+            selectcolor=PANEL_2,
+            activebackground=PANEL,
+            activeforeground=TEXT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+        ).pack(anchor=tk.W)
+
+        recovery_interval = tk.Frame(left, bg=PANEL)
+        recovery_interval.pack(fill=tk.X, padx=18, pady=(0, 16))
+        tk.Label(recovery_interval, text="\u56de\u6536\u95f4\u9694\uff08\u5206\u949f\uff09", bg=PANEL, fg=MUTED, font=("Microsoft YaHei UI", 10)).pack(side=tk.LEFT)
+        tk.Spinbox(
+            recovery_interval,
+            from_=5,
+            to=120,
+            width=6,
+            textvariable=self.auto_result_recovery_interval_min,
+            command=self._on_auto_result_recovery_changed,
+            bg=PANEL_2,
+            fg=TEXT,
+            buttonbackground=PANEL_2,
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10),
+        ).pack(side=tk.RIGHT)
+
         for label, value in [
             ("\u5f53\u524d\u6570\u636e\u6e90", self.data_source),
             ("\u6700\u8fd1\u52a0\u8f7d", self.last_loaded_at),
             ("\u6700\u8fd1\u8017\u65f6", f"{self.last_refresh_seconds:.2f}s" if self.last_refresh_seconds is not None else "-"),
+            ("\u81ea\u52a8\u8d5b\u679c\u56de\u6536", "\u5f00\u542f" if self.auto_result_recovery_enabled.get() else "\u5173\u95ed"),
+            ("\u8d5b\u679c\u56de\u6536\u95f4\u9694", f"{self.auto_result_recovery_interval_min.get()} \u5206\u949f"),
             ("\u9879\u76ee\u76ee\u5f55", str(PROJECT_ROOT)),
             ("\u6570\u636e\u76ee\u5f55", str(PROJECT_ROOT / "data")),
             ("\u62a5\u544a\u76ee\u5f55", str(REPORT_DIR)),
@@ -3365,7 +3468,7 @@ class SmartMatchDashboard:
             ("\u4e2d\u98ce\u9669", "\u6982\u7387\u8fb9\u754c\u4e0d\u6e05\u6216\u7a33\u5b9a\u6027\u4e0d\u8db3\u65f6\u89e6\u53d1"),
             ("\u4f4e\u98ce\u9669", "\u6a21\u578b\u3001\u5e02\u573a\u548c\u7a33\u5b9a\u6307\u6807\u65b9\u5411\u76f8\u5bf9\u4e00\u81f4"),
             ("\u7f6e\u4fe1\u5ea6\u5206\u5c42", "<50% \u89c2\u5bdf\uff0c50%-60% \u4f4e\u6743\u91cd\uff0c60%-70% \u5e38\u89c4\uff0c>70% \u9ad8\u4f18\u5148\u7ea7"),
-            ("\u81ea\u52a8\u5237\u65b0", "\u4ec5\u5728\u5f53\u524d APP \u8fd0\u884c\u671f\u95f4\u751f\u6548\uff0c\u4e0d\u5199\u5165\u914d\u7f6e\u6587\u4ef6"),
+            ("\u81ea\u52a8\u5237\u65b0", "\u8d5b\u4e8b\u5217\u8868\u5237\u65b0\u4e0e\u8d5b\u679c\u56de\u6536\u5206\u5f00\u63a7\u5236\uff0c\u914d\u7f6e\u4fdd\u5b58\u5230\u672c\u5730"),
             ("\u7248\u672c\u7ba1\u7406", "Git \u5df2\u542f\u7528\uff0c\u6bcf\u4e2a\u529f\u80fd\u70b9\u72ec\u7acb\u63d0\u4ea4"),
         ]
         for label, value in settings_rows:
