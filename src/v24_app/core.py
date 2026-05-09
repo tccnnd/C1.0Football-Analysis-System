@@ -4499,6 +4499,8 @@ def _finalize_play_backtest_bucket(bucket: dict[str, float]) -> dict[str, float 
 def calibrate_play_model_policy_now(
     validation_ratio: float = 0.20,
     min_validation_samples: int = 1000,
+    max_validation_samples: int | None = 800,
+    search_profile: str = "fast",
 ) -> dict:
     _, validation_items = _validation_split_samples(
         validation_ratio=validation_ratio,
@@ -4506,6 +4508,9 @@ def calibrate_play_model_policy_now(
     )
     if not validation_items:
         return {"calibrated": False, "reason": "insufficient_validation_split"}
+    original_validation_count = len(validation_items)
+    if max_validation_samples is not None and max_validation_samples > 0 and len(validation_items) > max_validation_samples:
+        validation_items = validation_items[-int(max_validation_samples):]
 
     rows: list[dict] = []
     for item in validation_items:
@@ -4546,11 +4551,20 @@ def calibrate_play_model_policy_now(
                 current_score_hits += 1
 
     candidates: list[dict] = []
-    regular_same_candidates = [0.05, 0.07, 0.09]
-    regular_cross_candidates = [0.05, 0.07, 0.09, 0.11]
-    volatile_same_candidates = [0.05, 0.07, 0.09, 0.11, 0.13]
-    volatile_cross_candidates = [0.05, 0.07, 0.09, 0.11, 0.13]
-    total_goal_threshold_candidates = [0.18, 0.22, 0.26]
+    if str(search_profile).strip().lower() == "full":
+        regular_same_candidates = [0.05, 0.07, 0.09]
+        regular_cross_candidates = [0.05, 0.07, 0.09, 0.11]
+        volatile_same_candidates = [0.05, 0.07, 0.09, 0.11, 0.13]
+        volatile_cross_candidates = [0.05, 0.07, 0.09, 0.11, 0.13]
+        total_goal_threshold_candidates = [0.18, 0.22, 0.26]
+        resolved_search_profile = "full"
+    else:
+        regular_same_candidates = [0.05, 0.07, 0.09]
+        regular_cross_candidates = [0.07, 0.09, 0.11]
+        volatile_same_candidates = [0.09, 0.11, 0.13]
+        volatile_cross_candidates = [0.11, 0.13]
+        total_goal_threshold_candidates = [0.22, 0.26]
+        resolved_search_profile = "fast"
     for regular_same_threshold in regular_same_candidates:
         for regular_cross_enabled in (False, True):
             for regular_cross_threshold in regular_cross_candidates:
@@ -4661,6 +4675,10 @@ def calibrate_play_model_policy_now(
             "date_start": min(sample_dates) if sample_dates else None,
             "date_end": max(sample_dates) if sample_dates else None,
             "ratio": round(len(validation_items) / max(len(STATE_STORE.load_xgb_samples()), 1), 4),
+            "original_validation_count": original_validation_count,
+            "max_validation_samples": max_validation_samples,
+            "search_profile": resolved_search_profile,
+            "candidate_count": len(candidates),
         },
         "metrics": {
             "scoreline_best": best,
