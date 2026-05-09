@@ -756,10 +756,27 @@ def _serialize_raw_matches(raw_matches: Iterable[object]) -> list[dict]:
                 "kelly_home": getattr(raw, "kelly_home", 0.0),
                 "kelly_draw": getattr(raw, "kelly_draw", 0.0),
                 "kelly_away": getattr(raw, "kelly_away", 0.0),
-                "source_id": getattr(raw, "match_id", ""),
+                "source_id": getattr(raw, "source_id", "") or getattr(raw, "match_id", ""),
             }
         )
     return serialized_matches
+
+
+def save_matches_cache(matches: Iterable[AppMatch], *, source: str = "live") -> int:
+    serialized_matches = _serialize_raw_matches(matches)
+    if not serialized_matches:
+        return 0
+    payload = {
+        "date": datetime.now().strftime("%Y-%m-%d"),
+        "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "source": source,
+        "matches": serialized_matches,
+    }
+    CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = CACHE_FILE.with_suffix(CACHE_FILE.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(CACHE_FILE)
+    return len(serialized_matches)
 
 
 def _compute_live_source_health_score(*, raw_count: int, valid_count: int, merged_count: int) -> int:
@@ -904,16 +921,7 @@ def fetch_matches_v24(strict_today: bool = True, force_live: bool = False) -> Fe
         elif strict_today and not diagnostics.cache_fresh:
             diagnostics.add("fixture_source_guard 拒绝使用过期缓存。")
         else:
-            diagnostics.fixture_source_guard = True
-            matches, messages = fixture_page_guard_from_items(payload.get("matches", []), source="cache")
-            diagnostics.messages.extend(messages)
-            if matches:
-                enrich_matches_from_market_snapshot_store(matches, diagnostics)
-                _enrich_matches_with_market_intent(matches, diagnostics)
-                _persist_market_snapshots_with_diagnostics(matches, diagnostics)
-                diagnostics.fixture_page_guard = True
-                diagnostics.source = "cache"
-                return FetchResult(matches=matches, diagnostics=diagnostics)
+            diagnostics.add("当日缓存已准备为回退池，本次仍优先尝试在线源。")
 
     fetchers: list[tuple[str, object]] = []
     if MatchFetcherTitan is not None:
@@ -1023,6 +1031,17 @@ def fetch_matches_v24(strict_today: bool = True, force_live: bool = False) -> Fe
         enrich_matches_from_market_snapshot_store(merged_matches, diagnostics)
         _enrich_matches_with_market_intent(merged_matches, diagnostics)
         _persist_market_snapshots_with_diagnostics(merged_matches, diagnostics)
+        try:
+            cached_count = save_matches_cache(merged_matches, source=diagnostics.source)
+            if cached_count > 0:
+                diagnostics.cache_exists = True
+                diagnostics.cache_fresh = True
+                diagnostics.cache_date = datetime.now().strftime("%Y-%m-%d")
+                diagnostics.cache_match_count = cached_count
+                diagnostics.cache_age_days = 0
+                diagnostics.add(f"在线源成功后已更新本地赛事回退缓存: {cached_count} 场。")
+        except Exception as exc:
+            diagnostics.add(f"本地赛事回退缓存写入失败: {exc}")
         return FetchResult(matches=merged_matches, diagnostics=diagnostics)
 
     fallback_result = try_cache_fallback("所有在线源均不可用")
