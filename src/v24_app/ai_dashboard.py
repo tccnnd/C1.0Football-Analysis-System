@@ -472,6 +472,7 @@ class SmartMatchDashboard:
         self.last_refresh_seconds: float | None = None
         self.event_log: list[tuple[str, str, str]] = []
         self.current_nav_index = 0
+        self.current_view = "home"
         self.show_all_matches = False
         self.admission_filter = "all"
         self.admission_filter_buttons: dict[str, tk.Button] = {}
@@ -600,6 +601,7 @@ class SmartMatchDashboard:
 
     def show_home_overview(self) -> None:
         self.current_nav_index = 0
+        self.current_view = "home"
         self._refresh_nav_highlight()
         release_alerts = self._release_recovery_alerts()
         content = self._page_shell(
@@ -680,6 +682,7 @@ class SmartMatchDashboard:
 
     def _build_main(self) -> None:
         self.current_nav_index = 1
+        self.current_view = "match_analysis"
         self._refresh_nav_highlight()
         self._clear_main()
         content = tk.Frame(self.main, bg=BG)
@@ -1110,6 +1113,7 @@ class SmartMatchDashboard:
             self._bind_detail_open(child, row)
 
     def open_match_detail(self, row: DashboardRow) -> None:
+        self.current_view = "match_detail"
         title = f"{row.match.home_team} vs {row.match.away_team}"
         shell = self._page_shell(title, f"{row.match.league}  |  {row.match.match_date} {row.match.match_time}")
 
@@ -1192,6 +1196,9 @@ class SmartMatchDashboard:
         return path
 
     def open_history_reports(self) -> None:
+        self.current_nav_index = 3
+        self.current_view = "history"
+        self._refresh_nav_highlight()
         REPORT_DIR.mkdir(parents=True, exist_ok=True)
         files = sorted(REPORT_DIR.glob("ai_match_report_*.md"), key=lambda path: path.stat().st_mtime, reverse=True)
 
@@ -1257,6 +1264,9 @@ class SmartMatchDashboard:
         listbox.bind("<<ListboxSelect>>", lambda _event: show_file(listbox.curselection()[0] if listbox.curselection() else -1))
 
     def open_data_center(self) -> None:
+        self.current_nav_index = 5
+        self.current_view = "data"
+        self._refresh_nav_highlight()
         shell = self._page_shell(
             "\u6570\u636e\u4e2d\u5fc3",
             "\u5f53\u524d\u6570\u636e\u6e90\u3001\u7f13\u5b58\u3001\u6a21\u578b\u72b6\u6001\u548c\u62a5\u544a\u4ea7\u7269",
@@ -1362,7 +1372,35 @@ class SmartMatchDashboard:
     def _release_recovery_alerts(self) -> dict[str, object]:
         return build_strategy_release_recovery_alerts(self._pending_snapshot_rows())
 
+    def _refresh_current_view_after_recovery(self) -> None:
+        self._refresh_metrics()
+        view = getattr(self, "current_view", "")
+        if view == "home":
+            self.show_home_overview()
+        elif view == "monitor":
+            self.open_monitor_center()
+        elif view == "review":
+            self.open_review_center()
+        elif view == "snapshot":
+            self.open_snapshot_center()
+        elif view == "strategy":
+            self.open_strategy_library()
+        elif view == "accuracy":
+            self.open_accuracy_diagnostics()
+        elif view == "data":
+            self.open_data_center()
+        elif view == "match_analysis":
+            if self._widget_alive("match_list"):
+                self._refresh_matches()
+            if self._widget_alive("risk_chart"):
+                self._draw_risk_chart()
+            if self._widget_alive("conf_chart"):
+                self._draw_confidence_chart()
+
     def open_monitor_center(self) -> None:
+        self.current_nav_index = 2
+        self.current_view = "monitor"
+        self._refresh_nav_highlight()
         release_alerts = self._release_recovery_alerts()
         release_alert_count = int(release_alerts.get("count", 0) or 0)
         shell = self._page_shell(
@@ -1443,6 +1481,7 @@ class SmartMatchDashboard:
                 logbox.insert(tk.END, f"{stamp} [{level}] {message}")
 
     def open_review_center(self) -> None:
+        self.current_view = "review"
         settlements = list(reversed(get_recent_settlements(limit=200)))
         summary = self._settlement_summary(settlements)
         trend = self._settlement_trend_summary(settlements)
@@ -1614,6 +1653,7 @@ class SmartMatchDashboard:
         self.status_var.set(message)
         self._log_event("OK", message)
         self.summary_vars["hit_rate"].set(self._historical_hit_rate())
+        self._refresh_current_view_after_recovery()
         detail = "\n".join(str(item) for item in result.get("messages", []) if item) or message
         messagebox.showinfo("\u8d5b\u679c\u56de\u6536", detail)
 
@@ -1631,6 +1671,7 @@ class SmartMatchDashboard:
         }
 
     def open_accuracy_diagnostics(self) -> None:
+        self.current_view = "accuracy"
         settlements = list(reversed(get_recent_settlements(limit=200)))
         diagnostics = self._accuracy_diagnostics(settlements)
         shell = self._page_shell(
@@ -2066,6 +2107,7 @@ class SmartMatchDashboard:
         )
 
     def open_snapshot_center(self) -> None:
+        self.current_view = "snapshot"
         rows = self._pending_snapshot_rows()
         total = len(rows)
         pending_review = sum(1 for item in rows if item.get("status") == "\u5f85\u56de\u6536")
@@ -2241,6 +2283,9 @@ class SmartMatchDashboard:
         self.open_strategy_library()
 
     def open_strategy_library(self) -> None:
+        self.current_nav_index = 4
+        self.current_view = "strategy"
+        self._refresh_nav_highlight()
         status = get_high_accuracy_strategy_status()
         admission_status = get_strategy_admission_policy_status()
         admission_policy = admission_status.get("policy", {}) if isinstance(admission_status.get("policy"), dict) else {}
@@ -2471,6 +2516,9 @@ class SmartMatchDashboard:
         return items
 
     def open_system_settings(self) -> None:
+        self.current_nav_index = 6
+        self.current_view = "settings"
+        self._refresh_nav_highlight()
         shell = self._page_shell(
             "\u7cfb\u7edf\u8bbe\u7f6e",
             "\u672c\u5730\u8fd0\u884c\u53c2\u6570\u3001\u6570\u636e\u76ee\u5f55\u3001\u62a5\u544a\u76ee\u5f55\u548c\u98ce\u63a7\u9608\u503c\u8bf4\u660e",
