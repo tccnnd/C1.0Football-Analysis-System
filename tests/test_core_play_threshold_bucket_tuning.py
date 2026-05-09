@@ -486,6 +486,66 @@ class CorePlayThresholdBucketTuningTests(unittest.TestCase):
         self.assertEqual(bucket["miss_streak"], 10)
         self.assertLess(bucket["live_hit_rate"], bucket["historical_wilson_lower"])
 
+    def test_jc_auto_calibration_tightens_thresholds_from_live_feedback(self) -> None:
+        status = {
+            "enabled": True,
+            "top_buckets": [
+                {
+                    "dimension": "league_confidence_bucket",
+                    "bucket": f"L{index} | >=0.65",
+                    "sample_count": 240,
+                    "hit_count": 180,
+                    "accuracy": 0.75,
+                    "wilson_lower": 0.70,
+                    "stability": {"stable": True, "stability_score": 0.76},
+                }
+                for index in range(3)
+            ],
+        }
+        feedback = {
+            "league_confidence_bucket|L0 | >=0.65": {
+                "status": "downgraded",
+                "live_count": 10,
+                "live_hit_count": 3,
+                "live_hit_rate": 0.30,
+                "deviation": -0.45,
+            },
+            "league_confidence_bucket|L1 | >=0.65": {
+                "status": "downgraded",
+                "live_count": 10,
+                "live_hit_count": 4,
+                "live_hit_rate": 0.40,
+                "deviation": -0.35,
+            },
+        }
+
+        calibration = core.build_jc_strategy_auto_calibration(status, feedback)
+
+        self.assertEqual(calibration["mode"], "strict")
+        self.assertGreaterEqual(calibration["thresholds"]["min_samples"], 220)
+        self.assertIn("watch", calibration["thresholds"]["observe_live_statuses"])
+
+    def test_jc_auto_calibration_can_filter_small_runtime_bucket(self) -> None:
+        bucket = {
+            "dimension": "league_confidence_bucket",
+            "bucket": "Stable League | >=0.65",
+            "sample_count": 180,
+            "hit_count": 145,
+            "accuracy": 0.805,
+            "wilson_lower": 0.75,
+            "stability": {"stable": True, "stability_score": 0.8},
+        }
+        calibration = {
+            "thresholds": {
+                "min_samples": 220,
+                "min_accuracy": 0.72,
+                "min_wilson": 0.68,
+                "min_stability_score": 0.70,
+            }
+        }
+
+        self.assertFalse(core._jc_bucket_runtime_eligible(bucket, calibration))
+
     def test_jc_live_feedback_turns_runtime_bucket_into_shadow_observation(self) -> None:
         match = core.AppMatch(
             home_team="A",

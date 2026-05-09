@@ -504,9 +504,19 @@ def build_high_accuracy_strategy_pool_rows(status: Mapping[str, object] | object
         jc_bucket = _as_mapping(item.get("jc_bucket"))
         jc_context = _as_mapping(item.get("jc_context"))
         jc_feedback = _as_mapping(item.get("jc_live_feedback"))
+        jc_calibration = _as_mapping(item.get("jc_auto_calibration"))
         jc_lines: list[str] = []
         if str(layer.get("data_layer") or "") == "jc_stratified_market":
             live_status = str(jc_feedback.get("status") or "pending").upper()
+            calibration_thresholds = _as_mapping(jc_calibration.get("thresholds"))
+            calibration_line = (
+                f"JC\u6821\u51c6: {str(jc_calibration.get('mode') or 'base').upper()} | "
+                f"\u6837\u672c>={_safe_int(calibration_thresholds.get('min_samples'), 120)} | "
+                f"\u51c6\u786e>={_pct(calibration_thresholds.get('min_accuracy'))} | "
+                f"Wilson>={_pct(calibration_thresholds.get('min_wilson'))}"
+                if jc_calibration
+                else "JC\u6821\u51c6: BASE"
+            )
             if jc_feedback:
                 live_line = (
                     f"JC\u5b9e\u76d8: {_safe_int(jc_feedback.get('live_hit_count'))}/{_safe_int(jc_feedback.get('live_count'))}"
@@ -518,6 +528,7 @@ def build_high_accuracy_strategy_pool_rows(status: Mapping[str, object] | object
                 f"JC\u7a33\u5b9a\u6876: {jc_bucket.get('dimension') or item.get('dimension') or '-'} / {jc_bucket.get('bucket') or item.get('scope_value') or '-'}",
                 f"JC\u5f53\u524d\u5339\u914d: confidence_bucket={jc_context.get('confidence_bucket') or '-'} | odds_bucket={jc_context.get('odds_bucket') or '-'} | pick_odds={_safe_float(jc_context.get('pick_odds')):.2f}",
                 live_line,
+                calibration_line,
             ]
         body = "\n".join(
             [

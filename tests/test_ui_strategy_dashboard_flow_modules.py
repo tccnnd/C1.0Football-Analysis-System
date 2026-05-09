@@ -216,6 +216,10 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
                             "live_hit_rate": 0.70,
                             "deviation": -0.0961,
                         },
+                        "jc_auto_calibration": {
+                            "mode": "cautious",
+                            "thresholds": {"min_samples": 160, "min_accuracy": 0.70, "min_wilson": 0.66},
+                        },
                     }
                 ]
             }
@@ -227,6 +231,8 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("pick_odds=1.24", rows[0]["body"])
         self.assertIn("7/10", rows[0]["body"])
         self.assertIn("WATCH", rows[0]["body"])
+        self.assertIn("CAUTIOUS", rows[0]["body"])
+        self.assertIn("Wilson>=66.0%", rows[0]["body"])
 
     def test_settlement_summary_ignores_unknown_results_for_hit_rate(self) -> None:
         summary = build_high_accuracy_strategy_settlement_summary(

@@ -58,11 +58,13 @@ HIGH_ACCURACY_STRATEGY_RECOVERY_HITS = 2
 JC_BUCKET_LIVE_FEEDBACK_WINDOW = 120
 JC_BUCKET_LIVE_PENDING_SAMPLES = 5
 JC_BUCKET_LIVE_DOWNGRADE_SAMPLES = 10
+JC_STRATEGY_CALIBRATION_MIN_LIVE_BUCKETS = 2
 STRATEGY_ADMISSION_MIN_CONFIDENCE = 0.50
 STRATEGY_ADMISSION_BLOCK_CONFIDENCE = 0.40
 JC_STRATIFIED_MIN_RUNTIME_SAMPLES = 120
 JC_STRATIFIED_MIN_RUNTIME_ACCURACY = 0.68
 JC_STRATIFIED_MIN_RUNTIME_WILSON = 0.64
+JC_STRATIFIED_MIN_STABILITY_SCORE = 0.0
 DEFAULT_STRATEGY_ADMISSION_POLICY = {
     "min_confidence": STRATEGY_ADMISSION_MIN_CONFIDENCE,
     "block_confidence": STRATEGY_ADMISSION_BLOCK_CONFIDENCE,
@@ -4973,6 +4975,92 @@ def build_jc_bucket_live_feedback(
     return feedback
 
 
+def build_jc_strategy_auto_calibration(
+    status: dict | None = None,
+    live_feedback: dict[str, dict] | None = None,
+) -> dict:
+    if status is None:
+        status = get_jc_stratified_strategy_status()
+    if live_feedback is None:
+        live_feedback = build_jc_bucket_live_feedback(limit=JC_BUCKET_LIVE_FEEDBACK_WINDOW)
+    top_buckets = status.get("top_buckets", []) if isinstance(status, dict) and isinstance(status.get("top_buckets"), list) else []
+    stable_buckets = [
+        bucket
+        for bucket in top_buckets
+        if isinstance(bucket, dict)
+        and bool((bucket.get("stability", {}) if isinstance(bucket.get("stability"), dict) else {}).get("stable", False))
+    ]
+    known_feedback = [
+        item
+        for item in (live_feedback or {}).values()
+        if isinstance(item, dict) and int(_safe_int(item.get("live_count"), 0) or 0) >= JC_BUCKET_LIVE_PENDING_SAMPLES
+    ]
+    status_counts: dict[str, int] = defaultdict(int)
+    deviations: list[float] = []
+    for item in known_feedback:
+        status_counts[normalize_text(item.get("status", "pending")) or "pending"] += 1
+        if item.get("deviation") is not None:
+            deviations.append(_safe_float(item.get("deviation"), default=0.0))
+    live_bucket_count = len(known_feedback)
+    downgraded_count = int(status_counts.get("downgraded", 0))
+    watch_count = int(status_counts.get("watch", 0))
+    avg_deviation = sum(deviations) / len(deviations) if deviations else 0.0
+
+    thresholds = {
+        "min_samples": JC_STRATIFIED_MIN_RUNTIME_SAMPLES,
+        "min_accuracy": JC_STRATIFIED_MIN_RUNTIME_ACCURACY,
+        "min_wilson": JC_STRATIFIED_MIN_RUNTIME_WILSON,
+        "min_stability_score": JC_STRATIFIED_MIN_STABILITY_SCORE,
+        "observe_live_statuses": ["downgraded"],
+    }
+    mode = "base"
+    reason = "default_runtime_thresholds"
+    if len(stable_buckets) < 3:
+        mode = "cautious"
+        reason = "few_stable_historical_buckets"
+    if live_bucket_count >= JC_STRATEGY_CALIBRATION_MIN_LIVE_BUCKETS:
+        downgrade_rate = downgraded_count / live_bucket_count if live_bucket_count else 0.0
+        watch_rate = (watch_count + downgraded_count) / live_bucket_count if live_bucket_count else 0.0
+        if downgraded_count >= 2 or downgrade_rate >= 0.25 or avg_deviation <= -0.12:
+            mode = "strict"
+            reason = "live_feedback_underperforming"
+        elif downgraded_count >= 1 or watch_rate >= 0.50 or avg_deviation <= -0.07:
+            mode = "cautious"
+            reason = "live_feedback_soft_gap"
+
+    if mode == "cautious":
+        thresholds.update(
+            {
+                "min_samples": max(thresholds["min_samples"], 160),
+                "min_accuracy": max(thresholds["min_accuracy"], 0.70),
+                "min_wilson": max(thresholds["min_wilson"], 0.66),
+                "min_stability_score": max(thresholds["min_stability_score"], 0.65),
+            }
+        )
+    elif mode == "strict":
+        thresholds.update(
+            {
+                "min_samples": max(thresholds["min_samples"], 220),
+                "min_accuracy": max(thresholds["min_accuracy"], 0.72),
+                "min_wilson": max(thresholds["min_wilson"], 0.68),
+                "min_stability_score": max(thresholds["min_stability_score"], 0.70),
+                "observe_live_statuses": ["watch", "downgraded"],
+            }
+        )
+
+    return {
+        "enabled": True,
+        "mode": mode,
+        "reason": reason,
+        "thresholds": thresholds,
+        "stable_bucket_count": len(stable_buckets),
+        "live_bucket_count": live_bucket_count,
+        "status_counts": dict(sorted(status_counts.items())),
+        "avg_deviation": round(avg_deviation, 4),
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
 def _apply_high_accuracy_strategy_breakers(status: dict, settlements: list[dict] | None = None) -> dict:
     resolved = dict(status)
     strategy = resolved.get("strategy", {}) if isinstance(resolved.get("strategy"), dict) else {}
@@ -5161,15 +5249,21 @@ def _market_pick_context(match: AppMatch, prediction: dict) -> dict:
     }
 
 
-def _jc_bucket_runtime_eligible(bucket: dict) -> bool:
+def _jc_bucket_runtime_eligible(bucket: dict, calibration: dict | None = None) -> bool:
     if not isinstance(bucket, dict):
         return False
     stability = bucket.get("stability", {}) if isinstance(bucket.get("stability"), dict) else {}
+    thresholds = calibration.get("thresholds", {}) if isinstance(calibration, dict) and isinstance(calibration.get("thresholds"), dict) else {}
+    min_samples = max(1, int(_safe_int(thresholds.get("min_samples"), JC_STRATIFIED_MIN_RUNTIME_SAMPLES) or JC_STRATIFIED_MIN_RUNTIME_SAMPLES))
+    min_accuracy = _safe_float(thresholds.get("min_accuracy"), default=JC_STRATIFIED_MIN_RUNTIME_ACCURACY)
+    min_wilson = _safe_float(thresholds.get("min_wilson"), default=JC_STRATIFIED_MIN_RUNTIME_WILSON)
+    min_stability_score = _safe_float(thresholds.get("min_stability_score"), default=JC_STRATIFIED_MIN_STABILITY_SCORE)
     return bool(
         bool(stability.get("stable", False))
-        and int(_safe_int(bucket.get("sample_count"), 0) or 0) >= JC_STRATIFIED_MIN_RUNTIME_SAMPLES
-        and _safe_float(bucket.get("accuracy"), default=0.0) >= JC_STRATIFIED_MIN_RUNTIME_ACCURACY
-        and _safe_float(bucket.get("wilson_lower"), default=0.0) >= JC_STRATIFIED_MIN_RUNTIME_WILSON
+        and int(_safe_int(bucket.get("sample_count"), 0) or 0) >= min_samples
+        and _safe_float(bucket.get("accuracy"), default=0.0) >= min_accuracy
+        and _safe_float(bucket.get("wilson_lower"), default=0.0) >= min_wilson
+        and _safe_float(stability.get("stability_score"), default=0.0) >= min_stability_score
     )
 
 
@@ -5196,10 +5290,17 @@ def _jc_stratified_runtime_strategies(match: AppMatch, prediction: dict) -> list
     dimension_values = context.get("dimension_values", {}) if isinstance(context.get("dimension_values"), dict) else {}
     top_buckets = status.get("top_buckets", []) if isinstance(status.get("top_buckets"), list) else []
     live_feedback = build_jc_bucket_live_feedback(limit=JC_BUCKET_LIVE_FEEDBACK_WINDOW)
+    calibration = build_jc_strategy_auto_calibration(status, live_feedback)
+    thresholds = calibration.get("thresholds", {}) if isinstance(calibration.get("thresholds"), dict) else {}
+    observe_live_statuses = {
+        normalize_text(item)
+        for item in thresholds.get("observe_live_statuses", ["downgraded"])
+        if normalize_text(item)
+    }
     strategies: list[dict] = []
     seen: set[tuple[str, str]] = set()
     for bucket in top_buckets:
-        if not _jc_bucket_runtime_eligible(bucket):
+        if not _jc_bucket_runtime_eligible(bucket, calibration):
             continue
         dimension = normalize_text(bucket.get("dimension", ""))
         bucket_value = normalize_text(bucket.get("bucket", ""))
@@ -5211,7 +5312,7 @@ def _jc_stratified_runtime_strategies(match: AppMatch, prediction: dict) -> list
         bucket_key = _jc_bucket_key_from_parts(dimension, bucket_value)
         feedback = live_feedback.get(bucket_key, {})
         feedback_status = normalize_text(feedback.get("status", ""))
-        breaker_on = feedback_status == "downgraded"
+        breaker_on = bool(feedback_status in observe_live_statuses)
         strategy = {
             "role": "primary" if not strategies else "backup",
             "scope": "jc_bucket",
@@ -5239,6 +5340,7 @@ def _jc_stratified_runtime_strategies(match: AppMatch, prediction: dict) -> list
             "jc_context": context,
             "jc_bucket_key": bucket_key,
             "jc_live_feedback": feedback,
+            "jc_auto_calibration": calibration,
             "updated_at": status.get("updated_at"),
         }
         strategies.append(strategy)
@@ -5534,6 +5636,7 @@ def _high_accuracy_strategy_match_single(
         "jc_context": strategy.get("jc_context") if isinstance(strategy.get("jc_context"), dict) else jc_context,
         "jc_bucket_key": strategy.get("jc_bucket_key") or _jc_bucket_key(strategy),
         "jc_live_feedback": strategy.get("jc_live_feedback") if isinstance(strategy.get("jc_live_feedback"), dict) else {},
+        "jc_auto_calibration": strategy.get("jc_auto_calibration") if isinstance(strategy.get("jc_auto_calibration"), dict) else {},
         "updated_at": updated_at,
     }
 
@@ -5640,6 +5743,7 @@ def _settle_high_accuracy_strategy_results(
                     },
                     "jc_bucket_key": _jc_bucket_key(item),
                     "jc_live_feedback": item.get("jc_live_feedback") if isinstance(item.get("jc_live_feedback"), dict) else {},
+                    "jc_auto_calibration": item.get("jc_auto_calibration") if isinstance(item.get("jc_auto_calibration"), dict) else {},
                 }
             )
         return settled
