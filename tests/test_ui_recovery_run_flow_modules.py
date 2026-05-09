@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 
@@ -17,6 +18,7 @@ from v24_app.ui_modules import (
     build_result_recovery_run_detail,
     build_result_recovery_run_rows,
     build_result_recovery_run_summary,
+    mark_stale_result_recovery_runs,
 )
 
 
@@ -93,6 +95,32 @@ class UIRecoveryRunFlowModuleTests(unittest.TestCase):
             ]
         )
         self.assertTrue(any("耗时异常" in item["title"] for item in slow_alerts))
+
+    def test_mark_stale_running_records_as_interrupted(self) -> None:
+        result = mark_stale_result_recovery_runs(
+            [
+                {
+                    "run_id": "old-running",
+                    "status": "running",
+                    "started_at": "2026-05-09 18:00:00",
+                },
+                {
+                    "run_id": "fresh-running",
+                    "status": "running",
+                    "started_at": "2026-05-09 19:45:00",
+                },
+            ],
+            now=datetime(2026, 5, 9, 20, 0, 0),
+            stale_after_minutes=60,
+        )
+        items = result["items"]
+        self.assertEqual(result["updated_count"], 1)
+        self.assertEqual(items[0]["status"], "interrupted")
+        self.assertIn("未正常完成", items[0]["error"])
+        self.assertEqual(items[1]["status"], "running")
+
+        alerts = build_result_recovery_quality_alerts(items)
+        self.assertTrue(any("中断" in item["title"] for item in alerts))
 
 
 if __name__ == "__main__":

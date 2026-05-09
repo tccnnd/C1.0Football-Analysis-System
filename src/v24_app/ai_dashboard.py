@@ -31,6 +31,7 @@ from .ui_modules import (
     build_result_recovery_run_detail,
     build_result_recovery_run_rows,
     build_result_recovery_run_summary,
+    mark_stale_result_recovery_runs,
     build_high_accuracy_strategy_dashboard,
     build_strategy_allowlist_settlement_summary,
     build_strategy_allowlist_tuning_recommendation,
@@ -500,6 +501,7 @@ class SmartMatchDashboard:
             "settlements": tk.StringVar(value="0"),
         }
 
+        self._mark_stale_result_recovery_runs()
         self._build_layout()
         self.refresh()
         self._schedule_auto_refresh()
@@ -919,6 +921,22 @@ class SmartMatchDashboard:
 
     def _recovery_quality_alerts(self, limit: int = 80) -> list[dict[str, str]]:
         return build_result_recovery_quality_alerts(self._recovery_run_records(limit=limit))
+
+    def _mark_stale_result_recovery_runs(self) -> None:
+        try:
+            records = get_result_recovery_runs(limit=0)
+            result = mark_stale_result_recovery_runs(records, stale_after_minutes=60)
+        except Exception as exc:
+            self._log_event("ERROR", f"\u56de\u6536\u8fd0\u884c\u8bb0\u5f55\u6821\u9a8c\u5931\u8d25: {exc}")
+            return
+        updated = result.get("updated", []) if isinstance(result, dict) else []
+        if not isinstance(updated, list):
+            return
+        for item in updated:
+            if isinstance(item, dict):
+                self._record_result_recovery_run(item)
+        if updated:
+            self._log_event("WARN", f"\u5df2\u5c06 {len(updated)} \u6761\u8fc7\u671f\u56de\u6536\u8bb0\u5f55\u6807\u8bb0\u4e3a\u4e2d\u65ad")
 
     def _record_result_recovery_run(self, record: dict[str, object]) -> None:
         try:

@@ -103,6 +103,7 @@ from .recovery_run_flow import (
     build_result_recovery_run_detail,
     build_result_recovery_run_rows,
     build_result_recovery_run_summary,
+    mark_stale_result_recovery_runs,
 )
 from .settlement_view import (
     build_gate_summary_text,
@@ -264,6 +265,7 @@ __all__ = [
     "build_result_recovery_run_detail",
     "build_result_recovery_run_rows",
     "build_result_recovery_run_summary",
+    "mark_stale_result_recovery_runs",
     "build_gate_summary_text",
     "build_parlay_settlement_row",
     "build_single_settlement_row",

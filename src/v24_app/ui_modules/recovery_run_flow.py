@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Mapping, Sequence
 
 
@@ -7,6 +8,7 @@ STATUS_LABELS = {
     "running": "\u8fd0\u884c\u4e2d",
     "success": "\u6210\u529f",
     "failed": "\u5931\u8d25",
+    "interrupted": "\u4e2d\u65ad",
 }
 
 
@@ -40,17 +42,64 @@ def _elapsed_text(value: object) -> str:
     return f"{seconds:.2f}s"
 
 
+def _parse_timestamp(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(text[:19], fmt)
+        except ValueError:
+            continue
+    return None
+
+
 def _run_items(records: Sequence[Mapping[str, object]] | object) -> list[Mapping[str, object]]:
     if not isinstance(records, Sequence) or isinstance(records, (str, bytes)):
         return []
     return [item for item in records if isinstance(item, Mapping)]
 
 
+def mark_stale_result_recovery_runs(
+    records: Sequence[Mapping[str, object]] | object,
+    *,
+    now: datetime | None = None,
+    stale_after_minutes: int = 60,
+) -> dict[str, object]:
+    rows = _run_items(records)
+    current = now or datetime.now()
+    threshold_seconds = max(1, int(stale_after_minutes)) * 60
+    normalized: list[dict[str, object]] = []
+    updated: list[dict[str, object]] = []
+    for item in rows:
+        record = dict(item)
+        if str(record.get("status") or "").lower() == "running":
+            started_at = _parse_timestamp(record.get("started_at"))
+            if started_at is not None:
+                elapsed = max(0.0, (current - started_at).total_seconds())
+                if elapsed >= threshold_seconds:
+                    record.update(
+                        {
+                            "status": "interrupted",
+                            "finished_at": current.strftime("%Y-%m-%d %H:%M:%S"),
+                            "elapsed_seconds": round(elapsed, 4),
+                            "error": "\u4e0a\u6b21\u56de\u6536\u672a\u6b63\u5e38\u5b8c\u6210\uff0c\u53ef\u80fd\u662f APP \u5173\u95ed\u6216\u4efb\u52a1\u4e2d\u65ad",
+                        }
+                    )
+                    messages = record.get("messages")
+                    if not isinstance(messages, list):
+                        messages = []
+                    record["messages"] = [*messages, "\u8fd0\u884c\u8bb0\u5f55\u5df2\u81ea\u52a8\u6807\u8bb0\u4e3a\u4e2d\u65ad"]
+                    updated.append(dict(record))
+        normalized.append(record)
+    return {"items": normalized, "updated": updated, "updated_count": len(updated)}
+
+
 def build_result_recovery_run_summary(records: Sequence[Mapping[str, object]] | object) -> dict[str, object]:
     rows = _run_items(records)
-    completed = [item for item in rows if str(item.get("status") or "").lower() in {"success", "failed"}]
+    completed = [item for item in rows if str(item.get("status") or "").lower() in {"success", "failed", "interrupted"}]
     success = [item for item in completed if str(item.get("status") or "").lower() == "success"]
-    failed = [item for item in completed if str(item.get("status") or "").lower() == "failed"]
+    failed = [item for item in completed if str(item.get("status") or "").lower() in {"failed", "interrupted"}]
     running = [item for item in rows if str(item.get("status") or "").lower() == "running"]
     recent_completed = completed[-10:]
     recent_success = [item for item in recent_completed if str(item.get("status") or "").lower() == "success"]
@@ -93,14 +142,33 @@ def build_result_recovery_quality_alerts(
     min_elapsed_seconds: float = 10.0,
 ) -> list[dict[str, str]]:
     rows = _run_items(records)
-    completed = [item for item in rows if str(item.get("status") or "").lower() in {"success", "failed"}]
+    completed = [item for item in rows if str(item.get("status") or "").lower() in {"success", "failed", "interrupted"}]
+    if not completed and rows and str(rows[-1].get("status") or "").lower() == "running":
+        return [
+            {
+                "severity": "info",
+                "title": "\u56de\u6536\u4efb\u52a1\u6b63\u5728\u8fd0\u884c",
+                "body": f"\u5f00\u59cb\u65f6\u95f4: {rows[-1].get('started_at') or '-'}",
+                "tone": "info",
+            }
+        ]
     if not completed:
         return []
 
     alerts: list[dict[str, str]] = []
+    latest_completed = completed[-1]
+    if str(latest_completed.get("status") or "").lower() == "interrupted":
+        alerts.append(
+            {
+                "severity": "high",
+                "title": "\u4e0a\u6b21\u56de\u6536\u4efb\u52a1\u4e2d\u65ad",
+                "body": str(latest_completed.get("error") or "\u56de\u6536\u672a\u6b63\u5e38\u5b8c\u6210\uff0c\u5efa\u8bae\u91cd\u65b0\u6267\u884c\u56de\u6536\u5e76\u68c0\u67e5\u5feb\u7167\u72b6\u6001\u3002"),
+                "tone": "bad",
+            }
+        )
     failure_streak = 0
     for item in reversed(completed):
-        if str(item.get("status") or "").lower() == "failed":
+        if str(item.get("status") or "").lower() in {"failed", "interrupted"}:
             failure_streak += 1
         else:
             break
@@ -109,7 +177,7 @@ def build_result_recovery_quality_alerts(
         alerts.append(
             {
                 "severity": "high",
-                "title": f"\u8fde\u7eed\u56de\u6536\u5931\u8d25 {failure_streak} \u6b21",
+                "title": f"\u8fde\u7eed\u56de\u6536\u5931\u8d25/\u4e2d\u65ad {failure_streak} \u6b21",
                 "body": f"\u6700\u8fd1\u9519\u8bef: {latest.get('error') or '-'}",
                 "tone": "bad",
             }
