@@ -4058,6 +4058,7 @@ def _settlement_strategy_records(settlements: list[dict]) -> list[dict]:
                     "is_hit": bool(hit),
                     "return_rate": round(_safe_float(item.get("return_rate"), default=0.0), 4),
                     "handicap_abs": round(abs(_safe_float(item.get("handicap_line"), default=0.0)), 2),
+                    "sample_source": "settlement",
                 }
             )
     return records
@@ -4118,6 +4119,77 @@ def _wilson_lower_bound(hits: int, total: int, z: float = 1.28) -> float:
     return max(0.0, (centre - margin) / denominator)
 
 
+def _strategy_accuracy(rows: list[dict]) -> float:
+    if not rows:
+        return 0.0
+    return sum(1 for row in rows if bool(row.get("is_hit"))) / len(rows)
+
+
+def _strategy_stability_from_rows(rows: list[dict]) -> dict:
+    ordered = sorted(enumerate(rows), key=lambda item: (normalize_text(item[1].get("match_date", "")), item[0]))
+    selected = [item for _, item in ordered]
+    total = len(selected)
+    if total <= 0:
+        return {
+            "time_split_ready": False,
+            "recent_ready": False,
+            "stability_score": 0.0,
+            "stable": False,
+        }
+    midpoint = total // 2
+    first_half = selected[:midpoint]
+    second_half = selected[midpoint:]
+    recent_30 = selected[-30:] if total >= 30 else selected
+    recent_90 = selected[-90:] if total >= 90 else selected
+    first_accuracy = _strategy_accuracy(first_half) if first_half else _strategy_accuracy(selected)
+    second_accuracy = _strategy_accuracy(second_half) if second_half else _strategy_accuracy(selected)
+    recent_30_accuracy = _strategy_accuracy(recent_30)
+    recent_90_accuracy = _strategy_accuracy(recent_90)
+    overall_accuracy = _strategy_accuracy(selected)
+    split_gap = abs(first_accuracy - second_accuracy)
+    recent_gap = abs(overall_accuracy - recent_30_accuracy)
+    worst_window = min(first_accuracy, second_accuracy, recent_30_accuracy, recent_90_accuracy)
+    stable = bool(
+        total >= 30
+        and worst_window >= max(0.45, overall_accuracy - 0.12)
+        and split_gap <= 0.18
+        and recent_gap <= 0.16
+    )
+    stability_score = _clamp((worst_window * 0.65) + ((1.0 - min(split_gap, 0.35) / 0.35) * 0.2) + ((1.0 - min(recent_gap, 0.3) / 0.3) * 0.15))
+    return {
+        "time_split_ready": total >= 30,
+        "recent_ready": total >= 30,
+        "first_half_accuracy": round(first_accuracy, 6),
+        "second_half_accuracy": round(second_accuracy, 6),
+        "recent_30_accuracy": round(recent_30_accuracy, 6),
+        "recent_90_accuracy": round(recent_90_accuracy, 6),
+        "worst_window_accuracy": round(worst_window, 6),
+        "split_gap": round(split_gap, 6),
+        "recent_gap": round(recent_gap, 6),
+        "stability_score": round(stability_score, 6),
+        "stable": stable,
+    }
+
+
+def _strategy_layer_from_rows(*, scope: str, play_type: str, rows: list[dict]) -> dict:
+    source_counts: dict[str, int] = defaultdict(int)
+    for row in rows:
+        source_counts[normalize_text(row.get("sample_source", "")) or "unknown"] += 1
+    dominant_source = max(source_counts, key=source_counts.get) if source_counts else "unknown"
+    if play_type == "market_1x2":
+        data_layer = "historical_market"
+    elif dominant_source == "settlement":
+        data_layer = "app_settlement"
+    else:
+        data_layer = dominant_source
+    return {
+        "data_layer": data_layer,
+        "scope_layer": "league" if scope == "league" else "global",
+        "play_layer": play_type,
+        "sample_sources": dict(sorted(source_counts.items())),
+    }
+
+
 def _strategy_candidate_from_rows(
     rows: list[dict],
     *,
@@ -4145,10 +4217,13 @@ def _strategy_candidate_from_rows(
     accuracy = hits / max(total, 1)
     avg_confidence = sum(_safe_float(row.get("confidence"), default=0.0) for row in selected) / max(total, 1)
     edge = accuracy - avg_confidence
+    stability = _strategy_stability_from_rows(selected)
+    layer = _strategy_layer_from_rows(scope=scope, play_type=play_type, rows=selected)
     return {
         "scope": scope,
         "scope_value": scope_value,
         "play_type": play_type,
+        "layer": layer,
         "min_confidence": round(min_confidence, 2),
         "sample_count": total,
         "hit_count": hits,
@@ -4157,6 +4232,7 @@ def _strategy_candidate_from_rows(
         "avg_confidence": round(avg_confidence, 6),
         "edge": round(edge, 6),
         "wilson_lower": round(_wilson_lower_bound(hits, total), 6),
+        "stability": stability,
     }
 
 
@@ -4177,6 +4253,7 @@ def _write_high_accuracy_strategy_report(result: dict) -> str | None:
         f"- Strategy Records: {validation.get('record_count', 0)}",
         f"- Settlement Records: {validation.get('settlement_record_count', 0)}",
         f"- Historical Market Records: {validation.get('historical_record_count', 0)}",
+        f"- Stable Candidates: {validation.get('stable_candidate_count', 0)} / {validation.get('candidate_count', 0)}",
         f"- Date Window: {validation.get('date_start') or '-'} -> {validation.get('date_end') or '-'}",
         "",
         "## Selected Strategy",
@@ -4188,19 +4265,37 @@ def _write_high_accuracy_strategy_report(result: dict) -> str | None:
         f"- Coverage: {float(best.get('coverage', 0) or 0):.2%}",
         f"- Wilson Lower: {float(best.get('wilson_lower', 0) or 0):.2%}",
         f"- Edge: {float(best.get('edge', 0) or 0):+.2%}",
+        f"- Stability: {float((best.get('stability', {}) if isinstance(best.get('stability'), dict) else {}).get('stability_score', 0) or 0):.2%} | stable={bool((best.get('stability', {}) if isinstance(best.get('stability'), dict) else {}).get('stable', False))}",
+        "",
+        "## Strategy Pool",
+        "",
+        "| Role | Layer | Scope | Play | Min Conf | Hits | Total | Accuracy | Stable | Stability |",
+        "|---|---|---|---|---:|---:|---:|---:|---|---:|",
+    ]
+    for item in result.get("strategy_pool", []) if isinstance(result.get("strategy_pool"), list) else []:
+        layer = item.get("layer", {}) if isinstance(item.get("layer"), dict) else {}
+        stability = item.get("stability", {}) if isinstance(item.get("stability"), dict) else {}
+        lines.append(
+            f"| {item.get('role', '-')} | {layer.get('data_layer', '-')} | {item.get('scope', '-')}/{item.get('scope_value', '-')} | {item.get('play_type', '-')} | "
+            f"{float(item.get('min_confidence', 0) or 0):.2f} | {int(item.get('hit_count', 0) or 0)} | "
+            f"{int(item.get('sample_count', 0) or 0)} | {float(item.get('accuracy', 0) or 0):.2%} | "
+            f"{bool(stability.get('stable', False))} | {float(stability.get('stability_score', 0) or 0):.2%} |"
+        )
+    lines.extend([
         "",
         "## Top Candidates",
         "",
-        "| Rank | Scope | Play | Min Conf | Hits | Total | Accuracy | Coverage | Wilson Lower | Edge |",
-        "|---:|---|---|---:|---:|---:|---:|---:|---:|---:|",
-    ]
+        "| Rank | Scope | Play | Min Conf | Hits | Total | Accuracy | Coverage | Wilson Lower | Edge | Stable |",
+        "|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---|",
+    ])
     for index, item in enumerate(candidates[:10], start=1):
+        stability = item.get("stability", {}) if isinstance(item.get("stability"), dict) else {}
         lines.append(
             f"| {index} | {item.get('scope', '-')}/{item.get('scope_value', '-')} | {item.get('play_type', '-')} | "
             f"{float(item.get('min_confidence', 0) or 0):.2f} | {int(item.get('hit_count', 0) or 0)} | "
             f"{int(item.get('sample_count', 0) or 0)} | {float(item.get('accuracy', 0) or 0):.2%} | "
             f"{float(item.get('coverage', 0) or 0):.2%} | {float(item.get('wilson_lower', 0) or 0):.2%} | "
-            f"{float(item.get('edge', 0) or 0):+.2%} |"
+            f"{float(item.get('edge', 0) or 0):+.2%} | {bool(stability.get('stable', False))} |"
         )
     report_path.write_text("\n".join(lines), encoding="utf-8")
     return str(report_path)
@@ -4246,14 +4341,14 @@ def get_high_accuracy_strategy_status() -> dict:
 def _build_high_accuracy_strategy_pool(candidates: list[dict]) -> list[dict]:
     pool: list[dict] = []
     seen: set[tuple[str, str, str]] = set()
-    for item in candidates:
+    def add_item(item: dict) -> None:
         key = (
             normalize_text(item.get("scope", "")),
             normalize_text(item.get("scope_value", "")),
             normalize_text(item.get("play_type", "")),
         )
         if key in seen:
-            continue
+            return
         seen.add(key)
         strategy = dict(item)
         if not pool:
@@ -4262,10 +4357,48 @@ def _build_high_accuracy_strategy_pool(candidates: list[dict]) -> list[dict]:
             strategy["role"] = "backup"
         else:
             strategy["role"] = "observe"
+        stability = strategy.get("stability", {}) if isinstance(strategy.get("stability"), dict) else {}
+        if strategy["role"] == "backup" and not bool(stability.get("stable", False)):
+            strategy["role"] = "observe"
         pool.append(strategy)
+
+    for item in candidates:
+        add_item(item)
         if len(pool) >= 6:
             break
+    present_layers = {
+        normalize_text((item.get("layer", {}) if isinstance(item.get("layer"), dict) else {}).get("data_layer", ""))
+        for item in pool
+    }
+    for item in candidates:
+        layer = item.get("layer", {}) if isinstance(item.get("layer"), dict) else {}
+        data_layer = normalize_text(layer.get("data_layer", ""))
+        if data_layer and data_layer not in present_layers:
+            add_item(item)
+            present_layers.add(data_layer)
+        if len(pool) >= 8:
+            break
     return pool
+
+
+def _strategy_layer_summary(candidates: list[dict]) -> dict:
+    summary: dict[str, dict[str, int]] = {
+        "data_layer": {},
+        "scope_layer": {},
+        "play_layer": {},
+    }
+    stable_count = 0
+    for item in candidates:
+        layer = item.get("layer", {}) if isinstance(item.get("layer"), dict) else {}
+        stability = item.get("stability", {}) if isinstance(item.get("stability"), dict) else {}
+        if bool(stability.get("stable", False)):
+            stable_count += 1
+        for key in ("data_layer", "scope_layer", "play_layer"):
+            value = normalize_text(layer.get(key, "")) or normalize_text(item.get("play_type", "")) or "-"
+            bucket = summary.setdefault(key, {})
+            bucket[value] = int(bucket.get(value, 0)) + 1
+    summary["stable"] = {"true": stable_count, "false": max(0, len(candidates) - stable_count)}
+    return summary
 
 
 def run_high_accuracy_strategy_backtest(
@@ -4293,43 +4426,57 @@ def run_high_accuracy_strategy_backtest(
         "score": [0.08, 0.10, 0.12, 0.15, 0.18, 0.22],
     }
     candidates: list[dict] = []
-    total_records = len(records)
-    for play_type, thresholds in confidence_grid.items():
-        for threshold in thresholds:
-            candidate = _strategy_candidate_from_rows(
-                records,
-                scope="global",
-                scope_value="all",
-                play_type=play_type,
-                min_confidence=threshold,
-                total_records=total_records,
-                min_samples=max(1, int(min_samples)),
-                min_coverage=max(0.0, float(min_coverage)),
-            )
-            if candidate is not None:
-                candidates.append(candidate)
 
-    by_league: dict[str, list[dict]] = defaultdict(list)
-    for row in records:
-        by_league[normalize_text(row.get("league", "")) or "-"].append(row)
-    for league, league_rows in by_league.items():
-        if len(league_rows) < max(1, int(min_league_samples)):
-            continue
-        league_coverage = max(0.0, float(min_coverage) / 2.0)
-        for play_type, thresholds in confidence_grid.items():
+    def collect_candidates(source_records: list[dict], grids: dict[str, list[float]]) -> None:
+        source_total = len(source_records)
+        if source_total <= 0:
+            return
+        for play_type, thresholds in grids.items():
             for threshold in thresholds:
                 candidate = _strategy_candidate_from_rows(
-                    league_rows,
-                    scope="league",
-                    scope_value=league,
+                    source_records,
+                    scope="global",
+                    scope_value="all",
                     play_type=play_type,
                     min_confidence=threshold,
-                    total_records=total_records,
-                    min_samples=max(1, int(min_league_samples)),
-                    min_coverage=league_coverage,
+                    total_records=source_total,
+                    min_samples=max(1, int(min_samples)),
+                    min_coverage=max(0.0, float(min_coverage)),
                 )
                 if candidate is not None:
                     candidates.append(candidate)
+
+        by_league: dict[str, list[dict]] = defaultdict(list)
+        for row in source_records:
+            by_league[normalize_text(row.get("league", "")) or "-"].append(row)
+        for league, league_rows in by_league.items():
+            if len(league_rows) < max(1, int(min_league_samples)):
+                continue
+            league_coverage = max(0.0, float(min_coverage) / 2.0)
+            for play_type, thresholds in grids.items():
+                for threshold in thresholds:
+                    candidate = _strategy_candidate_from_rows(
+                        league_rows,
+                        scope="league",
+                        scope_value=league,
+                        play_type=play_type,
+                        min_confidence=threshold,
+                        total_records=source_total,
+                        min_samples=max(1, int(min_league_samples)),
+                        min_coverage=league_coverage,
+                    )
+                    if candidate is not None:
+                        candidates.append(candidate)
+
+    collect_candidates(historical_records, {"market_1x2": confidence_grid["market_1x2"]})
+    collect_candidates(
+        settlement_records,
+        {
+            key: value
+            for key, value in confidence_grid.items()
+            if key != "market_1x2"
+        },
+    )
 
     if not candidates:
         return {
@@ -4349,8 +4496,10 @@ def run_high_accuracy_strategy_backtest(
     candidates = sorted(
         candidates,
         key=lambda item: (
+            1.0 if bool((item.get("stability", {}) if isinstance(item.get("stability"), dict) else {}).get("stable", False)) else 0.0,
             float(item.get("accuracy", 0.0)),
             float(item.get("wilson_lower", 0.0)),
+            float((item.get("stability", {}) if isinstance(item.get("stability"), dict) else {}).get("stability_score", 0.0)),
             float(item.get("edge", 0.0)),
             int(item.get("sample_count", 0)),
             float(item.get("coverage", 0.0)),
@@ -4359,6 +4508,7 @@ def run_high_accuracy_strategy_backtest(
     )
     best = dict(candidates[0])
     strategy_pool = _build_high_accuracy_strategy_pool(candidates)
+    layer_summary = _strategy_layer_summary(candidates)
     dates = [normalize_text(row.get("match_date", "")) for row in records if normalize_text(row.get("match_date", ""))]
     validation = {
         "settlement_count": len(settlements),
@@ -4372,6 +4522,8 @@ def run_high_accuracy_strategy_backtest(
         "min_coverage": round(float(min_coverage), 4),
         "min_league_samples": int(min_league_samples),
         "candidate_count": len(candidates),
+        "stable_candidate_count": int(layer_summary.get("stable", {}).get("true", 0)),
+        "strategy_layers": layer_summary,
     }
     persisted = {
         "enabled": True,
