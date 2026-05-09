@@ -30,6 +30,7 @@ from .ui_modules import (
     build_strategy_allowlist_tuning_recommendation,
     build_strategy_allowlist_filename,
     build_strategy_allowlist_report_lines,
+    build_strategy_release_pool_rows,
     compute_strategy_admission_counts,
     filter_strategy_admission_rows,
     format_strategy_admission_pick,
@@ -2180,6 +2181,7 @@ class SmartMatchDashboard:
         admission_policy = admission_status.get("policy", {}) if isinstance(admission_status.get("policy"), dict) else {}
         settlements = list(reversed(get_recent_settlements(limit=200)))
         dashboard = build_high_accuracy_strategy_dashboard(status, settlements)
+        release_pool_rows = self._strategy_release_pool_rows(settlements)
         shell = self._page_shell(
             "\u7b56\u7565\u770b\u677f",
             "\u5c55\u793a\u9ad8\u51c6\u7b56\u7565\u6c60\u3001\u56de\u6d4b\u5206\u5c42\u3001\u7a33\u5b9a\u6027\u548c\u771f\u5b9e\u7ed3\u7b97\u53cd\u9988",
@@ -2311,6 +2313,17 @@ class SmartMatchDashboard:
                 if isinstance(row, dict):
                     self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
 
+        tk.Label(right, text="\u6b63\u5f0f\u653e\u884c\u5f85\u590d\u76d8\u6c60", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
+        if release_pool_rows:
+            for title, body_text in release_pool_rows:
+                self._strategy_row(right, title, body_text)
+        else:
+            self._strategy_row(
+                right,
+                "\u6682\u65e0\u6b63\u5f0f\u653e\u884c\u573a\u6b21",
+                "\u5237\u65b0\u5e76\u5206\u6790\u8d5b\u4e8b\u540e\uff0c\u7b56\u7565\u51c6\u5165\u4e3a\u6b63\u5f0f\u653e\u884c\u7684\u573a\u6b21\u4f1a\u5728\u8fd9\u91cc\u5f62\u6210\u5f85\u590d\u76d8\u6c60\u3002",
+            )
+
         tk.Label(right, text="\u4f7f\u7528\u5efa\u8bae", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
         for row in dashboard.get("guidance_rows", []):
             if isinstance(row, dict):
@@ -2323,6 +2336,34 @@ class SmartMatchDashboard:
                 self._strategy_row(right, title, body_text)
         else:
             self._strategy_row(right, "暂无准入结果", "加载并分析赛事后，这里会显示正式放行、观察和阻断清单。")
+
+    def _strategy_release_pool_rows(self, settlements: list[dict] | None = None, limit: int = 10) -> list[tuple[str, str]]:
+        snapshots = _load_prediction_snapshot_records()
+        pool = build_strategy_release_pool_rows(
+            self.rows,
+            snapshots=snapshots,
+            settlements=settlements if settlements is not None else get_recent_settlements(limit=0),
+        )
+        items: list[tuple[str, str]] = []
+        for item in pool[: max(0, int(limit))]:
+            match_id = str(item.get("match_id") or "")
+            snapshot = snapshots.get(match_id) if isinstance(snapshots.get(match_id), dict) else {}
+            snapshot_match = snapshot.get("match", {}) if isinstance(snapshot.get("match"), dict) else {}
+            live_status = str(item.get("settlement_status") or "-")
+            if live_status != "\u5df2\u56de\u6536":
+                current_status = _snapshot_status(snapshot_match) if snapshot_match else "\u7b49\u5f85\u5feb\u7167"
+                live_status = "\u53ef\u56de\u6536" if current_status == "\u5f85\u56de\u6536" else current_status
+            title = f"{live_status} | {item.get('title', '-')}"
+            body = (
+                f"\u5f00\u8d5b: {item.get('kickoff', '-')}\n"
+                f"\u63a8\u8350: {item.get('recommendation', '-')} | \u7f6e\u4fe1 {item.get('confidence_text', '-')} | \u98ce\u9669 {item.get('risk_text', '-')}\n"
+                f"\u5bfc\u51fa: {item.get('export_status', '-')} | \u5feb\u7167: {item.get('snapshot_status', '-')} | \u56de\u6536: {live_status}\n"
+                f"\u6e05\u5355: {item.get('allowlist_file', '-')} | \u5bfc\u51fa\u65f6\u95f4: {item.get('exported_at', '-')}\n"
+                f"\u5019\u9009: {item.get('candidate_text', '-')}\n"
+                f"\u539f\u56e0: {item.get('reason_text', '-')}"
+            )
+            items.append((title, body))
+        return items
 
     def _strategy_row(self, parent: tk.Widget, title: str, body: str) -> None:
         frame = tk.Frame(parent, bg=PANEL_2, highlightbackground="#172638", highlightthickness=1)

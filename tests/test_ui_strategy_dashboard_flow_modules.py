@@ -23,6 +23,7 @@ from v24_app.ui_modules import (
     build_strategy_allowlist_settlement_rows,
     build_strategy_allowlist_settlement_summary,
     build_strategy_allowlist_tuning_recommendation,
+    build_strategy_release_pool_rows,
     compute_strategy_admission_counts,
     filter_strategy_admission_rows,
     format_strategy_admission_label,
@@ -307,6 +308,68 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
             build_strategy_allowlist_filename(datetime(2026, 5, 9, 17, 30, 45)),
             "strategy_allowlist_20260509_173045.md",
         )
+
+    def test_strategy_release_pool_rows_merge_export_snapshot_and_settlement_state(self) -> None:
+        match_a = AppMatch(
+            home_team="A",
+            away_team="B",
+            league="L1",
+            match_time="21:00",
+            match_date="2026-05-09",
+            odds_home=1.8,
+            odds_draw=3.2,
+            odds_away=4.0,
+            source="live",
+            source_id="a1",
+        )
+        match_b = AppMatch(
+            home_team="C",
+            away_team="D",
+            league="L2",
+            match_time="22:00",
+            match_date="2026-05-09",
+            odds_home=2.0,
+            odds_draw=3.1,
+            odds_away=3.8,
+            source="live",
+            source_id="b1",
+        )
+        rows = [
+            {
+                "match": match_a,
+                "prediction": {
+                    "recommendation": "home",
+                    "confidence": 0.72,
+                    "risk_level": "LOW",
+                    "strategy_admission": {"decision": "allow", "top_play": "market_1x2", "top_pick": "home", "top_confidence": 0.76, "reasons": ["high_accuracy_strategy_active"]},
+                    "strategy_allowlist": {"decision": "allow", "file": "strategy_allowlist_a.md", "exported_at": "2026-05-09 17:30:45", "top_play": "market_1x2", "top_pick": "home", "top_confidence": 0.76},
+                },
+            },
+            {
+                "match": match_b,
+                "prediction": {
+                    "recommendation": "draw",
+                    "confidence": 0.68,
+                    "risk_level": "MEDIUM",
+                    "strategy_admission": {"decision": "allow", "top_play": "handicap", "top_pick": "draw", "top_confidence": 0.69},
+                },
+            },
+        ]
+        snapshots = {match_a.match_id: {"strategy_allowlist": {"decision": "allow", "file": "strategy_allowlist_a.md"}}}
+        settlements = [{"match_id": match_a.match_id, "strategy_allowlist_decision": "allow"}]
+
+        pool = build_strategy_release_pool_rows(rows, snapshots=snapshots, settlements=settlements)
+
+        self.assertEqual(len(pool), 2)
+        first = pool[0]
+        self.assertEqual(first["export_status"], "\u5df2\u5bfc\u51fa")
+        self.assertEqual(first["snapshot_status"], "\u5df2\u4fdd\u5b58")
+        self.assertEqual(first["settlement_status"], "\u5df2\u56de\u6536")
+        self.assertFalse(first["ready_for_recovery"])
+        second = pool[1]
+        self.assertEqual(second["export_status"], "\u672a\u5bfc\u51fa")
+        self.assertEqual(second["snapshot_status"], "\u7f3a\u5feb\u7167")
+        self.assertEqual(second["settlement_status"], "\u5f85\u56de\u6536")
 
     def test_strategy_allowlist_settlement_summary_tracks_release_quality(self) -> None:
         settlements = [

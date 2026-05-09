@@ -134,6 +134,45 @@ def _strategy_admission(prediction: Mapping[str, object]) -> Mapping[str, object
     return _as_mapping(prediction.get("strategy_admission"))
 
 
+def _row_match_id(match: object) -> str:
+    direct = _text(_field(match, "match_id", ""), "")
+    if direct:
+        return direct
+    return "|".join(
+        [
+            _text(_field(match, "match_date"), ""),
+            _text(_field(match, "league"), ""),
+            _text(_field(match, "home_team"), ""),
+            _text(_field(match, "away_team"), ""),
+        ]
+    ).strip("|")
+
+
+def _settlement_match_id(item: Mapping[str, object]) -> str:
+    direct = _text(item.get("match_id"), "")
+    if direct:
+        return direct
+    return "|".join(
+        [
+            _text(item.get("match_date"), ""),
+            _text(item.get("league"), ""),
+            _text(item.get("home_team"), ""),
+            _text(item.get("away_team"), ""),
+        ]
+    ).strip("|")
+
+
+def _allowlist_marker(prediction: Mapping[str, object], snapshot: Mapping[str, object]) -> Mapping[str, object]:
+    marker = _as_mapping(prediction.get("strategy_allowlist"))
+    if marker:
+        return marker
+    marker = _as_mapping(snapshot.get("strategy_allowlist"))
+    if marker:
+        return marker
+    snapshot_prediction = _as_mapping(snapshot.get("prediction"))
+    return _as_mapping(snapshot_prediction.get("strategy_allowlist"))
+
+
 def _admission_decision(admission: Mapping[str, object]) -> str:
     decision = str(admission.get("decision") or "").strip()
     return decision if decision in {"allow", "observe", "block"} else "observe"
@@ -249,6 +288,50 @@ def filter_strategy_admission_rows(rows: Sequence[object] | object, selected_fil
         for row in rows
         if _admission_decision(_strategy_admission(_row_prediction(row))) == selected
     ]
+
+
+def build_strategy_release_pool_rows(
+    rows: Sequence[object] | object,
+    *,
+    snapshots: Mapping[str, object] | object = None,
+    settlements: Sequence[Mapping[str, object]] | object = None,
+) -> list[dict[str, object]]:
+    snapshot_map = snapshots if isinstance(snapshots, Mapping) else {}
+    settlement_items = [item for item in settlements if isinstance(item, Mapping)] if isinstance(settlements, Sequence) else []
+    settled_ids = {_settlement_match_id(item) for item in settlement_items if _settlement_match_id(item)}
+    pool: list[dict[str, object]] = []
+    for row in select_strategy_allowlist_rows(rows):
+        match = _row_match(row)
+        prediction = _row_prediction(row)
+        admission = _strategy_admission(prediction)
+        match_id = _row_match_id(match)
+        snapshot = _as_mapping(snapshot_map.get(match_id)) if match_id else {}
+        marker = _allowlist_marker(prediction, snapshot)
+        exported = bool(_text(marker.get("file"), ""))
+        snapshot_saved = bool(snapshot)
+        settled = bool(match_id and match_id in settled_ids)
+        pool.append(
+            {
+                "match_id": match_id,
+                "match": match,
+                "prediction": prediction,
+                "admission": admission,
+                "title": f"{_text(_field(match, 'league'))} | {_text(_field(match, 'home_team'))} vs {_text(_field(match, 'away_team'))}",
+                "kickoff": f"{_text(_field(match, 'match_date'))} {_text(_field(match, 'match_time'))}",
+                "recommendation": _text(prediction.get("recommendation")),
+                "confidence_text": _pct(prediction.get("confidence")),
+                "risk_text": _risk_text(prediction.get("risk_level")),
+                "candidate_text": format_strategy_admission_pick(marker if marker else admission),
+                "reason_text": format_strategy_admission_reasons(marker if marker else admission, limit=4),
+                "export_status": "\u5df2\u5bfc\u51fa" if exported else "\u672a\u5bfc\u51fa",
+                "allowlist_file": _text(marker.get("file")),
+                "exported_at": _text(marker.get("exported_at")),
+                "snapshot_status": "\u5df2\u4fdd\u5b58" if snapshot_saved else "\u7f3a\u5feb\u7167",
+                "settlement_status": "\u5df2\u56de\u6536" if settled else "\u5f85\u56de\u6536",
+                "ready_for_recovery": bool(snapshot_saved and not settled),
+            }
+        )
+    return pool
 
 
 def _allowlist_sort_key(row: object) -> tuple[str, str, str, str, float]:
