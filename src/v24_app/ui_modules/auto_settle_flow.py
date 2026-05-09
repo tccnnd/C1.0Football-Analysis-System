@@ -18,6 +18,13 @@ def build_auto_settle_popup_message(result: Mapping[str, object] | object) -> st
     messages = resolved.get("messages", [])
     details = "\n".join(f"- {item}" for item in messages) if isinstance(messages, list) and messages else "- 无"
     repair = resolved.get("snapshot_repair", {}) if isinstance(resolved, Mapping) else {}
+    miss_reasons = resolved.get("snapshot_result_miss_reasons", {})
+    if isinstance(miss_reasons, Mapping) and miss_reasons:
+        miss_reason_text = ", ".join(
+            f"{key}={int(value or 0)}" for key, value in sorted(miss_reasons.items()) if int(value or 0) > 0
+        )
+    else:
+        miss_reason_text = "-"
     return (
         f"数据源: {resolved.get('source')}\n"
         + f"回看天数: {int(resolved.get('lookback_days', 2) or 2)}\n"
@@ -27,7 +34,8 @@ def build_auto_settle_popup_message(result: Mapping[str, object] | object) -> st
         + f"新增结算: {int(resolved.get('new_settled', 0) or 0)}\n"
         + f"已结算跳过: {int(resolved.get('already_settled', 0) or 0)}\n"
         + f"其他跳过: {int(resolved.get('skipped', 0) or 0)}\n\n"
-        + f"赛果回查: 检查 {int(resolved.get('snapshot_checked', 0) or 0)} / 命中 {int(resolved.get('snapshot_result_hits', 0) or 0)}\n"
+        + f"赛果回查: 检查 {int(resolved.get('snapshot_checked', 0) or 0)} / 命中 {int(resolved.get('snapshot_result_hits', 0) or 0)} / 未命中 {int(resolved.get('snapshot_result_misses', 0) or 0)}\n"
+        + f"未命中原因: {miss_reason_text}\n"
         + f"预测快照命中: {int(resolved.get('snapshot_predictions', 0) or 0)}\n\n"
         + "消息:\n"
         + details

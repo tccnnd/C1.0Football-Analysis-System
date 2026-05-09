@@ -54,6 +54,23 @@ class UIRecoveryRunFlowModuleTests(unittest.TestCase):
                 "new_parlay_settled": 1,
                 "snapshot_recoverable": 2,
                 "snapshot_missing_source_id": 1,
+                "snapshot_checked": 4,
+                "snapshot_result_hits": 3,
+                "snapshot_result_misses": 1,
+                "snapshot_result_miss_reasons": {"state_not_finished": 1},
+                "snapshot_result_miss_items": [
+                    {
+                        "match_date": "2026-05-09",
+                        "league": "Friendly League",
+                        "home_team": "Alpha FC",
+                        "away_team": "Bravo FC",
+                        "schedule_id": "titan_1",
+                        "reason": "state_not_finished",
+                        "state_code": "1",
+                        "home_goals": 0,
+                        "away_goals": 0,
+                    }
+                ],
                 "messages": ["done"],
             }
         ]
@@ -68,6 +85,8 @@ class UIRecoveryRunFlowModuleTests(unittest.TestCase):
         self.assertIn("新增结算: 3", detail)
         self.assertIn("可自动回查: 2", detail)
         self.assertIn("缺 source_id: 1", detail)
+        self.assertIn("state_not_finished=1", detail)
+        self.assertIn("titan_1", detail)
         self.assertIn("- done", detail)
 
     def test_quality_alerts_detect_failures_no_settlement_and_slow_runs(self) -> None:

@@ -39,6 +39,8 @@ class UIAutoSettleFlowModuleTests(unittest.TestCase):
                 "skipped": 1,
                 "snapshot_checked": 10,
                 "snapshot_result_hits": 6,
+                "snapshot_result_misses": 4,
+                "snapshot_result_miss_reasons": {"no_result": 3, "state_not_finished": 1},
                 "snapshot_predictions": 5,
                 "messages": ["ok1", "ok2"],
             }
@@ -46,6 +48,8 @@ class UIAutoSettleFlowModuleTests(unittest.TestCase):
         self.assertIn("数据源: live:titan", message)
         self.assertIn("新增结算: 4", message)
         self.assertIn("赛果回查: 检查 10 / 命中 6", message)
+        self.assertIn("no_result=3", message)
+        self.assertIn("state_not_finished=1", message)
         self.assertIn("- ok1", message)
 
     def test_should_refresh_after_auto_settle(self) -> None:

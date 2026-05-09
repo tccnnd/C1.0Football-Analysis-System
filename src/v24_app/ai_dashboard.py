@@ -1249,6 +1249,13 @@ class SmartMatchDashboard:
                 "skipped": int(result_payload.get("skipped", 0) or 0),
                 "snapshot_checked": int(result_payload.get("snapshot_checked", 0) or 0),
                 "snapshot_result_hits": int(result_payload.get("snapshot_result_hits", 0) or 0),
+                "snapshot_result_misses": int(result_payload.get("snapshot_result_misses", 0) or 0),
+                "snapshot_result_miss_reasons": result_payload.get("snapshot_result_miss_reasons", {})
+                if isinstance(result_payload.get("snapshot_result_miss_reasons"), dict)
+                else {},
+                "snapshot_result_miss_items": result_payload.get("snapshot_result_miss_items", [])
+                if isinstance(result_payload.get("snapshot_result_miss_items"), list)
+                else [],
                 "snapshot_predictions": int(result_payload.get("snapshot_predictions", 0) or 0),
                 "snapshot_recoverable": int(result_payload.get("snapshot_recoverable", 0) or 0),
                 "snapshot_missing_source_id": int(result_payload.get("snapshot_missing_source_id", 0) or 0),

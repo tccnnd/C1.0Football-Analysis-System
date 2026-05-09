@@ -8102,6 +8102,43 @@ def record_result_recovery_run(record: dict, limit: int = 300) -> None:
     STATE_STORE.upsert_result_recovery_run(record, limit=limit)
 
 
+def classify_snapshot_result_lookup(result: object) -> dict[str, object]:
+    if not isinstance(result, dict):
+        return {
+            "is_finished": False,
+            "reason": "no_result",
+            "state_code": "",
+            "home_goals": None,
+            "away_goals": None,
+        }
+
+    home_goals = result.get("home_goals")
+    away_goals = result.get("away_goals")
+    state_code = normalize_text(result.get("state_code", ""))
+    if result.get("is_finished") and home_goals is not None and away_goals is not None:
+        return {
+            "is_finished": True,
+            "reason": "finished",
+            "state_code": state_code,
+            "home_goals": home_goals,
+            "away_goals": away_goals,
+        }
+
+    if home_goals is None or away_goals is None:
+        reason = "missing_score"
+    elif state_code:
+        reason = "state_not_finished"
+    else:
+        reason = "not_finished"
+    return {
+        "is_finished": False,
+        "reason": reason,
+        "state_code": state_code,
+        "home_goals": home_goals,
+        "away_goals": away_goals,
+    }
+
+
 def auto_settle_finished_matches(
     prediction_cache: dict[str, dict] | None = None,
     lookback_days: int = 2,
@@ -8119,6 +8156,9 @@ def auto_settle_finished_matches(
         "snapshot_predictions": 0,
         "snapshot_result_hits": 0,
         "snapshot_checked": 0,
+        "snapshot_result_misses": 0,
+        "snapshot_result_miss_reasons": {},
+        "snapshot_result_miss_items": [],
         "lookback_days": lookback_days,
         "restored_snapshots": int(repair_report.get("restored", 0) or 0),
         "snapshot_repair": repair_report,
@@ -8234,11 +8274,33 @@ def auto_settle_finished_matches(
             continue
         summary["snapshot_checked"] += 1
         result = fetcher.get_result_by_schedule_id(schedule_id)
-        if not isinstance(result, dict) or not result.get("is_finished"):
+        lookup = classify_snapshot_result_lookup(result)
+        if not lookup.get("is_finished"):
+            reason = str(lookup.get("reason") or "unknown")
+            summary["snapshot_result_misses"] += 1
+            miss_reasons = summary["snapshot_result_miss_reasons"]
+            if isinstance(miss_reasons, dict):
+                miss_reasons[reason] = int(miss_reasons.get(reason, 0) or 0) + 1
+            miss_items = summary["snapshot_result_miss_items"]
+            if isinstance(miss_items, list) and len(miss_items) < 20:
+                miss_items.append(
+                    {
+                        "match_id": app_match.match_id,
+                        "match_date": app_match.match_date,
+                        "league": app_match.league,
+                        "home_team": app_match.home_team,
+                        "away_team": app_match.away_team,
+                        "schedule_id": schedule_id,
+                        "reason": reason,
+                        "state_code": lookup.get("state_code", ""),
+                        "home_goals": lookup.get("home_goals"),
+                        "away_goals": lookup.get("away_goals"),
+                    }
+                )
             continue
         app_match.source = "snapshot:titan:analysisheader"
         app_match.source_id = schedule_id
-        append_candidate(app_match, result.get("home_goals"), result.get("away_goals"), snapshot_record)
+        append_candidate(app_match, lookup.get("home_goals"), lookup.get("away_goals"), snapshot_record)
         summary["snapshot_result_hits"] += 1
 
     if not candidates:

@@ -89,6 +89,68 @@ class CoreResultRecoverySnapshotAuditTests(unittest.TestCase):
 
         self.assertEqual(result["lookback_days"], 14)
 
+    def test_snapshot_result_lookup_classifies_misses(self) -> None:
+        self.assertEqual(core.classify_snapshot_result_lookup(None)["reason"], "no_result")
+        self.assertEqual(
+            core.classify_snapshot_result_lookup({"state_code": "-1", "is_finished": False})["reason"],
+            "missing_score",
+        )
+        self.assertEqual(
+            core.classify_snapshot_result_lookup(
+                {"state_code": "1", "home_goals": 0, "away_goals": 0, "is_finished": False}
+            )["reason"],
+            "state_not_finished",
+        )
+        finished = core.classify_snapshot_result_lookup(
+            {"state_code": "-1", "home_goals": 2, "away_goals": 1, "is_finished": True}
+        )
+        self.assertTrue(finished["is_finished"])
+        self.assertEqual(finished["reason"], "finished")
+
+    def test_auto_settle_records_snapshot_result_miss_diagnostics(self) -> None:
+        class FakeFetcher:
+            def __init__(self, debug: bool = False) -> None:
+                self.debug = debug
+
+            def get_recent_finished_matches(self, lookback_days: int = 2) -> list:
+                return []
+
+            def get_result_by_schedule_id(self, schedule_id: str) -> dict:
+                return {
+                    "schedule_id": schedule_id,
+                    "state_code": "1",
+                    "home_goals": 0,
+                    "away_goals": 0,
+                    "is_finished": False,
+                }
+
+        class FakeStateStore:
+            def load_settlements(self) -> list:
+                return []
+
+            def load_prediction_snapshots(self) -> dict:
+                return snapshots
+
+        today = core.datetime.now().strftime("%Y-%m-%d")
+        snapshots = {"miss": self._snapshot(home="Miss FC", match_date=today, source_id="titan_miss")}
+
+        with (
+            patch("v24_app.core.backfill_analysis_history_from_prediction_snapshots", return_value={}),
+            patch("v24_app.core.repair_prediction_snapshots_from_analysis_history", return_value={"restored": 0}),
+            patch("v24_app.core.migrate_prediction_snapshots", return_value={}),
+            patch("v24_app.core.MatchFetcherTitan", FakeFetcher),
+            patch("v24_app.core.STATE_STORE", FakeStateStore()),
+            patch("v24_app.core.auto_settle_pending_parlays", return_value={"new_settled": 0, "items": []}),
+            patch("v24_app.core.get_gate_metrics", return_value={}),
+        ):
+            result = core.auto_settle_finished_matches(lookback_days=14)
+
+        self.assertEqual(result["snapshot_checked"], 1)
+        self.assertEqual(result["snapshot_result_hits"], 0)
+        self.assertEqual(result["snapshot_result_misses"], 1)
+        self.assertEqual(result["snapshot_result_miss_reasons"], {"state_not_finished": 1})
+        self.assertEqual(result["snapshot_result_miss_items"][0]["schedule_id"], "titan_miss")
+
 
 if __name__ == "__main__":
     unittest.main()
