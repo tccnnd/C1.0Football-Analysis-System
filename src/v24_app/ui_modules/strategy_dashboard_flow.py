@@ -86,12 +86,20 @@ def _known_strategy_settlement_items(settlements: Sequence[Mapping[str, object]]
 def build_high_accuracy_strategy_settlement_summary(settlements: Sequence[Mapping[str, object]]) -> dict[str, object]:
     rows = _known_strategy_settlement_items(settlements)
     known = [item for _settlement, item in rows if item.get("is_hit") is not None]
+    official = [item for item in known if not bool(item.get("is_shadow"))]
+    shadow = [item for item in known if bool(item.get("is_shadow"))]
     hits = sum(1 for item in known if item.get("is_hit") is True)
     misses = sum(1 for item in known if item.get("is_hit") is False)
     unknown = len(rows) - len(known)
     hit_rate = hits / len(known) if known else None
+    official_hits = sum(1 for item in official if item.get("is_hit") is True)
+    shadow_hits = sum(1 for item in shadow if item.get("is_hit") is True)
     return {
         "active_count": len(rows),
+        "official_count": len(official),
+        "official_hit_count": official_hits,
+        "shadow_count": len(shadow),
+        "shadow_hit_count": shadow_hits,
         "known_count": len(known),
         "hit_count": hits,
         "miss_count": misses,
@@ -99,6 +107,8 @@ def build_high_accuracy_strategy_settlement_summary(settlements: Sequence[Mappin
         "hit_rate": hit_rate,
         "hit_rate_text": _pct(hit_rate) if hit_rate is not None else "-",
         "summary_text": f"{hits}/{len(known)}" if known else "-",
+        "official_summary_text": f"{official_hits}/{len(official)}" if official else "-",
+        "shadow_summary_text": f"{shadow_hits}/{len(shadow)}" if shadow else "-",
     }
 
 
@@ -124,7 +134,7 @@ def build_high_accuracy_strategy_pool_rows(status: Mapping[str, object] | object
                 f"\u95e8\u69db: {_safe_float(item.get('min_confidence')):.2f} | \u56de\u6d4b: {_pct(item.get('accuracy'))} ({_safe_int(item.get('hit_count'))}/{_safe_int(item.get('sample_count'))})",
                 f"Wilson: {_pct(item.get('wilson_lower'))} | \u8986\u76d6: {_pct(item.get('coverage'))} | \u8fb9\u9645: {_safe_float(item.get('edge')):+.1%}",
                 f"\u7a33\u5b9a: {'OK' if bool(stability.get('stable')) else 'WATCH'} | \u8bc4\u5206 {_pct(stability.get('stability_score'))} | \u8fd130/90 {_pct(stability.get('recent_30_accuracy'))}/{_pct(stability.get('recent_90_accuracy'))}",
-                f"\u65ad\u8def: {breaker_status} | \u8fde\u9519 {_safe_int(breaker.get('miss_streak'))}/{_safe_int(breaker.get('threshold'), 3)} | \u8fd1\u671f {_safe_int(breaker.get('hit_count'))}/{_safe_int(breaker.get('known_count'))}",
+                f"\u65ad\u8def: {breaker_status} | \u8fde\u9519 {_safe_int(breaker.get('miss_streak'))}/{_safe_int(breaker.get('threshold'), 3)} | \u6062\u590d {_safe_int(breaker.get('recovery_streak'))}/{_safe_int(breaker.get('recovery_hits_required'), 2)} | \u8fd1\u671f {_safe_int(breaker.get('hit_count'))}/{_safe_int(breaker.get('known_count'))}",
             ]
         )
         rows.append({"title": title, "body": body})
@@ -140,7 +150,8 @@ def build_high_accuracy_strategy_settlement_rows(
     for settlement, item in _known_strategy_settlement_items(settlements)[: max(0, int(limit))]:
         hit = item.get("is_hit")
         hit_label = "\u547d\u4e2d" if hit is True else "\u672a\u547d\u4e2d" if hit is False else "\u5f85\u5224\u5b9a"
-        title = f"{hit_label} | {_label(ROLE_LABELS, item.get('role'))} | {_label(PLAY_LABELS, item.get('play_type'))}"
+        shadow_label = "\u89c2\u5bdf" if bool(item.get("is_shadow")) else "\u6b63\u5f0f"
+        title = f"{hit_label} | {shadow_label} | {_label(ROLE_LABELS, item.get('role'))} | {_label(PLAY_LABELS, item.get('play_type'))}"
         match_text = (
             f"{settlement.get('league') or '-'} | {settlement.get('home_team') or '-'}"
             f" vs {settlement.get('away_team') or '-'}"
@@ -199,7 +210,7 @@ def build_high_accuracy_strategy_dashboard(
         ("\u65f6\u95f4\u8303\u56f4", f"{validation.get('date_start') or '-'} -> {validation.get('date_end') or '-'}"),
         (
             "\u7ed3\u7b97\u547d\u4e2d",
-            f"{settlement_summary.get('summary_text')} | \u6d3b\u8dc3 {_safe_int(settlement_summary.get('active_count'))} | \u672a\u5224\u5b9a {_safe_int(settlement_summary.get('unknown_count'))}",
+            f"\u6b63\u5f0f {settlement_summary.get('official_summary_text')} | \u89c2\u5bdf {settlement_summary.get('shadow_summary_text')} | \u672a\u5224\u5b9a {_safe_int(settlement_summary.get('unknown_count'))}",
         ),
     ]
     if not bool(resolved.get("enabled")):
@@ -225,7 +236,7 @@ def build_high_accuracy_strategy_dashboard(
                 0,
                 {
                     "title": "\u65ad\u8def\u5668\u5df2\u89e6\u53d1",
-                    "body": f"{paused_count} \u6761\u7b56\u7565\u56e0\u771f\u5b9e\u7ed3\u7b97\u8fde\u9519\u5df2\u964d\u4e3a\u89c2\u5bdf\u3002\u9700\u8981\u7b49\u5f85\u65b0\u547d\u4e2d\u6837\u672c\u6216\u91cd\u65b0\u56de\u6d4b\u540e\u518d\u6062\u590d\u3002",
+                    "body": f"{paused_count} \u6761\u7b56\u7565\u56e0\u771f\u5b9e\u7ed3\u7b97\u8fde\u9519\u5df2\u964d\u4e3a\u89c2\u5bdf\u3002\u7b56\u7565\u4ecd\u4f1a\u8bb0\u5f55\u5f71\u5b50\u7ed3\u7b97\uff0c\u8fde\u7eed\u8fbe\u5230\u6062\u590d\u547d\u4e2d\u8981\u6c42\u540e\u81ea\u52a8\u6062\u590d\u3002",
                 },
             )
     return {

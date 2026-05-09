@@ -175,8 +175,64 @@ class CorePlayThresholdBucketTuningTests(unittest.TestCase):
         item = status["strategy_pool"][0]
         self.assertTrue(item["breaker"]["breaker_on"])
         self.assertEqual(item["breaker"]["miss_streak"], 3)
+        self.assertEqual(item["breaker"]["status"], "paused")
         self.assertEqual(item["effective_role"], "observe")
         self.assertEqual(status["breaker"]["paused_count"], 1)
+
+    def test_high_accuracy_strategy_breaker_requires_recovery_hits(self) -> None:
+        strategy = {
+            "role": "primary",
+            "scope": "global",
+            "scope_value": "all",
+            "play_type": "market_1x2",
+            "min_confidence": 0.70,
+            "layer": {"data_layer": "historical_market"},
+        }
+        misses = [
+            {
+                "high_accuracy_strategy_items": [
+                    {
+                        "scope": "global",
+                        "scope_value": "all",
+                        "play_type": "market_1x2",
+                        "min_confidence": 0.70,
+                        "data_layer": "historical_market",
+                        "is_hit": False,
+                        "is_shadow": True,
+                    }
+                ]
+            }
+            for _ in range(3)
+        ]
+        one_recovery_hit = {
+            "high_accuracy_strategy_items": [
+                {
+                    "scope": "global",
+                    "scope_value": "all",
+                    "play_type": "market_1x2",
+                    "min_confidence": 0.70,
+                    "data_layer": "historical_market",
+                    "is_hit": True,
+                    "is_shadow": True,
+                }
+            ]
+        }
+
+        recovering = core._apply_high_accuracy_strategy_breakers(
+            {"enabled": True, "strategy": strategy, "strategy_pool": [strategy]},
+            misses + [one_recovery_hit],
+        )
+        recovered = core._apply_high_accuracy_strategy_breakers(
+            {"enabled": True, "strategy": strategy, "strategy_pool": [strategy]},
+            misses + [one_recovery_hit, one_recovery_hit],
+        )
+
+        self.assertTrue(recovering["strategy_pool"][0]["breaker"]["breaker_on"])
+        self.assertEqual(recovering["strategy_pool"][0]["breaker"]["status"], "recovering")
+        self.assertEqual(recovering["strategy_pool"][0]["breaker"]["recovery_streak"], 1)
+        self.assertFalse(recovered["strategy_pool"][0]["breaker"]["breaker_on"])
+        self.assertEqual(recovered["strategy_pool"][0]["breaker"]["status"], "recovered")
+        self.assertEqual(recovered["strategy_pool"][0]["effective_role"], "primary")
 
     def test_high_accuracy_strategy_match_respects_breaker(self) -> None:
         strategy = {
@@ -214,9 +270,11 @@ class CorePlayThresholdBucketTuningTests(unittest.TestCase):
             )
 
         self.assertFalse(result["active"])
-        self.assertEqual(result["reason"], "strategy_breaker_on")
+        self.assertEqual(result["reason"], "strategy_breaker_observing")
         self.assertEqual(result["role"], "observe")
         self.assertEqual(result["active_count"], 0)
+        self.assertEqual(result["shadow_count"], 1)
+        self.assertTrue(result["shadow_matches"][0]["shadow_active"])
 
     def test_high_accuracy_market_strategy_uses_market_probabilities(self) -> None:
         strategy = {
@@ -299,6 +357,48 @@ class CorePlayThresholdBucketTuningTests(unittest.TestCase):
         self.assertEqual(result["hit_count"], 2)
         self.assertEqual(result["summary"], "2/2")
         self.assertTrue(all(item["is_hit"] for item in result["items"]))
+
+    def test_settle_high_accuracy_strategy_results_records_shadow_without_official_hit(self) -> None:
+        result = core._settle_high_accuracy_strategy_results(
+            {
+                "high_accuracy_strategy": {
+                    "enabled": True,
+                    "active_matches": [],
+                    "shadow_matches": [
+                        {
+                            "role": "observe",
+                            "original_role": "primary",
+                            "play_type": "market_1x2",
+                            "scope": "global",
+                            "scope_value": "all",
+                            "pick": "涓昏儨",
+                            "confidence": 0.72,
+                            "min_confidence": 0.70,
+                            "backtest_accuracy": 0.78,
+                            "backtest_samples": 120,
+                            "layer": {"data_layer": "historical_market"},
+                            "data_layer": "historical_market",
+                            "breaker": {"breaker_on": True, "status": "recovering"},
+                        }
+                    ],
+                }
+            },
+            result="涓昏儨",
+            total_goals=2,
+            actual_score="1-1",
+            handicap_result="-1 璁╄礋",
+            ou_result="灏?.5",
+        )
+
+        self.assertEqual(result["active_count"], 0)
+        self.assertEqual(result["hit_count"], 0)
+        self.assertEqual(result["shadow_count"], 1)
+        self.assertEqual(result["shadow_hit_count"], 1)
+        self.assertEqual(result["summary"], "-")
+        self.assertEqual(result["shadow_summary"], "1/1")
+        self.assertTrue(result["items"][0]["is_shadow"])
+        self.assertTrue(result["items"][0]["blocked_by_breaker"])
+        self.assertEqual(result["items"][0]["data_layer"], "historical_market")
 
 
 if __name__ == "__main__":

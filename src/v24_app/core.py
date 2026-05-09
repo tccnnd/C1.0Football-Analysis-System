@@ -52,6 +52,7 @@ BAYES_CALIBRATION_FILE = PROJECT_DIR / "data" / "models" / "bayes_calibration_v1
 HIGH_ACCURACY_STRATEGY_FILE = PROJECT_DIR / "data" / "models" / "high_accuracy_strategy_v1.json"
 HIGH_ACCURACY_STRATEGY_BREAKER_THRESHOLD = 3
 HIGH_ACCURACY_STRATEGY_BREAKER_WINDOW = 30
+HIGH_ACCURACY_STRATEGY_RECOVERY_HITS = 2
 
 
 LEAGUE_STRENGTH = {
@@ -4326,6 +4327,7 @@ def _high_accuracy_strategy_breaker_for_item(
     *,
     threshold: int = HIGH_ACCURACY_STRATEGY_BREAKER_THRESHOLD,
     window: int = HIGH_ACCURACY_STRATEGY_BREAKER_WINDOW,
+    recovery_hits: int = HIGH_ACCURACY_STRATEGY_RECOVERY_HITS,
 ) -> dict:
     strategy_key = _high_accuracy_strategy_identity(strategy)
     results: list[bool] = []
@@ -4354,23 +4356,50 @@ def _high_accuracy_strategy_breaker_for_item(
         if hit:
             break
         miss_streak += 1
+    recovery_streak = 0
+    for hit in results:
+        if not hit:
+            break
+        recovery_streak += 1
+    prior_miss_streak = 0
+    for hit in results[recovery_streak:]:
+        if hit:
+            break
+        prior_miss_streak += 1
 
     threshold_value = max(1, int(threshold))
+    recovery_value = max(1, int(recovery_hits))
     known_count = len(results)
     hit_count = sum(1 for hit in results if hit)
     miss_count = known_count - hit_count
-    breaker_on = bool(known_count >= threshold_value and miss_streak >= threshold_value)
+    breaker_on = bool(
+        known_count >= threshold_value
+        and (
+            miss_streak >= threshold_value
+            or (prior_miss_streak >= threshold_value and recovery_streak < recovery_value)
+        )
+    )
+    status_text = "pending"
+    if breaker_on and recovery_streak > 0:
+        status_text = "recovering"
+    elif breaker_on:
+        status_text = "paused"
+    elif known_count:
+        status_text = "recovered" if prior_miss_streak >= threshold_value and recovery_streak >= recovery_value else "active"
     recent_hit_rate = hit_count / known_count if known_count else None
     return {
         "strategy_key": "|".join(strategy_key),
-        "status": "paused" if breaker_on else "active" if known_count else "pending",
+        "status": status_text,
         "breaker_on": breaker_on,
         "threshold": threshold_value,
         "window": max(1, int(window)),
+        "recovery_hits_required": recovery_value,
         "known_count": known_count,
         "hit_count": hit_count,
         "miss_count": miss_count,
         "miss_streak": miss_streak,
+        "recovery_streak": recovery_streak,
+        "prior_miss_streak": prior_miss_streak,
         "recent_hit_rate": round(recent_hit_rate, 4) if recent_hit_rate is not None else None,
     }
 
@@ -4695,8 +4724,17 @@ def _high_accuracy_strategy_match(match: AppMatch, prediction: dict, play_catalo
     active_matches = [item for item in matches if item.get("active")]
     primary["strategy_pool"] = matches
     primary["active_matches"] = active_matches
+    shadow_matches = [item for item in matches if item.get("shadow_active")]
+    primary["shadow_matches"] = shadow_matches
     primary["active_count"] = len(active_matches)
-    primary["summary"] = " / ".join(f"{item.get('play_type', '-')} {item.get('pick', '-')}" for item in active_matches[:3]) if active_matches else "未命中"
+    primary["shadow_count"] = len(shadow_matches)
+    primary["summary"] = (
+        " / ".join(f"{item.get('play_type', '-')} {item.get('pick', '-')}" for item in active_matches[:3])
+        if active_matches
+        else f"断路观察 {len(shadow_matches)}"
+        if shadow_matches
+        else "未命中"
+    )
     return primary
 
 
@@ -4740,19 +4778,24 @@ def _high_accuracy_strategy_match_single(
     league = normalize_text(match.league) or "-"
     scope_ok = scope != "league" or scope_value == league
     passed = bool(play_item.get("passed", False))
-    active = bool(scope_ok and passed and confidence >= min_confidence)
+    gate_matched = bool(scope_ok and passed and confidence >= min_confidence)
+    active = gate_matched
     reason = "matched" if active else "below_strategy_gate"
     if not scope_ok:
         reason = "league_scope_mismatch"
     elif not passed:
         reason = "play_threshold_blocked"
     breaker = strategy.get("breaker", {}) if isinstance(strategy.get("breaker"), dict) else {}
-    if bool(breaker.get("breaker_on")):
+    shadow_active = bool(breaker.get("breaker_on") and gate_matched)
+    if shadow_active:
         active = False
-        reason = "strategy_breaker_on"
+        reason = "strategy_breaker_observing"
+    layer = strategy.get("layer", {}) if isinstance(strategy.get("layer"), dict) else {}
     return {
         "enabled": True,
         "active": active,
+        "gate_matched": gate_matched,
+        "shadow_active": shadow_active,
         "reason": reason,
         "play_type": play_type,
         "pick": play_item.get("pick", "-"),
@@ -4766,6 +4809,8 @@ def _high_accuracy_strategy_match_single(
         "wilson_lower": strategy.get("wilson_lower", 0.0),
         "role": strategy.get("effective_role") or strategy.get("role", "primary"),
         "original_role": strategy.get("original_role") or strategy.get("role", "primary"),
+        "layer": layer,
+        "data_layer": layer.get("data_layer", "-"),
         "breaker": breaker,
         "updated_at": updated_at,
     }
@@ -4820,10 +4865,14 @@ def _settle_high_accuracy_strategy_results(
     active_items = high_strategy.get("active_matches", [])
     if not isinstance(active_items, list) or not active_items:
         active_items = [high_strategy] if high_strategy.get("active") else []
+    shadow_items = high_strategy.get("shadow_matches", [])
+    if not isinstance(shadow_items, list):
+        shadow_items = []
     settled_items: list[dict] = []
-    for item in active_items:
+
+    def settle_item(item: dict, *, is_shadow: bool) -> dict | None:
         if not isinstance(item, dict):
-            continue
+            return None
         play_type = normalize_text(item.get("play_type", ""))
         actual = _high_accuracy_strategy_actual_for_play(
             play_type=play_type,
@@ -4835,29 +4884,50 @@ def _settle_high_accuracy_strategy_results(
         )
         is_hit = _high_accuracy_strategy_hit(play_type, item.get("pick"), actual)
         layer = item.get("layer", {}) if isinstance(item.get("layer"), dict) else {}
-        settled_items.append(
-            {
-                "role": item.get("role", "-"),
-                "play_type": play_type,
-                "scope": item.get("scope", "-"),
-                "scope_value": item.get("scope_value", "-"),
-                "data_layer": layer.get("data_layer", "-"),
-                "pick": item.get("pick", "-"),
-                "actual": actual,
-                "confidence": round(_safe_float(item.get("confidence"), default=0.0), 4),
-                "min_confidence": round(_safe_float(item.get("min_confidence"), default=0.0), 2),
-                "backtest_accuracy": item.get("backtest_accuracy", 0.0),
-                "backtest_samples": item.get("backtest_samples", 0),
-                "is_hit": is_hit,
-            }
-        )
-    hit_count = sum(1 for item in settled_items if item.get("is_hit") is True)
-    summary = f"{hit_count}/{len(settled_items)}" if settled_items else "-"
+        breaker = item.get("breaker", {}) if isinstance(item.get("breaker"), dict) else {}
+        data_layer = item.get("data_layer") or layer.get("data_layer", "-")
+        return {
+            "role": item.get("role", "-"),
+            "original_role": item.get("original_role", item.get("role", "-")),
+            "play_type": play_type,
+            "scope": item.get("scope", "-"),
+            "scope_value": item.get("scope_value", "-"),
+            "data_layer": data_layer,
+            "pick": item.get("pick", "-"),
+            "actual": actual,
+            "confidence": round(_safe_float(item.get("confidence"), default=0.0), 4),
+            "min_confidence": round(_safe_float(item.get("min_confidence"), default=0.0), 2),
+            "backtest_accuracy": item.get("backtest_accuracy", 0.0),
+            "backtest_samples": item.get("backtest_samples", 0),
+            "is_hit": is_hit,
+            "is_shadow": bool(is_shadow),
+            "blocked_by_breaker": bool(is_shadow and breaker.get("breaker_on")),
+            "breaker_status": breaker.get("status", "-"),
+        }
+
+    for item in active_items:
+        settled = settle_item(item, is_shadow=False)
+        if settled is not None:
+            settled_items.append(settled)
+    for item in shadow_items:
+        settled = settle_item(item, is_shadow=True)
+        if settled is not None:
+            settled_items.append(settled)
+
+    official_items = [item for item in settled_items if not item.get("is_shadow")]
+    shadow_settled_items = [item for item in settled_items if item.get("is_shadow")]
+    hit_count = sum(1 for item in official_items if item.get("is_hit") is True)
+    shadow_hit_count = sum(1 for item in shadow_settled_items if item.get("is_hit") is True)
+    summary = f"{hit_count}/{len(official_items)}" if official_items else "-"
+    shadow_summary = f"{shadow_hit_count}/{len(shadow_settled_items)}" if shadow_settled_items else "-"
     return {
         "items": settled_items,
-        "active_count": len(settled_items),
+        "active_count": len(official_items),
         "hit_count": hit_count,
+        "shadow_count": len(shadow_settled_items),
+        "shadow_hit_count": shadow_hit_count,
         "summary": summary,
+        "shadow_summary": shadow_summary,
     }
 
 
@@ -7444,6 +7514,9 @@ def settle_match_result(
         "ou_is_correct": ou_is_correct,
         "high_accuracy_strategy_active_count": high_accuracy_strategy_settlement["active_count"],
         "high_accuracy_strategy_hit_count": high_accuracy_strategy_settlement["hit_count"],
+        "high_accuracy_strategy_shadow_count": high_accuracy_strategy_settlement.get("shadow_count", 0),
+        "high_accuracy_strategy_shadow_hit_count": high_accuracy_strategy_settlement.get("shadow_hit_count", 0),
+        "high_accuracy_strategy_shadow_summary": high_accuracy_strategy_settlement.get("shadow_summary", "-"),
         "high_accuracy_strategy_summary": high_accuracy_strategy_settlement["summary"],
         "high_accuracy_strategy_items": high_accuracy_strategy_settlement["items"],
         "opening_odds_home": round(_safe_float(match.opening_odds_home, 0.0), 4),
