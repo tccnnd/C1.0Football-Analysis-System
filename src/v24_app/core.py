@@ -8109,7 +8109,7 @@ def auto_settle_finished_matches(
     history_backfill = backfill_analysis_history_from_prediction_snapshots()
     repair_report = repair_prediction_snapshots_from_analysis_history(lookback_days=max(3, int(lookback_days)))
     migrate_prediction_snapshots()
-    lookback_days = max(0, min(int(lookback_days), 7))
+    lookback_days = max(0, min(int(lookback_days), 14))
     summary = {
         "fetched_finished": 0,
         "already_settled": 0,

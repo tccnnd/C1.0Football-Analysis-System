@@ -4,6 +4,7 @@ import sys
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -14,6 +15,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from v24_app.core import AppMatch, build_result_recovery_snapshot_audit, serialize_match
+from v24_app import core
 
 
 class CoreResultRecoverySnapshotAuditTests(unittest.TestCase):
@@ -75,6 +77,17 @@ class CoreResultRecoverySnapshotAuditTests(unittest.TestCase):
         self.assertEqual(statuses["recoverable"], "recoverable_titan")
         self.assertEqual(statuses["missing_source"], "missing_source_id")
         self.assertEqual(statuses["non_titan"], "non_titan_source")
+
+    def test_auto_settle_accepts_fourteen_day_lookback(self) -> None:
+        with (
+            patch("v24_app.core.backfill_analysis_history_from_prediction_snapshots", return_value={}),
+            patch("v24_app.core.repair_prediction_snapshots_from_analysis_history", return_value={"restored": 0}),
+            patch("v24_app.core.migrate_prediction_snapshots", return_value={}),
+            patch("v24_app.core.MatchFetcherTitan", None),
+        ):
+            result = core.auto_settle_finished_matches(lookback_days=14)
+
+        self.assertEqual(result["lookback_days"], 14)
 
 
 if __name__ == "__main__":
