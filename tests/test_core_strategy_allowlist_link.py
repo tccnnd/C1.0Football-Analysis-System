@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -122,6 +123,56 @@ class CoreStrategyAllowlistLinkTests(unittest.TestCase):
         self.assertEqual(fields["strategy_allowlist_status"], "settled")
         self.assertEqual(fields["strategy_allowlist_decision"], "allow")
         self.assertEqual(fields["strategy_allowlist_file"], "strategy_allowlist_20260509_173045.md")
+
+    def test_strategy_admission_gate_respects_manual_policy(self) -> None:
+        with patch(
+            "v24_app.core._current_strategy_admission_policy",
+            return_value={
+                "min_confidence": 0.58,
+                "block_confidence": 0.40,
+                "active_strategy_min": 2,
+                "medium_risk_allowed": False,
+                "high_risk_allowed": False,
+            },
+        ):
+            admission = core._strategy_admission_gate(
+                risk_level="MEDIUM",
+                confidence=0.62,
+                high_strategy={
+                    "enabled": True,
+                    "active_matches": [{"play_type": "market_1x2", "pick": "HOME", "confidence": 0.72}],
+                    "active_count": 1,
+                },
+                play_strategy={"single": [{"play_type": "1x2"}]},
+            )
+
+        self.assertEqual(admission["decision"], "observe")
+        self.assertIn("high_accuracy_strategy_count_below_policy", admission["reasons"])
+        self.assertIn("risk_medium_policy_watch", admission["reasons"])
+        self.assertEqual(admission["active_strategy_min"], 2)
+        self.assertFalse(admission["medium_risk_allowed"])
+
+    def test_apply_strategy_admission_policy_update_writes_local_policy(self) -> None:
+        cache_backup = dict(core._STRATEGY_ADMISSION_POLICY_CACHE)
+        with tempfile.TemporaryDirectory() as tmp:
+            policy_path = Path(tmp) / "strategy_admission_policy_v1.json"
+            try:
+                core._STRATEGY_ADMISSION_POLICY_CACHE.update({"mtime": object(), "policy": {}, "report": {}})
+                with patch("v24_app.core.STRATEGY_ADMISSION_POLICY_FILE", policy_path):
+                    status = core.apply_strategy_admission_policy_update(
+                        {"min_confidence": 0.59, "active_strategy_min": 2, "medium_risk_allowed": False},
+                        source="unit_test",
+                    )
+
+                    self.assertTrue(policy_path.exists())
+                    policy = status["policy"]
+                    self.assertEqual(policy["min_confidence"], 0.59)
+                    self.assertEqual(policy["active_strategy_min"], 2)
+                    self.assertFalse(policy["medium_risk_allowed"])
+                    self.assertEqual(status["reason"], "unit_test")
+            finally:
+                core._STRATEGY_ADMISSION_POLICY_CACHE.clear()
+                core._STRATEGY_ADMISSION_POLICY_CACHE.update(cache_backup)
 
 
 if __name__ == "__main__":

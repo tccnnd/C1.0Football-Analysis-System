@@ -14,10 +14,12 @@ from tkinter import messagebox
 
 from .core import (
     AppMatch,
+    apply_strategy_admission_policy_update,
     auto_settle_finished_matches,
     fetch_matches_v24,
     get_high_accuracy_strategy_status,
     get_recent_settlements,
+    get_strategy_admission_policy_status,
     mark_strategy_allowlist_snapshots,
     persist_prediction_snapshot,
     predict_match,
@@ -2042,8 +2044,41 @@ class SmartMatchDashboard:
         messagebox.showinfo("\u5bfc\u51fa\u653e\u884c\u6e05\u5355", f"\u5df2\u751f\u6210\u653e\u884c\u6e05\u5355:\n{path}\n\n\u5df2\u63a5\u5165\u590d\u76d8\u56de\u6536: {marked} \u573a")
         return path
 
+    def apply_strategy_allowlist_tuning(self, tuning: dict | object) -> None:
+        if not isinstance(tuning, dict):
+            messagebox.showinfo("\u653e\u884c\u95e8\u69db", "\u5f53\u524d\u6ca1\u6709\u53ef\u5e94\u7528\u7684\u95e8\u69db\u5efa\u8bae\u3002")
+            return
+        if str(tuning.get("action") or "") != "tighten":
+            messagebox.showinfo("\u653e\u884c\u95e8\u69db", f"\u5f53\u524d\u5efa\u8bae\u4e3a: {tuning.get('label', '-')}\n\u4e0d\u9700\u8981\u5199\u5165\u65b0\u95e8\u69db\u3002")
+            return
+        update = tuning.get("policy_update") if isinstance(tuning.get("policy_update"), dict) else {}
+        if not update:
+            messagebox.showinfo("\u653e\u884c\u95e8\u69db", "\u5efa\u8bae\u4e2d\u6ca1\u6709\u53ef\u5199\u5165\u7684\u95e8\u69db\u53c2\u6570\u3002")
+            return
+        current = get_strategy_admission_policy_status().get("policy", {})
+        reason_text = "\n".join(str(item) for item in tuning.get("reasons", []) if item) if isinstance(tuning.get("reasons"), list) else "-"
+        confirm = messagebox.askyesno(
+            "\u5e94\u7528\u653e\u884c\u95e8\u69db",
+            (
+                f"\u5c06\u5199\u5165\u672c\u5730\u51c6\u5165\u7b56\u7565:\n\n"
+                f"\u6700\u4f4e\u7f6e\u4fe1: {float(current.get('min_confidence', 0.5) or 0.5):.2f} -> {float(update.get('min_confidence', 0.5) or 0.5):.2f}\n"
+                f"\u9ad8\u51c6\u7b56\u7565\u6570: {int(current.get('active_strategy_min', 1) or 1)} -> {int(update.get('active_strategy_min', 1) or 1)}\n"
+                f"\u4e2d\u98ce\u9669\u653e\u884c: {'ON' if current.get('medium_risk_allowed', True) else 'OFF'} -> {'ON' if update.get('medium_risk_allowed', True) else 'OFF'}\n\n"
+                f"\u539f\u56e0:\n{reason_text}\n\n\u786e\u8ba4\u540e\uff0c\u540e\u7eed\u5206\u6790\u4f1a\u6309\u65b0\u95e8\u69db\u5224\u5b9a\u6b63\u5f0f\u653e\u884c\u3002"
+            ),
+        )
+        if not confirm:
+            return
+        status = apply_strategy_admission_policy_update(update, source="strategy_allowlist_tuning")
+        policy = status.get("policy", {}) if isinstance(status.get("policy"), dict) else {}
+        self.status_var.set(f"\u653e\u884c\u95e8\u69db\u5df2\u5e94\u7528: min={float(policy.get('min_confidence', 0) or 0):.2f}, high_strategy={int(policy.get('active_strategy_min', 1) or 1)}")
+        messagebox.showinfo("\u653e\u884c\u95e8\u69db", "\u95e8\u69db\u5df2\u5199\u5165\u672c\u5730\u914d\u7f6e\uff0c\u540e\u7eed\u5206\u6790\u5c06\u6309\u65b0\u51c6\u5165\u7b56\u7565\u6267\u884c\u3002")
+        self.open_strategy_library()
+
     def open_strategy_library(self) -> None:
         status = get_high_accuracy_strategy_status()
+        admission_status = get_strategy_admission_policy_status()
+        admission_policy = admission_status.get("policy", {}) if isinstance(admission_status.get("policy"), dict) else {}
         settlements = list(reversed(get_recent_settlements(limit=200)))
         dashboard = build_high_accuracy_strategy_dashboard(status, settlements)
         shell = self._page_shell(
@@ -2055,11 +2090,29 @@ class SmartMatchDashboard:
         header.pack(fill=tk.X, pady=(0, 12))
         tk.Label(
             header,
-            text=f"\u72b6\u6001: {'ON' if dashboard.get('enabled') else 'OFF'} | \u66f4\u65b0: {dashboard.get('updated_at', '-')}",
+            text=(
+                f"\u72b6\u6001: {'ON' if dashboard.get('enabled') else 'OFF'} | \u66f4\u65b0: {dashboard.get('updated_at', '-')} | "
+                f"\u51c6\u5165 min={float(admission_policy.get('min_confidence', 0.5) or 0.5):.2f} / "
+                f"\u9ad8\u51c6\u6570 {int(admission_policy.get('active_strategy_min', 1) or 1)} / "
+                f"\u4e2d\u98ce\u9669 {'ON' if admission_policy.get('medium_risk_allowed', True) else 'OFF'}"
+            ),
             bg=BG,
             fg=MUTED,
             font=("Microsoft YaHei UI", 10),
         ).pack(side=tk.LEFT)
+        tk.Button(
+            header,
+            text="\u5e94\u7528\u95e8\u69db\u5efa\u8bae",
+            command=lambda tuning=dashboard.get("allowlist_tuning", {}): self.apply_strategy_allowlist_tuning(tuning),
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=18,
+            pady=7,
+        ).pack(side=tk.RIGHT, padx=(10, 0))
         tk.Button(
             header,
             text="\u5bfc\u51fa\u653e\u884c\u6e05\u5355",

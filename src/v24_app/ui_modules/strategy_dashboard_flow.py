@@ -373,6 +373,7 @@ def build_strategy_allowlist_tuning_recommendation(
     reasons: list[str] = []
     next_min_confidence = _safe_float(base_min_confidence)
     next_active_strategy_min = max(1, _safe_int(base_active_strategy_min, 1))
+    medium_risk_allowed = True
     risk_policy = "\u5141\u8bb8\u4f4e/\u4e2d\u98ce\u9669\uff0c\u9ad8\u98ce\u9669\u7ee7\u7eed\u963b\u65ad"
     action = "collect"
     label = "\u7ee7\u7eed\u79ef\u7d2f\u6837\u672c"
@@ -394,6 +395,7 @@ def build_strategy_allowlist_tuning_recommendation(
         if high_conf_misses >= max(2, known_count // 4):
             reasons.append(f"\u9ad8\u7f6e\u4fe1\u5931\u8bef {high_conf_misses} \u573a\uff0c\u8bf4\u660e\u5f53\u524d\u7f6e\u4fe1\u8fc7\u6ee4\u504f\u677e\u3002")
             next_min_confidence += 0.03
+            medium_risk_allowed = False
             risk_policy = "\u4ec5\u5141\u8bb8\u4f4e\u98ce\u9669\uff0c\u4e2d\u98ce\u9669\u964d\u4e3a\u89c2\u5bdf"
         if high_strategy_value is not None and high_strategy_value < 0.60:
             reasons.append(f"\u9ad8\u51c6\u7b56\u7565\u547d\u4e2d {summary.get('high_strategy_summary')}\uff0c\u5efa\u8bae\u589e\u52a0\u6b63\u5f0f\u7b56\u7565\u6570\u8981\u6c42\u3002")
@@ -428,7 +430,14 @@ def build_strategy_allowlist_tuning_recommendation(
         "known_count": known_count,
         "next_min_confidence": next_min_confidence,
         "next_active_strategy_min": next_active_strategy_min,
+        "medium_risk_allowed": medium_risk_allowed,
         "risk_policy": risk_policy,
+        "policy_update": {
+            "min_confidence": next_min_confidence,
+            "active_strategy_min": next_active_strategy_min,
+            "medium_risk_allowed": medium_risk_allowed,
+            "high_risk_allowed": False,
+        },
         "reasons": reasons,
         "rows": rows,
         "summary": summary,

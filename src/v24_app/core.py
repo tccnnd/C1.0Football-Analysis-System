@@ -50,11 +50,19 @@ PLAY_THRESHOLDS_FILE = PROJECT_DIR / "data" / "models" / "play_thresholds_v1.jso
 PLAY_MODEL_POLICY_FILE = PROJECT_DIR / "data" / "models" / "play_model_policy_v1.json"
 BAYES_CALIBRATION_FILE = PROJECT_DIR / "data" / "models" / "bayes_calibration_v1.json"
 HIGH_ACCURACY_STRATEGY_FILE = PROJECT_DIR / "data" / "models" / "high_accuracy_strategy_v1.json"
+STRATEGY_ADMISSION_POLICY_FILE = PROJECT_DIR / "data" / "models" / "strategy_admission_policy_v1.json"
 HIGH_ACCURACY_STRATEGY_BREAKER_THRESHOLD = 3
 HIGH_ACCURACY_STRATEGY_BREAKER_WINDOW = 30
 HIGH_ACCURACY_STRATEGY_RECOVERY_HITS = 2
 STRATEGY_ADMISSION_MIN_CONFIDENCE = 0.50
 STRATEGY_ADMISSION_BLOCK_CONFIDENCE = 0.40
+DEFAULT_STRATEGY_ADMISSION_POLICY = {
+    "min_confidence": STRATEGY_ADMISSION_MIN_CONFIDENCE,
+    "block_confidence": STRATEGY_ADMISSION_BLOCK_CONFIDENCE,
+    "active_strategy_min": 1,
+    "medium_risk_allowed": True,
+    "high_risk_allowed": False,
+}
 
 
 LEAGUE_STRENGTH = {
@@ -166,6 +174,11 @@ _PLAY_MODEL_POLICY_CACHE: dict[str, object] = {
 _BAYES_CALIBRATION_CACHE: dict[str, object] = {
     "mtime": None,
     "config": dict(DEFAULT_BAYES_CALIBRATION),
+    "report": {},
+}
+_STRATEGY_ADMISSION_POLICY_CACHE: dict[str, object] = {
+    "mtime": None,
+    "policy": dict(DEFAULT_STRATEGY_ADMISSION_POLICY),
     "report": {},
 }
 _CONFIDENCE_CALIBRATION_CACHE: dict[str, object] = {
@@ -4311,6 +4324,103 @@ def _save_high_accuracy_strategy_report(report: dict) -> None:
     HIGH_ACCURACY_STRATEGY_FILE.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _strategy_admission_policy_mtime() -> float | None:
+    try:
+        return STRATEGY_ADMISSION_POLICY_FILE.stat().st_mtime
+    except OSError:
+        return None
+
+
+def _normalize_strategy_admission_policy(policy: dict | None) -> dict:
+    resolved = dict(DEFAULT_STRATEGY_ADMISSION_POLICY)
+    if isinstance(policy, dict):
+        resolved.update(policy)
+    resolved["min_confidence"] = round(
+        _clamp(_safe_float(resolved.get("min_confidence"), STRATEGY_ADMISSION_MIN_CONFIDENCE), 0.45, 0.78),
+        2,
+    )
+    resolved["block_confidence"] = round(
+        _clamp(
+            _safe_float(resolved.get("block_confidence"), STRATEGY_ADMISSION_BLOCK_CONFIDENCE),
+            0.25,
+            min(0.65, resolved["min_confidence"]),
+        ),
+        2,
+    )
+    resolved["active_strategy_min"] = max(1, min(3, int(_safe_int(resolved.get("active_strategy_min"), 1) or 1)))
+    resolved["medium_risk_allowed"] = bool(resolved.get("medium_risk_allowed", True))
+    resolved["high_risk_allowed"] = bool(resolved.get("high_risk_allowed", False))
+    return resolved
+
+
+def _load_strategy_admission_policy_report() -> dict:
+    mtime = _strategy_admission_policy_mtime()
+    if _STRATEGY_ADMISSION_POLICY_CACHE.get("mtime") == mtime:
+        cached = _STRATEGY_ADMISSION_POLICY_CACHE.get("report")
+        if isinstance(cached, dict):
+            return dict(cached)
+    if not STRATEGY_ADMISSION_POLICY_FILE.exists():
+        report = {
+            "mode": "default",
+            "updated_at": "-",
+            "policy": dict(DEFAULT_STRATEGY_ADMISSION_POLICY),
+            "reason": "default_policy",
+        }
+    else:
+        try:
+            report = json.loads(STRATEGY_ADMISSION_POLICY_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            report = {
+                "mode": "default",
+                "updated_at": "-",
+                "policy": dict(DEFAULT_STRATEGY_ADMISSION_POLICY),
+                "reason": "read_failed",
+            }
+    if not isinstance(report, dict):
+        report = {"mode": "default", "updated_at": "-", "policy": dict(DEFAULT_STRATEGY_ADMISSION_POLICY)}
+    report["policy"] = _normalize_strategy_admission_policy(report.get("policy") if isinstance(report.get("policy"), dict) else {})
+    _STRATEGY_ADMISSION_POLICY_CACHE["mtime"] = mtime
+    _STRATEGY_ADMISSION_POLICY_CACHE["policy"] = dict(report["policy"])
+    _STRATEGY_ADMISSION_POLICY_CACHE["report"] = dict(report)
+    return report
+
+
+def get_strategy_admission_policy_status() -> dict:
+    report = _load_strategy_admission_policy_report()
+    return {
+        "mode": report.get("mode", "default"),
+        "updated_at": report.get("updated_at", "-"),
+        "reason": report.get("reason", "-"),
+        "policy": _normalize_strategy_admission_policy(report.get("policy") if isinstance(report.get("policy"), dict) else {}),
+        "source": str(STRATEGY_ADMISSION_POLICY_FILE),
+    }
+
+
+def _current_strategy_admission_policy() -> dict:
+    return get_strategy_admission_policy_status().get("policy", dict(DEFAULT_STRATEGY_ADMISSION_POLICY))
+
+
+def apply_strategy_admission_policy_update(update: dict, *, source: str = "manual") -> dict:
+    current = get_strategy_admission_policy_status()
+    policy = dict(current.get("policy") if isinstance(current.get("policy"), dict) else DEFAULT_STRATEGY_ADMISSION_POLICY)
+    if isinstance(update, dict):
+        policy.update(update)
+    normalized = _normalize_strategy_admission_policy(policy)
+    report = {
+        "mode": "manual",
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "reason": str(source or "manual"),
+        "policy": normalized,
+        "previous_policy": current.get("policy", {}),
+    }
+    STRATEGY_ADMISSION_POLICY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    STRATEGY_ADMISSION_POLICY_FILE.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    _STRATEGY_ADMISSION_POLICY_CACHE["mtime"] = _strategy_admission_policy_mtime()
+    _STRATEGY_ADMISSION_POLICY_CACHE["policy"] = dict(normalized)
+    _STRATEGY_ADMISSION_POLICY_CACHE["report"] = dict(report)
+    return get_strategy_admission_policy_status()
+
+
 def _high_accuracy_strategy_identity(item: dict) -> tuple[str, str, str, str, str]:
     layer = item.get("layer", {}) if isinstance(item.get("layer"), dict) else {}
     data_layer = normalize_text(item.get("data_layer") or layer.get("data_layer") or "-")
@@ -4958,12 +5068,25 @@ def _strategy_admission_gate(
     risk_bucket = _risk_bucket_from_label(risk_level)
     confidence_value = _safe_float(confidence, default=0.0)
     single_count = len(play.get("single", [])) if isinstance(play.get("single"), list) else 0
+    admission_policy = _current_strategy_admission_policy()
+    min_confidence = _safe_float(admission_policy.get("min_confidence"), STRATEGY_ADMISSION_MIN_CONFIDENCE)
+    block_confidence = _safe_float(admission_policy.get("block_confidence"), STRATEGY_ADMISSION_BLOCK_CONFIDENCE)
+    active_strategy_min = max(1, int(_safe_int(admission_policy.get("active_strategy_min"), 1) or 1))
+    medium_risk_allowed = bool(admission_policy.get("medium_risk_allowed", True))
+    high_risk_allowed = bool(admission_policy.get("high_risk_allowed", False))
+    risk_allowed = (
+        risk_bucket == "low"
+        or (risk_bucket == "medium" and medium_risk_allowed)
+        or (risk_bucket == "high" and high_risk_allowed)
+    )
     reasons: list[str] = []
 
     if not bool(high.get("enabled")):
         reasons.append("strategy_not_calibrated")
-    if active_count > 0:
+    if active_count >= active_strategy_min:
         reasons.append("high_accuracy_strategy_active")
+    elif active_count > 0:
+        reasons.append("high_accuracy_strategy_count_below_policy")
     else:
         reasons.append("no_official_high_accuracy_strategy")
     if shadow_count > 0:
@@ -4972,22 +5095,24 @@ def _strategy_admission_gate(
         reasons.append("risk_high")
     elif risk_bucket == "medium":
         reasons.append("risk_medium")
+        if not medium_risk_allowed:
+            reasons.append("risk_medium_policy_watch")
     else:
         reasons.append("risk_low")
-    if confidence_value < STRATEGY_ADMISSION_BLOCK_CONFIDENCE:
+    if confidence_value < block_confidence:
         reasons.append("confidence_block")
-    elif confidence_value < STRATEGY_ADMISSION_MIN_CONFIDENCE:
+    elif confidence_value < min_confidence:
         reasons.append("confidence_watch")
     if single_count <= 0:
         reasons.append("no_single_play_passed")
 
-    if active_count > 0 and risk_bucket != "high" and confidence_value >= STRATEGY_ADMISSION_MIN_CONFIDENCE:
+    if active_count >= active_strategy_min and risk_allowed and confidence_value >= min_confidence:
         decision = "allow"
         label = "正式放行"
         action = "FORMAL_ALLOW"
     elif (
-        (risk_bucket == "high" and active_count <= 0 and shadow_count <= 0)
-        or (confidence_value < STRATEGY_ADMISSION_BLOCK_CONFIDENCE and active_count <= 0)
+        (risk_bucket == "high" and not high_risk_allowed and active_count < active_strategy_min and shadow_count <= 0)
+        or (confidence_value < block_confidence and active_count < active_strategy_min)
     ):
         decision = "block"
         label = "阻断"
@@ -5010,8 +5135,11 @@ def _strategy_admission_gate(
         "blocked": decision == "block",
         "risk_bucket": risk_bucket,
         "confidence": round(confidence_value, 4),
-        "min_confidence": STRATEGY_ADMISSION_MIN_CONFIDENCE,
-        "block_confidence": STRATEGY_ADMISSION_BLOCK_CONFIDENCE,
+        "min_confidence": min_confidence,
+        "block_confidence": block_confidence,
+        "active_strategy_min": active_strategy_min,
+        "medium_risk_allowed": medium_risk_allowed,
+        "high_risk_allowed": high_risk_allowed,
         "active_count": active_count,
         "shadow_count": shadow_count,
         "single_play_count": single_count,

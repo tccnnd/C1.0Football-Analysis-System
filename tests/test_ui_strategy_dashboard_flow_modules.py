@@ -381,6 +381,8 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertEqual(recommendation["action"], "tighten")
         self.assertGreater(recommendation["next_min_confidence"], 0.5)
         self.assertEqual(recommendation["next_active_strategy_min"], 2)
+        self.assertFalse(recommendation["medium_risk_allowed"])
+        self.assertEqual(recommendation["policy_update"]["active_strategy_min"], 2)
         self.assertIn("\u4ec5\u5141\u8bb8\u4f4e\u98ce\u9669", recommendation["risk_policy"])
         self.assertTrue(recommendation["reasons"])
 
