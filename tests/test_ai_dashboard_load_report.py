@@ -132,6 +132,7 @@ class AIDashboardLoadReportTests(unittest.TestCase):
             cache_match_count=2,
             cache_age_days=2,
             force_live=True,
+            cache_only=True,
         )
 
         self.assertEqual(_cache_status_summary(report), "已回退 2026-05-08 / 2 场")
@@ -139,6 +140,7 @@ class AIDashboardLoadReportTests(unittest.TestCase):
         rows = dict(_cache_status_rows(report))
         self.assertEqual(rows["缓存日期"], "2026-05-08")
         self.assertEqual(rows["本次强制在线"], "是")
+        self.assertEqual(rows["本次读取缓存"], "是")
 
     def test_build_match_load_report_marks_all_prediction_failures_failed(self) -> None:
         report = _build_match_load_report(

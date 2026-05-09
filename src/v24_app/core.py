@@ -864,7 +864,7 @@ def _persist_market_snapshots_with_diagnostics(matches: list[AppMatch], diagnost
         diagnostics.add(f"赛前市场快照已落盘: {saved} 条索引。")
 
 
-def fetch_matches_v24(strict_today: bool = True, force_live: bool = False) -> FetchResult:
+def fetch_matches_v24(strict_today: bool = True, force_live: bool = False, cache_only: bool = False) -> FetchResult:
     diagnostics = FetchDiagnostics(
         source="none",
         fetched_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -914,6 +914,14 @@ def fetch_matches_v24(strict_today: bool = True, force_live: bool = False) -> Fe
             f"{reason}，已回退到{cache_label}({cache_date_text})，共 {len(fallback_cache_matches)} 场。"
         )
         return FetchResult(matches=fallback_cache_matches, diagnostics=diagnostics)
+
+    if cache_only:
+        diagnostics.add("手动读取回退缓存: 本次不访问在线源。")
+        fallback_result = try_cache_fallback("手动读取回退缓存")
+        if fallback_result is not None:
+            return fallback_result
+        diagnostics.add("没有可用回退缓存，无法完成缓存读取。")
+        return FetchResult(matches=[], diagnostics=diagnostics)
 
     if payload and payload.get("matches"):
         if force_live:

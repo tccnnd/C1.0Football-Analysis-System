@@ -61,6 +61,7 @@ class CoreFetchSourceReportsTests(unittest.TestCase):
             patch("v24_app.core.enrich_matches_from_market_snapshot_store", return_value=0),
             patch("v24_app.core._enrich_matches_with_market_intent", return_value=None),
             patch("v24_app.core._persist_market_snapshots_with_diagnostics", return_value=None),
+            patch("v24_app.core.save_matches_cache", return_value=1),
         ):
             result = core.fetch_matches_v24(strict_today=True)
 
@@ -84,6 +85,7 @@ class CoreFetchSourceReportsTests(unittest.TestCase):
             patch("v24_app.core.enrich_matches_from_market_snapshot_store", return_value=0),
             patch("v24_app.core._enrich_matches_with_market_intent", return_value=None),
             patch("v24_app.core._persist_market_snapshots_with_diagnostics", return_value=None),
+            patch("v24_app.core.save_matches_cache", return_value=1),
         ):
             result = core.fetch_matches_v24(strict_today=True, force_live=True)
 
@@ -131,6 +133,40 @@ class CoreFetchSourceReportsTests(unittest.TestCase):
         reports = {str(item.get("source")): item for item in result.diagnostics.source_reports}
         self.assertEqual(reports["titan"]["status"], "empty")
         self.assertEqual(reports["500"]["status"], "empty")
+
+    def test_cache_only_uses_fallback_cache_without_online_fetchers(self) -> None:
+        cached_match = self._match("Cached FC", source="cache")
+        payload = {"date": "2026-05-10", "matches": [asdict(cached_match)]}
+
+        with (
+            patch("v24_app.core.load_cached_payload", return_value=(payload, self._cache_diagnostics(fresh=True))),
+            patch("v24_app.core.MatchFetcherTitan") as titan_mock,
+            patch("v24_app.core.MatchFetcher500") as fetcher_500_mock,
+            patch("v24_app.core.enrich_matches_from_market_snapshot_store", return_value=0),
+            patch("v24_app.core._enrich_matches_with_market_intent", return_value=None),
+            patch("v24_app.core._persist_market_snapshots_with_diagnostics", return_value=None),
+        ):
+            result = core.fetch_matches_v24(strict_today=True, cache_only=True)
+
+        self.assertEqual(result.diagnostics.source, "cache")
+        self.assertEqual(result.matches[0].home_team, "Cached FC")
+        self.assertFalse(titan_mock.called)
+        self.assertFalse(fetcher_500_mock.called)
+        self.assertTrue(any("手动读取回退缓存" in item for item in result.diagnostics.messages))
+
+    def test_cache_only_without_usable_cache_returns_empty_result(self) -> None:
+        with (
+            patch("v24_app.core.load_cached_payload", return_value=(None, FetchDiagnostics(source="cache"))),
+            patch("v24_app.core.MatchFetcherTitan") as titan_mock,
+            patch("v24_app.core.MatchFetcher500") as fetcher_500_mock,
+        ):
+            result = core.fetch_matches_v24(strict_today=True, cache_only=True)
+
+        self.assertEqual(result.matches, [])
+        self.assertEqual(result.diagnostics.source, "none")
+        self.assertFalse(titan_mock.called)
+        self.assertFalse(fetcher_500_mock.called)
+        self.assertTrue(any("没有可用回退缓存" in item for item in result.diagnostics.messages))
 
     def test_live_success_writes_today_fallback_cache(self) -> None:
         live_match = self._match("Live FC", source="live:titan")

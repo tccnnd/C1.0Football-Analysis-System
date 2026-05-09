@@ -96,6 +96,7 @@ def _build_match_load_report(
     cache_match_count: int = 0,
     cache_age_days: int | None = None,
     force_live: bool = False,
+    cache_only: bool = False,
 ) -> dict[str, object]:
     predict_failures = sum(1 for item in failures if item.get("stage") == "predict")
     snapshot_failures = sum(1 for item in failures if item.get("stage") == "snapshot")
@@ -118,6 +119,7 @@ def _build_match_load_report(
         "cache_match_count": max(0, int(cache_match_count or 0)),
         "cache_age_days": cache_age_days,
         "force_live": bool(force_live),
+        "cache_only": bool(cache_only),
     }
 
 
@@ -233,6 +235,7 @@ def _cache_status_rows(load_report: dict[str, object] | None) -> list[tuple[str,
         ("\u7f13\u5b58\u573a\u6b21", str(int(load_report.get("cache_match_count", 0) or 0))),
         ("\u7f13\u5b58\u5e74\u9f84", age_text),
         ("\u672c\u6b21\u5f3a\u5236\u5728\u7ebf", "\u662f" if load_report.get("force_live") else "\u5426"),
+        ("\u672c\u6b21\u8bfb\u53d6\u7f13\u5b58", "\u662f" if load_report.get("cache_only") else "\u5426"),
     ]
 
 
@@ -1193,14 +1196,17 @@ class SmartMatchDashboard:
         canvas.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 14))
         return canvas
 
-    def refresh(self, force_live: bool = False) -> None:
-        if force_live:
+    def refresh(self, force_live: bool = False, cache_only: bool = False) -> None:
+        if cache_only:
+            self._log_event("INFO", "\u624b\u52a8\u8bfb\u53d6\u56de\u9000\u7f13\u5b58")
+            self.status_var.set("\u6b63\u5728\u8bfb\u53d6\u56de\u9000\u7f13\u5b58...")
+        elif force_live:
             self._log_event("INFO", "\u624b\u52a8\u91cd\u8bd5\u5728\u7ebf\u6570\u636e\u6e90")
             self.status_var.set("\u6b63\u5728\u8df3\u8fc7\u7f13\u5b58\u5e76\u91cd\u8bd5\u5728\u7ebf\u6e90...")
         else:
             self._log_event("INFO", "\u5f00\u59cb\u5237\u65b0\u8d5b\u4e8b\u6570\u636e")
             self.status_var.set("正在聚合赛事数据并执行 AI 分析...")
-        threading.Thread(target=self._load_worker, args=(force_live,), daemon=True).start()
+        threading.Thread(target=self._load_worker, args=(force_live, cache_only), daemon=True).start()
 
     def _schedule_auto_refresh(self) -> None:
         if self._auto_refresh_after_id is not None:
@@ -1241,10 +1247,10 @@ class SmartMatchDashboard:
             self.status_var.set("\u81ea\u52a8\u5237\u65b0\u5df2\u5173\u95ed")
             self._log_event("INFO", "\u81ea\u52a8\u5237\u65b0\u5173\u95ed")
 
-    def _load_worker(self, force_live: bool = False) -> None:
+    def _load_worker(self, force_live: bool = False, cache_only: bool = False) -> None:
         started = time.perf_counter()
         try:
-            fetched = fetch_matches_v24(strict_today=True, force_live=force_live)
+            fetched = fetch_matches_v24(strict_today=True, force_live=force_live, cache_only=cache_only)
         except Exception as exc:
             elapsed = time.perf_counter() - started
             self.last_refresh_seconds = elapsed
@@ -1267,6 +1273,7 @@ class SmartMatchDashboard:
             cache_match_count=fetched.diagnostics.cache_match_count,
             cache_age_days=fetched.diagnostics.cache_age_days,
             force_live=force_live,
+            cache_only=cache_only,
         )
         self.root.after(
             0,
@@ -1717,6 +1724,19 @@ class SmartMatchDashboard:
             padx=18,
             pady=7,
         ).pack(anchor=tk.E, pady=(8, 0))
+        tk.Button(
+            shell,
+            text="\u8bfb\u53d6\u7f13\u5b58\u6c60",
+            command=lambda: self.refresh(cache_only=True),
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=18,
+            pady=7,
+        ).pack(anchor=tk.E, pady=(8, 0))
 
     def _dominant_model_name(self) -> str:
         for row in self.rows:
@@ -1840,6 +1860,19 @@ class SmartMatchDashboard:
             header,
             text="\u91cd\u8bd5\u5728\u7ebf\u6e90",
             command=lambda: self.refresh(force_live=True),
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=18,
+            pady=7,
+        ).pack(side=tk.RIGHT, padx=(0, 10))
+        tk.Button(
+            header,
+            text="\u8bfb\u53d6\u7f13\u5b58\u6c60",
+            command=lambda: self.refresh(cache_only=True),
             bg=PANEL_2,
             fg=TEXT,
             activebackground="#172638",
