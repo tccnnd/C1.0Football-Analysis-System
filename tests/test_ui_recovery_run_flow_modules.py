@@ -83,6 +83,8 @@ class UIRecoveryRunFlowModuleTests(unittest.TestCase):
 
         self.assertEqual(adjustment["action"], "tighten")
         self.assertEqual(adjustment["priority"], "high")
+        self.assertEqual(adjustment["policy_update"]["active_strategy_min"], 2)
+        self.assertFalse(adjustment["policy_update"]["medium_risk_allowed"])
         self.assertTrue(any("1X2" in item for item in adjustment["reasons"]))
 
     def test_summary_tracks_recent_success_and_elapsed(self) -> None:

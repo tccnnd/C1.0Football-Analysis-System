@@ -83,7 +83,13 @@ def _hit_stats(items: Sequence[Mapping[str, object]], field: str) -> dict[str, o
     }
 
 
-def build_result_recovery_strategy_adjustment(review_summary: Mapping[str, object] | object) -> dict[str, object]:
+def build_result_recovery_strategy_adjustment(
+    review_summary: Mapping[str, object] | object,
+    *,
+    base_min_confidence: float = 0.50,
+    base_active_strategy_min: int = 1,
+    base_medium_risk_allowed: bool = True,
+) -> dict[str, object]:
     summary = _as_mapping(review_summary)
     settlement_count = _safe_int(summary.get("settlement_count"), 0)
     plays = _as_mapping(summary.get("plays"))
@@ -93,6 +99,9 @@ def build_result_recovery_strategy_adjustment(review_summary: Mapping[str, objec
     label = "\u7ee7\u7eed\u79ef\u7d2f\u6837\u672c"
     tone = "neutral"
     priority = "low"
+    next_min_confidence = round(max(0.45, min(0.78, _safe_float(base_min_confidence, 0.50))), 2)
+    next_active_strategy_min = max(1, _safe_int(base_active_strategy_min, 1))
+    medium_risk_allowed = bool(base_medium_risk_allowed)
 
     if settlement_count < 3:
         reasons.append(f"\u672c\u8f6e\u53ea\u6709 {settlement_count} \u573a\u65b0\u7ed3\u7b97\uff0c\u6837\u672c\u4e0d\u8db3\uff0c\u6682\u4e0d\u5efa\u8bae\u8c03\u95e8\u69db\u3002")
@@ -105,18 +114,22 @@ def build_result_recovery_strategy_adjustment(review_summary: Mapping[str, objec
 
         if one_x_two.get("rate") is not None and _safe_float(one_x_two.get("rate"), 0.0) < 0.55:
             reasons.append(f"1X2 \u547d\u4e2d {one_x_two.get('text', '-')}\uff0c\u4f4e\u4e8e 55% \u89c2\u5bdf\u7ebf\uff0c\u5efa\u8bae\u63d0\u9ad8\u653e\u884c\u7f6e\u4fe1\u95e8\u69db\u3002")
+            next_min_confidence += 0.05
         if handicap.get("rate") is not None and _safe_float(handicap.get("rate"), 0.0) < 0.50:
             reasons.append(f"\u8ba9\u7403\u547d\u4e2d {handicap.get('text', '-')}\uff0c\u5efa\u8bae\u964d\u4f4e\u8ba9\u7403\u73a9\u6cd5\u6743\u91cd\u3002")
         if ou.get("rate") is not None and _safe_float(ou.get("rate"), 0.0) < 0.50:
             reasons.append(f"\u5927\u5c0f\u7403\u547d\u4e2d {ou.get('text', '-')}\uff0c\u5efa\u8bae\u964d\u4f4e\u5927\u5c0f\u7403\u73a9\u6cd5\u6743\u91cd\u3002")
         if high_rate_value is not None and high_rate_value >= 0 and high_rate_value < 0.60:
             reasons.append(f"\u9ad8\u51c6\u7b56\u7565\u547d\u4e2d {high_strategy.get('text', '-')}\uff0c\u5efa\u8bae\u63d0\u9ad8\u6b63\u5f0f\u7b56\u7565\u6570\u8981\u6c42\u3002")
+            next_active_strategy_min = max(next_active_strategy_min, 2)
 
         if reasons:
             action = "tighten"
             label = "\u5efa\u8bae\u6536\u7d27"
             tone = "warning"
             priority = "high" if len(reasons) >= 2 else "medium"
+            if priority == "high":
+                medium_risk_allowed = False
         else:
             action = "hold"
             label = "\u7ef4\u6301\u5f53\u524d\u95e8\u69db"
@@ -124,15 +137,30 @@ def build_result_recovery_strategy_adjustment(review_summary: Mapping[str, objec
             priority = "low"
             reasons.append("\u672c\u8f6e\u4e3b\u8981\u73a9\u6cd5\u672a\u89e6\u53d1\u6536\u7d27\u6761\u4ef6\uff0c\u7ee7\u7eed\u6309\u5f53\u524d\u51c6\u5165\u7b56\u7565\u8fd0\u884c\u3002")
 
+    next_min_confidence = round(min(0.78, max(0.45, next_min_confidence)), 2)
+    policy_update = {}
+    if action == "tighten":
+        policy_update = {
+            "min_confidence": next_min_confidence,
+            "active_strategy_min": next_active_strategy_min,
+            "medium_risk_allowed": medium_risk_allowed,
+            "high_risk_allowed": False,
+        }
     return {
         "action": action,
         "label": label,
         "tone": tone,
         "priority": priority,
+        "next_min_confidence": next_min_confidence,
+        "next_active_strategy_min": next_active_strategy_min,
+        "medium_risk_allowed": medium_risk_allowed,
+        "policy_update": policy_update,
         "reasons": reasons,
         "rows": [
             ("\u52a8\u4f5c", label),
             ("\u4f18\u5148\u7ea7", priority),
+            ("\u6700\u4f4e\u7f6e\u4fe1", f"{_safe_float(base_min_confidence, 0.50):.2f} -> {next_min_confidence:.2f}"),
+            ("\u9ad8\u51c6\u7b56\u7565\u6570", f"{max(1, _safe_int(base_active_strategy_min, 1))} -> {next_active_strategy_min}"),
             ("\u89e6\u53d1\u539f\u56e0", "\n".join(reasons) if reasons else "-"),
         ],
     }

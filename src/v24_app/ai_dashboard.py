@@ -33,6 +33,7 @@ from .ui_modules import (
     build_result_recovery_run_detail,
     build_result_recovery_run_rows,
     build_result_recovery_run_summary,
+    build_result_recovery_strategy_adjustment,
     mark_stale_result_recovery_runs,
     build_high_accuracy_strategy_dashboard,
     build_strategy_allowlist_settlement_summary,
@@ -2434,17 +2435,42 @@ class SmartMatchDashboard:
             height=18,
         )
         detail.pack(fill=tk.BOTH, expand=True, padx=18, pady=(0, 14))
+        selected_recovery_record: dict[str, object] = {}
+        apply_adjustment_button = tk.Button(
+            right,
+            text="\u5e94\u7528\u672c\u6b21\u6536\u7d27\u5efa\u8bae",
+            command=lambda: self._apply_recovery_strategy_adjustment(selected_recovery_record),
+            bg=YELLOW,
+            fg="#10141f",
+            activebackground="#f7c948",
+            activeforeground="#10141f",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=14,
+            pady=7,
+            state=tk.DISABLED,
+        )
+        apply_adjustment_button.pack(anchor=tk.E, padx=18, pady=(0, 14))
 
         def show_detail(index: int) -> None:
             detail.configure(state=tk.NORMAL)
             detail.delete("1.0", tk.END)
+            selected_recovery_record.clear()
             if not run_rows:
                 detail.insert(tk.END, "\u6682\u65e0\u56de\u6536\u8fd0\u884c\u8bb0\u5f55\u3002\u70b9\u51fb\u201c\u56de\u6536\u8d5b\u679c\u201d\u540e\uff0c\u8fd9\u91cc\u4f1a\u4fdd\u7559\u6267\u884c\u8fc7\u7a0b\u548c\u7ed3\u679c\u3002")
             elif index < 0 or index >= len(run_rows):
-                detail.insert(tk.END, build_result_recovery_run_detail(run_rows[0].get("record", {})))
+                record = run_rows[0].get("record", {})
+                selected_recovery_record.update(record if isinstance(record, dict) else {})
+                detail.insert(tk.END, build_result_recovery_run_detail(record))
             else:
-                detail.insert(tk.END, build_result_recovery_run_detail(run_rows[index].get("record", {})))
+                record = run_rows[index].get("record", {})
+                selected_recovery_record.update(record if isinstance(record, dict) else {})
+                detail.insert(tk.END, build_result_recovery_run_detail(record))
             detail.configure(state=tk.DISABLED)
+            adjustment = self._strategy_adjustment_from_recovery_record(selected_recovery_record)
+            apply_adjustment_button.configure(
+                state=tk.NORMAL if str(adjustment.get("action") or "") == "tighten" else tk.DISABLED
+            )
 
         for row in run_rows:
             listbox.insert(tk.END, str(row.get("title") or "-"))
@@ -2521,6 +2547,31 @@ class SmartMatchDashboard:
         self._schedule_auto_result_recovery()
         if show_popup:
             messagebox.showerror("\u8d5b\u679c\u56de\u6536\u5931\u8d25", str(exc))
+
+    def _strategy_adjustment_from_recovery_record(self, record: dict | object) -> dict:
+        if not isinstance(record, dict):
+            return {}
+        review_summary = record.get("review_summary")
+        if not isinstance(review_summary, dict):
+            return {}
+        adjustment = review_summary.get("strategy_adjustment")
+        return dict(adjustment) if isinstance(adjustment, dict) else {}
+
+    def _apply_recovery_strategy_adjustment(self, record: dict | object) -> None:
+        adjustment = self._strategy_adjustment_from_recovery_record(record)
+        if str(adjustment.get("action") or "") != "tighten":
+            messagebox.showinfo("\u56de\u6536\u7b56\u7565\u5efa\u8bae", "\u5f53\u524d\u56de\u6536\u8bb0\u5f55\u6ca1\u6709\u53ef\u5e94\u7528\u7684\u6536\u7d27\u5efa\u8bae\u3002")
+            return
+        if not isinstance(adjustment.get("policy_update"), dict) or not adjustment.get("policy_update"):
+            current = get_strategy_admission_policy_status().get("policy", {})
+            review_summary = record.get("review_summary") if isinstance(record, dict) else {}
+            adjustment = build_result_recovery_strategy_adjustment(
+                review_summary if isinstance(review_summary, dict) else {},
+                base_min_confidence=float(current.get("min_confidence", 0.5) or 0.5) if isinstance(current, dict) else 0.5,
+                base_active_strategy_min=int(current.get("active_strategy_min", 1) or 1) if isinstance(current, dict) else 1,
+                base_medium_risk_allowed=bool(current.get("medium_risk_allowed", True)) if isinstance(current, dict) else True,
+            )
+        self.apply_strategy_allowlist_tuning(adjustment)
 
     def _settlement_summary(self, settlements: list[dict]) -> dict[str, str | int]:
         return {
