@@ -137,9 +137,16 @@ class UIDetailsTextFlowModuleTests(unittest.TestCase):
                 "label": "正式放行",
                 "release_allowed": True,
                 "active_count": 1,
+                "active_strategy_min": 1,
                 "shadow_count": 0,
+                "confidence": 0.62,
+                "min_confidence": 0.50,
+                "block_confidence": 0.40,
+                "medium_risk_allowed": True,
+                "high_risk_allowed": False,
                 "top_play": "market_1x2",
                 "top_pick": "涓昏儨",
+                "top_confidence": 0.62,
                 "reasons": ["high_accuracy_strategy_active", "risk_low"],
             },
         }
@@ -184,6 +191,9 @@ class UIDetailsTextFlowModuleTests(unittest.TestCase):
         self.assertIn("C1 放行门控", text)
         self.assertIn("策略准入白名单", text)
         self.assertIn("正式放行", text)
+        self.assertIn("\u547d\u4e2d\u6b63\u5f0f\u9ad8\u51c6\u7b56\u7565", text)
+        self.assertIn("\u51c6\u5165\u95e8\u69db", text)
+        self.assertIn("\u9ad8\u51c6 1/1", text)
         self.assertIn("Confidence Calibration", text)
         self.assertIn("Runtime Threshold Guard", text)
 

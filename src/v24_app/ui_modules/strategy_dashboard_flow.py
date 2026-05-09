@@ -30,6 +30,29 @@ ADMISSION_DECISION_LABELS = {
     "observe": "\u89c2\u5bdf",
     "block": "\u963b\u65ad",
 }
+ADMISSION_ACTION_LABELS = {
+    "FORMAL_ALLOW": "\u6b63\u5f0f\u653e\u884c",
+    "OBSERVE_ONLY": "\u4ec5\u89c2\u5bdf",
+    "BLOCK": "\u963b\u65ad",
+    "allow": "\u6b63\u5f0f\u653e\u884c",
+    "release": "\u6b63\u5f0f\u653e\u884c",
+    "observe": "\u4ec5\u89c2\u5bdf",
+    "block": "\u963b\u65ad",
+}
+ADMISSION_REASON_LABELS = {
+    "strategy_not_calibrated": "\u9ad8\u51c6\u7b56\u7565\u5c1a\u672a\u6821\u51c6",
+    "high_accuracy_strategy_active": "\u547d\u4e2d\u6b63\u5f0f\u9ad8\u51c6\u7b56\u7565",
+    "high_accuracy_strategy_count_below_policy": "\u9ad8\u51c6\u7b56\u7565\u6570\u91cf\u4f4e\u4e8e\u5f53\u524d\u51c6\u5165\u95e8\u69db",
+    "no_official_high_accuracy_strategy": "\u672a\u547d\u4e2d\u6b63\u5f0f\u9ad8\u51c6\u7b56\u7565",
+    "breaker_shadow_observation": "\u65ad\u8def\u89c2\u5bdf\u7b56\u7565\u547d\u4e2d\uff0c\u4ecd\u9700\u590d\u6838",
+    "risk_high": "\u98ce\u9669\u7b49\u7ea7\u4e3a\u9ad8\u98ce\u9669",
+    "risk_medium": "\u98ce\u9669\u7b49\u7ea7\u4e3a\u4e2d\u98ce\u9669",
+    "risk_medium_policy_watch": "\u5f53\u524d\u95e8\u69db\u5c06\u4e2d\u98ce\u9669\u964d\u4e3a\u89c2\u5bdf",
+    "risk_low": "\u98ce\u9669\u7b49\u7ea7\u4e3a\u4f4e\u98ce\u9669",
+    "confidence_block": "\u7f6e\u4fe1\u5ea6\u4f4e\u4e8e\u963b\u65ad\u7ebf",
+    "confidence_watch": "\u7f6e\u4fe1\u5ea6\u4f4e\u4e8e\u6b63\u5f0f\u653e\u884c\u7ebf",
+    "no_single_play_passed": "\u6682\u65e0\u5355\u73a9\u6cd5\u901a\u8fc7\u95e8\u69db",
+}
 PRE_MATCH_REVIEW_CHECKLIST = (
     "\u786e\u8ba4\u9996\u53d1\u3001\u4f24\u505c\u3001\u8f6e\u6362\u4e0e\u4e34\u573a\u540d\u5355\u6ca1\u6709\u53cd\u5411\u53d8\u5316\u3002",
     "\u786e\u8ba4\u76d8\u53e3/\u8d54\u7387\u4e34\u573a\u65b9\u5411\u6ca1\u6709\u6301\u7eed\u80cc\u79bb\u6a21\u578b\u65b9\u5411\u3002",
@@ -60,6 +83,19 @@ def _safe_int(value: object, default: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _safe_bool(value: object, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on", "y"}:
+        return True
+    if text in {"0", "false", "no", "off", "n"}:
+        return False
+    return default
 
 
 def _pct(value: object, digits: int = 1) -> str:
@@ -118,12 +154,62 @@ def _admission_label(admission: Mapping[str, object]) -> str:
     return _text(admission.get("label") or ADMISSION_DECISION_LABELS.get(decision))
 
 
-def _admission_reasons(admission: Mapping[str, object]) -> str:
+def _admission_reason_label(value: object) -> str:
+    key = _text(value, "")
+    return ADMISSION_REASON_LABELS.get(key, key)
+
+
+def _admission_reasons(admission: Mapping[str, object], *, limit: int = 6) -> str:
     reasons = admission.get("reasons", [])
     if not isinstance(reasons, list) or not reasons:
         return "-"
-    items = [_text(item, "") for item in reasons[:6]]
+    try:
+        count = max(0, int(limit))
+    except (TypeError, ValueError):
+        count = 6
+    items = [_admission_reason_label(item) for item in reasons[:count]]
     return "\uff1b".join(item for item in items if item) or "-"
+
+
+def format_strategy_admission_label(admission: Mapping[str, object] | object) -> str:
+    return _admission_label(_as_mapping(admission))
+
+
+def format_strategy_admission_action(admission: Mapping[str, object] | object) -> str:
+    resolved = _as_mapping(admission)
+    action = _text(resolved.get("action"), "")
+    return ADMISSION_ACTION_LABELS.get(action, action or "-")
+
+
+def format_strategy_admission_reasons(admission: Mapping[str, object] | object, *, limit: int = 6) -> str:
+    return _admission_reasons(_as_mapping(admission), limit=limit)
+
+
+def format_strategy_admission_pick(admission: Mapping[str, object] | object) -> str:
+    resolved = _as_mapping(admission)
+    play = _label(PLAY_LABELS, resolved.get("top_play"))
+    pick = _text(resolved.get("top_pick"))
+    confidence = _pct(resolved.get("top_confidence"))
+    if play == "-" and pick == "-":
+        return "-"
+    return f"{play} {pick} / {confidence}"
+
+
+def format_strategy_admission_thresholds(admission: Mapping[str, object] | object) -> str:
+    resolved = _as_mapping(admission)
+    if not resolved:
+        return "-"
+    active_count = _safe_int(resolved.get("active_count"))
+    active_min = max(1, _safe_int(resolved.get("active_strategy_min"), 1))
+    medium_policy = "\u5141\u8bb8" if _safe_bool(resolved.get("medium_risk_allowed"), True) else "\u89c2\u5bdf"
+    high_policy = "\u5141\u8bb8" if _safe_bool(resolved.get("high_risk_allowed"), False) else "\u963b\u65ad"
+    return (
+        f"\u7f6e\u4fe1 {_pct(resolved.get('confidence'))} / "
+        f"\u653e\u884c\u7ebf {_pct(resolved.get('min_confidence'))} / "
+        f"\u963b\u65ad\u7ebf {_pct(resolved.get('block_confidence'))}\uff1b"
+        f"\u9ad8\u51c6 {active_count}/{active_min}\uff1b"
+        f"\u4e2d\u98ce\u9669{medium_policy}\uff1b\u9ad8\u98ce\u9669{high_policy}"
+    )
 
 
 def _allowlist_sort_key(row: object) -> tuple[str, str, str, str, float]:
@@ -500,9 +586,6 @@ def build_strategy_allowlist_report_lines(
         away = _text(_field(match, "away_team"))
         league = _text(_field(match, "league"))
         title = f"### {index}. {league} | {home} vs {away}"
-        top_play = _label(PLAY_LABELS, admission.get("top_play"))
-        top_pick = _text(admission.get("top_pick"))
-        top_confidence = _pct(admission.get("top_confidence"))
         lines.extend(
             [
                 title,
@@ -512,13 +595,14 @@ def build_strategy_allowlist_report_lines(
                 f"| \u5f00\u8d5b\u65f6\u95f4 | {_md_cell(_field(match, 'match_date'))} {_md_cell(_field(match, 'match_time'))} |",
                 f"| \u6570\u636e\u6e90 | {_md_cell(_field(match, 'source'))} / {_md_cell(_field(match, 'source_id'))} |",
                 f"| \u51c6\u5165\u7ed3\u8bba | {_md_cell(_admission_label(admission))} |",
-                f"| \u51c6\u5165\u52a8\u4f5c | {_md_cell(admission.get('action'))} |",
+                f"| \u51c6\u5165\u52a8\u4f5c | {_md_cell(format_strategy_admission_action(admission))} |",
                 f"| \u63a8\u8350 | {_md_cell(prediction.get('recommendation'))} |",
                 f"| \u7f6e\u4fe1\u5ea6 | {_pct(prediction.get('confidence'))} |",
                 f"| \u98ce\u9669\u7b49\u7ea7 | {_md_cell(_risk_text(prediction.get('risk_level')))} |",
                 f"| \u9ad8\u51c6\u7b56\u7565 | \u6b63\u5f0f {_safe_int(admission.get('active_count'))} / \u89c2\u5bdf {_safe_int(admission.get('shadow_count'))} / \u5355\u73a9\u6cd5 {_safe_int(admission.get('single_play_count'))} |",
-                f"| \u5019\u9009\u73a9\u6cd5 | {_md_cell(top_play)} {_md_cell(top_pick)} ({top_confidence}) |",
+                f"| \u5019\u9009\u73a9\u6cd5 | {_md_cell(format_strategy_admission_pick(admission))} |",
                 f"| \u51c6\u5165\u539f\u56e0 | {_md_cell(_admission_reasons(admission))} |",
+                f"| \u51c6\u5165\u95e8\u69db | {_md_cell(format_strategy_admission_thresholds(admission))} |",
                 f"| \u6458\u8981 | {_md_cell(admission.get('summary'))} |",
                 "",
                 "\u8d5b\u524d\u590d\u6838\u6e05\u5355",

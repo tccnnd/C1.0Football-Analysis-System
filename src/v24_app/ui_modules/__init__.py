@@ -154,6 +154,11 @@ from .strategy_dashboard_flow import (
     build_strategy_allowlist_tuning_recommendation,
     build_strategy_allowlist_filename,
     build_strategy_allowlist_report_lines,
+    format_strategy_admission_action,
+    format_strategy_admission_label,
+    format_strategy_admission_pick,
+    format_strategy_admission_reasons,
+    format_strategy_admission_thresholds,
     select_strategy_allowlist_rows,
 )
 from .ops_report_flow import (
@@ -285,6 +290,11 @@ __all__ = [
     "build_strategy_allowlist_tuning_recommendation",
     "build_strategy_allowlist_filename",
     "build_strategy_allowlist_report_lines",
+    "format_strategy_admission_action",
+    "format_strategy_admission_label",
+    "format_strategy_admission_pick",
+    "format_strategy_admission_reasons",
+    "format_strategy_admission_thresholds",
     "select_strategy_allowlist_rows",
     "build_ops_heartbeat_summary_text",
     "build_ops_trend_rows",

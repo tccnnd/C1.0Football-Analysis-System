@@ -30,6 +30,9 @@ from .ui_modules import (
     build_strategy_allowlist_tuning_recommendation,
     build_strategy_allowlist_filename,
     build_strategy_allowlist_report_lines,
+    format_strategy_admission_pick,
+    format_strategy_admission_reasons,
+    format_strategy_admission_thresholds,
     select_strategy_allowlist_rows,
 )
 
@@ -122,6 +125,10 @@ def _admission_text(prediction: dict) -> str:
     return str(admission.get("label") or "-")
 
 
+def _admission_reasons_text(prediction: dict, *, limit: int = 4) -> str:
+    return format_strategy_admission_reasons(_admission_payload(prediction), limit=limit)
+
+
 def _admission_color(prediction: dict) -> str:
     decision = str(_admission_payload(prediction).get("decision") or "")
     if decision == "allow":
@@ -194,8 +201,8 @@ def _analysis_report(row: DashboardRow) -> str:
     market_probs = pred.get("market_probabilities", {}) if isinstance(pred.get("market_probabilities"), dict) else {}
     risk = _risk_key(pred.get("risk_level"))
     admission = _admission_payload(pred)
-    admission_reasons = admission.get("reasons", []) if isinstance(admission.get("reasons"), list) else []
-    admission_reason_text = ", ".join(str(item) for item in admission_reasons[:4]) if admission_reasons else "-"
+    admission_reason_text = _admission_reasons_text(pred, limit=4)
+    admission_threshold_text = format_strategy_admission_thresholds(admission)
 
     risk_reason = {
         "high": "\u51b7\u95e8\u6307\u6570\u504f\u9ad8\uff0c\u5e02\u573a\u4e0e\u6a21\u578b\u53ef\u80fd\u5b58\u5728\u660e\u663e\u5206\u6b67\u3002",
@@ -216,7 +223,9 @@ def _analysis_report(row: DashboardRow) -> str:
         f"\u5f00\u8d5b\uff1a{match.match_date} {match.match_time}\n\n"
         "\u6838\u5fc3\u7ed3\u8bba\n"
         f"- \u63a8\u8350\u7b56\u7565\uff1a{_strategy_text(pred)}\n"
-        f"- \u7b56\u7565\u51c6\u5165\uff1a{_admission_text(pred)} | {admission_reason_text}\n"
+        f"- \u7b56\u7565\u51c6\u5165\uff1a{_admission_text(pred)}\n"
+        f"- \u51c6\u5165\u539f\u56e0\uff1a{admission_reason_text}\n"
+        f"- \u51c6\u5165\u95e8\u69db\uff1a{admission_threshold_text}\n"
         f"- \u98ce\u9669\u7b49\u7ea7\uff1a{_risk_label(pred.get('risk_level'))}\n"
         f"- \u7efc\u5408\u7f6e\u4fe1\u5ea6\uff1a{_pct1(pred.get('confidence'))}\n"
         f"- \u9884\u8ba1\u603b\u8fdb\u7403\uff1a{_num(pred.get('expected_goals'))}\n\n"
@@ -282,6 +291,7 @@ def _markdown_report(row: DashboardRow, generated_at: datetime | None = None) ->
     handicap_probs = pred.get("handicap_probabilities", {}) if isinstance(pred.get("handicap_probabilities"), dict) else {}
     ou_probs = pred.get("ou_probabilities", {}) if isinstance(pred.get("ou_probabilities"), dict) else {}
     indices = pred.get("indices", {}) if isinstance(pred.get("indices"), dict) else {}
+    admission = _admission_payload(pred)
     return (
         f"# {match.home_team} vs {match.away_team} \u8d5b\u4e8b\u5206\u6790\u62a5\u544a\n\n"
         "## 1. 基本信息\n\n"
@@ -297,6 +307,8 @@ def _markdown_report(row: DashboardRow, generated_at: datetime | None = None) ->
         "|---|---|\n"
         f"| 推荐策略 | {_md_cell(_strategy_text(pred))} |\n"
         f"| 策略准入 | {_md_cell(_admission_text(pred))} |\n"
+        f"| \u51c6\u5165\u539f\u56e0 | {_md_cell(format_strategy_admission_reasons(admission, limit=6))} |\n"
+        f"| \u51c6\u5165\u95e8\u69db | {_md_cell(format_strategy_admission_thresholds(admission))} |\n"
         f"| 风险等级 | {_md_cell(_risk_label(pred.get('risk_level')))} |\n"
         f"| 综合置信度 | {_pct1(pred.get('confidence'))} |\n"
         f"| 预计总进球 | {_num(pred.get('expected_goals'))} |\n"
@@ -1866,7 +1878,17 @@ class SmartMatchDashboard:
         market = item.get("market_snapshot", {}) if isinstance(item.get("market_snapshot"), dict) else {}
         probs = prediction.get("probabilities", {}) if isinstance(prediction.get("probabilities"), dict) else {}
         indices = prediction.get("indices", {}) if isinstance(prediction.get("indices"), dict) else {}
+        admission = _admission_payload(prediction)
         allowlist = item.get("strategy_allowlist", {}) if isinstance(item.get("strategy_allowlist"), dict) else {}
+        admission_text = ""
+        if admission:
+            admission_text = (
+                "\n\n\u7b56\u7565\u51c6\u5165\n"
+                f"- \u7ed3\u8bba: {_admission_text(prediction)}\n"
+                f"- \u539f\u56e0: {format_strategy_admission_reasons(admission, limit=5)}\n"
+                f"- \u95e8\u69db: {format_strategy_admission_thresholds(admission)}\n"
+                f"- \u5019\u9009: {format_strategy_admission_pick(admission)}\n\n"
+            )
         allowlist_text = ""
         if allowlist:
             allowlist_text = (
@@ -1874,7 +1896,8 @@ class SmartMatchDashboard:
                 f"- \u72b6\u6001: \u653e\u884c\u5f85\u56de\u6536\n"
                 f"- \u6e05\u5355: {allowlist.get('file', '-')}\n"
                 f"- \u5bfc\u51fa\u65f6\u95f4: {allowlist.get('exported_at', '-')}\n"
-                f"- \u5019\u9009: {allowlist.get('top_play', '-')} {allowlist.get('top_pick', '-')} / {_pct1(allowlist.get('top_confidence'))}"
+                f"- \u5019\u9009: {format_strategy_admission_pick(allowlist)}\n"
+                f"- \u539f\u56e0: {format_strategy_admission_reasons(allowlist, limit=5)}"
             )
         return (
             f"\u5feb\u7167\u65f6\u95f4: {item.get('saved_at', '-')}\n"
@@ -1887,6 +1910,7 @@ class SmartMatchDashboard:
             f"\u98ce\u9669: {_risk_label(prediction.get('risk_level'))}\n"
             f"\u7f6e\u4fe1\u5ea6: {_pct1(prediction.get('confidence'))}\n"
             f"\u9884\u8ba1\u603b\u8fdb\u7403: {_num(prediction.get('expected_goals'))}\n\n"
+            f"{admission_text}"
             f"\u6982\u7387: {_prob_text(probs, 'home')} / {_prob_text(probs, 'draw')} / {_prob_text(probs, 'away')}\n"
             f"\u51b7\u95e8\u6307\u6570: {_pct1(indices.get('upset_index', 0))}\n"
             f"\u7a33\u5b9a\u6307\u6570: {_pct1(indices.get('stability_index', 0))}\n"
@@ -2251,14 +2275,16 @@ class SmartMatchDashboard:
         items: list[tuple[str, str]] = []
         for row in ranked[: max(0, int(limit))]:
             admission = _admission_payload(row.prediction)
-            reasons = admission.get("reasons", []) if isinstance(admission.get("reasons"), list) else []
-            reason_text = ", ".join(str(item) for item in reasons[:4]) if reasons else "-"
+            reason_text = format_strategy_admission_reasons(admission, limit=4)
+            threshold_text = format_strategy_admission_thresholds(admission)
+            pick_text = format_strategy_admission_pick(admission)
             title = f"{_admission_text(row.prediction)} | {row.match.league} | {row.match.home_team} vs {row.match.away_team}"
             body = (
                 f"推荐: {_strategy_text(row.prediction)} | 风险 {_risk_label(row.prediction.get('risk_level'))} | 置信 {_pct1(row.prediction.get('confidence'))}\n"
                 f"高准正式/观察: {int(admission.get('active_count', 0) or 0)} / {int(admission.get('shadow_count', 0) or 0)} | "
-                f"候选 {admission.get('top_play', '-')} {admission.get('top_pick', '-')}\n"
-                f"原因: {reason_text}"
+                f"候选 {pick_text}\n"
+                f"原因: {reason_text}\n"
+                f"门槛: {threshold_text}"
             )
             items.append((title, body))
         return items

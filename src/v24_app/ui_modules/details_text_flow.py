@@ -2,6 +2,12 @@ from __future__ import annotations
 
 from typing import Any, Callable, Mapping
 
+from .strategy_dashboard_flow import (
+    format_strategy_admission_pick,
+    format_strategy_admission_reasons,
+    format_strategy_admission_thresholds,
+)
+
 
 def build_diagnostics_text(
     *,
@@ -244,15 +250,17 @@ def build_match_details_text(
         )
     admission_block = ""
     if admission:
-        reasons = admission.get("reasons", [])
-        reason_text = ", ".join(str(item) for item in reasons[:5]) if isinstance(reasons, list) and reasons else "-"
+        reason_text = format_strategy_admission_reasons(admission, limit=5)
+        threshold_text = format_strategy_admission_thresholds(admission)
+        pick_text = format_strategy_admission_pick(admission)
         admission_block = (
             "\n\n策略准入白名单\n"
             + f"- 准入结论: {admission.get('label', '-')}\n"
             + f"- 放行状态: {'可放行' if admission.get('release_allowed') else '不可放行'}\n"
             + f"- 高准正式/观察: {int(admission.get('active_count', 0) or 0)} / {int(admission.get('shadow_count', 0) or 0)}\n"
-            + f"- 候选玩法: {admission.get('top_play', '-')} | {admission.get('top_pick', '-')}\n"
-            + f"- 原因: {reason_text}"
+            + f"- 候选玩法: {pick_text}\n"
+            + f"- 原因: {reason_text}\n"
+            + f"- 准入门槛: {threshold_text}"
         )
     confidence_block = _build_confidence_calibration_block(prediction)
     runtime_threshold_block = _build_runtime_threshold_block(prediction)

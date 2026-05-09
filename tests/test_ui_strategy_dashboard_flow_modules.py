@@ -23,11 +23,38 @@ from v24_app.ui_modules import (
     build_strategy_allowlist_settlement_rows,
     build_strategy_allowlist_settlement_summary,
     build_strategy_allowlist_tuning_recommendation,
+    format_strategy_admission_label,
+    format_strategy_admission_pick,
+    format_strategy_admission_reasons,
+    format_strategy_admission_thresholds,
     select_strategy_allowlist_rows,
 )
 
 
 class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
+    def test_strategy_admission_formatters_translate_reason_codes(self) -> None:
+        admission = {
+            "decision": "observe",
+            "top_play": "market_1x2",
+            "top_pick": "HOME",
+            "top_confidence": 0.62,
+            "confidence": 0.62,
+            "min_confidence": 0.58,
+            "block_confidence": 0.40,
+            "active_count": 1,
+            "active_strategy_min": 2,
+            "medium_risk_allowed": False,
+            "high_risk_allowed": False,
+            "reasons": ["high_accuracy_strategy_count_below_policy", "risk_medium_policy_watch"],
+        }
+
+        self.assertEqual(format_strategy_admission_label(admission), "\u89c2\u5bdf")
+        self.assertIn("\u9ad8\u51c6\u7b56\u7565\u6570\u91cf\u4f4e\u4e8e\u5f53\u524d\u51c6\u5165\u95e8\u69db", format_strategy_admission_reasons(admission))
+        self.assertIn("\u5f53\u524d\u95e8\u69db\u5c06\u4e2d\u98ce\u9669\u964d\u4e3a\u89c2\u5bdf", format_strategy_admission_reasons(admission))
+        self.assertIn("\u5e02\u573a\u80dc\u5e73\u8d1f HOME / 62.0%", format_strategy_admission_pick(admission))
+        self.assertIn("\u9ad8\u51c6 1/2", format_strategy_admission_thresholds(admission))
+        self.assertIn("\u4e2d\u98ce\u9669\u89c2\u5bdf", format_strategy_admission_thresholds(admission))
+
     def test_strategy_dashboard_summarizes_pool_and_settlements(self) -> None:
         status = {
             "enabled": True,
