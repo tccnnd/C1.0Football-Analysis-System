@@ -269,13 +269,17 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
                         "jc_bucket": {
                             "dimension": "league_confidence_bucket",
                             "bucket": "L1 | >=0.65",
-                            "accuracy": 0.796117,
-                            "wilson_lower": 0.757916,
-                            "sample_count": 206,
-                        },
-                    }
-                ]
-            }
+                        "accuracy": 0.796117,
+                        "wilson_lower": 0.757916,
+                        "sample_count": 206,
+                        "avg_pick_odds": 1.45,
+                        "avg_confidence": 0.72,
+                    },
+                    "confidence": 0.66,
+                    "jc_context": {"confidence_bucket": ">=0.65", "odds_bucket": "1.81-2.20", "pick_odds": 1.95},
+                }
+            ]
+        }
             for _ in range(10)
         ]
 
@@ -288,6 +292,9 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertEqual(feedback["status_counts"]["downgraded"], 1)
         self.assertEqual(feedback["rows"][0]["status"], "downgraded")
         self.assertIn("0/10", feedback["rows"][0]["body"])
+        self.assertIn("\u8dcc\u7834Wilson", feedback["rows"][0]["body"])
+        self.assertIn("\u5747\u8d54 1.95/1.45", feedback["rows"][0]["body"])
+        self.assertIn(">=0.65", feedback["rows"][0]["body"])
 
     def test_settlement_summary_ignores_unknown_results_for_hit_rate(self) -> None:
         summary = build_high_accuracy_strategy_settlement_summary(

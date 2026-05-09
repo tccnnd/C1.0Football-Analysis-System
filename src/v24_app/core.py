@@ -4870,6 +4870,8 @@ def _jc_bucket_metadata(item: dict) -> dict:
         "hit_count": bucket.get("hit_count", item.get("hit_count", item.get("backtest_hits", 0))),
         "sample_count": bucket.get("sample_count", item.get("sample_count", item.get("backtest_samples", 0))),
         "wilson_lower": bucket.get("wilson_lower", item.get("wilson_lower", 0.0)),
+        "avg_confidence": bucket.get("avg_confidence", item.get("avg_confidence")),
+        "avg_pick_odds": bucket.get("avg_pick_odds", item.get("avg_pick_odds")),
         "stability": dict(stability) if isinstance(stability, dict) else {},
     }
     return metadata

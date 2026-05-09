@@ -607,6 +607,60 @@ def _jc_bucket_summary_status(
     return "healthy"
 
 
+def _most_common_text(values: Sequence[object]) -> str:
+    counts: dict[str, int] = {}
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        counts[text] = counts.get(text, 0) + 1
+    if not counts:
+        return "-"
+    return sorted(counts.items(), key=lambda item: (-item[1], item[0]))[0][0]
+
+
+def _avg_float(values: Sequence[object]) -> float | None:
+    numbers = [_safe_float(value) for value in values if value not in (None, "")]
+    if not numbers:
+        return None
+    return sum(numbers) / len(numbers)
+
+
+def _jc_bucket_diagnostics(
+    *,
+    status_text: str,
+    live_count: int,
+    live_hit_rate: float | None,
+    historical_accuracy: float,
+    historical_wilson: float,
+    deviation: object,
+    miss_streak: int,
+    live_avg_odds: float | None,
+    historical_avg_odds: float | None,
+    live_avg_confidence: float | None,
+    historical_avg_confidence: float | None,
+) -> str:
+    reasons: list[str] = []
+    deviation_value = _safe_float(deviation) if deviation is not None else None
+    if live_count < 10:
+        reasons.append("\u5b9e\u76d8\u6837\u672c\u504f\u5c11")
+    if live_hit_rate is not None and live_hit_rate < historical_wilson:
+        reasons.append("\u5b9e\u76d8\u8dcc\u7834Wilson\u4e0b\u9650")
+    if deviation_value is not None and deviation_value <= -0.10:
+        reasons.append("\u547d\u4e2d\u7387\u8f83\u5386\u53f2\u660e\u663e\u56de\u843d")
+    if miss_streak >= 3:
+        reasons.append("\u8fde\u7eed\u672a\u547d\u4e2d")
+    if live_avg_odds is not None and historical_avg_odds is not None and abs(live_avg_odds - historical_avg_odds) >= 0.25:
+        reasons.append("\u5b9e\u76d8\u8d54\u7387\u4e0e\u5386\u53f2\u5747\u503c\u504f\u79bb")
+    if live_avg_confidence is not None and historical_avg_confidence is not None and live_avg_confidence + 0.05 < historical_avg_confidence:
+        reasons.append("\u5b9e\u76d8\u7f6e\u4fe1\u4f4e\u4e8e\u5386\u53f2\u5747\u503c")
+    if status_text == "healthy" and not reasons:
+        reasons.append("\u5b9e\u76d8\u8868\u73b0\u4e0e\u5386\u53f2\u5339\u914d")
+    if status_text == "pending" and not reasons:
+        reasons.append("\u7b49\u5f85\u66f4\u591a\u8d5b\u540e\u6837\u672c")
+    return " | ".join(reasons[:4]) if reasons else "-"
+
+
 def build_jc_bucket_feedback_summary(
     status: Mapping[str, object] | object,
     settlements: Sequence[Mapping[str, object]] | object,
@@ -632,7 +686,13 @@ def build_jc_bucket_feedback_summary(
                 "historical_accuracy": feedback.get("historical_accuracy", bucket.get("accuracy", item.get("accuracy", item.get("backtest_accuracy")))),
                 "historical_wilson_lower": feedback.get("historical_wilson_lower", bucket.get("wilson_lower", item.get("wilson_lower"))),
                 "historical_samples": bucket.get("sample_count", item.get("sample_count", item.get("backtest_samples", 0))),
+                "historical_avg_confidence": bucket.get("avg_confidence", item.get("avg_confidence")),
+                "historical_avg_pick_odds": bucket.get("avg_pick_odds", item.get("avg_pick_odds")),
                 "hits": [],
+                "confidence_buckets": [],
+                "odds_buckets": [],
+                "pick_odds_values": [],
+                "confidence_values": [],
                 "explicit_status": "",
             },
         )
@@ -649,6 +709,15 @@ def build_jc_bucket_feedback_summary(
             ):
                 if feedback.get(source_key) is not None:
                     current[target_key] = feedback.get(source_key)
+        for source_key, target_key in (
+            ("avg_confidence", "historical_avg_confidence"),
+            ("avg_pick_odds", "historical_avg_pick_odds"),
+            ("accuracy", "historical_accuracy"),
+            ("wilson_lower", "historical_wilson_lower"),
+            ("sample_count", "historical_samples"),
+        ):
+            if current.get(target_key) in (None, "") and bucket.get(source_key) not in (None, ""):
+                current[target_key] = bucket.get(source_key)
         return current
 
     for pool_item in _strategy_pool(resolved):
@@ -660,6 +729,19 @@ def build_jc_bucket_feedback_summary(
         hits = bucket_row.setdefault("hits", [])
         if isinstance(hits, list):
             hits.append(bool(item.get("is_hit")))
+        context = _as_mapping(item.get("jc_context"))
+        confidence_buckets = bucket_row.setdefault("confidence_buckets", [])
+        odds_buckets = bucket_row.setdefault("odds_buckets", [])
+        pick_odds_values = bucket_row.setdefault("pick_odds_values", [])
+        confidence_values = bucket_row.setdefault("confidence_values", [])
+        if isinstance(confidence_buckets, list) and context.get("confidence_bucket"):
+            confidence_buckets.append(context.get("confidence_bucket"))
+        if isinstance(odds_buckets, list) and context.get("odds_bucket"):
+            odds_buckets.append(context.get("odds_bucket"))
+        if isinstance(pick_odds_values, list) and context.get("pick_odds") not in (None, ""):
+            pick_odds_values.append(context.get("pick_odds"))
+        if isinstance(confidence_values, list) and item.get("confidence") not in (None, ""):
+            confidence_values.append(item.get("confidence"))
 
     rows: list[dict[str, str]] = []
     status_counts = {"healthy": 0, "watch": 0, "downgraded": 0, "pending": 0}
@@ -681,6 +763,12 @@ def build_jc_bucket_feedback_summary(
         historical_accuracy = _safe_float(bucket.get("historical_accuracy"))
         historical_wilson = _safe_float(bucket.get("historical_wilson_lower"))
         deviation = live_hit_rate - historical_accuracy if live_hit_rate is not None else bucket.get("feedback_deviation")
+        confidence_buckets = bucket.get("confidence_buckets") if isinstance(bucket.get("confidence_buckets"), list) else []
+        odds_buckets = bucket.get("odds_buckets") if isinstance(bucket.get("odds_buckets"), list) else []
+        live_avg_odds = _avg_float(bucket.get("pick_odds_values") if isinstance(bucket.get("pick_odds_values"), list) else [])
+        live_avg_confidence = _avg_float(bucket.get("confidence_values") if isinstance(bucket.get("confidence_values"), list) else [])
+        historical_avg_odds = _safe_float(bucket.get("historical_avg_pick_odds")) if bucket.get("historical_avg_pick_odds") not in (None, "") else None
+        historical_avg_confidence = _safe_float(bucket.get("historical_avg_confidence")) if bucket.get("historical_avg_confidence") not in (None, "") else None
         status_text = _jc_bucket_summary_status(
             live_count=live_count,
             live_hit_rate=live_hit_rate,
@@ -690,17 +778,33 @@ def build_jc_bucket_feedback_summary(
         )
         status_counts[status_text] = status_counts.get(status_text, 0) + 1
         recovery_text = "\u9700\u7ee7\u7eed\u89c2\u5bdf\u5f71\u5b50\u7ed3\u7b97" if status_text in {"watch", "downgraded"} else "\u6682\u65e0\u6062\u590d\u538b\u529b"
+        diagnostics = _jc_bucket_diagnostics(
+            status_text=status_text,
+            live_count=live_count,
+            live_hit_rate=live_hit_rate,
+            historical_accuracy=historical_accuracy,
+            historical_wilson=historical_wilson,
+            deviation=deviation,
+            miss_streak=miss_streak,
+            live_avg_odds=live_avg_odds,
+            historical_avg_odds=historical_avg_odds,
+            live_avg_confidence=live_avg_confidence,
+            historical_avg_confidence=historical_avg_confidence,
+        )
         rows.append(
             {
                 "title": f"{status_text.upper()} | {bucket.get('dimension') or '-'} / {bucket.get('bucket') or '-'}",
                 "body": (
                     f"\u5386\u53f2: {_pct(historical_accuracy)} | Wilson {_pct(historical_wilson)} | \u6837\u672c {_safe_int(bucket.get('historical_samples'))}\n"
                     f"\u5b9e\u76d8: {live_hit_count}/{live_count} ({_pct(live_hit_rate)}) | \u504f\u5dee {_pct(deviation)} | \u8fde\u9519 {miss_streak}\n"
+                    f"\u5206\u5e03: \u7f6e\u4fe1 {_most_common_text(confidence_buckets)} / \u8d54\u7387 {_most_common_text(odds_buckets)} | \u5747\u8d54 {_safe_float(live_avg_odds):.2f}/{_safe_float(historical_avg_odds):.2f}\n"
+                    f"\u8bca\u65ad: {diagnostics}\n"
                     f"\u6062\u590d: {recovery_text}"
                 ),
                 "status": status_text,
                 "live_count": str(live_count),
                 "deviation": f"{_safe_float(deviation):.4f}" if deviation is not None else "",
+                "diagnostics": diagnostics,
             }
         )
 

@@ -437,6 +437,8 @@ class CorePlayThresholdBucketTuningTests(unittest.TestCase):
                                 "sample_count": 180,
                                 "hit_count": 144,
                                 "wilson_lower": 0.74,
+                                "avg_confidence": 0.72,
+                                "avg_pick_odds": 1.45,
                                 "stability": {"stable": True, "stability_score": 0.8},
                             },
                             "jc_context": {"confidence_bucket": ">=0.65", "odds_bucket": "<=1.50", "pick_odds": 1.24},
@@ -455,6 +457,7 @@ class CorePlayThresholdBucketTuningTests(unittest.TestCase):
         item = settlement["items"][0]
         self.assertEqual(item["jc_bucket_key"], "league_confidence_bucket|Stable League | >=0.65")
         self.assertEqual(item["jc_bucket"]["sample_count"], 180)
+        self.assertEqual(item["jc_bucket"]["avg_pick_odds"], 1.45)
         self.assertEqual(item["jc_context"]["pick_odds"], 1.24)
 
     def test_jc_bucket_live_feedback_downgrades_underperforming_bucket(self) -> None:
