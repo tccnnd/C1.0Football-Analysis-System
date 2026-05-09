@@ -30,6 +30,8 @@ from .ui_modules import (
     build_strategy_allowlist_tuning_recommendation,
     build_strategy_allowlist_filename,
     build_strategy_allowlist_report_lines,
+    compute_strategy_admission_counts,
+    filter_strategy_admission_rows,
     format_strategy_admission_pick,
     format_strategy_admission_reasons,
     format_strategy_admission_thresholds,
@@ -469,6 +471,8 @@ class SmartMatchDashboard:
         self.event_log: list[tuple[str, str, str]] = []
         self.current_nav_index = 0
         self.show_all_matches = False
+        self.admission_filter = "all"
+        self.admission_filter_buttons: dict[str, tk.Button] = {}
         self.nav_items: list[tuple[tk.Frame, list[tk.Label]]] = []
         settings = _load_dashboard_settings()
         self.auto_refresh_enabled = tk.BooleanVar(value=bool(settings.get("auto_refresh_enabled", False)))
@@ -719,6 +723,32 @@ class SmartMatchDashboard:
         toggle.pack(side=tk.RIGHT)
         toggle.bind("<Button-1>", lambda _event: self._toggle_match_list())
 
+        filter_bar = tk.Frame(matches_card, bg=PANEL)
+        filter_bar.pack(fill=tk.X, padx=18, pady=(0, 10))
+        tk.Label(filter_bar, text="\u51c6\u5165\u7b5b\u9009", bg=PANEL, fg=MUTED, font=("Microsoft YaHei UI", 10, "bold")).pack(side=tk.LEFT, padx=(0, 8))
+        self.admission_filter_buttons = {}
+        for key, label in [
+            ("all", "\u5168\u90e8"),
+            ("allow", "\u6b63\u5f0f\u653e\u884c"),
+            ("observe", "\u89c2\u5bdf"),
+            ("block", "\u963b\u65ad"),
+        ]:
+            button = tk.Button(
+                filter_bar,
+                text=label,
+                command=lambda key=key: self._set_admission_filter(key),
+                bg=PANEL_2,
+                fg=TEXT,
+                activebackground="#172638",
+                activeforeground="white",
+                relief=tk.FLAT,
+                font=("Microsoft YaHei UI", 9, "bold"),
+                padx=12,
+                pady=5,
+            )
+            button.pack(side=tk.LEFT, padx=(0, 6))
+            self.admission_filter_buttons[key] = button
+
         list_wrap = tk.Frame(matches_card, bg=PANEL, height=260)
         list_wrap.pack(fill=tk.X, padx=18, pady=(0, 10))
         list_wrap.pack_propagate(False)
@@ -905,6 +935,36 @@ class SmartMatchDashboard:
         self.show_all_matches = not self.show_all_matches
         self._refresh_matches()
 
+    def _set_admission_filter(self, selected: str) -> None:
+        self.admission_filter = selected if selected in {"all", "allow", "observe", "block"} else "all"
+        self.show_all_matches = False
+        self._refresh_matches()
+
+    def _widget_alive_for(self, widget: tk.Widget) -> bool:
+        try:
+            return bool(widget is not None and widget.winfo_exists())
+        except tk.TclError:
+            return False
+
+    def _refresh_admission_filter_buttons(self, counts: dict[str, int]) -> None:
+        labels = {
+            "all": "\u5168\u90e8",
+            "allow": "\u6b63\u5f0f\u653e\u884c",
+            "observe": "\u89c2\u5bdf",
+            "block": "\u963b\u65ad",
+        }
+        colors = {"all": BLUE, "allow": GREEN, "observe": YELLOW, "block": RED}
+        for key, button in getattr(self, "admission_filter_buttons", {}).items():
+            if not self._widget_alive_for(button):
+                continue
+            active = key == self.admission_filter
+            button.configure(
+                text=f"{labels.get(key, key)} {int(counts.get(key, 0) or 0)}",
+                bg=colors.get(key, BLUE) if active else PANEL_2,
+                fg="white" if active else TEXT,
+                activebackground=colors.get(key, BLUE) if active else "#172638",
+            )
+
     def _bind_match_scroll(self, widget: tk.Widget) -> None:
         widget.bind("<MouseWheel>", self._on_match_mousewheel, add="+")
         for child in widget.winfo_children():
@@ -921,8 +981,11 @@ class SmartMatchDashboard:
         for child in self.match_list.winfo_children():
             child.destroy()
 
+        counts = compute_strategy_admission_counts(self.rows)
+        self._refresh_admission_filter_buttons(counts)
+        filtered_rows = filter_strategy_admission_rows(self.rows, self.admission_filter)
         ranked = sorted(
-            self.rows,
+            filtered_rows,
             key=lambda row: (
                 {"high": 0, "medium": 1, "low": 2}[_risk_key(row.prediction.get("risk_level"))],
                 -float(row.prediction.get("confidence", 0) or 0),
@@ -930,10 +993,22 @@ class SmartMatchDashboard:
         )
         ranked = ranked if self.show_all_matches else ranked[:3]
         if hasattr(self, "match_toggle_var"):
-            text = "\u6536\u8d77 \u2039" if self.show_all_matches else "\u67e5\u770b\u5168\u90e8 \u203a"
+            text = "\u6536\u8d77 \u2039" if self.show_all_matches else f"\u67e5\u770b\u5168\u90e8 {len(filtered_rows)} \u203a"
             self.match_toggle_var.set(text)
 
         if not ranked:
+            if self.rows and not filtered_rows:
+                tk.Label(
+                    self.match_list,
+                    text="\u6682\u65e0\u7b26\u5408\u5f53\u524d\u51c6\u5165\u7b5b\u9009\u7684\u8d5b\u4e8b\u3002",
+                    bg=PANEL,
+                    fg=MUTED,
+                    font=("Microsoft YaHei UI", 11),
+                ).pack(anchor=tk.W, pady=20)
+                if self._widget_alive("match_canvas"):
+                    self.match_canvas.configure(scrollregion=self.match_canvas.bbox("all"))
+                    self.match_canvas.yview_moveto(0)
+                return
             tk.Label(self.match_list, text="暂无通过校验的赛事数据", bg=PANEL, fg=MUTED, font=("Microsoft YaHei UI", 11)).pack(anchor=tk.W, pady=20)
             if self._widget_alive("match_canvas"):
                 self.match_canvas.configure(scrollregion=self.match_canvas.bbox("all"))

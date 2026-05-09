@@ -30,6 +30,12 @@ ADMISSION_DECISION_LABELS = {
     "observe": "\u89c2\u5bdf",
     "block": "\u963b\u65ad",
 }
+ADMISSION_FILTER_LABELS = {
+    "all": "\u5168\u90e8",
+    "allow": "\u6b63\u5f0f\u653e\u884c",
+    "observe": "\u89c2\u5bdf",
+    "block": "\u963b\u65ad",
+}
 ADMISSION_ACTION_LABELS = {
     "FORMAL_ALLOW": "\u6b63\u5f0f\u653e\u884c",
     "OBSERVE_ONLY": "\u4ec5\u89c2\u5bdf",
@@ -128,6 +134,11 @@ def _strategy_admission(prediction: Mapping[str, object]) -> Mapping[str, object
     return _as_mapping(prediction.get("strategy_admission"))
 
 
+def _admission_decision(admission: Mapping[str, object]) -> str:
+    decision = str(admission.get("decision") or "").strip()
+    return decision if decision in {"allow", "observe", "block"} else "observe"
+
+
 def _text(value: object, default: str = "-") -> str:
     text = str(value if value is not None else "").strip()
     return text or default
@@ -210,6 +221,34 @@ def format_strategy_admission_thresholds(admission: Mapping[str, object] | objec
         f"\u9ad8\u51c6 {active_count}/{active_min}\uff1b"
         f"\u4e2d\u98ce\u9669{medium_policy}\uff1b\u9ad8\u98ce\u9669{high_policy}"
     )
+
+
+def compute_strategy_admission_counts(rows: Sequence[object] | object) -> dict[str, int]:
+    counts = {"all": 0, "allow": 0, "observe": 0, "block": 0}
+    if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
+        return counts
+    for row in rows:
+        prediction = _row_prediction(row)
+        if not prediction:
+            continue
+        counts["all"] += 1
+        counts[_admission_decision(_strategy_admission(prediction))] += 1
+    return counts
+
+
+def filter_strategy_admission_rows(rows: Sequence[object] | object, selected_filter: object = "all") -> list[object]:
+    if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
+        return []
+    selected = str(selected_filter or "all").strip()
+    if selected not in ADMISSION_FILTER_LABELS:
+        selected = next((key for key, label in ADMISSION_FILTER_LABELS.items() if label == selected), "all")
+    if selected == "all":
+        return list(rows)
+    return [
+        row
+        for row in rows
+        if _admission_decision(_strategy_admission(_row_prediction(row))) == selected
+    ]
 
 
 def _allowlist_sort_key(row: object) -> tuple[str, str, str, str, float]:

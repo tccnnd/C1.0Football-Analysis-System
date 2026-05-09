@@ -23,6 +23,8 @@ from v24_app.ui_modules import (
     build_strategy_allowlist_settlement_rows,
     build_strategy_allowlist_settlement_summary,
     build_strategy_allowlist_tuning_recommendation,
+    compute_strategy_admission_counts,
+    filter_strategy_admission_rows,
     format_strategy_admission_label,
     format_strategy_admission_pick,
     format_strategy_admission_reasons,
@@ -54,6 +56,22 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("\u5e02\u573a\u80dc\u5e73\u8d1f HOME / 62.0%", format_strategy_admission_pick(admission))
         self.assertIn("\u9ad8\u51c6 1/2", format_strategy_admission_thresholds(admission))
         self.assertIn("\u4e2d\u98ce\u9669\u89c2\u5bdf", format_strategy_admission_thresholds(admission))
+
+    def test_strategy_admission_counts_and_filters_rows(self) -> None:
+        rows = [
+            {"prediction": {"strategy_admission": {"decision": "allow"}}},
+            {"prediction": {"strategy_admission": {"decision": "observe"}}},
+            {"prediction": {"strategy_admission": {"decision": "block"}}},
+            {"prediction": {"strategy_admission": {"decision": "unknown"}}},
+        ]
+
+        counts = compute_strategy_admission_counts(rows)
+
+        self.assertEqual(counts, {"all": 4, "allow": 1, "observe": 2, "block": 1})
+        self.assertEqual(len(filter_strategy_admission_rows(rows, "allow")), 1)
+        self.assertEqual(len(filter_strategy_admission_rows(rows, "observe")), 2)
+        self.assertEqual(len(filter_strategy_admission_rows(rows, "\u963b\u65ad")), 1)
+        self.assertEqual(len(filter_strategy_admission_rows(rows, "all")), 4)
 
     def test_strategy_dashboard_summarizes_pool_and_settlements(self) -> None:
         status = {
