@@ -3229,6 +3229,89 @@ def get_play_model_policy_status() -> dict:
     }
 
 
+def _load_state_payload(filename: str) -> dict:
+    path = PROJECT_DIR / "data" / "state" / filename
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _state_payload_items(payload: dict) -> list[dict]:
+    items = payload.get("items", []) if isinstance(payload, dict) else []
+    return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+
+
+def _history_date_range(items: list[dict], date_key: str) -> tuple[str | None, str | None]:
+    dates = [normalize_text(item.get(date_key, "")) for item in items if normalize_text(item.get(date_key, ""))]
+    return (min(dates), max(dates)) if dates else (None, None)
+
+
+def get_training_data_coverage_status() -> dict:
+    samples = STATE_STORE.load_xgb_samples()
+    valid_samples = [item for item in samples if isinstance(item, dict) and isinstance(item.get("features"), dict)]
+    sample_meta = [item.get("meta", {}) for item in valid_samples if isinstance(item.get("meta"), dict)]
+    sample_dates = [normalize_text(meta.get("match_date", "")) for meta in sample_meta if normalize_text(meta.get("match_date", ""))]
+    sample_leagues = sorted({normalize_text(meta.get("league", "")) for meta in sample_meta if normalize_text(meta.get("league", ""))})
+
+    club_payload = _load_state_payload("club_match_history.json")
+    club_items = _state_payload_items(club_payload)
+    club_start, club_end = _history_date_range(club_items, "match_date")
+
+    world_cup_payload = _load_state_payload("world_cup_history.json")
+    world_cup_items = _state_payload_items(world_cup_payload)
+    world_cup_start, world_cup_end = _history_date_range(world_cup_items, "date")
+    world_cup_years = sorted(
+        {
+            int(item.get("year"))
+            for item in world_cup_items
+            if isinstance(item.get("year"), int) or str(item.get("year", "")).isdigit()
+        }
+    )
+
+    league_profile_payload = _load_state_payload("league_profiles.json")
+    league_profiles = league_profile_payload.get("leagues", {})
+    league_profile_count = len(league_profiles) if isinstance(league_profiles, dict) else 0
+
+    club_ratings = STATE_STORE.load_ratings()
+    national_team_ratings = STATE_STORE.load_national_team_ratings()
+    return {
+        "xgb_samples": {
+            "sample_count": len(samples),
+            "valid_feature_count": len(valid_samples),
+            "date_start": min(sample_dates) if sample_dates else None,
+            "date_end": max(sample_dates) if sample_dates else None,
+            "league_count": len(sample_leagues),
+            "league_examples": sample_leagues[:8],
+        },
+        "club_history": {
+            "match_count": len(club_items),
+            "date_start": club_start,
+            "date_end": club_end,
+            "updated_at": club_payload.get("updated_at"),
+            "source": club_payload.get("source"),
+            "league_profile_count": league_profile_count,
+        },
+        "world_cup_history": {
+            "match_count": len(world_cup_items),
+            "date_start": world_cup_start,
+            "date_end": world_cup_end,
+            "updated_at": world_cup_payload.get("updated_at"),
+            "source": world_cup_payload.get("source"),
+            "year_start": min(world_cup_years) if world_cup_years else None,
+            "year_end": max(world_cup_years) if world_cup_years else None,
+            "year_count": len(world_cup_years),
+        },
+        "rating_pools": {
+            "club_team_count": len(club_ratings),
+            "national_team_count": len(national_team_ratings),
+        },
+    }
+
+
 def _current_play_model_policy() -> dict:
     return get_play_model_policy_status().get("policy", json.loads(json.dumps(DEFAULT_PLAY_MODEL_POLICY)))
 

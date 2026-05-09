@@ -51,6 +51,7 @@ from .ui_modules import (
     build_ensemble_backtest_apply_status_text,
     build_ensemble_backtest_success_message,
     build_ensemble_weight_status_text,
+    build_model_training_overview_text,
     build_export_message_text,
     build_export_status_text,
     build_play_model_backtest_apply_status_text,
@@ -152,6 +153,7 @@ from .core import (
     get_play_model_training_status,
     get_play_model_policy_status,
     get_bayes_calibration_status,
+    get_training_data_coverage_status,
     get_recent_parlay_settlements,
     get_prediction_snapshot_migration_report,
     get_xgb_training_status,
@@ -268,6 +270,7 @@ class FootballPredictionApp:
         ttk.Button(toolbar, text="分析选中", command=self.analyze_selected).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(toolbar, text="分析全部", command=self.analyze_all).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(toolbar, text="自动回收赛果", command=self.auto_settle_results).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(toolbar, text="模型状态", command=self.show_model_training_overview).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(toolbar, text="用户中心", command=self.open_user_center).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(
             toolbar,
@@ -714,6 +717,21 @@ class FootballPredictionApp:
 
     def show_xgb_status(self) -> None:
         messagebox.showinfo("XGBoost 状态", self._xgb_status_text())
+
+    def show_model_training_overview(self) -> None:
+        self._close_user_center()
+        self._write_details(
+            build_model_training_overview_text(
+                xgb_status=get_xgb_training_status(),
+                play_model_status=get_play_model_training_status(),
+                ensemble_status=get_ensemble_weight_status(),
+                bayes_status=get_bayes_calibration_status(),
+                threshold_status=get_play_threshold_status(),
+                policy_status=get_play_model_policy_status(),
+                coverage_status=get_training_data_coverage_status(),
+            )
+        )
+        self.status_var.set("已显示模型训练状态总览")
 
     def train_xgb_now(self) -> None:
         self._run_background(
@@ -2046,6 +2064,7 @@ def _app_open_user_center_final(self) -> None:
         "export_handicap_shadow_report": self.export_handicap_shadow_report,
         "export_accuracy_decomposition_report": self.export_accuracy_decomposition_report,
         "show_xgb_status": self.show_xgb_status,
+        "show_model_training_overview": self.show_model_training_overview,
         "train_xgb_now": self.train_xgb_now,
         "show_play_model_status": self.show_play_model_status,
         "train_play_models": self.train_play_models,

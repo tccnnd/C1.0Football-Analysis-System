@@ -31,6 +31,7 @@ USER_CENTER_LAYOUT: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
     (
         "模型管理",
         (
+            ("模型总览", "show_model_training_overview"),
             ("XGB状态", "show_xgb_status"),
             ("训练XGB", "train_xgb_now"),
             ("玩法状态", "show_play_model_status"),

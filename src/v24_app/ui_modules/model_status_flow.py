@@ -3,6 +3,73 @@ from __future__ import annotations
 from typing import Mapping
 
 
+def _ready_text(value: object) -> str:
+    return "就绪" if bool(value) else "未就绪"
+
+
+def build_model_training_overview_text(
+    *,
+    xgb_status: Mapping[str, object] | object,
+    play_model_status: Mapping[str, object] | object,
+    ensemble_status: Mapping[str, object] | object,
+    bayes_status: Mapping[str, object] | object,
+    threshold_status: Mapping[str, object] | object,
+    policy_status: Mapping[str, object] | object,
+    coverage_status: Mapping[str, object] | object,
+) -> str:
+    xgb = xgb_status if isinstance(xgb_status, Mapping) else {}
+    play = play_model_status if isinstance(play_model_status, Mapping) else {}
+    ensemble = ensemble_status if isinstance(ensemble_status, Mapping) else {}
+    bayes = bayes_status if isinstance(bayes_status, Mapping) else {}
+    thresholds = threshold_status if isinstance(threshold_status, Mapping) else {}
+    policy = policy_status if isinstance(policy_status, Mapping) else {}
+    coverage = coverage_status if isinstance(coverage_status, Mapping) else {}
+
+    total_goals = play.get("total_goals", {}) if isinstance(play, Mapping) else {}
+    scoreline = play.get("scoreline", {}) if isinstance(play, Mapping) else {}
+    volatile_scoreline = play.get("volatile_scoreline", {}) if isinstance(play, Mapping) else {}
+    weights = ensemble.get("weights", {}) if isinstance(ensemble, Mapping) else {}
+    ensemble_validation = ensemble.get("validation", {}) if isinstance(ensemble, Mapping) else {}
+    bayes_config = bayes.get("config", {}) if isinstance(bayes, Mapping) else {}
+    threshold_values = thresholds.get("thresholds", {}) if isinstance(thresholds, Mapping) else {}
+    policy_config = policy.get("policy", {}) if isinstance(policy, Mapping) else {}
+    scoreline_policy = policy_config.get("scoreline", {}) if isinstance(policy_config, Mapping) else {}
+    total_goals_policy = policy_config.get("total_goals", {}) if isinstance(policy_config, Mapping) else {}
+    policy_validation = policy.get("validation", {}) if isinstance(policy, Mapping) else {}
+    samples = coverage.get("xgb_samples", {}) if isinstance(coverage, Mapping) else {}
+    club_history = coverage.get("club_history", {}) if isinstance(coverage, Mapping) else {}
+    world_cup = coverage.get("world_cup_history", {}) if isinstance(coverage, Mapping) else {}
+    rating_pools = coverage.get("rating_pools", {}) if isinstance(coverage, Mapping) else {}
+
+    lines = [
+        "模型训练状态总览",
+        "",
+        "训练数据",
+        f"- XGB样本: {samples.get('sample_count', 0)} | 有效特征: {samples.get('valid_feature_count', 0)} | 联赛覆盖: {samples.get('league_count', 0)}",
+        f"- 样本时间: {samples.get('date_start') or '-'} -> {samples.get('date_end') or '-'}",
+        f"- 联赛样例: {', '.join(samples.get('league_examples', []) or []) or '-'}",
+        f"- 联赛历史: {club_history.get('match_count', 0)} 场 | {club_history.get('date_start') or '-'} -> {club_history.get('date_end') or '-'} | profile={club_history.get('league_profile_count', 0)}",
+        f"- 世界杯历史: {world_cup.get('match_count', 0)} 场 | {world_cup.get('year_start') or '-'}-{world_cup.get('year_end') or '-'} | 届数={world_cup.get('year_count', 0)}",
+        f"- ELO评分池: 俱乐部 {rating_pools.get('club_team_count', 0)} 队 | 国家队 {rating_pools.get('national_team_count', 0)} 队",
+        "",
+        "模型就绪",
+        f"- 主胜平负 XGB: {_ready_text(xgb.get('model_ready'))} | 样本={xgb.get('sample_count', 0)} | updated={xgb.get('model_updated_at') or '-'}",
+        f"- 总进球模型: {_ready_text(total_goals.get('model_ready'))} | usable={total_goals.get('usable_count', 0)} | updated={total_goals.get('model_updated_at') or '-'}",
+        f"- 比分模型: {_ready_text(scoreline.get('model_ready'))} | usable={scoreline.get('usable_count', 0)} | updated={scoreline.get('model_updated_at') or '-'}",
+        f"- 高波动比分: {_ready_text(volatile_scoreline.get('model_ready'))} | usable={volatile_scoreline.get('usable_count', 0)} | updated={volatile_scoreline.get('model_updated_at') or '-'}",
+        "",
+        "校准参数",
+        f"- Ensemble: updated={ensemble.get('updated_at') or '-'} | market={float(weights.get('market', 0) or 0):.1%} | elo={float(weights.get('elo', 0) or 0):.1%} | poisson={float(weights.get('poisson', 0) or 0):.1%} | xgb={float(weights.get('xgboost', 0) or 0):.1%}",
+        f"- Ensemble验证: {ensemble_validation.get('sample_count', 0)} 场 | 联赛分层={ensemble_validation.get('league_override_count', 0)}",
+        f"- Bayes: updated={bayes.get('updated_at') or '-'} | prior={bayes_config.get('prior_source', '-')} | prior_strength={float(bayes_config.get('prior_strength', 0) or 0):.1f} | model_strength={float(bayes_config.get('model_strength', 0) or 0):.1f}",
+        f"- 玩法阈值: 1x2={float(threshold_values.get('1x2', 0) or 0):.2f} | handicap={float(threshold_values.get('handicap', 0) or 0):.2f} | total={float(threshold_values.get('total_goals', 0) or 0):.2f} | score={float(threshold_values.get('score', 0) or 0):.2f}",
+        f"- 接管策略: updated={policy.get('updated_at') or '-'} | 验证={policy_validation.get('sample_count', 0)} | 搜索={policy_validation.get('search_profile', '-')}/{policy_validation.get('candidate_count', 0)}",
+        f"- 比分接管: enabled={scoreline_policy.get('takeover_enabled')} | 同向={float(scoreline_policy.get('regular_same_outcome_min_confidence', 0) or 0):.2f} | 跨向={scoreline_policy.get('regular_cross_outcome_enabled')}@{float(scoreline_policy.get('regular_cross_outcome_min_confidence', 0) or 0):.2f}",
+        f"- 总进球接管: enabled={total_goals_policy.get('takeover_enabled')} | min_conf={float(total_goals_policy.get('min_confidence', 0) or 0):.2f}",
+    ]
+    return "\n".join(lines)
+
+
 def build_bayes_calibration_status_text(status: Mapping[str, object] | object) -> str:
     resolved = status if isinstance(status, Mapping) else {}
     config = resolved.get("config", {}) if isinstance(resolved, Mapping) else {}
