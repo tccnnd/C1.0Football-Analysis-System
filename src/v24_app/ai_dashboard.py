@@ -473,6 +473,8 @@ class SmartMatchDashboard:
         self.event_log: list[tuple[str, str, str]] = []
         self.current_nav_index = 0
         self.current_view = "home"
+        self.result_recovery_running = False
+        self.result_recovery_buttons: list[tk.Button] = []
         self.show_all_matches = False
         self.admission_filter = "all"
         self.admission_filter_buttons: dict[str, tk.Button] = {}
@@ -835,7 +837,7 @@ class SmartMatchDashboard:
         ).pack(anchor=tk.W, padx=14, pady=(0, 10))
         actions = tk.Frame(frame, bg=PANEL_2)
         actions.pack(fill=tk.X, padx=14, pady=(0, 12))
-        tk.Button(
+        recover_button = tk.Button(
             actions,
             text="\u7acb\u5373\u56de\u6536\u8d5b\u679c",
             command=self.run_result_recovery,
@@ -847,7 +849,9 @@ class SmartMatchDashboard:
             font=("Microsoft YaHei UI", 9, "bold"),
             padx=12,
             pady=5,
-        ).pack(side=tk.LEFT)
+        )
+        self._register_result_recovery_button(recover_button)
+        recover_button.pack(side=tk.LEFT)
         tk.Button(
             actions,
             text="\u67e5\u770b\u5feb\u7167",
@@ -861,6 +865,26 @@ class SmartMatchDashboard:
             padx=12,
             pady=5,
         ).pack(side=tk.LEFT, padx=(8, 0))
+
+    def _register_result_recovery_button(self, button: tk.Button) -> None:
+        self.result_recovery_buttons = [
+            item for item in self.result_recovery_buttons if self._widget_alive_for(item)
+        ]
+        self.result_recovery_buttons.append(button)
+        button.configure(state=tk.DISABLED if self.result_recovery_running else tk.NORMAL)
+
+    def _set_result_recovery_controls_state(self) -> None:
+        state = tk.DISABLED if self.result_recovery_running else tk.NORMAL
+        live_buttons: list[tk.Button] = []
+        for button in self.result_recovery_buttons:
+            if not self._widget_alive_for(button):
+                continue
+            try:
+                button.configure(state=state)
+            except tk.TclError:
+                continue
+            live_buttons.append(button)
+        self.result_recovery_buttons = live_buttons
 
     def _chart_card(self, parent: tk.Widget, title: str) -> tk.Canvas:
         frame = self._card(parent, PANEL)
@@ -1494,7 +1518,7 @@ class SmartMatchDashboard:
         )
         header = tk.Frame(shell, bg=BG)
         header.pack(fill=tk.X)
-        tk.Button(
+        recover_button = tk.Button(
             header,
             text="\u56de\u6536\u8d5b\u679c",
             command=self.run_result_recovery,
@@ -1506,7 +1530,9 @@ class SmartMatchDashboard:
             font=("Microsoft YaHei UI", 10, "bold"),
             padx=18,
             pady=7,
-        ).pack(side=tk.RIGHT)
+        )
+        self._register_result_recovery_button(recover_button)
+        recover_button.pack(side=tk.RIGHT)
         tk.Button(
             header,
             text="\u8d5b\u524d\u5feb\u7167",
@@ -1628,6 +1654,13 @@ class SmartMatchDashboard:
         listbox.bind("<<ListboxSelect>>", on_settlement_select)
 
     def run_result_recovery(self) -> None:
+        if self.result_recovery_running:
+            message = "\u8d5b\u679c\u56de\u6536\u6b63\u5728\u8fd0\u884c\uff0c\u8bf7\u7b49\u5f53\u524d\u4efb\u52a1\u5b8c\u6210\u3002"
+            self.status_var.set(message)
+            self._log_event("INFO", message)
+            return
+        self.result_recovery_running = True
+        self._set_result_recovery_controls_state()
         self.status_var.set("\u6b63\u5728\u56de\u6536\u8d5b\u679c...")
         self._log_event("INFO", "\u5f00\u59cb\u56de\u6536\u8d5b\u679c")
         prediction_cache = {row.match.match_id: row.prediction for row in self.rows}
@@ -1649,6 +1682,8 @@ class SmartMatchDashboard:
         fetched = int(result.get("fetched_finished", 0) or 0)
         restored = int(result.get("restored_snapshots", 0) or 0)
         source = str(result.get("source", "-"))
+        self.result_recovery_running = False
+        self._set_result_recovery_controls_state()
         message = f"\u8d5b\u679c\u56de\u6536\u5b8c\u6210: \u5b8c\u573a {fetched} | \u4fee\u590d\u5feb\u7167 {restored} | \u65b0\u7ed3\u7b97 {new_settled} | \u6570\u636e\u6e90 {source} | \u8017\u65f6 {elapsed:.2f}s"
         self.status_var.set(message)
         self._log_event("OK", message)
@@ -1658,6 +1693,8 @@ class SmartMatchDashboard:
         messagebox.showinfo("\u8d5b\u679c\u56de\u6536", detail)
 
     def _finish_result_recovery_error(self, exc: Exception) -> None:
+        self.result_recovery_running = False
+        self._set_result_recovery_controls_state()
         self.status_var.set(f"\u8d5b\u679c\u56de\u6536\u5931\u8d25: {exc}")
         self._log_event("ERROR", f"\u8d5b\u679c\u56de\u6536\u5931\u8d25: {exc}")
         messagebox.showerror("\u8d5b\u679c\u56de\u6536\u5931\u8d25", str(exc))
@@ -2130,7 +2167,7 @@ class SmartMatchDashboard:
         )
         header = tk.Frame(shell, bg=BG)
         header.pack(fill=tk.X, pady=(0, 16))
-        tk.Button(
+        recover_button = tk.Button(
             header,
             text="\u56de\u6536\u8d5b\u679c",
             command=self.run_result_recovery,
@@ -2142,7 +2179,9 @@ class SmartMatchDashboard:
             font=("Microsoft YaHei UI", 10, "bold"),
             padx=18,
             pady=7,
-        ).pack(side=tk.RIGHT)
+        )
+        self._register_result_recovery_button(recover_button)
+        recover_button.pack(side=tk.RIGHT)
         tk.Button(
             header,
             text="\u8fd4\u56de\u590d\u76d8\u4e2d\u5fc3",
