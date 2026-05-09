@@ -70,6 +70,60 @@ class DashboardRow:
     prediction: dict
 
 
+def _match_load_failure(match: AppMatch, stage: str, exc: Exception) -> dict[str, str]:
+    return {
+        "stage": stage,
+        "match_id": str(getattr(match, "match_id", "-") or "-"),
+        "league": str(getattr(match, "league", "-") or "-"),
+        "home": str(getattr(match, "home_team", "-") or "-"),
+        "away": str(getattr(match, "away_team", "-") or "-"),
+        "error": str(exc) or exc.__class__.__name__,
+    }
+
+
+def _build_match_load_report(
+    *,
+    fetched_count: int,
+    row_count: int,
+    failures: list[dict[str, str]],
+    source: str,
+    elapsed: float | None = None,
+    source_messages: list[str] | None = None,
+) -> dict[str, object]:
+    predict_failures = sum(1 for item in failures if item.get("stage") == "predict")
+    snapshot_failures = sum(1 for item in failures if item.get("stage") == "snapshot")
+    status = "partial" if failures and row_count > 0 else "failed" if failures else "ok"
+    return {
+        "status": status,
+        "source": source or "-",
+        "fetched_count": max(0, int(fetched_count)),
+        "row_count": max(0, int(row_count)),
+        "failure_count": len(failures),
+        "predict_failure_count": predict_failures,
+        "snapshot_failure_count": snapshot_failures,
+        "elapsed": elapsed,
+        "failures": list(failures),
+        "source_messages": list(source_messages or []),
+    }
+
+
+def _build_dashboard_rows(matches: list[AppMatch]) -> tuple[list[DashboardRow], list[dict[str, str]]]:
+    rows: list[DashboardRow] = []
+    failures: list[dict[str, str]] = []
+    for match in matches:
+        try:
+            prediction = predict_match(match)
+        except Exception as exc:
+            failures.append(_match_load_failure(match, "predict", exc))
+            continue
+        try:
+            persist_prediction_snapshot(match, prediction)
+        except Exception as exc:
+            failures.append(_match_load_failure(match, "snapshot", exc))
+        rows.append(DashboardRow(match, prediction))
+    return rows, failures
+
+
 def _pct(value: object) -> str:
     try:
         return f"{float(value):.0%}"
@@ -477,6 +531,8 @@ class SmartMatchDashboard:
         self.data_source = "-"
         self.last_loaded_at = "-"
         self.last_refresh_seconds: float | None = None
+        self.last_load_diagnostics: dict[str, object] = {}
+        self.load_failures: list[dict[str, str]] = []
         self.event_log: list[tuple[str, str, str]] = []
         self.current_nav_index = 0
         self.current_view = "home"
@@ -1056,28 +1112,51 @@ class SmartMatchDashboard:
         started = time.perf_counter()
         try:
             fetched = fetch_matches_v24(strict_today=True)
-            rows = []
-            for match in fetched.matches:
-                prediction = predict_match(match)
-                persist_prediction_snapshot(match, prediction)
-                rows.append(DashboardRow(match, prediction))
-            elapsed = time.perf_counter() - started
-            self.root.after(0, lambda: self._apply_rows(rows, fetched.diagnostics.source, elapsed))
         except Exception as exc:
             elapsed = time.perf_counter() - started
             self.last_refresh_seconds = elapsed
-            self.root.after(0, lambda: self._show_error(exc))
+            self.root.after(0, lambda exc=exc: self._show_error(exc))
+            return
+
+        rows, failures = _build_dashboard_rows(fetched.matches)
+        elapsed = time.perf_counter() - started
+        report = _build_match_load_report(
+            fetched_count=len(fetched.matches),
+            row_count=len(rows),
+            failures=failures,
+            source=fetched.diagnostics.source,
+            elapsed=elapsed,
+            source_messages=fetched.diagnostics.messages,
+        )
+        self.root.after(
+            0,
+            lambda rows=rows, source=fetched.diagnostics.source, elapsed=elapsed, report=report: self._apply_rows(
+                rows,
+                source,
+                elapsed,
+                report,
+            ),
+        )
 
     def _show_error(self, exc: Exception) -> None:
         self._log_event("ERROR", f"\u52a0\u8f7d\u5931\u8d25: {exc}")
         self.status_var.set(f"加载失败: {exc}")
         messagebox.showerror("加载失败", str(exc))
 
-    def _apply_rows(self, rows: list[DashboardRow], source: str, elapsed: float | None = None) -> None:
+    def _apply_rows(
+        self,
+        rows: list[DashboardRow],
+        source: str,
+        elapsed: float | None = None,
+        load_report: dict[str, object] | None = None,
+    ) -> None:
         self.rows = rows
         self.data_source = source or "-"
         self.last_loaded_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.last_refresh_seconds = elapsed
+        self.last_load_diagnostics = dict(load_report or {})
+        failures = self.last_load_diagnostics.get("failures", [])
+        self.load_failures = list(failures) if isinstance(failures, list) else []
         self.date_var.set(datetime.now().strftime("(%Y-%m-%d)"))
         self._refresh_metrics()
         if self._widget_alive("match_list"):
@@ -1086,11 +1165,19 @@ class SmartMatchDashboard:
             self._draw_risk_chart()
         if self._widget_alive("conf_chart"):
             self._draw_confidence_chart()
+        fetched_count = int(self.last_load_diagnostics.get("fetched_count", len(rows)) or 0)
+        failure_count = int(self.last_load_diagnostics.get("failure_count", 0) or 0)
+        snapshot_failures = int(self.last_load_diagnostics.get("snapshot_failure_count", 0) or 0)
+        log_level = "OK" if failure_count == 0 else "WARN" if rows else "ERROR"
+        failure_text = f" | \u5931\u8d25 {failure_count} \u9879" if failure_count else ""
         if elapsed is not None:
-            self._log_event("OK", f"\u5206\u6790\u5b8c\u6210: {len(rows)} \u573a | \u6570\u636e\u6e90 {source or '-'} | \u8017\u65f6 {elapsed:.2f}s")
+            self._log_event(log_level, f"\u5206\u6790\u5b8c\u6210: {len(rows)}/{fetched_count} \u573a | \u6570\u636e\u6e90 {source or '-'} | \u8017\u65f6 {elapsed:.2f}s{failure_text}")
         else:
-            self._log_event("OK", f"\u5206\u6790\u5b8c\u6210: {len(rows)} \u573a | \u6570\u636e\u6e90 {source or '-'}")
-        self.status_var.set(f"已完成 {len(rows)} 场赛事分析 | 数据源 {source or '-'}")
+            self._log_event(log_level, f"\u5206\u6790\u5b8c\u6210: {len(rows)}/{fetched_count} \u573a | \u6570\u636e\u6e90 {source or '-'}{failure_text}")
+        if failure_count:
+            self.status_var.set(f"\u5df2\u5b8c\u6210 {len(rows)}/{fetched_count} \u573a\u8d5b\u4e8b\u5206\u6790 | \u5931\u8d25 {failure_count} \u9879 | \u5feb\u7167\u5931\u8d25 {snapshot_failures} \u9879")
+        else:
+            self.status_var.set(f"已完成 {len(rows)} 场赛事分析 | 数据源 {source or '-'}")
 
     def _refresh_metrics(self) -> None:
         total = len(self.rows)
@@ -1582,10 +1669,16 @@ class SmartMatchDashboard:
         top = tk.Frame(shell, bg=BG)
         top.pack(fill=tk.X, pady=(0, 16))
         risk_counts = self._risk_counts()
+        load_report = self.last_load_diagnostics if isinstance(self.last_load_diagnostics, dict) else {}
+        load_failure_count = int(load_report.get("failure_count", 0) or 0)
+        snapshot_failure_count = int(load_report.get("snapshot_failure_count", 0) or 0)
+        fetched_count = int(load_report.get("fetched_count", len(self.rows)) or 0)
         metrics = [
             ("\u6700\u8fd1\u8017\u65f6", f"{self.last_refresh_seconds:.2f}s" if self.last_refresh_seconds is not None else "-"),
             ("\u6570\u636e\u6e90", self.data_source, "#7aa2ff"),
-            ("\u8d5b\u4e8b\u6570", str(len(self.rows)), TEXT),
+            ("\u52a0\u8f7d\u6210\u529f", f"{len(self.rows)}/{fetched_count}", GREEN if load_failure_count == 0 else YELLOW),
+            ("\u52a0\u8f7d\u5931\u8d25", str(load_failure_count), RED if load_failure_count else GREEN),
+            ("\u5feb\u7167\u5931\u8d25", str(snapshot_failure_count), YELLOW if snapshot_failure_count else GREEN),
             ("\u9884\u8b66", str(risk_counts.get("high", 0)), RED),
             ("\u653e\u884c\u5f85\u56de\u6536", str(release_alert_count), RED if release_alert_count else GREEN),
             ("\u6700\u8fd1\u56de\u6536", str(recovery_summary.get("latest_status_label") or "-"), GREEN if recovery_summary.get("latest_status") == "success" else RED if recovery_summary.get("latest_status") == "failed" else YELLOW),
@@ -1604,7 +1697,7 @@ class SmartMatchDashboard:
 
         tk.Label(left, text="Agent \u72b6\u6001", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
         agent_rows = [
-            ("DataHunter", "\u5df2\u63a5\u5165" if self.rows else "\u7b49\u5f85\u6570\u636e"),
+            ("DataHunter", f"\u5df2\u63a5\u5165 {len(self.rows)}/{fetched_count} \u573a" if self.rows else "\u7b49\u5f85\u6570\u636e"),
             ("MarketEntropy", f"\u9ad8\u98ce\u9669 {risk_counts.get('high', 0)} / \u4e2d\u98ce\u9669 {risk_counts.get('medium', 0)}"),
             ("Simulation", f"\u5df2\u63a8\u6f14 {len(self.rows)} \u573a"),
             ("RiskGuardian", "\u6b63\u5e38" if risk_counts.get("high", 0) == 0 else "\u89e6\u53d1\u9884\u8b66"),
@@ -1613,6 +1706,20 @@ class SmartMatchDashboard:
         ]
         for label, value in agent_rows:
             self._kv_row(left, label, value)
+
+        if self.load_failures:
+            tk.Label(left, text="\u52a0\u8f7d\u5f02\u5e38", bg=PANEL, fg=YELLOW, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
+            stage_labels = {"predict": "\u9884\u6d4b", "snapshot": "\u5feb\u7167"}
+            for failure in self.load_failures[:3]:
+                if not isinstance(failure, dict):
+                    continue
+                stage = str(failure.get("stage") or "-")
+                title = f"{stage_labels.get(stage, stage)}\u5931\u8d25"
+                body = (
+                    f"{failure.get('league', '-')}: {failure.get('home', '-')} vs {failure.get('away', '-')}\n"
+                    f"{failure.get('error', '-')}"
+                )
+                self._alert_card(left, title, body, tone="bad" if stage == "predict" else "warning")
 
         if release_alert_count:
             tk.Label(left, text="\u653e\u884c\u56de\u6536\u63d0\u9192", bg=PANEL, fg=RED, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
