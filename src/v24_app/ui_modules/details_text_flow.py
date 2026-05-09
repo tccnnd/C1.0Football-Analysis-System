@@ -121,6 +121,42 @@ def _format_play_items(items: object) -> str:
     return " / ".join(parts) if parts else "-"
 
 
+def _pct_text(value: object, digits: int = 1) -> str:
+    try:
+        return f"{float(value):.{digits}%}"
+    except (TypeError, ValueError):
+        return "-"
+
+
+def _format_jc_strategy_evidence(item: Mapping[str, object] | object) -> list[str]:
+    resolved = item if isinstance(item, Mapping) else {}
+    layer = resolved.get("layer", {}) if isinstance(resolved.get("layer"), Mapping) else {}
+    if str(layer.get("data_layer") or "") != "jc_stratified_market":
+        return []
+    bucket = resolved.get("jc_bucket", {}) if isinstance(resolved.get("jc_bucket"), Mapping) else {}
+    context = resolved.get("jc_context", {}) if isinstance(resolved.get("jc_context"), Mapping) else {}
+    stability = bucket.get("stability", {}) if isinstance(bucket.get("stability"), Mapping) else {}
+    return [
+        f"- JC stable bucket: {bucket.get('dimension') or resolved.get('dimension') or '-'} / {bucket.get('bucket') or resolved.get('scope_value') or '-'}",
+        (
+            f"- JC backtest: {_pct_text(bucket.get('accuracy', resolved.get('backtest_accuracy')))} "
+            f"({int(bucket.get('hit_count', resolved.get('backtest_hits', 0)) or 0)}/"
+            f"{int(bucket.get('sample_count', resolved.get('backtest_samples', 0)) or 0)}) | "
+            f"Wilson {_pct_text(bucket.get('wilson_lower', resolved.get('wilson_lower')))}"
+        ),
+        (
+            f"- JC runtime match: confidence_bucket={context.get('confidence_bucket') or '-'} | "
+            f"odds_bucket={context.get('odds_bucket') or '-'} | "
+            f"pick_odds={float(context.get('pick_odds', 0) or 0):.2f}"
+        ),
+        (
+            f"- JC stability: {'stable' if bool(stability.get('stable')) else 'watch'} | "
+            f"score {_pct_text(stability.get('stability_score'))} | "
+            f"recent30 {_pct_text(stability.get('recent_30_accuracy'))}"
+        ),
+    ]
+
+
 def _build_confidence_calibration_block(prediction: Mapping[str, object]) -> str:
     calibration = prediction.get("confidence_calibration")
     if not isinstance(calibration, Mapping):
@@ -248,6 +284,11 @@ def build_match_details_text(
             + f"- 策略摘要: {high_strategy.get('summary', '-')}\n"
             + f"- 原因: {high_strategy.get('reason', '-')}"
         )
+    if high_strategy.get("enabled"):
+        evidence_source = active_items[0] if isinstance(active_items, list) and active_items else high_strategy
+        jc_evidence = _format_jc_strategy_evidence(evidence_source)
+        if jc_evidence:
+            high_strategy_block += "\n" + "\n".join(jc_evidence)
     admission_block = ""
     if admission:
         reason_text = format_strategy_admission_reasons(admission, limit=5)

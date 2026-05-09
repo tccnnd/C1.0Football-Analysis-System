@@ -189,6 +189,36 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertEqual(dashboard["metrics"][0]["value"], "0")
         self.assertIn("\u672a\u542f\u7528", dashboard["guidance_rows"][0]["title"])
 
+    def test_strategy_pool_rows_show_jc_bucket_evidence(self) -> None:
+        rows = build_high_accuracy_strategy_pool_rows(
+            {
+                "strategy_pool": [
+                    {
+                        "role": "primary",
+                        "scope": "jc_bucket",
+                        "scope_value": "L1 | >=0.65",
+                        "dimension": "league_confidence_bucket",
+                        "play_type": "market_1x2",
+                        "layer": {"data_layer": "jc_stratified_market"},
+                        "min_confidence": 0.65,
+                        "sample_count": 206,
+                        "hit_count": 164,
+                        "accuracy": 0.796117,
+                        "wilson_lower": 0.757916,
+                        "stability": {"stable": True, "stability_score": 0.795, "recent_30_accuracy": 0.733333, "recent_90_accuracy": 0.8},
+                        "breaker": {"breaker_on": False, "status": "active"},
+                        "jc_bucket": {"dimension": "league_confidence_bucket", "bucket": "L1 | >=0.65"},
+                        "jc_context": {"confidence_bucket": ">=0.65", "odds_bucket": "<=1.50", "pick_odds": 1.24},
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertIn("\u7ade\u5f69\u7a33\u5b9a\u6876", rows[0]["body"])
+        self.assertIn("JC稳定桶: league_confidence_bucket / L1 | >=0.65", rows[0]["body"])
+        self.assertIn("pick_odds=1.24", rows[0]["body"])
+
     def test_settlement_summary_ignores_unknown_results_for_hit_rate(self) -> None:
         summary = build_high_accuracy_strategy_settlement_summary(
             [

@@ -149,6 +149,43 @@ class UIDetailsTextFlowModuleTests(unittest.TestCase):
                 "top_confidence": 0.62,
                 "reasons": ["high_accuracy_strategy_active", "risk_low"],
             },
+            "high_accuracy_strategy": {
+                "enabled": True,
+                "active": True,
+                "active_count": 1,
+                "play_type": "market_1x2",
+                "pick": "HOME",
+                "confidence": 0.70,
+                "min_confidence": 0.65,
+                "backtest_accuracy": 0.796117,
+                "backtest_hits": 164,
+                "backtest_samples": 206,
+                "summary": "market_1x2 HOME",
+                "reason": "matched",
+                "active_matches": [
+                    {
+                        "play_type": "market_1x2",
+                        "pick": "HOME",
+                        "confidence": 0.70,
+                        "min_confidence": 0.65,
+                        "backtest_accuracy": 0.796117,
+                        "backtest_hits": 164,
+                        "backtest_samples": 206,
+                        "wilson_lower": 0.757916,
+                        "layer": {"data_layer": "jc_stratified_market"},
+                        "jc_bucket": {
+                            "dimension": "league_confidence_bucket",
+                            "bucket": "L1 | >=0.65",
+                            "accuracy": 0.796117,
+                            "hit_count": 164,
+                            "sample_count": 206,
+                            "wilson_lower": 0.757916,
+                            "stability": {"stable": True, "stability_score": 0.795, "recent_30_accuracy": 0.733333},
+                        },
+                        "jc_context": {"confidence_bucket": ">=0.65", "odds_bucket": "<=1.50", "pick_odds": 1.24},
+                    }
+                ],
+            },
         }
         settlement = {
             "home_goals": 2,
@@ -196,6 +233,9 @@ class UIDetailsTextFlowModuleTests(unittest.TestCase):
         self.assertIn("\u9ad8\u51c6 1/1", text)
         self.assertIn("Confidence Calibration", text)
         self.assertIn("Runtime Threshold Guard", text)
+        self.assertIn("JC stable bucket", text)
+        self.assertIn("L1 | >=0.65", text)
+        self.assertIn("Wilson 75.8%", text)
 
 
 if __name__ == "__main__":

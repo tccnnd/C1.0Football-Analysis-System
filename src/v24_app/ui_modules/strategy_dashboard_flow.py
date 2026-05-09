@@ -453,6 +453,14 @@ def build_high_accuracy_strategy_pool_rows(status: Mapping[str, object] | object
         data_layer = _label(DATA_LAYER_LABELS, layer.get("data_layer"))
         breaker_status = "ON" if bool(breaker.get("breaker_on")) else str(breaker.get("status") or "pending").upper()
         title = f"{index}. {role} | {play}"
+        jc_bucket = _as_mapping(item.get("jc_bucket"))
+        jc_context = _as_mapping(item.get("jc_context"))
+        jc_lines: list[str] = []
+        if str(layer.get("data_layer") or "") == "jc_stratified_market":
+            jc_lines = [
+                f"JC稳定桶: {jc_bucket.get('dimension') or item.get('dimension') or '-'} / {jc_bucket.get('bucket') or item.get('scope_value') or '-'}",
+                f"JC当前匹配: confidence_bucket={jc_context.get('confidence_bucket') or '-'} | odds_bucket={jc_context.get('odds_bucket') or '-'} | pick_odds={_safe_float(jc_context.get('pick_odds')):.2f}",
+            ]
         body = "\n".join(
             [
                 f"\u8303\u56f4: {scope} / {item.get('scope_value') or '-'} | \u6570\u636e\u5c42: {data_layer}",
@@ -461,6 +469,7 @@ def build_high_accuracy_strategy_pool_rows(status: Mapping[str, object] | object
                 f"\u7a33\u5b9a: {'OK' if bool(stability.get('stable')) else 'WATCH'} | \u8bc4\u5206 {_pct(stability.get('stability_score'))} | \u8fd130/90 {_pct(stability.get('recent_30_accuracy'))}/{_pct(stability.get('recent_90_accuracy'))}",
                 f"\u65ad\u8def: {breaker_status} | \u8fde\u9519 {_safe_int(breaker.get('miss_streak'))}/{_safe_int(breaker.get('threshold'), 3)} | \u6062\u590d {_safe_int(breaker.get('recovery_streak'))}/{_safe_int(breaker.get('recovery_hits_required'), 2)} | \u8fd1\u671f {_safe_int(breaker.get('hit_count'))}/{_safe_int(breaker.get('known_count'))}",
             ]
+            + jc_lines
         )
         rows.append({"title": title, "body": body})
     return rows
