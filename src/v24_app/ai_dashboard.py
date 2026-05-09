@@ -16,10 +16,12 @@ from .core import (
     AppMatch,
     auto_settle_finished_matches,
     fetch_matches_v24,
+    get_high_accuracy_strategy_status,
     get_recent_settlements,
     persist_prediction_snapshot,
     predict_match,
 )
+from .ui_modules import build_high_accuracy_strategy_dashboard
 
 
 BG = "#070d16"
@@ -1930,55 +1932,91 @@ class SmartMatchDashboard:
         listbox.bind("<<ListboxSelect>>", on_select)
 
     def open_strategy_library(self) -> None:
+        status = get_high_accuracy_strategy_status()
+        settlements = list(reversed(get_recent_settlements(limit=200)))
+        dashboard = build_high_accuracy_strategy_dashboard(status, settlements)
         shell = self._page_shell(
-            "\u7b56\u7565\u5e93",
-            "\u63a8\u8350\u7b56\u7565\u3001\u98ce\u9669\u89c4\u5219\u3001\u7f6e\u4fe1\u5ea6\u5206\u5c42\u548c\u73a9\u6cd5\u7ef4\u5ea6",
+            "\u7b56\u7565\u770b\u677f",
+            "\u5c55\u793a\u9ad8\u51c6\u7b56\u7565\u6c60\u3001\u56de\u6d4b\u5206\u5c42\u3001\u7a33\u5b9a\u6027\u548c\u771f\u5b9e\u7ed3\u7b97\u53cd\u9988",
         )
 
-        top = tk.Frame(shell, bg=BG)
-        top.pack(fill=tk.X, pady=(0, 16))
-        avg_conf = self._average_confidence()
-        high_count = self._risk_counts().get("high", 0)
-        metrics = [
-            ("\u7b56\u7565\u6570", "6", TEXT),
-            ("\u73a9\u6cd5\u7ef4\u5ea6", "5", "#7aa2ff"),
-            ("\u5e73\u5747\u7f6e\u4fe1", avg_conf, TEXT),
-            ("\u98ce\u9669\u89e6\u53d1", str(high_count), RED if high_count else GREEN),
-        ]
-        for label, value, color in metrics:
-            self._detail_metric(top, label, value, color)
+        header = tk.Frame(shell, bg=BG)
+        header.pack(fill=tk.X, pady=(0, 12))
+        tk.Label(
+            header,
+            text=f"\u72b6\u6001: {'ON' if dashboard.get('enabled') else 'OFF'} | \u66f4\u65b0: {dashboard.get('updated_at', '-')}",
+            bg=BG,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 10),
+        ).pack(side=tk.LEFT)
+        tk.Button(
+            header,
+            text="\u5237\u65b0\u770b\u677f",
+            command=self.open_strategy_library,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=18,
+            pady=7,
+        ).pack(side=tk.RIGHT)
 
-        body = tk.Frame(shell, bg=BG)
+        scroll_wrap = tk.Frame(shell, bg=BG)
+        scroll_wrap.pack(fill=tk.BOTH, expand=True)
+        canvas = tk.Canvas(scroll_wrap, bg=BG, bd=0, highlightthickness=0)
+        scrollbar = tk.Scrollbar(scroll_wrap, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        content = tk.Frame(canvas, bg=BG)
+        window_id = canvas.create_window((0, 0), window=content, anchor=tk.NW)
+        content.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window_id, width=event.width))
+
+        tone_colors = {"good": GREEN, "warning": YELLOW, "bad": RED, "info": "#7aa2ff", "neutral": TEXT}
+        top = tk.Frame(content, bg=BG)
+        top.pack(fill=tk.X, pady=(0, 16))
+        for metric in dashboard.get("metrics", []):
+            if not isinstance(metric, dict):
+                continue
+            color = tone_colors.get(str(metric.get("tone") or "neutral"), TEXT)
+            self._detail_metric(top, str(metric.get("label") or "-"), str(metric.get("value") or "-"), color)
+
+        body = tk.Frame(content, bg=BG)
         body.pack(fill=tk.BOTH, expand=True)
-        left = self._card(body, PANEL)
+        left = tk.Frame(body, bg=BG)
         left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 14))
-        right = self._card(body, PANEL)
+        right = tk.Frame(body, bg=BG)
         right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        tk.Label(left, text="\u6838\u5fc3\u7b56\u7565", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
-        strategy_rows = [
-            ("\u4e3b\u80dc/\u5e73/\u5ba2\u80dc", "\u57fa\u4e8e\u5e02\u573a\u3001ELO\u3001Poisson\u3001XGB \u878d\u5408\u6982\u7387\u9009\u62e9\u4e3b\u7ed3\u8bba"),
-            ("\u5927\u5c0f\u7403", "\u4f7f\u7528\u8fdb\u7403\u671f\u671b\u548c Poisson \u5206\u5e03\u63a8\u5bfc 2.5 \u7403\u65b9\u5411"),
-            ("\u8ba9\u7403", "\u6839\u636e\u76d8\u53e3\u7ebf\u3001\u80dc\u5e73\u8d1f\u6982\u7387\u548c\u4e13\u5bb6\u6a21\u578b\u8f93\u51fa\u751f\u6210"),
-            ("\u6bd4\u5206", "\u4ece Poisson \u6bd4\u5206\u5206\u5e03\u4e2d\u9009\u53d6\u6982\u7387\u66f4\u9ad8\u7684\u5019\u9009"),
-            ("\u534a\u5168\u573a", "\u4f9d\u636e\u534a\u573a/\u5168\u573a\u72b6\u6001\u6982\u7387\u63a8\u5bfc\u8282\u594f\u8d70\u5411"),
-            ("\u4fdd\u5b88\u9632\u5b88", "\u9ad8\u98ce\u9669\u6216\u51b7\u95e8\u6307\u6570\u504f\u9ad8\u65f6\u964d\u4f4e\u63a8\u8350\u6743\u91cd"),
-        ]
-        for label, value in strategy_rows:
-            self._strategy_row(left, label, value)
+        tk.Label(left, text="\u5f53\u524d\u7b56\u7565\u6c60", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(2, 8))
+        pool_rows = dashboard.get("pool_rows", [])
+        if pool_rows:
+            for row in pool_rows:
+                if isinstance(row, dict):
+                    self._strategy_row(left, str(row.get("title") or "-"), str(row.get("body") or "-"))
+        else:
+            self._strategy_row(left, "\u6682\u65e0\u53ef\u7528\u7b56\u7565", "\u8bf7\u5148\u6267\u884c\u9ad8\u51c6\u7b56\u7565\u56de\u6d4b\uff0c\u8ba9\u7cfb\u7edf\u4ece\u5386\u53f2\u6837\u672c\u4e2d\u751f\u6210\u7b56\u7565\u6c60\u3002")
 
-        tk.Label(right, text="\u98ce\u63a7\u89c4\u5219", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
-        rule_rows = [
-            ("\u4f4e\u98ce\u9669", "\u7f6e\u4fe1\u5ea6\u53ef\u7528\uff0c\u51b7\u95e8\u6307\u6570\u4f4e\uff0c\u5e02\u573a\u548c\u6a21\u578b\u65b9\u5411\u57fa\u672c\u4e00\u81f4"),
-            ("\u4e2d\u98ce\u9669", "\u6982\u7387\u5dee\u8ddd\u4e0d\u5927\u6216\u7a33\u5b9a\u6307\u6570\u4e0d\u8db3\uff0c\u9700\u8981\u8d5b\u524d\u590d\u6838"),
-            ("\u9ad8\u98ce\u9669", "\u51b7\u95e8\u6307\u6570\u504f\u9ad8\u6216\u76d8\u53e3/\u70ed\u5ea6\u5b58\u5728\u5f02\u5e38\uff0c\u4ee5\u9632\u5b88\u6216\u89c2\u671b\u4e3a\u4e3b"),
-            ("\u7f6e\u4fe1\u5ea6 <50%", "\u4e0d\u5efa\u8bae\u4f5c\u4e3a\u4e3b\u7b56\u7565\uff0c\u53ea\u7528\u4e8e\u89c2\u5bdf"),
-            ("\u7f6e\u4fe1\u5ea6 50%-60%", "\u4f4e\u6743\u91cd\uff0c\u9700\u914d\u5408\u98ce\u9669\u7b49\u7ea7\u5224\u65ad"),
-            ("\u7f6e\u4fe1\u5ea6 60%-70%", "\u5e38\u89c4\u53ef\u7528\u533a\u95f4\uff0c\u4ecd\u9700\u68c0\u67e5\u4e34\u573a\u4fe1\u606f"),
-            ("\u7f6e\u4fe1\u5ea6 >70%", "\u4f18\u5148\u7ea7\u8f83\u9ad8\uff0c\u4f46\u82e5\u98ce\u9669\u7b49\u7ea7\u9ad8\u4ecd\u9700\u964d\u6743"),
-        ]
-        for label, value in rule_rows:
-            self._strategy_row(right, label, value)
+        tk.Label(left, text="\u56de\u6d4b\u4e0e\u6837\u672c", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
+        for label, value in dashboard.get("validation_rows", []):
+            self._strategy_row(left, str(label), str(value))
+
+        tk.Label(right, text="\u771f\u5b9e\u7ed3\u7b97\u53cd\u9988", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(2, 8))
+        settlement_rows = dashboard.get("settlement_rows", [])
+        if settlement_rows:
+            for row in settlement_rows:
+                if isinstance(row, dict):
+                    self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
+        else:
+            self._strategy_row(right, "\u5c1a\u65e0\u547d\u4e2d\u53cd\u9988", "\u8fd1\u671f\u7ed3\u7b97\u4e2d\u8fd8\u6ca1\u6709\u8bb0\u5f55\u5230\u9ad8\u51c6\u7b56\u7565\u547d\u4e2d\u9879\u3002\u540e\u7eed\u8d5b\u679c\u56de\u6536\u540e\u4f1a\u5728\u8fd9\u91cc\u663e\u793a\u3002")
+
+        tk.Label(right, text="\u4f7f\u7528\u5efa\u8bae", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
+        for row in dashboard.get("guidance_rows", []):
+            if isinstance(row, dict):
+                self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
 
     def _strategy_row(self, parent: tk.Widget, title: str, body: str) -> None:
         frame = tk.Frame(parent, bg=PANEL_2, highlightbackground="#172638", highlightthickness=1)

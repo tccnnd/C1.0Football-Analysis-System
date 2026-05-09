@@ -144,6 +144,12 @@ from .coverage_guardrail_flow import (
     build_coverage_guardrail_apply_message,
     build_coverage_guardrail_apply_status_text,
 )
+from .strategy_dashboard_flow import (
+    build_high_accuracy_strategy_dashboard,
+    build_high_accuracy_strategy_pool_rows,
+    build_high_accuracy_strategy_settlement_rows,
+    build_high_accuracy_strategy_settlement_summary,
+)
 from .ops_report_flow import (
     build_threshold_change_table_text,
     build_ops_heartbeat_summary_text,
@@ -264,6 +270,10 @@ __all__ = [
     "summarize_prediction_coverage",
     "build_coverage_guardrail_apply_message",
     "build_coverage_guardrail_apply_status_text",
+    "build_high_accuracy_strategy_dashboard",
+    "build_high_accuracy_strategy_pool_rows",
+    "build_high_accuracy_strategy_settlement_rows",
+    "build_high_accuracy_strategy_settlement_summary",
     "build_ops_heartbeat_summary_text",
     "build_ops_trend_rows",
     "build_ops_trend_text",
