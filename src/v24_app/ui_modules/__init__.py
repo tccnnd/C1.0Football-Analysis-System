@@ -149,6 +149,9 @@ from .strategy_dashboard_flow import (
     build_high_accuracy_strategy_pool_rows,
     build_high_accuracy_strategy_settlement_rows,
     build_high_accuracy_strategy_settlement_summary,
+    build_strategy_allowlist_filename,
+    build_strategy_allowlist_report_lines,
+    select_strategy_allowlist_rows,
 )
 from .ops_report_flow import (
     build_threshold_change_table_text,
@@ -274,6 +277,9 @@ __all__ = [
     "build_high_accuracy_strategy_pool_rows",
     "build_high_accuracy_strategy_settlement_rows",
     "build_high_accuracy_strategy_settlement_summary",
+    "build_strategy_allowlist_filename",
+    "build_strategy_allowlist_report_lines",
+    "select_strategy_allowlist_rows",
     "build_ops_heartbeat_summary_text",
     "build_ops_trend_rows",
     "build_ops_trend_text",

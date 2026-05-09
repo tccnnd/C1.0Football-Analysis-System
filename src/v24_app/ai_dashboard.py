@@ -21,7 +21,12 @@ from .core import (
     persist_prediction_snapshot,
     predict_match,
 )
-from .ui_modules import build_high_accuracy_strategy_dashboard
+from .ui_modules import (
+    build_high_accuracy_strategy_dashboard,
+    build_strategy_allowlist_filename,
+    build_strategy_allowlist_report_lines,
+    select_strategy_allowlist_rows,
+)
 
 
 BG = "#070d16"
@@ -1957,6 +1962,25 @@ class SmartMatchDashboard:
 
         listbox.bind("<<ListboxSelect>>", on_select)
 
+    def export_strategy_allowlist(self) -> Path | None:
+        if not self.rows:
+            messagebox.showinfo("\u5bfc\u51fa\u653e\u884c\u6e05\u5355", "\u5f53\u524d\u8fd8\u6ca1\u6709\u5df2\u52a0\u8f7d\u7684\u8d5b\u4e8b\u5206\u6790\u7ed3\u679c\u3002")
+            return None
+
+        allowed = select_strategy_allowlist_rows(self.rows)
+        if not allowed:
+            self.status_var.set("\u5f53\u524d\u6ca1\u6709\u6b63\u5f0f\u653e\u884c\u573a\u6b21")
+            messagebox.showinfo("\u5bfc\u51fa\u653e\u884c\u6e05\u5355", "\u5f53\u524d\u6ca1\u6709\u7b56\u7565\u51c6\u5165\u4e3a\u6b63\u5f0f\u653e\u884c\u7684\u573a\u6b21\u3002")
+            return None
+
+        REPORT_DIR.mkdir(parents=True, exist_ok=True)
+        now = datetime.now()
+        path = REPORT_DIR / build_strategy_allowlist_filename(now)
+        path.write_text("\n".join(build_strategy_allowlist_report_lines(allowed, generated_at=now)), encoding="utf-8")
+        self.status_var.set(f"\u653e\u884c\u6e05\u5355\u5df2\u5bfc\u51fa: {path.name}")
+        messagebox.showinfo("\u5bfc\u51fa\u653e\u884c\u6e05\u5355", f"\u5df2\u751f\u6210\u653e\u884c\u6e05\u5355:\n{path}")
+        return path
+
     def open_strategy_library(self) -> None:
         status = get_high_accuracy_strategy_status()
         settlements = list(reversed(get_recent_settlements(limit=200)))
@@ -1975,6 +1999,19 @@ class SmartMatchDashboard:
             fg=MUTED,
             font=("Microsoft YaHei UI", 10),
         ).pack(side=tk.LEFT)
+        tk.Button(
+            header,
+            text="\u5bfc\u51fa\u653e\u884c\u6e05\u5355",
+            command=self.export_strategy_allowlist,
+            bg=BLUE,
+            fg="white",
+            activebackground="#3d5ee7",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=18,
+            pady=7,
+        ).pack(side=tk.RIGHT, padx=(10, 0))
         tk.Button(
             header,
             text="\u5237\u65b0\u770b\u677f",

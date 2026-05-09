@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 
@@ -12,10 +13,14 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+from v24_app.core import AppMatch
 from v24_app.ui_modules import (
     build_high_accuracy_strategy_dashboard,
     build_high_accuracy_strategy_pool_rows,
     build_high_accuracy_strategy_settlement_summary,
+    build_strategy_allowlist_filename,
+    build_strategy_allowlist_report_lines,
+    select_strategy_allowlist_rows,
 )
 
 
@@ -145,6 +150,115 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertEqual(summary["known_count"], 2)
         self.assertEqual(summary["summary_text"], "1/2")
         self.assertEqual(summary["hit_rate_text"], "50.0%")
+
+    def test_strategy_allowlist_report_keeps_only_formal_release_rows(self) -> None:
+        match_a = AppMatch(
+            home_team="A",
+            away_team="B",
+            league="L1",
+            match_time="21:00",
+            match_date="2026-05-09",
+            odds_home=1.8,
+            odds_draw=3.2,
+            odds_away=4.0,
+            source="live",
+            source_id="a1",
+        )
+        match_b = AppMatch(
+            home_team="C",
+            away_team="D",
+            league="L2",
+            match_time="19:30",
+            match_date="2026-05-09",
+            odds_home=2.0,
+            odds_draw=3.1,
+            odds_away=3.8,
+            source="live",
+            source_id="b1",
+        )
+        match_c = AppMatch(
+            home_team="E",
+            away_team="F",
+            league="L3",
+            match_time="18:00",
+            match_date="2026-05-09",
+            odds_home=2.1,
+            odds_draw=3.0,
+            odds_away=3.5,
+            source="live",
+            source_id="c1",
+        )
+        rows = [
+            {
+                "match": match_a,
+                "prediction": {
+                    "recommendation": "home",
+                    "confidence": 0.72,
+                    "risk_level": "LOW",
+                    "strategy_admission": {
+                        "decision": "allow",
+                        "label": "\u6b63\u5f0f\u653e\u884c",
+                        "action": "release",
+                        "active_count": 2,
+                        "shadow_count": 1,
+                        "single_play_count": 1,
+                        "top_play": "market_1x2",
+                        "top_pick": "home",
+                        "top_confidence": 0.76,
+                        "summary": "primary strategy passed",
+                        "reasons": ["primary_pass", "low_risk"],
+                    },
+                },
+            },
+            {
+                "match": match_c,
+                "prediction": {
+                    "recommendation": "away",
+                    "confidence": 0.81,
+                    "risk_level": "HIGH",
+                    "strategy_admission": {"decision": "block", "label": "\u963b\u65ad"},
+                },
+            },
+            {
+                "match": match_b,
+                "prediction": {
+                    "recommendation": "draw",
+                    "confidence": 0.68,
+                    "risk_level": "MEDIUM",
+                    "strategy_admission": {
+                        "decision": "allow",
+                        "label": "\u6b63\u5f0f\u653e\u884c",
+                        "action": "release",
+                        "active_count": 1,
+                        "shadow_count": 0,
+                        "single_play_count": 1,
+                        "top_play": "handicap",
+                        "top_pick": "draw",
+                        "top_confidence": 0.69,
+                        "reasons": ["backup_pass"],
+                    },
+                },
+            },
+        ]
+
+        selected = select_strategy_allowlist_rows(rows)
+        self.assertEqual([item["match"].home_team for item in selected], ["C", "A"])
+
+        lines = build_strategy_allowlist_report_lines(rows, generated_at=datetime(2026, 5, 9, 17, 30, 45))
+        payload = "\n".join(lines)
+        self.assertIn("# \u7b56\u7565\u653e\u884c\u6e05\u5355", payload)
+        self.assertIn("\u6b63\u5f0f\u653e\u884c\u573a\u6b21: 2", payload)
+        self.assertIn("C vs D", payload)
+        self.assertIn("A vs B", payload)
+        self.assertNotIn("E vs F", payload)
+        self.assertIn("\u8d5b\u524d\u590d\u6838\u6e05\u5355", payload)
+        self.assertIn("\u786e\u8ba4\u9996\u53d1", payload)
+
+    def test_strategy_allowlist_filename_is_timestamped(self) -> None:
+        self.assertEqual(
+            build_strategy_allowlist_filename(datetime(2026, 5, 9, 17, 30, 45)),
+            "strategy_allowlist_20260509_173045.md",
+        )
 
 
 if __name__ == "__main__":
