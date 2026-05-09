@@ -3198,7 +3198,11 @@ class SmartMatchDashboard:
         REPORT_DIR.mkdir(parents=True, exist_ok=True)
         now = datetime.now()
         path = REPORT_DIR / build_strategy_allowlist_filename(now)
-        path.write_text("\n".join(build_strategy_allowlist_report_lines(allowed, generated_at=now)), encoding="utf-8")
+        recent_settlements = get_recent_settlements(limit=200)
+        path.write_text(
+            "\n".join(build_strategy_allowlist_report_lines(allowed, generated_at=now, settlements=recent_settlements)),
+            encoding="utf-8",
+        )
         link_summary = mark_strategy_allowlist_snapshots(
             [(row.match, row.prediction) for row in allowed],
             allowlist_file=path.name,

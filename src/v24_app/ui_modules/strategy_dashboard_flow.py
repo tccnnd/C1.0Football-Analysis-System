@@ -1193,6 +1193,7 @@ def build_strategy_allowlist_report_lines(
     rows: Sequence[object] | object,
     *,
     generated_at: datetime | None = None,
+    settlements: Sequence[Mapping[str, object]] | object | None = None,
 ) -> list[str]:
     current = generated_at or datetime.now()
     allowed = select_strategy_allowlist_rows(rows)
@@ -1254,6 +1255,30 @@ def build_strategy_allowlist_report_lines(
         )
         lines.extend(f"- [ ] {item}" for item in PRE_MATCH_REVIEW_CHECKLIST)
         lines.append("")
+    error_attribution = build_strategy_error_attribution_summary(settlements or [])
+    if _safe_int(error_attribution.get("miss_count")) or _safe_int(error_attribution.get("unknown_count")):
+        lines.extend(
+            [
+                "## \u6700\u8fd1\u590d\u76d8\u9519\u56e0",
+                "",
+                f"- \u4e3b\u8981\u9519\u56e0: {error_attribution.get('top_reason') or '-'}",
+                f"- \u9519\u56e0\u9879: {_safe_int(error_attribution.get('miss_count'))}",
+                f"- \u5f85\u5224\u5b9a: {_safe_int(error_attribution.get('unknown_count'))}",
+                "",
+            ]
+        )
+        rows_payload = error_attribution.get("rows", []) if isinstance(error_attribution.get("rows"), list) else []
+        for row in rows_payload[:5]:
+            if not isinstance(row, Mapping):
+                continue
+            lines.extend(
+                [
+                    f"### \u9519\u56e0\u6837\u672c: {row.get('title') or '-'}",
+                    "",
+                    str(row.get("body") or "-"),
+                    "",
+                ]
+            )
     return lines
 
 

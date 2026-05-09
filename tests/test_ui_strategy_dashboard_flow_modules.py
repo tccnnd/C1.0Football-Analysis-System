@@ -493,6 +493,33 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("\u8d5b\u524d\u590d\u6838\u6e05\u5355", payload)
         self.assertIn("\u786e\u8ba4\u9996\u53d1", payload)
 
+        lines_with_review = build_strategy_allowlist_report_lines(
+            rows,
+            generated_at=datetime(2026, 5, 9, 17, 30, 45),
+            settlements=[
+                {
+                    "league": "L1",
+                    "home_team": "A",
+                    "away_team": "B",
+                    "high_accuracy_strategy_items": [
+                        {
+                            "play_type": "market_1x2",
+                            "pick": "home",
+                            "actual": "away",
+                            "confidence": 0.72,
+                            "min_confidence": 0.65,
+                            "backtest_accuracy": 0.8,
+                            "backtest_samples": 200,
+                            "is_hit": False,
+                        }
+                    ],
+                }
+            ],
+        )
+        payload_with_review = "\n".join(lines_with_review)
+        self.assertIn("\u6700\u8fd1\u590d\u76d8\u9519\u56e0", payload_with_review)
+        self.assertIn("\u9ad8\u7f6e\u4fe1\u5931\u8bef", payload_with_review)
+
     def test_strategy_allowlist_filename_is_timestamped(self) -> None:
         self.assertEqual(
             build_strategy_allowlist_filename(datetime(2026, 5, 9, 17, 30, 45)),
