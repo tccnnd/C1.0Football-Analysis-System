@@ -10,7 +10,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from tkinter import messagebox
+from tkinter import messagebox, ttk
 
 from .core import (
     AppMatch,
@@ -969,12 +969,12 @@ class SmartMatchDashboard:
             button.pack(side=tk.LEFT, padx=(0, 6))
             self.admission_filter_buttons[key] = button
 
-        list_wrap = tk.Frame(matches_card, bg=PANEL, height=260)
-        list_wrap.pack(fill=tk.X, padx=18, pady=(0, 10))
-        list_wrap.pack_propagate(False)
-        self.match_canvas = tk.Canvas(list_wrap, bg=PANEL, bd=0, highlightthickness=0)
+        self.match_list_wrap = tk.Frame(matches_card, bg=PANEL, height=205)
+        self.match_list_wrap.pack(fill=tk.X, padx=18, pady=(0, 10))
+        self.match_list_wrap.pack_propagate(False)
+        self.match_canvas = tk.Canvas(self.match_list_wrap, bg=PANEL, bd=0, highlightthickness=0)
         self.match_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.match_scrollbar = tk.Scrollbar(list_wrap, orient=tk.VERTICAL, command=self.match_canvas.yview)
+        self.match_scrollbar = tk.Scrollbar(self.match_list_wrap, orient=tk.VERTICAL, command=self.match_canvas.yview)
         self.match_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.match_canvas.configure(yscrollcommand=self.match_scrollbar.set)
         self.match_list = tk.Frame(self.match_canvas, bg=PANEL)
@@ -1542,6 +1542,15 @@ class SmartMatchDashboard:
                 activebackground=colors.get(key, BLUE) if active else "#172638",
             )
 
+    def _resize_match_list_area(self, row_count: int) -> None:
+        if not self._widget_alive("match_list_wrap"):
+            return
+        if self.show_all_matches:
+            height = 255
+        else:
+            height = 88 if row_count <= 1 else 146 if row_count == 2 else 205
+        self.match_list_wrap.configure(height=height)
+
     def _bind_match_scroll(self, widget: tk.Widget) -> None:
         widget.bind("<MouseWheel>", self._on_match_mousewheel, add="+")
         for child in widget.winfo_children():
@@ -1569,6 +1578,7 @@ class SmartMatchDashboard:
             ),
         )
         ranked = ranked if self.show_all_matches else ranked[:3]
+        self._resize_match_list_area(len(ranked))
         if hasattr(self, "match_toggle_var"):
             text = "\u6536\u8d77 \u2039" if self.show_all_matches else f"\u67e5\u770b\u5168\u90e8 {len(filtered_rows)} \u203a"
             self.match_toggle_var.set(text)
@@ -1606,9 +1616,9 @@ class SmartMatchDashboard:
         frame.configure(cursor="hand2")
 
         left = tk.Frame(frame, bg=PANEL_2)
-        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=18, pady=8)
-        tk.Label(left, text=match.league, bg=PANEL_2, fg="#6d8dff", font=("Microsoft YaHei UI", 9, "bold")).pack(anchor=tk.W)
-        tk.Label(left, text=f"{match.home_team} vs {match.away_team}", bg=PANEL_2, fg=TEXT, font=("Microsoft YaHei UI", 12, "bold")).pack(anchor=tk.W, pady=(4, 2))
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=16, pady=6)
+        tk.Label(left, text=match.league, bg=PANEL_2, fg="#6d8dff", font=("Microsoft YaHei UI", 8, "bold")).pack(anchor=tk.W)
+        tk.Label(left, text=f"{match.home_team} vs {match.away_team}", bg=PANEL_2, fg=TEXT, font=("Microsoft YaHei UI", 11, "bold")).pack(anchor=tk.W, pady=(3, 1))
         tk.Label(left, text=f"开赛时间：{match.match_date} {match.match_time}", bg=PANEL_2, fg=MUTED, font=("Microsoft YaHei UI", 9)).pack(anchor=tk.W)
 
         for title, value, color, width in [
@@ -2262,21 +2272,35 @@ class SmartMatchDashboard:
         right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         tk.Label(left, text="\u6700\u8fd1\u590d\u76d8", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
-        listbox = tk.Listbox(
-            left,
-            bg=PANEL,
-            fg=TEXT,
-            selectbackground=BLUE,
-            selectforeground="white",
-            relief=tk.FLAT,
-            font=("Microsoft YaHei UI", 10),
-            activestyle="none",
-        )
-        listbox.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
-        for item in settlements[:80]:
-            listbox.insert(tk.END, self._settlement_line(item))
+        table_wrap = tk.Frame(left, bg=PANEL)
+        table_wrap.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
+        style = ttk.Style()
+        style.configure("Review.Treeview", background=PANEL, foreground=TEXT, fieldbackground=PANEL, rowheight=26, borderwidth=0)
+        style.configure("Review.Treeview.Heading", background=PANEL_2, foreground=TEXT, font=("Microsoft YaHei UI", 9, "bold"))
+        columns = ("date", "league", "match", "score", "pick", "result", "hit", "confidence")
+        review_tree = ttk.Treeview(table_wrap, columns=columns, show="headings", style="Review.Treeview", height=16)
+        headings = {
+            "date": "\u65e5\u671f",
+            "league": "\u8054\u8d5b",
+            "match": "\u8d5b\u4e8b",
+            "score": "\u6bd4\u5206",
+            "pick": "\u9884\u6d4b",
+            "result": "\u8d5b\u679c",
+            "hit": "1X2",
+            "confidence": "\u7f6e\u4fe1",
+        }
+        widths = {"date": 86, "league": 78, "match": 220, "score": 58, "pick": 62, "result": 62, "hit": 62, "confidence": 64}
+        for key in columns:
+            review_tree.heading(key, text=headings[key])
+            review_tree.column(key, width=widths[key], minwidth=50, stretch=key == "match", anchor=tk.W)
+        review_scrollbar = tk.Scrollbar(table_wrap, orient=tk.VERTICAL, command=review_tree.yview)
+        review_tree.configure(yscrollcommand=review_scrollbar.set)
+        review_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        review_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        for index, item in enumerate(settlements[:80]):
+            review_tree.insert("", tk.END, iid=str(index), values=self._settlement_table_values(item))
         if not settlements:
-            listbox.insert(tk.END, "\u6682\u65e0\u590d\u76d8\u7ed3\u7b97\u8bb0\u5f55")
+            review_tree.insert("", tk.END, iid="empty", values=("-", "-", "\u6682\u65e0\u590d\u76d8\u7ed3\u7b97\u8bb0\u5f55", "-", "-", "-", "-", "-"))
 
         tk.Label(right, text="\u95ed\u73af\u590d\u76d8", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
         detail = tk.Text(
@@ -2301,17 +2325,21 @@ class SmartMatchDashboard:
             detail.configure(state=tk.DISABLED)
 
         if settlements:
-            listbox.selection_set(0)
+            review_tree.selection_set("0")
+            review_tree.focus("0")
             show_settlement_detail(0)
         else:
             show_settlement_detail(0)
 
         def on_settlement_select(_event=None) -> None:
-            selection = listbox.curselection()
+            selection = review_tree.selection()
             if selection and settlements:
-                show_settlement_detail(int(selection[0]))
+                try:
+                    show_settlement_detail(int(selection[0]))
+                except (TypeError, ValueError):
+                    show_settlement_detail(0)
 
-        listbox.bind("<<ListboxSelect>>", on_settlement_select)
+        review_tree.bind("<<TreeviewSelect>>", on_settlement_select)
 
     def open_recovery_run_center(self) -> None:
         self.current_view = "recovery_runs"
@@ -2828,6 +2856,22 @@ class SmartMatchDashboard:
             f"{prefix}{item.get('match_date', '-')} {item.get('league', '-')} | "
             f"{item.get('home_team', '-')} {item.get('home_goals', '-')}-{item.get('away_goals', '-')} {item.get('away_team', '-')} | "
             f"\u9884\u6d4b {item.get('predicted', '-')} | {hit} | {_pct1(item.get('prediction_confidence'))}"
+        )
+
+    def _settlement_table_values(self, item: dict) -> tuple[str, str, str, str, str, str, str, str]:
+        hit = "\u547d\u4e2d" if item.get("is_correct") is True else "\u5931\u8bef" if item.get("is_correct") is False else "-"
+        match = f"{item.get('home_team', '-')} vs {item.get('away_team', '-')}"
+        if str(item.get("strategy_allowlist_decision") or "") == "allow":
+            match = f"\u653e\u884c | {match}"
+        return (
+            str(item.get("match_date") or "-"),
+            str(item.get("league") or "-"),
+            match,
+            f"{item.get('home_goals', '-')}-{item.get('away_goals', '-')}",
+            str(item.get("predicted") or "-"),
+            str(item.get("result") or "-"),
+            hit,
+            _pct1(item.get("prediction_confidence")),
         )
 
     def _hit_label(self, value: object) -> str:
