@@ -108,7 +108,7 @@ from .ui_modules import (
     show_recent_settlements_window,
     sync_tree_c1_action_column,
     should_run_pre_export_analysis,
-    open_user_center_window,
+    build_user_center_sections,
     is_settlement_score_in_range,
     parse_settlement_score_inputs,
     refresh_parlay_recommendations,
@@ -417,6 +417,8 @@ class FootballPredictionApp:
             fg="#111827",
         ).pack(anchor=tk.W)
 
+        self.inline_actions_container = ttk.Frame(right, style="Card.TFrame")
+
         self.details = tk.Text(
             right,
             wrap=tk.WORD,
@@ -581,6 +583,7 @@ class FootballPredictionApp:
         if self.user_center_window is not None and self.user_center_window.winfo_exists():
             self.user_center_window.destroy()
         self.user_center_window = None
+        self._clear_inline_actions()
 
     def analyze_selected(self) -> None:
         match = self.selected_match()
@@ -913,7 +916,17 @@ class FootballPredictionApp:
     def _show_match_details(self, match: AppMatch, prediction: dict, settlement: dict | None = None) -> None:
         _app_show_match_details_with_parlays(self, match, prediction, settlement)
 
-    def _write_details(self, content: str) -> None:
+    def _clear_inline_actions(self) -> None:
+        container = getattr(self, "inline_actions_container", None)
+        if container is None:
+            return
+        for child in container.winfo_children():
+            child.destroy()
+        container.pack_forget()
+
+    def _write_details(self, content: str, *, clear_actions: bool = True) -> None:
+        if clear_actions:
+            self._clear_inline_actions()
         self.details.config(state=tk.NORMAL)
         self.details.delete("1.0", tk.END)
         self.details.insert("1.0", content)
@@ -2090,14 +2103,27 @@ def _app_open_user_center_final(self) -> None:
         "open_c1_release_allowlist": self.open_c1_release_allowlist,
         "open_c1_workbench": self.open_c1_workbench,
     }
-    self.user_center_window = open_user_center_window(
-        root=self.root,
-        existing_window=self.user_center_window,
-        match_count=len(self.matches),
-        analyzed_count=len(self.predictions),
-        on_close=self._close_user_center,
-        actions=actions,
+    self._close_user_center()
+    container = self.inline_actions_container
+    container.pack(fill=tk.X, pady=(8, 2), before=self.details)
+
+    for section_title, buttons in build_user_center_sections(actions):
+        section = ttk.LabelFrame(container, text=section_title, padding=8)
+        section.pack(fill=tk.X, pady=(0, 8))
+        for index, (button_text, callback) in enumerate(buttons):
+            button = ttk.Button(section, text=button_text, command=callback)
+            button.grid(row=index // 6, column=index % 6, sticky=tk.W, padx=(0, 8), pady=(0, 6))
+
+    ttk.Button(container, text="收起用户中心", command=self._close_user_center).pack(anchor=tk.E, pady=(0, 6))
+    self._write_details(
+        "用户中心\n\n"
+        + f"- 当前赛事: {len(self.matches)} 场\n"
+        + f"- 已分析: {len(self.predictions)} 场\n"
+        + "- 功能入口已切换为主界面内嵌面板，不再打开独立窗口。\n"
+        + "- 点击上方按钮即可执行分析、结算、训练、校准、回测和 C1 对照任务。",
+        clear_actions=False,
     )
+    self.status_var.set("已打开用户中心")
 
 
 _FINAL_BINDINGS: dict[str, object] = resolve_final_bindings(globals())
