@@ -3023,6 +3023,7 @@ def get_play_threshold_status() -> dict:
         "default_thresholds": dict(DEFAULT_PLAY_THRESHOLDS),
         "metrics": report.get("metrics", {}),
         "validation": report.get("validation", {}),
+        "layered_filter": report.get("layered_filter", {}),
     }
 
 
@@ -3032,6 +3033,78 @@ def _current_play_thresholds() -> dict[str, float]:
     if not isinstance(thresholds, dict):
         return dict(DEFAULT_PLAY_THRESHOLDS)
     return {key: float(thresholds.get(key, DEFAULT_PLAY_THRESHOLDS[key])) for key in DEFAULT_PLAY_THRESHOLDS}
+
+
+def _current_layered_filter_gates() -> dict:
+    status = get_play_threshold_status()
+    gates = status.get("layered_filter", {}) if isinstance(status, dict) else {}
+    if not isinstance(gates, dict):
+        return {}
+    return gates if gates.get("enabled") else {}
+
+
+def _layered_gate_for_play(
+    *,
+    match: AppMatch,
+    play_type: str,
+    confidence: float,
+    threshold: float,
+) -> tuple[bool, float, dict]:
+    gates = _current_layered_filter_gates()
+    if not gates:
+        resolved_threshold = _safe_float(threshold, default=0.0)
+        return _safe_float(confidence, default=0.0) >= resolved_threshold, resolved_threshold, {}
+
+    league_key = normalize_text(match.league)
+    play_key = normalize_text(play_type)
+    global_play = gates.get("global_play", {}) if isinstance(gates.get("global_play"), dict) else {}
+    league_play = gates.get("league_play", {}) if isinstance(gates.get("league_play"), dict) else {}
+    candidates: list[dict] = []
+    global_rule = global_play.get(play_key) if isinstance(global_play, dict) else None
+    league_rules = league_play.get(league_key) if isinstance(league_play, dict) else None
+    league_rule = league_rules.get(play_key) if isinstance(league_rules, dict) else None
+    if isinstance(global_rule, dict):
+        candidates.append({**global_rule, "scope": "global_play", "league": ""})
+    if isinstance(league_rule, dict):
+        candidates.append({**league_rule, "scope": "league_play", "league": league_key})
+
+    resolved_threshold = _safe_float(threshold, default=0.0)
+    blocked = False
+    reasons: list[str] = []
+    applied_rules: list[dict] = []
+    for rule in candidates:
+        min_threshold = _safe_float(rule.get("min_threshold"), default=resolved_threshold)
+        resolved_threshold = max(resolved_threshold, min_threshold)
+        if bool(rule.get("blocked")):
+            blocked = True
+        reason = normalize_text(rule.get("reason", ""))
+        if reason:
+            reasons.append(reason)
+        applied_rules.append(
+            {
+                "scope": rule.get("scope", "-"),
+                "league": rule.get("league", ""),
+                "play_type": play_key,
+                "min_threshold": round(min_threshold, 4),
+                "blocked": bool(rule.get("blocked")),
+                "sample_count": int(rule.get("sample_count", 0) or 0),
+                "hit_rate": round(_safe_float(rule.get("hit_rate"), default=0.0), 4),
+                "ev_bias": round(_safe_float(rule.get("ev_bias"), default=0.0), 4),
+                "reason": reason or "-",
+            }
+        )
+
+    resolved_threshold = round(_clamp(resolved_threshold, 0.0, 0.99), 4)
+    passed = (not blocked) and _safe_float(confidence, default=0.0) >= resolved_threshold
+    meta = {
+        "threshold": resolved_threshold,
+        "base_threshold": round(_safe_float(threshold, default=0.0), 4),
+        "confidence": round(_safe_float(confidence, default=0.0), 4),
+        "blocked": blocked,
+        "reasons": reasons,
+        "rules": applied_rules,
+    }
+    return passed, resolved_threshold, meta
 
 
 def _runtime_dynamic_play_thresholds(base_thresholds: dict[str, float], *, window: int = 120) -> tuple[dict[str, float], dict[str, Any]]:
@@ -3153,6 +3226,11 @@ def _runtime_dynamic_play_thresholds(base_thresholds: dict[str, float], *, windo
 def _save_play_threshold_report(report: dict) -> None:
     if not isinstance(report, dict):
         return
+    if "layered_filter" not in report:
+        existing = _load_play_threshold_report()
+        layered_filter = existing.get("layered_filter") if isinstance(existing, dict) else None
+        if isinstance(layered_filter, dict) and layered_filter:
+            report["layered_filter"] = layered_filter
     _safe_model_dir()
     PLAY_THRESHOLDS_FILE.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     _PLAY_THRESHOLD_CACHE["mtime"] = _play_thresholds_mtime()
@@ -3769,6 +3847,179 @@ def _collect_settlement_play_metrics(settlements: list[dict]) -> dict[str, dict]
             "confidence_values": [],
         }
     return metrics
+
+
+def _settlement_layered_play_records(settlements: list[dict]) -> list[dict]:
+    specs = {
+        "1x2": ("is_correct", "prediction_confidence"),
+        "handicap": ("handicap_is_correct", "handicap_confidence"),
+        "total_goals": ("total_goals_is_correct", "total_goals_confidence"),
+        "score": ("score_is_correct", "score_confidence"),
+        "ou": ("ou_is_correct", "ou_confidence"),
+    }
+    records: list[dict] = []
+    for item in settlements:
+        if not isinstance(item, dict):
+            continue
+        league = normalize_text(item.get("league", "")) or "-"
+        fallback_confidence = item.get("prediction_confidence")
+        for play_type, (hit_key, conf_key) in specs.items():
+            hit = item.get(hit_key)
+            if not isinstance(hit, bool):
+                continue
+            confidence = _safe_float(item.get(conf_key), default=-1.0)
+            if confidence <= 0.0 or confidence > 1.0:
+                confidence = _safe_float(fallback_confidence, default=0.0)
+            records.append(
+                {
+                    "league": league,
+                    "play_type": "total_goals" if play_type == "ou" else play_type,
+                    "confidence": _clamp(confidence),
+                    "is_hit": bool(hit),
+                }
+            )
+    return records
+
+
+def _layered_gate_rule_from_rows(
+    rows: list[dict],
+    *,
+    play_type: str,
+    base_threshold: float,
+    min_samples: int,
+    weak_hit_rate: float,
+    weak_ev_bias: float,
+    block_hit_rate: float,
+    block_ev_bias: float,
+) -> dict | None:
+    sample_count = len(rows)
+    if sample_count < min_samples:
+        return None
+    hit_count = sum(1 for row in rows if bool(row.get("is_hit")))
+    hit_rate = hit_count / max(sample_count, 1)
+    expected_values = [_safe_float(row.get("confidence"), default=0.0) for row in rows]
+    expected_hit_rate = sum(expected_values) / max(len(expected_values), 1)
+    ev_bias = hit_rate - expected_hit_rate
+    current_threshold = _safe_float(base_threshold, default=DEFAULT_PLAY_THRESHOLDS.get(play_type, 0.0))
+    min_thr, max_thr = PLAY_THRESHOLD_RANGE.get(play_type, (0.0, 0.99))
+    blocked = False
+    raise_steps = 0
+    reasons: list[str] = []
+
+    if hit_rate <= block_hit_rate and ev_bias <= block_ev_bias and sample_count >= max(min_samples, 12):
+        blocked = True
+        raise_steps = 3
+        reasons.append("block_weak_layer")
+    elif hit_rate <= weak_hit_rate or ev_bias <= weak_ev_bias:
+        raise_steps = 2 if ev_bias <= weak_ev_bias - 0.06 else 1
+        reasons.append("raise_weak_layer")
+    else:
+        return None
+
+    min_threshold = round(_clamp(current_threshold + raise_steps * 0.03, min_thr, max_thr), 2)
+    return {
+        "play_type": play_type,
+        "sample_count": sample_count,
+        "hit_count": hit_count,
+        "hit_rate": round(hit_rate, 6),
+        "expected_hit_rate": round(expected_hit_rate, 6),
+        "ev_bias": round(ev_bias, 6),
+        "base_threshold": round(current_threshold, 2),
+        "min_threshold": min_threshold,
+        "blocked": blocked,
+        "reason": ",".join(reasons),
+    }
+
+
+def calibrate_layered_filter_thresholds_now(
+    *,
+    limit: int = 500,
+    min_samples: int = 8,
+    weak_hit_rate: float = 0.42,
+    weak_ev_bias: float = -0.08,
+    block_hit_rate: float = 0.25,
+    block_ev_bias: float = -0.16,
+) -> dict:
+    settlements = get_recent_settlements(limit=max(0, int(limit)))
+    current_thresholds = _current_play_thresholds()
+    records = _settlement_layered_play_records(settlements)
+    global_play: dict[str, dict] = {}
+    league_play: dict[str, dict[str, dict]] = {}
+
+    by_play: dict[str, list[dict]] = defaultdict(list)
+    by_league_play: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    for row in records:
+        play_type = normalize_text(row.get("play_type", ""))
+        league = normalize_text(row.get("league", "")) or "-"
+        if play_type not in DEFAULT_PLAY_THRESHOLDS:
+            continue
+        by_play[play_type].append(row)
+        by_league_play[(league, play_type)].append(row)
+
+    for play_type, rows in by_play.items():
+        rule = _layered_gate_rule_from_rows(
+            rows,
+            play_type=play_type,
+            base_threshold=_safe_float(current_thresholds.get(play_type), default=DEFAULT_PLAY_THRESHOLDS[play_type]),
+            min_samples=max(12, int(min_samples) * 2),
+            weak_hit_rate=weak_hit_rate,
+            weak_ev_bias=weak_ev_bias,
+            block_hit_rate=block_hit_rate,
+            block_ev_bias=block_ev_bias,
+        )
+        if rule is not None:
+            global_play[play_type] = rule
+
+    for (league, play_type), rows in by_league_play.items():
+        rule = _layered_gate_rule_from_rows(
+            rows,
+            play_type=play_type,
+            base_threshold=_safe_float(current_thresholds.get(play_type), default=DEFAULT_PLAY_THRESHOLDS[play_type]),
+            min_samples=int(min_samples),
+            weak_hit_rate=weak_hit_rate,
+            weak_ev_bias=weak_ev_bias,
+            block_hit_rate=block_hit_rate,
+            block_ev_bias=block_ev_bias,
+        )
+        if rule is None:
+            continue
+        rule["league"] = league
+        league_play.setdefault(league, {})[play_type] = rule
+
+    previous = get_play_threshold_status()
+    report = {
+        "updated_at": previous.get("updated_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "mode": previous.get("mode", "layered_filter"),
+        "thresholds": current_thresholds,
+        "default_thresholds": previous.get("default_thresholds", dict(DEFAULT_PLAY_THRESHOLDS)),
+        "metrics": previous.get("metrics", {}),
+        "validation": previous.get("validation", {}),
+        "layered_filter": {
+            "enabled": True,
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "source": "settlement_layers",
+            "sample_count": len(settlements),
+            "record_count": len(records),
+            "min_samples": int(min_samples),
+            "weak_hit_rate": round(float(weak_hit_rate), 4),
+            "weak_ev_bias": round(float(weak_ev_bias), 4),
+            "block_hit_rate": round(float(block_hit_rate), 4),
+            "block_ev_bias": round(float(block_ev_bias), 4),
+            "global_play": global_play,
+            "league_play": league_play,
+        },
+    }
+    _save_play_threshold_report(report)
+    return {
+        "calibrated": True,
+        "reason": "ok",
+        "sample_count": len(settlements),
+        "record_count": len(records),
+        "global_rule_count": len(global_play),
+        "league_rule_count": sum(len(item) for item in league_play.values()),
+        "layered_filter": report["layered_filter"],
+        "status": get_play_threshold_status(),
+    }
 
 
 def calibrate_play_thresholds_by_settlement_now(
@@ -5775,13 +6026,27 @@ def _predict_match_with_inputs(
     }
     play_thresholds_base = _current_play_thresholds()
     play_thresholds, play_threshold_adjustment = _runtime_dynamic_play_thresholds(play_thresholds_base)
-    play_pass = {
-        "1x2": round(recommendation_confidence, 4) >= _safe_float(play_thresholds.get("1x2"), default=0.0),
-        "handicap": round(handicap_confidence, 4) >= _safe_float(play_thresholds.get("handicap"), default=0.0),
-        "total_goals": round(aligned_total_goals_prob, 4) >= _safe_float(play_thresholds.get("total_goals"), default=0.0),
-        "score": round(_safe_float(aligned_score.get("probability"), default=0.0), 4) >= _safe_float(play_thresholds.get("score"), default=0.0),
-        "htft": round(_safe_float(aligned_htft.get("probability"), default=0.0), 4) >= _safe_float(play_thresholds.get("htft"), default=0.0),
+    play_confidences = {
+        "1x2": round(recommendation_confidence, 4),
+        "handicap": round(handicap_confidence, 4),
+        "total_goals": round(aligned_total_goals_prob, 4),
+        "score": round(_safe_float(aligned_score.get("probability"), default=0.0), 4),
+        "htft": round(_safe_float(aligned_htft.get("probability"), default=0.0), 4),
     }
+    play_pass: dict[str, bool] = {}
+    layered_filter_meta: dict[str, dict] = {}
+    effective_play_thresholds = dict(play_thresholds)
+    for play_name, confidence_value in play_confidences.items():
+        passed, effective_threshold, gate_meta = _layered_gate_for_play(
+            match=match,
+            play_type=play_name,
+            confidence=confidence_value,
+            threshold=_safe_float(play_thresholds.get(play_name), default=0.0),
+        )
+        play_pass[play_name] = bool(passed)
+        effective_play_thresholds[play_name] = effective_threshold
+        if gate_meta:
+            layered_filter_meta[play_name] = gate_meta
     play_policy = _current_play_policy()
     play_catalog = {
         "1x2": {
@@ -5892,9 +6157,11 @@ def _predict_match_with_inputs(
         "scoreline_model_takeover_bucket": scoreline_takeover_bucket if scoreline_model_takeover else None,
         "recent_form_features": recent_form_features,
         "ensemble_weights": ensemble_result.effective_weights,
-        "play_thresholds": play_thresholds,
+        "play_thresholds": effective_play_thresholds,
         "play_thresholds_base": play_thresholds_base,
+        "play_thresholds_runtime": play_thresholds,
         "play_threshold_adjustment": play_threshold_adjustment,
+        "layered_filter": layered_filter_meta,
         "play_policy": play_policy,
         "play_pass": play_pass,
         "draw_score": round(draw_score, 4),

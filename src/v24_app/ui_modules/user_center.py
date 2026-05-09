@@ -46,6 +46,7 @@ USER_CENTER_LAYOUT: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("阈值状态", "show_play_threshold_status"),
             ("校准玩法", "calibrate_play_thresholds"),
             ("弱分桶校准", "calibrate_thresholds_by_decomposition"),
+            ("分层门槛", "calibrate_layered_filter_thresholds"),
             ("覆盖率保护", "run_threshold_coverage_guardrail"),
             ("贝叶斯状态", "show_bayes_calibration_status"),
             ("校准贝叶斯", "calibrate_bayes_calibration"),

@@ -143,6 +143,7 @@ from .core import (
     calibrate_play_thresholds_now,
     calibrate_play_thresholds_by_settlement_now,
     calibrate_play_thresholds_coverage_guardrail_now,
+    calibrate_layered_filter_thresholds_now,
     calibrate_bayes_calibration_now,
     fetch_matches_v24,
     generate_mix_parlay_recommendations,
@@ -1473,6 +1474,36 @@ def _app_calibrate_thresholds_by_decomposition(self) -> None:
     )
 
 
+def _app_apply_layered_filter_threshold_result(self, result: dict) -> None:
+    calibrated = bool(result.get("calibrated"))
+    reason = result.get("reason", "-")
+    league_rules = int(result.get("league_rule_count", 0) or 0)
+    global_rules = int(result.get("global_rule_count", 0) or 0)
+    self.status_var.set(f"分层门槛{'完成' if calibrated else '失败'} | global={global_rules} | league={league_rules}")
+    if not calibrated:
+        messagebox.showinfo("分层门槛", f"执行未完成\n原因: {reason}")
+        return
+    messagebox.showinfo(
+        "分层门槛",
+        f"已按近期复盘分层设置过滤门槛\n"
+        f"- 结算样本: {int(result.get('sample_count', 0) or 0)}\n"
+        f"- 分层记录: {int(result.get('record_count', 0) or 0)}\n"
+        f"- 全局玩法规则: {global_rules}\n"
+        f"- 联赛玩法规则: {league_rules}\n\n"
+        + self._play_threshold_status_text(),
+    )
+
+
+def _app_calibrate_layered_filter_thresholds(self) -> None:
+    self._run_background(
+        task_key="layered_filter_thresholds",
+        start_status="正在按分层结果设置过滤门槛...",
+        worker=calibrate_layered_filter_thresholds_now,
+        on_success=self._apply_layered_filter_threshold_result,
+        error_title="分层门槛失败",
+    )
+
+
 def _app_apply_threshold_coverage_guardrail_result(self, result: dict) -> None:
     calibrated = bool(result.get("calibrated"))
     reason = result.get("reason", "-")
@@ -2086,6 +2117,7 @@ def _app_open_user_center_final(self) -> None:
         "show_play_threshold_status": self.show_play_threshold_status,
         "calibrate_play_thresholds": self.calibrate_play_thresholds,
         "calibrate_thresholds_by_decomposition": self.calibrate_thresholds_by_decomposition,
+        "calibrate_layered_filter_thresholds": self.calibrate_layered_filter_thresholds,
         "run_threshold_coverage_guardrail": self.run_threshold_coverage_guardrail,
         "show_bayes_calibration_status": self.show_bayes_calibration_status,
         "calibrate_bayes_calibration": self.calibrate_bayes_calibration,

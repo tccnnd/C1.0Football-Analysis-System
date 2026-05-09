@@ -34,6 +34,8 @@ FINAL_BINDING_MANIFEST: tuple[tuple[str, str], ...] = (
     ("calibrate_play_thresholds", "_app_calibrate_play_thresholds"),
     ("_apply_threshold_bucket_tuning_result", "_app_apply_threshold_bucket_tuning_result"),
     ("calibrate_thresholds_by_decomposition", "_app_calibrate_thresholds_by_decomposition"),
+    ("_apply_layered_filter_threshold_result", "_app_apply_layered_filter_threshold_result"),
+    ("calibrate_layered_filter_thresholds", "_app_calibrate_layered_filter_thresholds"),
     ("_apply_threshold_coverage_guardrail_result", "_app_apply_threshold_coverage_guardrail_result"),
     ("run_threshold_coverage_guardrail", "_app_run_threshold_coverage_guardrail"),
     ("_bayes_calibration_status_text", "_app_bayes_calibration_status_text"),

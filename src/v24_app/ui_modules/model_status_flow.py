@@ -218,6 +218,7 @@ def build_play_threshold_status_text(status: Mapping[str, object] | object) -> s
     thresholds = resolved.get("thresholds", {}) if isinstance(resolved, Mapping) else {}
     metrics = resolved.get("metrics", {}) if isinstance(resolved, Mapping) else {}
     validation = resolved.get("validation", {}) if isinstance(resolved, Mapping) else {}
+    layered = resolved.get("layered_filter", {}) if isinstance(resolved, Mapping) else {}
     parts = [
         "玩法阈值状态",
         f"- 模式: {resolved.get('mode')}",
@@ -230,6 +231,13 @@ def build_play_threshold_status_text(status: Mapping[str, object] | object) -> s
         metric = metrics.get(play_name, {}) if isinstance(metrics, Mapping) else {}
         parts.append(
             f"- {play_name}: threshold={float(thresholds.get(play_name, 0) or 0):.2f}, acc={float(metric.get('accuracy', 0) or 0):.2%}, coverage={float(metric.get('coverage', 0) or 0):.2%}"
+        )
+    if isinstance(layered, Mapping) and layered.get("enabled"):
+        global_play = layered.get("global_play", {}) if isinstance(layered.get("global_play"), Mapping) else {}
+        league_play = layered.get("league_play", {}) if isinstance(layered.get("league_play"), Mapping) else {}
+        league_rule_count = sum(len(item) for item in league_play.values() if isinstance(item, Mapping))
+        parts.append(
+            f"- 分层过滤: enabled=True | updated={layered.get('updated_at') or '-'} | global={len(global_play)} | league={league_rule_count}"
         )
     return "\n".join(parts)
 
