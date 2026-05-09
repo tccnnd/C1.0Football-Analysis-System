@@ -20,6 +20,8 @@ from v24_app.ui_modules import (
     build_high_accuracy_strategy_settlement_summary,
     build_strategy_allowlist_filename,
     build_strategy_allowlist_report_lines,
+    build_strategy_allowlist_settlement_rows,
+    build_strategy_allowlist_settlement_summary,
     select_strategy_allowlist_rows,
 )
 
@@ -259,6 +261,70 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
             build_strategy_allowlist_filename(datetime(2026, 5, 9, 17, 30, 45)),
             "strategy_allowlist_20260509_173045.md",
         )
+
+    def test_strategy_allowlist_settlement_summary_tracks_release_quality(self) -> None:
+        settlements = [
+            {
+                "strategy_allowlist_decision": "allow",
+                "strategy_allowlist_file": "strategy_allowlist_a.md",
+                "strategy_allowlist_exported_at": "2026-05-09 17:30:45",
+                "match_date": "2026-05-09",
+                "league": "L1",
+                "home_team": "A",
+                "away_team": "B",
+                "home_goals": 2,
+                "away_goals": 1,
+                "predicted": "home",
+                "is_correct": True,
+                "prediction_confidence": 0.72,
+                "handicap_is_correct": True,
+                "ou_is_correct": False,
+                "predicted_handicap": "home -0.5",
+                "predicted_ou": "over",
+                "high_accuracy_strategy_active_count": 2,
+                "high_accuracy_strategy_hit_count": 2,
+                "high_accuracy_strategy_summary": "2/2",
+            },
+            {
+                "strategy_allowlist_decision": "allow",
+                "strategy_allowlist_file": "strategy_allowlist_a.md",
+                "strategy_allowlist_exported_at": "2026-05-09 17:30:45",
+                "match_date": "2026-05-10",
+                "league": "L2",
+                "home_team": "C",
+                "away_team": "D",
+                "home_goals": 0,
+                "away_goals": 1,
+                "predicted": "home",
+                "is_correct": False,
+                "prediction_confidence": 0.68,
+                "handicap_is_correct": False,
+                "ou_is_correct": True,
+                "predicted_handicap": "home -0.25",
+                "predicted_ou": "under",
+                "high_accuracy_strategy_active_count": 1,
+                "high_accuracy_strategy_hit_count": 0,
+                "high_accuracy_strategy_summary": "0/1",
+                "high_accuracy_strategy_shadow_count": 1,
+            },
+            {"strategy_allowlist_decision": "", "is_correct": False},
+        ]
+
+        summary = build_strategy_allowlist_settlement_summary(settlements)
+
+        self.assertEqual(summary["settled_count"], 2)
+        self.assertEqual(summary["known_count"], 2)
+        self.assertEqual(summary["hit_rate_text"], "50.0%")
+        self.assertEqual(summary["high_strategy_summary"], "2/3")
+        self.assertEqual(summary["high_conf_misses"], 1)
+        self.assertEqual(summary["shadow_observed_count"], 1)
+        self.assertIn("1X2", summary["top_failure"])
+
+        rows = build_strategy_allowlist_settlement_rows(settlements)
+        self.assertEqual(len(rows), 2)
+        self.assertIn("\u547d\u4e2d", rows[0]["title"])
+        self.assertIn("strategy_allowlist_a.md", rows[0]["body"])
+        self.assertIn("\u9ad8\u7f6e\u4fe1\u5931\u8bef", rows[1]["body"])
 
 
 if __name__ == "__main__":

@@ -24,6 +24,7 @@ from .core import (
 )
 from .ui_modules import (
     build_high_accuracy_strategy_dashboard,
+    build_strategy_allowlist_settlement_summary,
     build_strategy_allowlist_filename,
     build_strategy_allowlist_report_lines,
     select_strategy_allowlist_rows,
@@ -1289,6 +1290,7 @@ class SmartMatchDashboard:
         settlements = list(reversed(get_recent_settlements(limit=200)))
         summary = self._settlement_summary(settlements)
         trend = self._settlement_trend_summary(settlements)
+        allowlist_summary = build_strategy_allowlist_settlement_summary(settlements)
 
         shell = self._page_shell(
             "\u590d\u76d8\u4e2d\u5fc3",
@@ -1355,6 +1357,19 @@ class SmartMatchDashboard:
             ("\u8c03\u6743\u91cd\u70b9", trend["priority"], "#7aa2ff"),
         ]:
             self._detail_metric(trend_frame, label, str(value), color)
+
+        allowlist_frame = tk.Frame(shell, bg=BG)
+        allowlist_frame.pack(fill=tk.X, pady=(0, 16))
+        allowlist_hit_rate = str(allowlist_summary.get("hit_rate_text") or "-")
+        allowlist_known = int(allowlist_summary.get("known_count", 0) or 0)
+        allowlist_hit_color = TEXT if not allowlist_known else GREEN if float(allowlist_summary.get("hit_rate", 0) or 0) >= 0.6 else YELLOW
+        for label, value, color in [
+            ("\u653e\u884c\u5df2\u7ed3\u7b97", str(allowlist_summary.get("settled_count", 0)), TEXT),
+            ("\u653e\u884c 1X2", allowlist_hit_rate, allowlist_hit_color),
+            ("\u653e\u884c\u9ad8\u51c6", str(allowlist_summary.get("high_strategy_summary") or "-"), "#7aa2ff"),
+            ("\u653e\u884c\u504f\u5dee", str(allowlist_summary.get("top_failure") or "-"), RED if allowlist_summary.get("top_failure") != "-" else TEXT),
+        ]:
+            self._detail_metric(allowlist_frame, label, str(value), color)
 
         body = tk.Frame(shell, bg=BG)
         body.pack(fill=tk.BOTH, expand=True)
@@ -1698,8 +1713,9 @@ class SmartMatchDashboard:
 
     def _settlement_line(self, item: dict) -> str:
         hit = "\u547d\u4e2d" if item.get("is_correct") else "\u5931\u8bef"
+        prefix = "\u653e\u884c | " if str(item.get("strategy_allowlist_decision") or "") == "allow" else ""
         return (
-            f"{item.get('match_date', '-')} {item.get('league', '-')} | "
+            f"{prefix}{item.get('match_date', '-')} {item.get('league', '-')} | "
             f"{item.get('home_team', '-')} {item.get('home_goals', '-')}-{item.get('away_goals', '-')} {item.get('away_team', '-')} | "
             f"\u9884\u6d4b {item.get('predicted', '-')} | {hit} | {_pct1(item.get('prediction_confidence'))}"
         )
@@ -1748,6 +1764,17 @@ class SmartMatchDashboard:
         tags = self._settlement_bias_tags(item)
         suggestions = self._settlement_review_suggestions(tags)
         actual_score = f"{item.get('home_goals', '-')}-{item.get('away_goals', '-')}"
+        allowlist_lines: list[str] = []
+        if str(item.get("strategy_allowlist_decision") or "") == "allow":
+            allowlist_lines = [
+                "",
+                "\u7b56\u7565\u653e\u884c\u95ed\u73af",
+                f"- \u653e\u884c\u6e05\u5355: {item.get('strategy_allowlist_file') or '-'}",
+                f"- \u5bfc\u51fa\u65f6\u95f4: {item.get('strategy_allowlist_exported_at') or '-'}",
+                f"- \u653e\u884c\u7ed3\u679c: {self._hit_label(item.get('is_correct'))}",
+                f"- \u9ad8\u51c6\u7b56\u7565: {item.get('high_accuracy_strategy_summary') or '-'}",
+                f"- \u5f71\u5b50\u89c2\u5bdf: {item.get('high_accuracy_strategy_shadow_summary') or '-'}",
+            ]
         lines = [
             "\u8d5b\u524d\u5feb\u7167",
             f"- \u8d5b\u4e8b: {item.get('home_team', '-')} vs {item.get('away_team', '-')}",
@@ -1755,6 +1782,7 @@ class SmartMatchDashboard:
             f"- \u5f00\u8d5b: {item.get('match_date', '-')} {item.get('match_time', '-')}",
             f"- \u9884\u6d4b\u65b9\u5411: {item.get('predicted', '-')}",
             f"- \u7f6e\u4fe1\u5ea6: {_pct1(item.get('prediction_confidence'))}",
+            *allowlist_lines,
             "",
             "\u5b9e\u9645\u8d5b\u679c",
             f"- \u6bd4\u5206: {actual_score}",
@@ -2105,6 +2133,24 @@ class SmartMatchDashboard:
                     self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
         else:
             self._strategy_row(right, "\u5c1a\u65e0\u547d\u4e2d\u53cd\u9988", "\u8fd1\u671f\u7ed3\u7b97\u4e2d\u8fd8\u6ca1\u6709\u8bb0\u5f55\u5230\u9ad8\u51c6\u7b56\u7565\u547d\u4e2d\u9879\u3002\u540e\u7eed\u8d5b\u679c\u56de\u6536\u540e\u4f1a\u5728\u8fd9\u91cc\u663e\u793a\u3002")
+
+        allowlist_summary = dashboard.get("allowlist_settlement_summary", {}) if isinstance(dashboard.get("allowlist_settlement_summary"), dict) else {}
+        tk.Label(right, text="\u653e\u884c\u590d\u76d8\u7edf\u8ba1", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
+        self._strategy_row(
+            right,
+            f"\u653e\u884c\u547d\u4e2d: {allowlist_summary.get('hit_rate_text', '-')} | \u6837\u672c {allowlist_summary.get('known_count', 0)}",
+            (
+                f"\u9ad8\u51c6\u547d\u4e2d: {allowlist_summary.get('high_strategy_summary', '-')} | "
+                f"\u8ba9\u7403 {allowlist_summary.get('handicap_hit_rate_text', '-')} | "
+                f"\u5927\u5c0f {allowlist_summary.get('ou_hit_rate_text', '-')} | "
+                f"\u4e3b\u8981\u504f\u5dee: {allowlist_summary.get('top_failure', '-')}"
+            ),
+        )
+        allowlist_settlement_rows = dashboard.get("allowlist_settlement_rows", [])
+        if allowlist_settlement_rows:
+            for row in allowlist_settlement_rows:
+                if isinstance(row, dict):
+                    self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
 
         tk.Label(right, text="\u4f7f\u7528\u5efa\u8bae", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
         for row in dashboard.get("guidance_rows", []):

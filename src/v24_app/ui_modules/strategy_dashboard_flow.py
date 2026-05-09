@@ -245,6 +245,117 @@ def build_high_accuracy_strategy_settlement_rows(
     return rows
 
 
+def _known_values(items: Sequence[Mapping[str, object]], key: str) -> list[bool]:
+    return [bool(item.get(key)) for item in items if isinstance(item, Mapping) and item.get(key) is not None]
+
+
+def _hit_rate(values: Sequence[bool]) -> float | None:
+    if not values:
+        return None
+    return sum(1 for value in values if value) / len(values)
+
+
+def _strategy_allowlist_settlements(settlements: Sequence[Mapping[str, object]] | object) -> list[Mapping[str, object]]:
+    if not isinstance(settlements, Sequence):
+        return []
+    return [
+        item
+        for item in settlements
+        if isinstance(item, Mapping) and str(item.get("strategy_allowlist_decision") or "") == "allow"
+    ]
+
+
+def _allowlist_failure_reasons(item: Mapping[str, object]) -> list[str]:
+    reasons: list[str] = []
+    if item.get("is_correct") is False:
+        reasons.append("1X2 \u65b9\u5411\u5931\u8bef")
+    if item.get("is_correct") is False and _safe_float(item.get("prediction_confidence")) >= 0.6:
+        reasons.append("\u9ad8\u7f6e\u4fe1\u5931\u8bef")
+    if item.get("handicap_is_correct") is False:
+        reasons.append("\u8ba9\u7403\u5931\u8bef")
+    if item.get("ou_is_correct") is False:
+        reasons.append("\u5927\u5c0f\u7403\u5931\u8bef")
+    active_count = _safe_int(item.get("high_accuracy_strategy_active_count"))
+    hit_count = _safe_int(item.get("high_accuracy_strategy_hit_count"))
+    if active_count > 0 and hit_count < active_count:
+        reasons.append("\u9ad8\u51c6\u7b56\u7565\u672a\u5168\u547d\u4e2d")
+    if not reasons:
+        reasons.append("\u6682\u65e0\u660e\u663e\u5931\u8d25\u56e0\u5b50")
+    return reasons
+
+
+def build_strategy_allowlist_settlement_summary(settlements: Sequence[Mapping[str, object]] | object) -> dict[str, object]:
+    rows = _strategy_allowlist_settlements(settlements)
+    official_values = _known_values(rows, "is_correct")
+    handicap_values = _known_values(rows, "handicap_is_correct")
+    ou_values = _known_values(rows, "ou_is_correct")
+    active_total = sum(_safe_int(item.get("high_accuracy_strategy_active_count")) for item in rows)
+    active_hits = sum(_safe_int(item.get("high_accuracy_strategy_hit_count")) for item in rows)
+    shadow_count = sum(1 for item in rows if _safe_int(item.get("high_accuracy_strategy_shadow_count")) > 0)
+    high_conf_misses = sum(
+        1
+        for item in rows
+        if item.get("is_correct") is False and _safe_float(item.get("prediction_confidence")) >= 0.6
+    )
+    reason_counter: dict[str, int] = {}
+    for item in rows:
+        if item.get("is_correct") is True:
+            continue
+        for reason in _allowlist_failure_reasons(item):
+            if reason == "\u6682\u65e0\u660e\u663e\u5931\u8d25\u56e0\u5b50":
+                continue
+            reason_counter[reason] = reason_counter.get(reason, 0) + 1
+    top_failure = "-"
+    if reason_counter:
+        reason, count = sorted(reason_counter.items(), key=lambda pair: (-pair[1], pair[0]))[0]
+        top_failure = f"{reason} {count}\u6b21"
+    official_rate = _hit_rate(official_values)
+    high_strategy_rate = active_hits / active_total if active_total else None
+    return {
+        "settled_count": len(rows),
+        "known_count": len(official_values),
+        "hit_count": sum(1 for value in official_values if value),
+        "miss_count": sum(1 for value in official_values if not value),
+        "hit_rate": official_rate,
+        "hit_rate_text": _pct(official_rate) if official_rate is not None else "-",
+        "handicap_hit_rate_text": _pct(_hit_rate(handicap_values)) if handicap_values else "-",
+        "ou_hit_rate_text": _pct(_hit_rate(ou_values)) if ou_values else "-",
+        "high_strategy_summary": f"{active_hits}/{active_total}" if active_total else "-",
+        "high_strategy_hit_rate_text": _pct(high_strategy_rate) if high_strategy_rate is not None else "-",
+        "shadow_observed_count": shadow_count,
+        "high_conf_misses": high_conf_misses,
+        "top_failure": top_failure,
+        "failure_counts": reason_counter,
+    }
+
+
+def build_strategy_allowlist_settlement_rows(
+    settlements: Sequence[Mapping[str, object]] | object,
+    *,
+    limit: int = 8,
+) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for item in _strategy_allowlist_settlements(settlements)[: max(0, int(limit))]:
+        hit = item.get("is_correct")
+        hit_label = "\u547d\u4e2d" if hit is True else "\u5931\u8bef" if hit is False else "\u5f85\u5224\u5b9a"
+        title = (
+            f"{hit_label} | {item.get('league') or '-'} | "
+            f"{item.get('home_team') or '-'} vs {item.get('away_team') or '-'}"
+        )
+        score = f"{item.get('home_goals', '-')}:{item.get('away_goals', '-')}"
+        reasons_text = "\u3001".join(_allowlist_failure_reasons(item))
+        body = "\n".join(
+            [
+                f"\u6e05\u5355: {item.get('strategy_allowlist_file') or '-'} | \u5bfc\u51fa {item.get('strategy_allowlist_exported_at') or '-'}",
+                f"\u8d5b\u679c: {score} | \u9884\u6d4b {item.get('predicted') or '-'} | \u7f6e\u4fe1 {_pct(item.get('prediction_confidence'))}",
+                f"\u9ad8\u51c6: {item.get('high_accuracy_strategy_summary') or '-'} | \u8ba9\u7403 {item.get('predicted_handicap') or '-'} / {'Y' if item.get('handicap_is_correct') is True else 'N' if item.get('handicap_is_correct') is False else '-'} | \u5927\u5c0f {item.get('predicted_ou') or '-'} / {'Y' if item.get('ou_is_correct') is True else 'N' if item.get('ou_is_correct') is False else '-'}",
+                f"\u504f\u5dee: {reasons_text}",
+            ]
+        )
+        rows.append({"title": title, "body": body})
+    return rows
+
+
 def select_strategy_allowlist_rows(rows: Sequence[object] | object) -> list[object]:
     if not isinstance(rows, Sequence):
         return []
@@ -341,6 +452,7 @@ def build_high_accuracy_strategy_dashboard(
     validation = _as_mapping(resolved.get("validation"))
     breaker = _as_mapping(resolved.get("breaker"))
     settlement_summary = build_high_accuracy_strategy_settlement_summary(settlement_items)
+    allowlist_summary = build_strategy_allowlist_settlement_summary(settlement_items)
     stable_count = sum(1 for item in pool if bool(_strategy_stability(item).get("stable")))
     primary_count = sum(1 for item in pool if str(item.get("role") or "") == "primary")
     backup_count = sum(1 for item in pool if str(item.get("role") or "") == "backup")
@@ -361,6 +473,11 @@ def build_high_accuracy_strategy_dashboard(
             "tone": "neutral",
         },
         {"label": "\u771f\u5b9e\u547d\u4e2d", "value": str(settlement_summary.get("hit_rate_text") or "-"), "tone": hit_tone},
+        {
+            "label": "\u653e\u884c\u547d\u4e2d",
+            "value": str(allowlist_summary.get("hit_rate_text") or "-"),
+            "tone": "good" if _safe_float(allowlist_summary.get("hit_rate")) >= 0.6 else "warning" if _safe_int(allowlist_summary.get("known_count")) else "neutral",
+        },
     ]
     validation_rows = [
         (
@@ -410,7 +527,9 @@ def build_high_accuracy_strategy_dashboard(
         "metrics": metrics,
         "pool_rows": build_high_accuracy_strategy_pool_rows(resolved),
         "settlement_rows": build_high_accuracy_strategy_settlement_rows(settlement_items),
+        "allowlist_settlement_rows": build_strategy_allowlist_settlement_rows(settlement_items),
         "validation_rows": validation_rows,
         "guidance_rows": guidance,
         "settlement_summary": settlement_summary,
+        "allowlist_settlement_summary": allowlist_summary,
     }
