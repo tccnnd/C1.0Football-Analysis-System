@@ -133,6 +133,15 @@ class UIDetailsTextFlowModuleTests(unittest.TestCase):
                 "parlay": [{"play_type": "totals", "pick": "2球", "confidence": 0.55}],
                 "display_only": [],
             },
+            "strategy_admission": {
+                "label": "正式放行",
+                "release_allowed": True,
+                "active_count": 1,
+                "shadow_count": 0,
+                "top_play": "market_1x2",
+                "top_pick": "涓昏儨",
+                "reasons": ["high_accuracy_strategy_active", "risk_low"],
+            },
         }
         settlement = {
             "home_goals": 2,
@@ -173,6 +182,8 @@ class UIDetailsTextFlowModuleTests(unittest.TestCase):
         self.assertIn("模型拆解", text)
         self.assertIn("赛果结算", text)
         self.assertIn("C1 放行门控", text)
+        self.assertIn("策略准入白名单", text)
+        self.assertIn("正式放行", text)
         self.assertIn("Confidence Calibration", text)
         self.assertIn("Runtime Threshold Guard", text)
 

@@ -313,6 +313,53 @@ class CorePlayThresholdBucketTuningTests(unittest.TestCase):
         self.assertEqual(result["active_count"], 1)
         self.assertEqual(result["active_matches"][0]["play_type"], "market_1x2")
 
+    def test_strategy_admission_gate_allows_active_low_risk_strategy(self) -> None:
+        admission = core._strategy_admission_gate(
+            risk_level="LOW",
+            confidence=0.62,
+            high_strategy={
+                "enabled": True,
+                "active_matches": [{"play_type": "market_1x2", "pick": "HOME", "confidence": 0.72}],
+                "active_count": 1,
+                "summary": "market_1x2 HOME",
+            },
+            play_strategy={"single": [{"play_type": "1x2"}]},
+        )
+
+        self.assertEqual(admission["decision"], "allow")
+        self.assertTrue(admission["release_allowed"])
+        self.assertEqual(admission["top_play"], "market_1x2")
+
+    def test_strategy_admission_gate_observes_breaker_recovery(self) -> None:
+        admission = core._strategy_admission_gate(
+            risk_level="LOW",
+            confidence=0.62,
+            high_strategy={
+                "enabled": True,
+                "active_matches": [],
+                "shadow_matches": [{"play_type": "market_1x2", "pick": "HOME", "confidence": 0.72}],
+                "shadow_count": 1,
+                "summary": "断路观察 1",
+            },
+            play_strategy={"single": [{"play_type": "1x2"}]},
+        )
+
+        self.assertEqual(admission["decision"], "observe")
+        self.assertFalse(admission["release_allowed"])
+        self.assertIn("breaker_shadow_observation", admission["reasons"])
+
+    def test_strategy_admission_gate_blocks_high_risk_without_strategy(self) -> None:
+        admission = core._strategy_admission_gate(
+            risk_level="HIGH",
+            confidence=0.36,
+            high_strategy={"enabled": True, "active_matches": [], "active_count": 0},
+            play_strategy={"single": []},
+        )
+
+        self.assertEqual(admission["decision"], "block")
+        self.assertTrue(admission["blocked"])
+        self.assertIn("risk_high", admission["reasons"])
+
     def test_settle_high_accuracy_strategy_results_marks_hits(self) -> None:
         result = core._settle_high_accuracy_strategy_results(
             {

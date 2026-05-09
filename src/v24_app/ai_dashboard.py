@@ -102,6 +102,25 @@ def _strategy_text(prediction: dict) -> str:
     return pick
 
 
+def _admission_payload(prediction: dict) -> dict:
+    payload = prediction.get("strategy_admission", {})
+    return payload if isinstance(payload, dict) else {}
+
+
+def _admission_text(prediction: dict) -> str:
+    admission = _admission_payload(prediction)
+    return str(admission.get("label") or "-")
+
+
+def _admission_color(prediction: dict) -> str:
+    decision = str(_admission_payload(prediction).get("decision") or "")
+    if decision == "allow":
+        return GREEN
+    if decision == "block":
+        return RED
+    return YELLOW
+
+
 def _competition_mode_label(prediction: dict) -> str:
     if prediction.get("competition_mode") == "world_cup":
         return "\u4e16\u754c\u676f\u6a21\u5f0f"
@@ -164,6 +183,9 @@ def _analysis_report(row: DashboardRow) -> str:
     probs = pred.get("probabilities", {}) if isinstance(pred.get("probabilities"), dict) else {}
     market_probs = pred.get("market_probabilities", {}) if isinstance(pred.get("market_probabilities"), dict) else {}
     risk = _risk_key(pred.get("risk_level"))
+    admission = _admission_payload(pred)
+    admission_reasons = admission.get("reasons", []) if isinstance(admission.get("reasons"), list) else []
+    admission_reason_text = ", ".join(str(item) for item in admission_reasons[:4]) if admission_reasons else "-"
 
     risk_reason = {
         "high": "\u51b7\u95e8\u6307\u6570\u504f\u9ad8\uff0c\u5e02\u573a\u4e0e\u6a21\u578b\u53ef\u80fd\u5b58\u5728\u660e\u663e\u5206\u6b67\u3002",
@@ -184,6 +206,7 @@ def _analysis_report(row: DashboardRow) -> str:
         f"\u5f00\u8d5b\uff1a{match.match_date} {match.match_time}\n\n"
         "\u6838\u5fc3\u7ed3\u8bba\n"
         f"- \u63a8\u8350\u7b56\u7565\uff1a{_strategy_text(pred)}\n"
+        f"- \u7b56\u7565\u51c6\u5165\uff1a{_admission_text(pred)} | {admission_reason_text}\n"
         f"- \u98ce\u9669\u7b49\u7ea7\uff1a{_risk_label(pred.get('risk_level'))}\n"
         f"- \u7efc\u5408\u7f6e\u4fe1\u5ea6\uff1a{_pct1(pred.get('confidence'))}\n"
         f"- \u9884\u8ba1\u603b\u8fdb\u7403\uff1a{_num(pred.get('expected_goals'))}\n\n"
@@ -263,6 +286,7 @@ def _markdown_report(row: DashboardRow, generated_at: datetime | None = None) ->
         "| 项目 | 结果 |\n"
         "|---|---|\n"
         f"| 推荐策略 | {_md_cell(_strategy_text(pred))} |\n"
+        f"| 策略准入 | {_md_cell(_admission_text(pred))} |\n"
         f"| 风险等级 | {_md_cell(_risk_label(pred.get('risk_level')))} |\n"
         f"| 综合置信度 | {_pct1(pred.get('confidence'))} |\n"
         f"| 预计总进球 | {_num(pred.get('expected_goals'))} |\n"
@@ -916,6 +940,7 @@ class SmartMatchDashboard:
         for title, value, color, width in [
             ("风险等级", _risk_label(pred.get("risk_level")), _risk_color(pred.get("risk_level")), 112),
             ("置信度", _pct(pred.get("confidence")), TEXT, 88),
+            ("策略准入", _admission_text(pred), _admission_color(pred), 96),
             ("推荐策略", _strategy_text(pred), TEXT, 168),
         ]:
             block = tk.Frame(frame, bg=PANEL_2, width=width)
@@ -973,6 +998,7 @@ class SmartMatchDashboard:
         pred = row.prediction
         for label, value, color in [
             ("\u98ce\u9669\u7b49\u7ea7", _risk_label(pred.get("risk_level")), _risk_color(pred.get("risk_level"))),
+            ("策略准入", _admission_text(pred), _admission_color(pred)),
             ("\u63a8\u8350\u7b56\u7565", _strategy_text(pred), TEXT),
             ("\u7f6e\u4fe1\u5ea6", _pct1(pred.get("confidence")), "#7aa2ff"),
             ("\u8d5b\u4e8b\u6a21\u5f0f", _competition_mode_label(pred), YELLOW if pred.get("competition_mode") == "world_cup" else TEXT),
@@ -2018,6 +2044,14 @@ class SmartMatchDashboard:
             if isinstance(row, dict):
                 self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
 
+        tk.Label(right, text="当前准入清单", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
+        admission_rows = self._strategy_admission_rows()
+        if admission_rows:
+            for title, body_text in admission_rows:
+                self._strategy_row(right, title, body_text)
+        else:
+            self._strategy_row(right, "暂无准入结果", "加载并分析赛事后，这里会显示正式放行、观察和阻断清单。")
+
     def _strategy_row(self, parent: tk.Widget, title: str, body: str) -> None:
         frame = tk.Frame(parent, bg=PANEL_2, highlightbackground="#172638", highlightthickness=1)
         frame.pack(fill=tk.X, padx=18, pady=6)
@@ -2031,6 +2065,30 @@ class SmartMatchDashboard:
             justify=tk.LEFT,
             wraplength=350,
         ).pack(anchor=tk.W, padx=14, pady=(0, 10))
+
+    def _strategy_admission_rows(self, limit: int = 12) -> list[tuple[str, str]]:
+        order = {"allow": 0, "observe": 1, "block": 2}
+        ranked = sorted(
+            self.rows,
+            key=lambda row: (
+                order.get(str(_admission_payload(row.prediction).get("decision") or "observe"), 1),
+                -float(row.prediction.get("confidence", 0) or 0),
+            ),
+        )
+        items: list[tuple[str, str]] = []
+        for row in ranked[: max(0, int(limit))]:
+            admission = _admission_payload(row.prediction)
+            reasons = admission.get("reasons", []) if isinstance(admission.get("reasons"), list) else []
+            reason_text = ", ".join(str(item) for item in reasons[:4]) if reasons else "-"
+            title = f"{_admission_text(row.prediction)} | {row.match.league} | {row.match.home_team} vs {row.match.away_team}"
+            body = (
+                f"推荐: {_strategy_text(row.prediction)} | 风险 {_risk_label(row.prediction.get('risk_level'))} | 置信 {_pct1(row.prediction.get('confidence'))}\n"
+                f"高准正式/观察: {int(admission.get('active_count', 0) or 0)} / {int(admission.get('shadow_count', 0) or 0)} | "
+                f"候选 {admission.get('top_play', '-')} {admission.get('top_pick', '-')}\n"
+                f"原因: {reason_text}"
+            )
+            items.append((title, body))
+        return items
 
     def open_system_settings(self) -> None:
         shell = self._page_shell(

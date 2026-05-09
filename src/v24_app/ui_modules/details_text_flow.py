@@ -205,6 +205,7 @@ def build_match_details_text(
     parlay_plays = play_strategy.get("parlay", [])
     display_only_plays = play_strategy.get("display_only", [])
     high_strategy = prediction.get("high_accuracy_strategy", {}) if isinstance(prediction.get("high_accuracy_strategy"), Mapping) else {}
+    admission = prediction.get("strategy_admission", {}) if isinstance(prediction.get("strategy_admission"), Mapping) else {}
 
     settlement_block = ""
     if settlement is not None:
@@ -240,6 +241,18 @@ def build_match_details_text(
             + f"- 历史命中: {float(high_strategy.get('backtest_accuracy', 0) or 0):.1%} ({int(high_strategy.get('backtest_hits', 0) or 0)}/{int(high_strategy.get('backtest_samples', 0) or 0)})\n"
             + f"- 策略摘要: {high_strategy.get('summary', '-')}\n"
             + f"- 原因: {high_strategy.get('reason', '-')}"
+        )
+    admission_block = ""
+    if admission:
+        reasons = admission.get("reasons", [])
+        reason_text = ", ".join(str(item) for item in reasons[:5]) if isinstance(reasons, list) and reasons else "-"
+        admission_block = (
+            "\n\n策略准入白名单\n"
+            + f"- 准入结论: {admission.get('label', '-')}\n"
+            + f"- 放行状态: {'可放行' if admission.get('release_allowed') else '不可放行'}\n"
+            + f"- 高准正式/观察: {int(admission.get('active_count', 0) or 0)} / {int(admission.get('shadow_count', 0) or 0)}\n"
+            + f"- 候选玩法: {admission.get('top_play', '-')} | {admission.get('top_pick', '-')}\n"
+            + f"- 原因: {reason_text}"
         )
     confidence_block = _build_confidence_calibration_block(prediction)
     runtime_threshold_block = _build_runtime_threshold_block(prediction)
@@ -291,6 +304,7 @@ def build_match_details_text(
         + poisson_block_text
         + strategy_block
         + high_strategy_block
+        + admission_block
         + confidence_block
         + runtime_threshold_block
         + release_block

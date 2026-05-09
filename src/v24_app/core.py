@@ -53,6 +53,8 @@ HIGH_ACCURACY_STRATEGY_FILE = PROJECT_DIR / "data" / "models" / "high_accuracy_s
 HIGH_ACCURACY_STRATEGY_BREAKER_THRESHOLD = 3
 HIGH_ACCURACY_STRATEGY_BREAKER_WINDOW = 30
 HIGH_ACCURACY_STRATEGY_RECOVERY_HITS = 2
+STRATEGY_ADMISSION_MIN_CONFIDENCE = 0.50
+STRATEGY_ADMISSION_BLOCK_CONFIDENCE = 0.40
 
 
 LEAGUE_STRENGTH = {
@@ -4931,6 +4933,96 @@ def _settle_high_accuracy_strategy_results(
     }
 
 
+def _risk_bucket_from_label(label: object) -> str:
+    text = normalize_text(label).upper()
+    if "HIGH" in text or "楂" in text:
+        return "high"
+    if "MEDIUM" in text or "MID" in text or "涓" in text:
+        return "medium"
+    return "low"
+
+
+def _strategy_admission_gate(
+    *,
+    risk_level: object,
+    confidence: object,
+    high_strategy: dict | None,
+    play_strategy: dict | None = None,
+) -> dict:
+    high = high_strategy if isinstance(high_strategy, dict) else {}
+    play = play_strategy if isinstance(play_strategy, dict) else {}
+    active_matches = high.get("active_matches", []) if isinstance(high.get("active_matches"), list) else []
+    shadow_matches = high.get("shadow_matches", []) if isinstance(high.get("shadow_matches"), list) else []
+    active_count = len(active_matches) if active_matches else int(high.get("active_count", 0) or 0)
+    shadow_count = len(shadow_matches) if shadow_matches else int(high.get("shadow_count", 0) or 0)
+    risk_bucket = _risk_bucket_from_label(risk_level)
+    confidence_value = _safe_float(confidence, default=0.0)
+    single_count = len(play.get("single", [])) if isinstance(play.get("single"), list) else 0
+    reasons: list[str] = []
+
+    if not bool(high.get("enabled")):
+        reasons.append("strategy_not_calibrated")
+    if active_count > 0:
+        reasons.append("high_accuracy_strategy_active")
+    else:
+        reasons.append("no_official_high_accuracy_strategy")
+    if shadow_count > 0:
+        reasons.append("breaker_shadow_observation")
+    if risk_bucket == "high":
+        reasons.append("risk_high")
+    elif risk_bucket == "medium":
+        reasons.append("risk_medium")
+    else:
+        reasons.append("risk_low")
+    if confidence_value < STRATEGY_ADMISSION_BLOCK_CONFIDENCE:
+        reasons.append("confidence_block")
+    elif confidence_value < STRATEGY_ADMISSION_MIN_CONFIDENCE:
+        reasons.append("confidence_watch")
+    if single_count <= 0:
+        reasons.append("no_single_play_passed")
+
+    if active_count > 0 and risk_bucket != "high" and confidence_value >= STRATEGY_ADMISSION_MIN_CONFIDENCE:
+        decision = "allow"
+        label = "正式放行"
+        action = "FORMAL_ALLOW"
+    elif (
+        (risk_bucket == "high" and active_count <= 0 and shadow_count <= 0)
+        or (confidence_value < STRATEGY_ADMISSION_BLOCK_CONFIDENCE and active_count <= 0)
+    ):
+        decision = "block"
+        label = "阻断"
+        action = "BLOCK"
+    else:
+        decision = "observe"
+        label = "观察"
+        action = "OBSERVE"
+
+    candidate = active_matches[0] if active_matches else shadow_matches[0] if shadow_matches else high
+    if not isinstance(candidate, dict):
+        candidate = {}
+    return {
+        "enabled": bool(high.get("enabled")),
+        "decision": decision,
+        "label": label,
+        "action": action,
+        "release_allowed": decision == "allow",
+        "observe": decision == "observe",
+        "blocked": decision == "block",
+        "risk_bucket": risk_bucket,
+        "confidence": round(confidence_value, 4),
+        "min_confidence": STRATEGY_ADMISSION_MIN_CONFIDENCE,
+        "block_confidence": STRATEGY_ADMISSION_BLOCK_CONFIDENCE,
+        "active_count": active_count,
+        "shadow_count": shadow_count,
+        "single_play_count": single_count,
+        "top_play": candidate.get("play_type", "-"),
+        "top_pick": candidate.get("pick", "-"),
+        "top_confidence": round(_safe_float(candidate.get("confidence"), default=0.0), 4),
+        "summary": high.get("summary", "-"),
+        "reasons": reasons,
+    }
+
+
 def calibrate_play_thresholds_by_settlement_now(
     *,
     limit: int = 500,
@@ -7017,6 +7109,7 @@ def _predict_match_with_inputs(
         ],
         "blocked": blocked_plays,
     }
+    risk_level = _risk_level_from_upset(upset_index)
     high_accuracy_strategy = _high_accuracy_strategy_match(
         match,
         {
@@ -7027,6 +7120,12 @@ def _predict_match_with_inputs(
         },
         play_catalog,
     )
+    strategy_admission = _strategy_admission_gate(
+        risk_level=risk_level,
+        confidence=recommendation_confidence,
+        high_strategy=high_accuracy_strategy,
+        play_strategy=play_strategy,
+    )
 
     return {
         "match_id": match.match_id,
@@ -7034,7 +7133,7 @@ def _predict_match_with_inputs(
         "confidence": round(recommendation_confidence, 4),
         "confidence_raw": round(recommendation_confidence_raw, 4),
         "confidence_calibration": recommendation_confidence_calibration,
-        "risk_level": _risk_level_from_upset(upset_index),
+        "risk_level": risk_level,
         "probabilities": {key: round(_safe_float(probabilities.get(key), default=0.0), 4) for key in ("home", "draw", "away")},
         "pre_bayes_probabilities": {
             key: round(_safe_float(pre_bayes_probabilities.get(key), default=0.0), 4) for key in ("home", "draw", "away")
@@ -7084,6 +7183,7 @@ def _predict_match_with_inputs(
         "play_policy": play_policy,
         "play_pass": play_pass,
         "high_accuracy_strategy": high_accuracy_strategy,
+        "strategy_admission": strategy_admission,
         "draw_score": round(draw_score, 4),
         "draw_signals": draw_signals,
         "draw_grade": draw_grade,
