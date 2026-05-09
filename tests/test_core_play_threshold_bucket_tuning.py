@@ -142,6 +142,119 @@ class CorePlayThresholdBucketTuningTests(unittest.TestCase):
         self.assertGreaterEqual(float(result["strategy"]["accuracy"]), 0.99)
         self.assertTrue(save_mock.called)
 
+    def test_high_accuracy_strategy_breaker_pauses_consecutive_misses(self) -> None:
+        strategy = {
+            "role": "primary",
+            "scope": "global",
+            "scope_value": "all",
+            "play_type": "market_1x2",
+            "min_confidence": 0.70,
+            "layer": {"data_layer": "historical_market"},
+        }
+        settlements = [
+            {
+                "high_accuracy_strategy_items": [
+                    {
+                        "scope": "global",
+                        "scope_value": "all",
+                        "play_type": "market_1x2",
+                        "min_confidence": 0.70,
+                        "data_layer": "historical_market",
+                        "is_hit": False,
+                    }
+                ]
+            }
+            for _ in range(3)
+        ]
+
+        status = core._apply_high_accuracy_strategy_breakers(
+            {"enabled": True, "strategy": strategy, "strategy_pool": [strategy]},
+            settlements,
+        )
+
+        item = status["strategy_pool"][0]
+        self.assertTrue(item["breaker"]["breaker_on"])
+        self.assertEqual(item["breaker"]["miss_streak"], 3)
+        self.assertEqual(item["effective_role"], "observe")
+        self.assertEqual(status["breaker"]["paused_count"], 1)
+
+    def test_high_accuracy_strategy_match_respects_breaker(self) -> None:
+        strategy = {
+            "role": "primary",
+            "effective_role": "observe",
+            "original_role": "primary",
+            "scope": "global",
+            "scope_value": "all",
+            "play_type": "market_1x2",
+            "min_confidence": 0.70,
+            "accuracy": 0.80,
+            "hit_count": 80,
+            "sample_count": 100,
+            "breaker": {"breaker_on": True, "miss_streak": 3, "threshold": 3},
+        }
+        match = core.AppMatch(
+            home_team="A",
+            away_team="B",
+            league="Test League",
+            match_time="12:00",
+            match_date="2026-05-09",
+            odds_home=1.8,
+            odds_draw=3.2,
+            odds_away=4.2,
+        )
+
+        with patch(
+            "v24_app.core.get_high_accuracy_strategy_status",
+            return_value={"enabled": True, "updated_at": "now", "strategy": strategy, "strategy_pool": [strategy]},
+        ):
+            result = core._high_accuracy_strategy_match(
+                match,
+                {"market_probabilities": {"home": 0.80, "draw": 0.10, "away": 0.10}},
+                {},
+            )
+
+        self.assertFalse(result["active"])
+        self.assertEqual(result["reason"], "strategy_breaker_on")
+        self.assertEqual(result["role"], "observe")
+        self.assertEqual(result["active_count"], 0)
+
+    def test_high_accuracy_market_strategy_uses_market_probabilities(self) -> None:
+        strategy = {
+            "role": "primary",
+            "scope": "global",
+            "scope_value": "all",
+            "play_type": "market_1x2",
+            "min_confidence": 0.70,
+            "accuracy": 0.80,
+            "hit_count": 80,
+            "sample_count": 100,
+            "breaker": {"breaker_on": False},
+        }
+        match = core.AppMatch(
+            home_team="A",
+            away_team="B",
+            league="Test League",
+            match_time="12:00",
+            match_date="2026-05-09",
+            odds_home=1.8,
+            odds_draw=3.2,
+            odds_away=4.2,
+        )
+
+        with patch(
+            "v24_app.core.get_high_accuracy_strategy_status",
+            return_value={"enabled": True, "updated_at": "now", "strategy": strategy, "strategy_pool": [strategy]},
+        ):
+            result = core._high_accuracy_strategy_match(
+                match,
+                {"market_probabilities": {"home": 0.80, "draw": 0.10, "away": 0.10}},
+                {},
+            )
+
+        self.assertTrue(result["active"])
+        self.assertEqual(result["active_count"], 1)
+        self.assertEqual(result["active_matches"][0]["play_type"], "market_1x2")
+
     def test_settle_high_accuracy_strategy_results_marks_hits(self) -> None:
         result = core._settle_high_accuracy_strategy_results(
             {

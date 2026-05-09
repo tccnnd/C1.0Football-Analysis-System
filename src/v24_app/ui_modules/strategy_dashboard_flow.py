@@ -108,10 +108,15 @@ def build_high_accuracy_strategy_pool_rows(status: Mapping[str, object] | object
     for index, item in enumerate(_strategy_pool(resolved), start=1):
         layer = _strategy_layer(item)
         stability = _strategy_stability(item)
-        role = _label(ROLE_LABELS, item.get("role"))
+        breaker = _as_mapping(item.get("breaker"))
+        role = _label(ROLE_LABELS, item.get("effective_role") or item.get("role"))
+        original_role = _label(ROLE_LABELS, item.get("original_role") or item.get("role"))
+        if role != original_role:
+            role = f"{role}(\u539f{original_role})"
         play = _label(PLAY_LABELS, item.get("play_type"))
         scope = _label(SCOPE_LABELS, item.get("scope"))
         data_layer = _label(DATA_LAYER_LABELS, layer.get("data_layer"))
+        breaker_status = "ON" if bool(breaker.get("breaker_on")) else str(breaker.get("status") or "pending").upper()
         title = f"{index}. {role} | {play}"
         body = "\n".join(
             [
@@ -119,6 +124,7 @@ def build_high_accuracy_strategy_pool_rows(status: Mapping[str, object] | object
                 f"\u95e8\u69db: {_safe_float(item.get('min_confidence')):.2f} | \u56de\u6d4b: {_pct(item.get('accuracy'))} ({_safe_int(item.get('hit_count'))}/{_safe_int(item.get('sample_count'))})",
                 f"Wilson: {_pct(item.get('wilson_lower'))} | \u8986\u76d6: {_pct(item.get('coverage'))} | \u8fb9\u9645: {_safe_float(item.get('edge')):+.1%}",
                 f"\u7a33\u5b9a: {'OK' if bool(stability.get('stable')) else 'WATCH'} | \u8bc4\u5206 {_pct(stability.get('stability_score'))} | \u8fd130/90 {_pct(stability.get('recent_30_accuracy'))}/{_pct(stability.get('recent_90_accuracy'))}",
+                f"\u65ad\u8def: {breaker_status} | \u8fde\u9519 {_safe_int(breaker.get('miss_streak'))}/{_safe_int(breaker.get('threshold'), 3)} | \u8fd1\u671f {_safe_int(breaker.get('hit_count'))}/{_safe_int(breaker.get('known_count'))}",
             ]
         )
         rows.append({"title": title, "body": body})
@@ -158,10 +164,12 @@ def build_high_accuracy_strategy_dashboard(
     settlement_items = [item for item in settlements if isinstance(item, Mapping)] if isinstance(settlements, Sequence) else []
     pool = _strategy_pool(resolved)
     validation = _as_mapping(resolved.get("validation"))
+    breaker = _as_mapping(resolved.get("breaker"))
     settlement_summary = build_high_accuracy_strategy_settlement_summary(settlement_items)
     stable_count = sum(1 for item in pool if bool(_strategy_stability(item).get("stable")))
     primary_count = sum(1 for item in pool if str(item.get("role") or "") == "primary")
     backup_count = sum(1 for item in pool if str(item.get("role") or "") == "backup")
+    paused_count = _safe_int(breaker.get("paused_count"))
     known_count = _safe_int(settlement_summary.get("known_count"))
     hit_rate = settlement_summary.get("hit_rate")
     hit_tone = "neutral"
@@ -171,6 +179,7 @@ def build_high_accuracy_strategy_dashboard(
     metrics = [
         {"label": "\u7b56\u7565\u6c60", "value": str(len(pool)), "tone": "info"},
         {"label": "\u7a33\u5b9a\u7b56\u7565", "value": f"{stable_count}/{len(pool)}", "tone": "good" if stable_count else "warning"},
+        {"label": "\u65ad\u8def\u6682\u505c", "value": str(paused_count), "tone": "bad" if paused_count else "good"},
         {
             "label": "\u56de\u6d4b\u8bb0\u5f55",
             "value": str(_safe_int(validation.get("record_count"))),
@@ -211,6 +220,14 @@ def build_high_accuracy_strategy_dashboard(
                 "body": "\u6bcf\u6b21\u8d5b\u679c\u56de\u6536\u540e\u8981\u89c2\u5bdf\u771f\u5b9e\u547d\u4e2d\u7387\u3002\u82e5\u8fde\u7eed\u672a\u547d\u4e2d\uff0c\u4e0b\u4e00\u6b65\u5e94\u52a0\u65ad\u8def\u5668\u800c\u4e0d\u662f\u7ee7\u7eed\u6269\u5927\u8986\u76d6\u3002",
             },
         ]
+        if paused_count:
+            guidance.insert(
+                0,
+                {
+                    "title": "\u65ad\u8def\u5668\u5df2\u89e6\u53d1",
+                    "body": f"{paused_count} \u6761\u7b56\u7565\u56e0\u771f\u5b9e\u7ed3\u7b97\u8fde\u9519\u5df2\u964d\u4e3a\u89c2\u5bdf\u3002\u9700\u8981\u7b49\u5f85\u65b0\u547d\u4e2d\u6837\u672c\u6216\u91cd\u65b0\u56de\u6d4b\u540e\u518d\u6062\u590d\u3002",
+                },
+            )
     return {
         "enabled": bool(resolved.get("enabled")),
         "updated_at": resolved.get("updated_at") or "-",

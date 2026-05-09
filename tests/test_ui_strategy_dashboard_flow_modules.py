@@ -33,9 +33,12 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
                 "date_start": "2024-01-01",
                 "date_end": "2026-05-09",
             },
+            "breaker": {"paused_count": 1, "threshold": 3, "window": 30},
             "strategy_pool": [
                 {
                     "role": "primary",
+                    "original_role": "primary",
+                    "effective_role": "observe",
                     "scope": "league",
                     "scope_value": "La Liga",
                     "play_type": "market_1x2",
@@ -48,6 +51,7 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
                     "wilson_lower": 0.72,
                     "edge": 0.08,
                     "stability": {"stable": True, "stability_score": 0.81, "recent_30_accuracy": 0.83, "recent_90_accuracy": 0.79},
+                    "breaker": {"breaker_on": True, "status": "paused", "miss_streak": 3, "threshold": 3, "hit_count": 0, "known_count": 3},
                 },
                 {
                     "role": "backup",
@@ -63,6 +67,7 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
                     "wilson_lower": 0.47,
                     "edge": -0.23,
                     "stability": {"stable": True, "stability_score": 0.67, "recent_30_accuracy": 0.56, "recent_90_accuracy": 0.57},
+                    "breaker": {"breaker_on": False, "status": "active", "miss_streak": 0, "threshold": 3, "hit_count": 1, "known_count": 2},
                 },
             ],
         }
@@ -108,15 +113,19 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         dashboard = build_high_accuracy_strategy_dashboard(status, settlements)
 
         self.assertTrue(dashboard["enabled"])
-        self.assertEqual(dashboard["metrics"][0]["value"], "2")
-        self.assertEqual(dashboard["metrics"][1]["value"], "2/2")
-        self.assertEqual(dashboard["metrics"][3]["value"], "50.0%")
+        metrics = {item["label"]: item["value"] for item in dashboard["metrics"]}
+        self.assertEqual(metrics["\u7b56\u7565\u6c60"], "2")
+        self.assertEqual(metrics["\u7a33\u5b9a\u7b56\u7565"], "2/2")
+        self.assertEqual(metrics["\u65ad\u8def\u6682\u505c"], "1")
+        self.assertEqual(metrics["\u771f\u5b9e\u547d\u4e2d"], "50.0%")
         self.assertIn("APP 40", dashboard["validation_rows"][0][1])
         self.assertEqual(len(dashboard["pool_rows"]), 2)
-        self.assertIn("\u4e3b\u7b56\u7565", dashboard["pool_rows"][0]["title"])
+        self.assertIn("\u89c2\u5bdf(\u539f\u4e3b\u7b56\u7565)", dashboard["pool_rows"][0]["title"])
+        self.assertIn("\u65ad\u8def: ON", dashboard["pool_rows"][0]["body"])
         self.assertIn("\u56de\u6d4b: 80.0%", dashboard["pool_rows"][0]["body"])
         self.assertEqual(len(dashboard["settlement_rows"]), 2)
         self.assertIn("\u547d\u4e2d", dashboard["settlement_rows"][0]["title"])
+        self.assertIn("\u65ad\u8def\u5668\u5df2\u89e6\u53d1", dashboard["guidance_rows"][0]["title"])
 
     def test_strategy_pool_rows_handle_missing_status(self) -> None:
         self.assertEqual(build_high_accuracy_strategy_pool_rows({}), [])

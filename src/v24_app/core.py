@@ -50,6 +50,8 @@ PLAY_THRESHOLDS_FILE = PROJECT_DIR / "data" / "models" / "play_thresholds_v1.jso
 PLAY_MODEL_POLICY_FILE = PROJECT_DIR / "data" / "models" / "play_model_policy_v1.json"
 BAYES_CALIBRATION_FILE = PROJECT_DIR / "data" / "models" / "bayes_calibration_v1.json"
 HIGH_ACCURACY_STRATEGY_FILE = PROJECT_DIR / "data" / "models" / "high_accuracy_strategy_v1.json"
+HIGH_ACCURACY_STRATEGY_BREAKER_THRESHOLD = 3
+HIGH_ACCURACY_STRATEGY_BREAKER_WINDOW = 30
 
 
 LEAGUE_STRENGTH = {
@@ -4306,6 +4308,122 @@ def _save_high_accuracy_strategy_report(report: dict) -> None:
     HIGH_ACCURACY_STRATEGY_FILE.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _high_accuracy_strategy_identity(item: dict) -> tuple[str, str, str, str, str]:
+    layer = item.get("layer", {}) if isinstance(item.get("layer"), dict) else {}
+    data_layer = normalize_text(item.get("data_layer") or layer.get("data_layer") or "-")
+    return (
+        normalize_text(item.get("scope") or "global"),
+        normalize_text(item.get("scope_value") or "all"),
+        normalize_text(item.get("play_type") or "-"),
+        data_layer,
+        f"{_safe_float(item.get('min_confidence'), default=0.0):.2f}",
+    )
+
+
+def _high_accuracy_strategy_breaker_for_item(
+    strategy: dict,
+    settlements: list[dict],
+    *,
+    threshold: int = HIGH_ACCURACY_STRATEGY_BREAKER_THRESHOLD,
+    window: int = HIGH_ACCURACY_STRATEGY_BREAKER_WINDOW,
+) -> dict:
+    strategy_key = _high_accuracy_strategy_identity(strategy)
+    results: list[bool] = []
+    for settlement in reversed(settlements):
+        if not isinstance(settlement, dict):
+            continue
+        items = settlement.get("high_accuracy_strategy_items", [])
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if _high_accuracy_strategy_identity(item) != strategy_key:
+                continue
+            hit = item.get("is_hit")
+            if hit is None:
+                continue
+            results.append(bool(hit))
+            if len(results) >= max(1, int(window)):
+                break
+        if len(results) >= max(1, int(window)):
+            break
+
+    miss_streak = 0
+    for hit in results:
+        if hit:
+            break
+        miss_streak += 1
+
+    threshold_value = max(1, int(threshold))
+    known_count = len(results)
+    hit_count = sum(1 for hit in results if hit)
+    miss_count = known_count - hit_count
+    breaker_on = bool(known_count >= threshold_value and miss_streak >= threshold_value)
+    recent_hit_rate = hit_count / known_count if known_count else None
+    return {
+        "strategy_key": "|".join(strategy_key),
+        "status": "paused" if breaker_on else "active" if known_count else "pending",
+        "breaker_on": breaker_on,
+        "threshold": threshold_value,
+        "window": max(1, int(window)),
+        "known_count": known_count,
+        "hit_count": hit_count,
+        "miss_count": miss_count,
+        "miss_streak": miss_streak,
+        "recent_hit_rate": round(recent_hit_rate, 4) if recent_hit_rate is not None else None,
+    }
+
+
+def _apply_high_accuracy_strategy_breakers(status: dict, settlements: list[dict] | None = None) -> dict:
+    resolved = dict(status)
+    strategy = resolved.get("strategy", {}) if isinstance(resolved.get("strategy"), dict) else {}
+    pool = resolved.get("strategy_pool", []) if isinstance(resolved.get("strategy_pool"), list) else []
+    if not pool and strategy:
+        pool = [{**strategy, "role": "primary"}]
+    settlement_items = settlements if isinstance(settlements, list) else []
+
+    augmented_pool: list[dict] = []
+    paused_count = 0
+    active_count = 0
+    pending_count = 0
+    for item in pool:
+        if not isinstance(item, dict):
+            continue
+        augmented = dict(item)
+        breaker = _high_accuracy_strategy_breaker_for_item(augmented, settlement_items)
+        original_role = normalize_text(augmented.get("role") or "observe")
+        effective_role = "observe" if breaker.get("breaker_on") and original_role in {"primary", "backup"} else original_role
+        augmented["original_role"] = original_role
+        augmented["effective_role"] = effective_role
+        augmented["breaker"] = breaker
+        if breaker.get("breaker_on"):
+            paused_count += 1
+        elif int(breaker.get("known_count", 0) or 0) <= 0:
+            pending_count += 1
+        else:
+            active_count += 1
+        augmented_pool.append(augmented)
+
+    if strategy:
+        strategy_key = _high_accuracy_strategy_identity(strategy)
+        resolved["strategy"] = next(
+            (dict(item) for item in augmented_pool if _high_accuracy_strategy_identity(item) == strategy_key),
+            dict(strategy),
+        )
+    resolved["strategy_pool"] = augmented_pool
+    resolved["breaker"] = {
+        "threshold": HIGH_ACCURACY_STRATEGY_BREAKER_THRESHOLD,
+        "window": HIGH_ACCURACY_STRATEGY_BREAKER_WINDOW,
+        "strategy_count": len(augmented_pool),
+        "active_count": active_count,
+        "pending_count": pending_count,
+        "paused_count": paused_count,
+        "breaker_on": paused_count > 0,
+    }
+    return resolved
+
+
 def get_high_accuracy_strategy_status() -> dict:
     if not HIGH_ACCURACY_STRATEGY_FILE.exists():
         return {
@@ -4327,7 +4445,7 @@ def get_high_accuracy_strategy_status() -> dict:
         }
     if not isinstance(payload, dict):
         payload = {}
-    return {
+    status = {
         "enabled": bool(payload.get("enabled", False)),
         "updated_at": payload.get("updated_at"),
         "strategy": payload.get("strategy", {}) if isinstance(payload.get("strategy"), dict) else {},
@@ -4336,6 +4454,11 @@ def get_high_accuracy_strategy_status() -> dict:
         "top_candidates": payload.get("top_candidates", []) if isinstance(payload.get("top_candidates"), list) else [],
         "reason": payload.get("reason", "ok"),
     }
+    try:
+        settlements = get_recent_settlements(limit=HIGH_ACCURACY_STRATEGY_BREAKER_WINDOW * 4)
+    except Exception:
+        settlements = []
+    return _apply_high_accuracy_strategy_breakers(status, settlements)
 
 
 def _build_high_accuracy_strategy_pool(candidates: list[dict]) -> list[dict]:
@@ -4568,7 +4691,7 @@ def _high_accuracy_strategy_match(match: AppMatch, prediction: dict, play_catalo
         return result
 
     matches = [evaluate(item) for item in strategy_pool if isinstance(item, dict)]
-    primary = matches[0] if matches else evaluate({**strategy, "role": "primary"})
+    primary = next((item for item in matches if item.get("active")), matches[0] if matches else evaluate({**strategy, "role": "primary"}))
     active_matches = [item for item in matches if item.get("active")]
     primary["strategy_pool"] = matches
     primary["active_matches"] = active_matches
@@ -4623,6 +4746,10 @@ def _high_accuracy_strategy_match_single(
         reason = "league_scope_mismatch"
     elif not passed:
         reason = "play_threshold_blocked"
+    breaker = strategy.get("breaker", {}) if isinstance(strategy.get("breaker"), dict) else {}
+    if bool(breaker.get("breaker_on")):
+        active = False
+        reason = "strategy_breaker_on"
     return {
         "enabled": True,
         "active": active,
@@ -4637,7 +4764,9 @@ def _high_accuracy_strategy_match_single(
         "backtest_hits": strategy.get("hit_count", 0),
         "backtest_samples": strategy.get("sample_count", 0),
         "wilson_lower": strategy.get("wilson_lower", 0.0),
-        "role": strategy.get("role", "primary"),
+        "role": strategy.get("effective_role") or strategy.get("role", "primary"),
+        "original_role": strategy.get("original_role") or strategy.get("role", "primary"),
+        "breaker": breaker,
         "updated_at": updated_at,
     }
 
@@ -6824,6 +6953,7 @@ def _predict_match_with_inputs(
             "play_strategy": play_strategy,
             "ou_recommendation": ou_recommendation,
             "ou_confidence": round(ou_confidence, 4),
+            "market_probabilities": market_probabilities,
         },
         play_catalog,
     )
