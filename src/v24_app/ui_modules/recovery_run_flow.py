@@ -83,6 +83,61 @@ def _hit_stats(items: Sequence[Mapping[str, object]], field: str) -> dict[str, o
     }
 
 
+def build_result_recovery_strategy_adjustment(review_summary: Mapping[str, object] | object) -> dict[str, object]:
+    summary = _as_mapping(review_summary)
+    settlement_count = _safe_int(summary.get("settlement_count"), 0)
+    plays = _as_mapping(summary.get("plays"))
+    high_strategy = _as_mapping(summary.get("high_accuracy_strategy"))
+    reasons: list[str] = []
+    action = "collect"
+    label = "\u7ee7\u7eed\u79ef\u7d2f\u6837\u672c"
+    tone = "neutral"
+    priority = "low"
+
+    if settlement_count < 3:
+        reasons.append(f"\u672c\u8f6e\u53ea\u6709 {settlement_count} \u573a\u65b0\u7ed3\u7b97\uff0c\u6837\u672c\u4e0d\u8db3\uff0c\u6682\u4e0d\u5efa\u8bae\u8c03\u95e8\u69db\u3002")
+    else:
+        one_x_two = _as_mapping(plays.get("1X2"))
+        handicap = _as_mapping(plays.get("\u8ba9\u7403"))
+        ou = _as_mapping(plays.get("\u5927\u5c0f\u7403"))
+        high_rate = high_strategy.get("rate")
+        high_rate_value = _safe_float(high_rate, -1.0) if high_rate is not None else None
+
+        if one_x_two.get("rate") is not None and _safe_float(one_x_two.get("rate"), 0.0) < 0.55:
+            reasons.append(f"1X2 \u547d\u4e2d {one_x_two.get('text', '-')}\uff0c\u4f4e\u4e8e 55% \u89c2\u5bdf\u7ebf\uff0c\u5efa\u8bae\u63d0\u9ad8\u653e\u884c\u7f6e\u4fe1\u95e8\u69db\u3002")
+        if handicap.get("rate") is not None and _safe_float(handicap.get("rate"), 0.0) < 0.50:
+            reasons.append(f"\u8ba9\u7403\u547d\u4e2d {handicap.get('text', '-')}\uff0c\u5efa\u8bae\u964d\u4f4e\u8ba9\u7403\u73a9\u6cd5\u6743\u91cd\u3002")
+        if ou.get("rate") is not None and _safe_float(ou.get("rate"), 0.0) < 0.50:
+            reasons.append(f"\u5927\u5c0f\u7403\u547d\u4e2d {ou.get('text', '-')}\uff0c\u5efa\u8bae\u964d\u4f4e\u5927\u5c0f\u7403\u73a9\u6cd5\u6743\u91cd\u3002")
+        if high_rate_value is not None and high_rate_value >= 0 and high_rate_value < 0.60:
+            reasons.append(f"\u9ad8\u51c6\u7b56\u7565\u547d\u4e2d {high_strategy.get('text', '-')}\uff0c\u5efa\u8bae\u63d0\u9ad8\u6b63\u5f0f\u7b56\u7565\u6570\u8981\u6c42\u3002")
+
+        if reasons:
+            action = "tighten"
+            label = "\u5efa\u8bae\u6536\u7d27"
+            tone = "warning"
+            priority = "high" if len(reasons) >= 2 else "medium"
+        else:
+            action = "hold"
+            label = "\u7ef4\u6301\u5f53\u524d\u95e8\u69db"
+            tone = "good"
+            priority = "low"
+            reasons.append("\u672c\u8f6e\u4e3b\u8981\u73a9\u6cd5\u672a\u89e6\u53d1\u6536\u7d27\u6761\u4ef6\uff0c\u7ee7\u7eed\u6309\u5f53\u524d\u51c6\u5165\u7b56\u7565\u8fd0\u884c\u3002")
+
+    return {
+        "action": action,
+        "label": label,
+        "tone": tone,
+        "priority": priority,
+        "reasons": reasons,
+        "rows": [
+            ("\u52a8\u4f5c", label),
+            ("\u4f18\u5148\u7ea7", priority),
+            ("\u89e6\u53d1\u539f\u56e0", "\n".join(reasons) if reasons else "-"),
+        ],
+    }
+
+
 def build_result_recovery_review_summary(settlements: Sequence[Mapping[str, object]] | object) -> dict[str, object]:
     rows = [item for item in _run_items(settlements) if isinstance(item, Mapping)]
     play_fields = [
@@ -125,7 +180,7 @@ def build_result_recovery_review_summary(settlements: Sequence[Mapping[str, obje
         f"\u9ad8\u51c6\u7b56\u7565 {high_hits}/{high_total} ({high_rate:.0%})" if high_rate is not None else "\u9ad8\u51c6\u7b56\u7565 -",
         f"\u653e\u884c\u6e05\u5355 1X2 {allow_stats['text']}",
     ]
-    return {
+    summary = {
         "settlement_count": len(rows),
         "plays": plays,
         "high_accuracy_strategy": {
@@ -142,6 +197,8 @@ def build_result_recovery_review_summary(settlements: Sequence[Mapping[str, obje
         "summary_lines": lines,
         "summary_text": "\n".join(lines),
     }
+    summary["strategy_adjustment"] = build_result_recovery_strategy_adjustment(summary)
+    return summary
 
 
 def _review_summary_text(value: object) -> str:
@@ -166,6 +223,18 @@ def _review_summary_text(value: object) -> str:
             )
     if miss_lines:
         text = (text + "\n\n\u9ad8\u7f6e\u4fe1\u5931\u8bef\u6837\u4f8b:\n" if text else "\u9ad8\u7f6e\u4fe1\u5931\u8bef\u6837\u4f8b:\n") + "\n".join(miss_lines)
+    adjustment = _as_mapping(summary.get("strategy_adjustment"))
+    adjustment_reasons = adjustment.get("reasons")
+    if adjustment:
+        reason_text = ""
+        if isinstance(adjustment_reasons, Sequence) and not isinstance(adjustment_reasons, (str, bytes)):
+            reason_text = "\n".join(f"- {item}" for item in adjustment_reasons if item)
+        if reason_text:
+            text = (
+                text
+                + f"\n\n\u7b56\u7565\u8c03\u6574\u5efa\u8bae: {adjustment.get('label') or '-'}\n"
+                + reason_text
+            )
     return text or "- \u65e0"
 
 

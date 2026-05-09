@@ -19,6 +19,7 @@ from v24_app.ui_modules import (
     build_result_recovery_run_detail,
     build_result_recovery_run_rows,
     build_result_recovery_run_summary,
+    build_result_recovery_strategy_adjustment,
     mark_stale_result_recovery_runs,
 )
 
@@ -65,6 +66,24 @@ class UIRecoveryRunFlowModuleTests(unittest.TestCase):
         self.assertEqual(summary["plays"]["1X2"]["text"], "1/2 (50%)")
         self.assertEqual(summary["high_accuracy_strategy"]["text"], "2/3 (67%)")
         self.assertIn("Charlie FC", summary["top_misses"][0]["home_team"])
+        self.assertEqual(summary["strategy_adjustment"]["action"], "collect")
+
+    def test_strategy_adjustment_tightens_on_weak_review_summary(self) -> None:
+        adjustment = build_result_recovery_strategy_adjustment(
+            {
+                "settlement_count": 5,
+                "plays": {
+                    "1X2": {"rate": 0.4, "text": "2/5 (40%)"},
+                    "让球": {"rate": 0.4, "text": "2/5 (40%)"},
+                    "大小球": {"rate": 0.8, "text": "4/5 (80%)"},
+                },
+                "high_accuracy_strategy": {"rate": 0.5, "text": "2/4 (50%)"},
+            }
+        )
+
+        self.assertEqual(adjustment["action"], "tighten")
+        self.assertEqual(adjustment["priority"], "high")
+        self.assertTrue(any("1X2" in item for item in adjustment["reasons"]))
 
     def test_summary_tracks_recent_success_and_elapsed(self) -> None:
         records = [
@@ -117,6 +136,10 @@ class UIRecoveryRunFlowModuleTests(unittest.TestCase):
                 "review_summary": {
                     "settlement_count": 3,
                     "summary_lines": ["本轮新增结算 3 场", "1X2 2/3 (67%)"],
+                    "strategy_adjustment": {
+                        "label": "建议收紧",
+                        "reasons": ["1X2 命中偏低"],
+                    },
                     "top_misses": [
                         {
                             "match_date": "2026-05-09",
@@ -148,6 +171,7 @@ class UIRecoveryRunFlowModuleTests(unittest.TestCase):
         self.assertIn("titan_1", detail)
         self.assertIn("1X2 2/3", detail)
         self.assertIn("Alpha FC", detail)
+        self.assertIn("建议收紧", detail)
         self.assertIn("- done", detail)
 
     def test_quality_alerts_detect_failures_no_settlement_and_slow_runs(self) -> None:
