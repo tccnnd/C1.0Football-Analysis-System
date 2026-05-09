@@ -3346,6 +3346,16 @@ class SmartMatchDashboard:
         else:
             self._strategy_row(left, "\u6682\u65e0\u53ef\u7528\u7b56\u7565", "\u8bf7\u5148\u6267\u884c\u9ad8\u51c6\u7b56\u7565\u56de\u6d4b\uff0c\u8ba9\u7cfb\u7edf\u4ece\u5386\u53f2\u6837\u672c\u4e2d\u751f\u6210\u7b56\u7565\u6c60\u3002")
 
+        jc_feedback = dashboard.get("jc_bucket_feedback", {}) if isinstance(dashboard.get("jc_bucket_feedback"), dict) else {}
+        tk.Label(left, text="JC\u7a33\u5b9a\u6876\u5b9e\u76d8\u6392\u540d", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
+        jc_rows = jc_feedback.get("rows", []) if isinstance(jc_feedback.get("rows"), list) else []
+        if jc_rows:
+            for row in jc_rows:
+                if isinstance(row, dict):
+                    self._strategy_row(left, str(row.get("title") or "-"), str(row.get("body") or "-"))
+        else:
+            self._strategy_row(left, "\u6682\u65e0JC\u6876\u5b9e\u76d8\u7edf\u8ba1", "\u5f53\u7ade\u5f69\u7a33\u5b9a\u6876\u7b56\u7565\u5b8c\u6210\u8d5b\u679c\u56de\u6536\u540e\uff0c\u8fd9\u91cc\u4f1a\u663e\u793a\u5404\u6876\u7684\u5b9e\u76d8\u547d\u4e2d\u3001\u504f\u5dee\u548c\u964d\u7ea7\u72b6\u6001\u3002")
+
         tk.Label(left, text="\u56de\u6d4b\u4e0e\u6837\u672c", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
         for label, value in dashboard.get("validation_rows", []):
             self._strategy_row(left, str(label), str(value))

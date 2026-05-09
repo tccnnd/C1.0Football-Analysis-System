@@ -570,6 +570,153 @@ def build_high_accuracy_strategy_settlement_rows(
     return rows
 
 
+def _jc_bucket_key_from_item(item: Mapping[str, object]) -> str:
+    explicit = str(item.get("jc_bucket_key") or "").strip()
+    if explicit:
+        return explicit
+    bucket = _as_mapping(item.get("jc_bucket"))
+    dimension = str(bucket.get("dimension") or item.get("dimension") or "").strip()
+    bucket_value = str(bucket.get("bucket") or item.get("scope_value") or "").strip()
+    if not dimension or not bucket_value:
+        return ""
+    return f"{dimension}|{bucket_value}"
+
+
+def _is_jc_bucket_item(item: Mapping[str, object]) -> bool:
+    layer = _as_mapping(item.get("layer"))
+    return str(item.get("data_layer") or layer.get("data_layer") or "") == "jc_stratified_market" or bool(_as_mapping(item.get("jc_bucket")))
+
+
+def _jc_bucket_summary_status(
+    *,
+    live_count: int,
+    live_hit_rate: float | None,
+    wilson_lower: float,
+    miss_streak: int,
+    explicit_status: str = "",
+) -> str:
+    explicit = explicit_status.strip().lower()
+    if explicit in {"downgraded", "watch", "healthy", "pending"}:
+        return explicit
+    if live_count < 5 or live_hit_rate is None:
+        return "pending"
+    if live_count >= 10 and live_hit_rate < max(0.45, wilson_lower - 0.10):
+        return "downgraded"
+    if miss_streak >= 3 or live_hit_rate < max(0.45, wilson_lower - 0.05):
+        return "watch"
+    return "healthy"
+
+
+def build_jc_bucket_feedback_summary(
+    status: Mapping[str, object] | object,
+    settlements: Sequence[Mapping[str, object]] | object,
+) -> dict[str, object]:
+    resolved = _as_mapping(status)
+    settlement_items = [item for item in settlements if isinstance(item, Mapping)] if isinstance(settlements, Sequence) else []
+    buckets: dict[str, dict[str, object]] = {}
+
+    def ensure_bucket(item: Mapping[str, object]) -> dict[str, object] | None:
+        if not _is_jc_bucket_item(item):
+            return None
+        key = _jc_bucket_key_from_item(item)
+        if not key:
+            return None
+        bucket = _as_mapping(item.get("jc_bucket"))
+        feedback = _as_mapping(item.get("jc_live_feedback"))
+        current = buckets.setdefault(
+            key,
+            {
+                "key": key,
+                "dimension": bucket.get("dimension") or item.get("dimension") or "-",
+                "bucket": bucket.get("bucket") or item.get("scope_value") or "-",
+                "historical_accuracy": feedback.get("historical_accuracy", bucket.get("accuracy", item.get("accuracy", item.get("backtest_accuracy")))),
+                "historical_wilson_lower": feedback.get("historical_wilson_lower", bucket.get("wilson_lower", item.get("wilson_lower"))),
+                "historical_samples": bucket.get("sample_count", item.get("sample_count", item.get("backtest_samples", 0))),
+                "hits": [],
+                "explicit_status": "",
+            },
+        )
+        if feedback:
+            current["explicit_status"] = str(feedback.get("status") or current.get("explicit_status") or "")
+            for source_key, target_key in (
+                ("historical_accuracy", "historical_accuracy"),
+                ("historical_wilson_lower", "historical_wilson_lower"),
+                ("live_count", "feedback_live_count"),
+                ("live_hit_count", "feedback_live_hit_count"),
+                ("live_hit_rate", "feedback_live_hit_rate"),
+                ("deviation", "feedback_deviation"),
+                ("miss_streak", "feedback_miss_streak"),
+            ):
+                if feedback.get(source_key) is not None:
+                    current[target_key] = feedback.get(source_key)
+        return current
+
+    for pool_item in _strategy_pool(resolved):
+        ensure_bucket(pool_item)
+    for _settlement, item in _known_strategy_settlement_items(settlement_items):
+        bucket_row = ensure_bucket(item)
+        if bucket_row is None or item.get("is_hit") is None:
+            continue
+        hits = bucket_row.setdefault("hits", [])
+        if isinstance(hits, list):
+            hits.append(bool(item.get("is_hit")))
+
+    rows: list[dict[str, str]] = []
+    status_counts = {"healthy": 0, "watch": 0, "downgraded": 0, "pending": 0}
+    for bucket in buckets.values():
+        hits = bucket.get("hits") if isinstance(bucket.get("hits"), list) else []
+        live_count = len(hits) if hits else _safe_int(bucket.get("feedback_live_count"))
+        live_hit_count = sum(1 for hit in hits if hit) if hits else _safe_int(bucket.get("feedback_live_hit_count"))
+        live_hit_rate = live_hit_count / live_count if live_count else None
+        if live_hit_rate is None and bucket.get("feedback_live_hit_rate") is not None:
+            live_hit_rate = _safe_float(bucket.get("feedback_live_hit_rate"))
+        miss_streak = 0
+        if hits:
+            for hit in hits:
+                if hit:
+                    break
+                miss_streak += 1
+        else:
+            miss_streak = _safe_int(bucket.get("feedback_miss_streak"))
+        historical_accuracy = _safe_float(bucket.get("historical_accuracy"))
+        historical_wilson = _safe_float(bucket.get("historical_wilson_lower"))
+        deviation = live_hit_rate - historical_accuracy if live_hit_rate is not None else bucket.get("feedback_deviation")
+        status_text = _jc_bucket_summary_status(
+            live_count=live_count,
+            live_hit_rate=live_hit_rate,
+            wilson_lower=historical_wilson,
+            miss_streak=miss_streak,
+            explicit_status=str(bucket.get("explicit_status") or ""),
+        )
+        status_counts[status_text] = status_counts.get(status_text, 0) + 1
+        recovery_text = "\u9700\u7ee7\u7eed\u89c2\u5bdf\u5f71\u5b50\u7ed3\u7b97" if status_text in {"watch", "downgraded"} else "\u6682\u65e0\u6062\u590d\u538b\u529b"
+        rows.append(
+            {
+                "title": f"{status_text.upper()} | {bucket.get('dimension') or '-'} / {bucket.get('bucket') or '-'}",
+                "body": (
+                    f"\u5386\u53f2: {_pct(historical_accuracy)} | Wilson {_pct(historical_wilson)} | \u6837\u672c {_safe_int(bucket.get('historical_samples'))}\n"
+                    f"\u5b9e\u76d8: {live_hit_count}/{live_count} ({_pct(live_hit_rate)}) | \u504f\u5dee {_pct(deviation)} | \u8fde\u9519 {miss_streak}\n"
+                    f"\u6062\u590d: {recovery_text}"
+                ),
+                "status": status_text,
+                "live_count": str(live_count),
+                "deviation": f"{_safe_float(deviation):.4f}" if deviation is not None else "",
+            }
+        )
+
+    priority = {"downgraded": 0, "watch": 1, "pending": 2, "healthy": 3}
+    rows.sort(key=lambda row: (priority.get(row.get("status", "pending"), 9), _safe_float(row.get("deviation"), 0.0), -_safe_int(row.get("live_count"))))
+    return {
+        "total": len(rows),
+        "status_counts": status_counts,
+        "rows": rows[:8],
+        "summary_text": (
+            f"\u964d\u7ea7 {status_counts.get('downgraded', 0)} | \u89c2\u5bdf {status_counts.get('watch', 0)} | "
+            f"\u5065\u5eb7 {status_counts.get('healthy', 0)} | \u5f85\u6837\u672c {status_counts.get('pending', 0)}"
+        ),
+    }
+
+
 def _known_values(items: Sequence[Mapping[str, object]], key: str) -> list[bool]:
     return [bool(item.get(key)) for item in items if isinstance(item, Mapping) and item.get(key) is not None]
 
@@ -865,6 +1012,7 @@ def build_high_accuracy_strategy_dashboard(
     settlement_summary = build_high_accuracy_strategy_settlement_summary(settlement_items)
     allowlist_summary = build_strategy_allowlist_settlement_summary(settlement_items)
     allowlist_tuning = build_strategy_allowlist_tuning_recommendation(settlement_items)
+    jc_bucket_feedback = build_jc_bucket_feedback_summary(resolved, settlement_items)
     stable_count = sum(1 for item in pool if bool(_strategy_stability(item).get("stable")))
     primary_count = sum(1 for item in pool if str(item.get("role") or "") == "primary")
     backup_count = sum(1 for item in pool if str(item.get("role") or "") == "backup")
@@ -885,6 +1033,17 @@ def build_high_accuracy_strategy_dashboard(
             "tone": "neutral",
         },
         {"label": "\u771f\u5b9e\u547d\u4e2d", "value": str(settlement_summary.get("hit_rate_text") or "-"), "tone": hit_tone},
+        {
+            "label": "JC\u7a33\u5b9a\u6876",
+            "value": str(jc_bucket_feedback.get("summary_text") or "-"),
+            "tone": "bad"
+            if _safe_int(_as_mapping(jc_bucket_feedback.get("status_counts")).get("downgraded"))
+            else "warning"
+            if _safe_int(_as_mapping(jc_bucket_feedback.get("status_counts")).get("watch"))
+            else "good"
+            if _safe_int(jc_bucket_feedback.get("total"))
+            else "neutral",
+        },
         {
             "label": "\u653e\u884c\u547d\u4e2d",
             "value": str(allowlist_summary.get("hit_rate_text") or "-"),
@@ -939,6 +1098,7 @@ def build_high_accuracy_strategy_dashboard(
         "metrics": metrics,
         "pool_rows": build_high_accuracy_strategy_pool_rows(resolved),
         "settlement_rows": build_high_accuracy_strategy_settlement_rows(settlement_items),
+        "jc_bucket_feedback": jc_bucket_feedback,
         "allowlist_settlement_rows": build_strategy_allowlist_settlement_rows(settlement_items),
         "validation_rows": validation_rows,
         "guidance_rows": guidance,

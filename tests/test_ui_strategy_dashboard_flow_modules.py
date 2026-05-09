@@ -234,6 +234,61 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("CAUTIOUS", rows[0]["body"])
         self.assertIn("Wilson>=66.0%", rows[0]["body"])
 
+    def test_strategy_dashboard_adds_jc_bucket_feedback_summary(self) -> None:
+        status = {
+            "enabled": True,
+            "strategy_pool": [
+                {
+                    "role": "primary",
+                    "scope": "jc_bucket",
+                    "scope_value": "L1 | >=0.65",
+                    "dimension": "league_confidence_bucket",
+                    "play_type": "market_1x2",
+                    "layer": {"data_layer": "jc_stratified_market"},
+                    "sample_count": 206,
+                    "hit_count": 164,
+                    "accuracy": 0.796117,
+                    "wilson_lower": 0.757916,
+                    "stability": {"stable": True, "stability_score": 0.795},
+                    "jc_bucket": {
+                        "dimension": "league_confidence_bucket",
+                        "bucket": "L1 | >=0.65",
+                        "accuracy": 0.796117,
+                        "wilson_lower": 0.757916,
+                        "sample_count": 206,
+                    },
+                }
+            ],
+        }
+        settlements = [
+            {
+                "high_accuracy_strategy_items": [
+                    {
+                        "data_layer": "jc_stratified_market",
+                        "is_hit": False,
+                        "jc_bucket": {
+                            "dimension": "league_confidence_bucket",
+                            "bucket": "L1 | >=0.65",
+                            "accuracy": 0.796117,
+                            "wilson_lower": 0.757916,
+                            "sample_count": 206,
+                        },
+                    }
+                ]
+            }
+            for _ in range(10)
+        ]
+
+        dashboard = build_high_accuracy_strategy_dashboard(status, settlements)
+
+        metrics = {item["label"]: item["value"] for item in dashboard["metrics"]}
+        self.assertIn("JC\u7a33\u5b9a\u6876", metrics)
+        self.assertIn("\u964d\u7ea7 1", metrics["JC\u7a33\u5b9a\u6876"])
+        feedback = dashboard["jc_bucket_feedback"]
+        self.assertEqual(feedback["status_counts"]["downgraded"], 1)
+        self.assertEqual(feedback["rows"][0]["status"], "downgraded")
+        self.assertIn("0/10", feedback["rows"][0]["body"])
+
     def test_settlement_summary_ignores_unknown_results_for_hit_rate(self) -> None:
         summary = build_high_accuracy_strategy_settlement_summary(
             [
