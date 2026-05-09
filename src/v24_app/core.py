@@ -4832,11 +4832,13 @@ def _high_accuracy_strategy_match(match: AppMatch, prediction: dict, play_catalo
         return result
 
     matches = [evaluate(item) for item in strategy_pool if isinstance(item, dict)]
-    primary = next((item for item in matches if item.get("active")), matches[0] if matches else evaluate({**strategy, "role": "primary"}))
-    active_matches = [item for item in matches if item.get("active")]
-    primary["strategy_pool"] = matches
+    selected = next((item for item in matches if item.get("active")), matches[0] if matches else evaluate({**strategy, "role": "primary"}))
+    primary = dict(selected)
+    pool_matches = [dict(item) for item in matches]
+    active_matches = [dict(item) for item in matches if item.get("active")]
+    shadow_matches = [dict(item) for item in matches if item.get("shadow_active")]
+    primary["strategy_pool"] = pool_matches
     primary["active_matches"] = active_matches
-    shadow_matches = [item for item in matches if item.get("shadow_active")]
     primary["shadow_matches"] = shadow_matches
     primary["active_count"] = len(active_matches)
     primary["shadow_count"] = len(shadow_matches)

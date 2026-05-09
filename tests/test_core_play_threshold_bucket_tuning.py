@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -312,6 +313,44 @@ class CorePlayThresholdBucketTuningTests(unittest.TestCase):
         self.assertTrue(result["active"])
         self.assertEqual(result["active_count"], 1)
         self.assertEqual(result["active_matches"][0]["play_type"], "market_1x2")
+        json.dumps(result, ensure_ascii=False)
+
+    def test_high_accuracy_strategy_match_does_not_self_reference_pool(self) -> None:
+        strategy = {
+            "role": "primary",
+            "scope": "global",
+            "scope_value": "all",
+            "play_type": "market_1x2",
+            "min_confidence": 0.70,
+            "accuracy": 0.80,
+            "hit_count": 80,
+            "sample_count": 100,
+            "breaker": {"breaker_on": False},
+        }
+        match = core.AppMatch(
+            home_team="A",
+            away_team="B",
+            league="Test League",
+            match_time="12:00",
+            match_date="2026-05-09",
+            odds_home=1.8,
+            odds_draw=3.2,
+            odds_away=4.2,
+        )
+
+        with patch(
+            "v24_app.core.get_high_accuracy_strategy_status",
+            return_value={"enabled": True, "updated_at": "now", "strategy": strategy, "strategy_pool": [strategy]},
+        ):
+            result = core._high_accuracy_strategy_match(
+                match,
+                {"market_probabilities": {"home": 0.80, "draw": 0.10, "away": 0.10}},
+                {},
+            )
+
+        self.assertIsNot(result, result["strategy_pool"][0])
+        self.assertNotIn("strategy_pool", result["strategy_pool"][0])
+        json.dumps({"high_accuracy_strategy": result}, ensure_ascii=False)
 
     def test_strategy_admission_gate_allows_active_low_risk_strategy(self) -> None:
         admission = core._strategy_admission_gate(
