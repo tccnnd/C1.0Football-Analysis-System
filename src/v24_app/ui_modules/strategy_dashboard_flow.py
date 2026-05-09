@@ -334,6 +334,43 @@ def build_strategy_release_pool_rows(
     return pool
 
 
+def build_strategy_release_recovery_alerts(snapshot_rows: Sequence[Mapping[str, object]] | object, *, limit: int = 5) -> dict[str, object]:
+    if not isinstance(snapshot_rows, Sequence) or isinstance(snapshot_rows, (str, bytes)):
+        return {"count": 0, "rows": [], "summary": "\u6682\u65e0\u6b63\u5f0f\u653e\u884c\u5f85\u56de\u6536\u63d0\u9192"}
+    alerts: list[dict[str, str]] = []
+    for item in snapshot_rows:
+        if not isinstance(item, Mapping):
+            continue
+        allowlist = _as_mapping(item.get("strategy_allowlist"))
+        if not allowlist:
+            continue
+        if _text(item.get("status")) != "\u5f85\u56de\u6536":
+            continue
+        match = _as_mapping(item.get("match"))
+        prediction = _as_mapping(item.get("prediction"))
+        title = (
+            f"\u5f85\u56de\u6536 | {_text(match.get('league'))} | "
+            f"{_text(match.get('home_team'))} vs {_text(match.get('away_team'))}"
+        )
+        body = (
+            f"\u5f00\u8d5b: {_text(match.get('match_date'))} {_text(match.get('match_time'))}\n"
+            f"\u63a8\u8350: {_text(prediction.get('recommendation'))} | \u7f6e\u4fe1 {_pct(prediction.get('confidence'))} | \u98ce\u9669 {_risk_text(prediction.get('risk_level'))}\n"
+            f"\u6e05\u5355: {_text(allowlist.get('file'))} | \u5bfc\u51fa\u65f6\u95f4: {_text(allowlist.get('exported_at'))}\n"
+            f"\u5019\u9009: {format_strategy_admission_pick(allowlist)}"
+        )
+        alerts.append({"title": title, "body": body})
+    try:
+        max_rows = max(0, int(limit))
+    except (TypeError, ValueError):
+        max_rows = 5
+    count = len(alerts)
+    return {
+        "count": count,
+        "rows": alerts[:max_rows],
+        "summary": f"\u6709 {count} \u573a\u6b63\u5f0f\u653e\u884c\u5df2\u8fdb\u5165\u5f85\u56de\u6536" if count else "\u6682\u65e0\u6b63\u5f0f\u653e\u884c\u5f85\u56de\u6536\u63d0\u9192",
+    }
+
+
 def _allowlist_sort_key(row: object) -> tuple[str, str, str, str, float]:
     match = _row_match(row)
     prediction = _row_prediction(row)

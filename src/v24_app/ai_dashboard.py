@@ -30,6 +30,7 @@ from .ui_modules import (
     build_strategy_allowlist_tuning_recommendation,
     build_strategy_allowlist_filename,
     build_strategy_allowlist_report_lines,
+    build_strategy_release_recovery_alerts,
     build_strategy_release_pool_rows,
     compute_strategy_admission_counts,
     filter_strategy_admission_rows,
@@ -600,6 +601,7 @@ class SmartMatchDashboard:
     def show_home_overview(self) -> None:
         self.current_nav_index = 0
         self._refresh_nav_highlight()
+        release_alerts = self._release_recovery_alerts()
         content = self._page_shell(
             "\u9996\u9875\u6982\u89c8",
             "\u8d5b\u4e8b\u5206\u6790\u603b\u89c8\u3001\u98ce\u9669\u6458\u8981\u548c\u7cfb\u7edf\u72b6\u6001",
@@ -657,6 +659,13 @@ class SmartMatchDashboard:
             ("\u81ea\u52a8\u5237\u65b0", "\u5df2\u5f00\u542f" if self.auto_refresh_enabled.get() else "\u5df2\u5173\u95ed"),
         ]:
             self._kv_row(left, label, value)
+
+        alert_count = int(release_alerts.get("count", 0) or 0)
+        if alert_count:
+            tk.Label(left, text="\u653e\u884c\u56de\u6536\u63d0\u9192", bg=PANEL, fg=RED, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
+            first_alert = release_alerts.get("rows", [])[0] if isinstance(release_alerts.get("rows"), list) and release_alerts.get("rows") else {}
+            body_text = str(first_alert.get("body") or release_alerts.get("summary") or "-") if isinstance(first_alert, dict) else str(release_alerts.get("summary") or "-")
+            self._shortcut_row(left, f"\u5f85\u56de\u6536 {alert_count} \u573a\u6b63\u5f0f\u653e\u884c", body_text, self.open_snapshot_center)
 
         tk.Label(right, text="\u5feb\u6377\u5165\u53e3", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
         shortcuts = [
@@ -1308,7 +1317,12 @@ class SmartMatchDashboard:
         self.event_log.insert(0, (stamp, level, message))
         self.event_log = self.event_log[:200]
 
+    def _release_recovery_alerts(self) -> dict[str, object]:
+        return build_strategy_release_recovery_alerts(self._pending_snapshot_rows())
+
     def open_monitor_center(self) -> None:
+        release_alerts = self._release_recovery_alerts()
+        release_alert_count = int(release_alerts.get("count", 0) or 0)
         shell = self._page_shell(
             "\u76d1\u63a7\u4e2d\u5fc3",
             "\u8fd0\u884c\u65e5\u5fd7\u3001\u5206\u6790\u8017\u65f6\u3001\u6570\u636e\u6e90\u548c\u98ce\u9669\u72b6\u6001",
@@ -1337,6 +1351,7 @@ class SmartMatchDashboard:
             ("\u6570\u636e\u6e90", self.data_source, "#7aa2ff"),
             ("\u8d5b\u4e8b\u6570", str(len(self.rows)), TEXT),
             ("\u9884\u8b66", str(risk_counts.get("high", 0)), RED),
+            ("\u653e\u884c\u5f85\u56de\u6536", str(release_alert_count), RED if release_alert_count else GREEN),
         ]
         for label, value, color in metrics:
             self._detail_metric(top, label, value, color)
@@ -1354,10 +1369,18 @@ class SmartMatchDashboard:
             ("MarketEntropy", f"\u9ad8\u98ce\u9669 {risk_counts.get('high', 0)} / \u4e2d\u98ce\u9669 {risk_counts.get('medium', 0)}"),
             ("Simulation", f"\u5df2\u63a8\u6f14 {len(self.rows)} \u573a"),
             ("RiskGuardian", "\u6b63\u5e38" if risk_counts.get("high", 0) == 0 else "\u89e6\u53d1\u9884\u8b66"),
+            ("ReviewLoop", f"\u653e\u884c\u5f85\u56de\u6536 {release_alert_count} \u573a" if release_alert_count else "\u65e0\u5f85\u56de\u6536\u6b63\u5f0f\u653e\u884c"),
             ("StrategyComposer", f"\u62a5\u544a {len(list(REPORT_DIR.glob('ai_match_report_*.md'))) if REPORT_DIR.exists() else 0} \u4efd"),
         ]
         for label, value in agent_rows:
             self._kv_row(left, label, value)
+
+        if release_alert_count:
+            tk.Label(left, text="\u653e\u884c\u56de\u6536\u63d0\u9192", bg=PANEL, fg=RED, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
+            rows = release_alerts.get("rows", []) if isinstance(release_alerts.get("rows"), list) else []
+            for row in rows:
+                if isinstance(row, dict):
+                    self._strategy_row(left, str(row.get("title") or "-"), str(row.get("body") or "-"))
 
         tk.Label(right, text="\u8fd0\u884c\u65e5\u5fd7", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
         logbox = tk.Listbox(

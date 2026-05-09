@@ -23,6 +23,7 @@ from v24_app.ui_modules import (
     build_strategy_allowlist_settlement_rows,
     build_strategy_allowlist_settlement_summary,
     build_strategy_allowlist_tuning_recommendation,
+    build_strategy_release_recovery_alerts,
     build_strategy_release_pool_rows,
     compute_strategy_admission_counts,
     filter_strategy_admission_rows,
@@ -370,6 +371,34 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertEqual(second["export_status"], "\u672a\u5bfc\u51fa")
         self.assertEqual(second["snapshot_status"], "\u7f3a\u5feb\u7167")
         self.assertEqual(second["settlement_status"], "\u5f85\u56de\u6536")
+
+    def test_strategy_release_recovery_alerts_only_include_due_allowlist_snapshots(self) -> None:
+        snapshots = [
+            {
+                "status": "\u5f85\u56de\u6536",
+                "match": {"match_date": "2026-05-09", "match_time": "21:00", "league": "L1", "home_team": "A", "away_team": "B"},
+                "prediction": {"recommendation": "home", "confidence": 0.72, "risk_level": "LOW"},
+                "strategy_allowlist": {"file": "strategy_allowlist_a.md", "exported_at": "2026-05-09 17:30:45", "top_play": "market_1x2", "top_pick": "home", "top_confidence": 0.76},
+            },
+            {
+                "status": "\u5f85\u5f00\u8d5b",
+                "match": {"league": "L2", "home_team": "C", "away_team": "D"},
+                "strategy_allowlist": {"file": "strategy_allowlist_b.md"},
+            },
+            {
+                "status": "\u5f85\u56de\u6536",
+                "match": {"league": "L3", "home_team": "E", "away_team": "F"},
+                "strategy_allowlist": {},
+            },
+        ]
+
+        alerts = build_strategy_release_recovery_alerts(snapshots)
+
+        self.assertEqual(alerts["count"], 1)
+        self.assertIn("\u6709 1 \u573a", alerts["summary"])
+        row = alerts["rows"][0]
+        self.assertIn("A vs B", row["title"])
+        self.assertIn("strategy_allowlist_a.md", row["body"])
 
     def test_strategy_allowlist_settlement_summary_tracks_release_quality(self) -> None:
         settlements = [
