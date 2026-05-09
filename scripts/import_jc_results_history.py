@@ -5,6 +5,8 @@ import csv
 import hashlib
 import json
 import re
+import os
+import sys
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -42,6 +44,13 @@ COL_HANDICAP_RESULT = 344
 COL_HANDICAP_BONUS = 345
 COL_SPF_RESULT = 346
 COL_SPF_BONUS = 347
+
+
+def bootstrap_project() -> None:
+    os.chdir(PROJECT_ROOT)
+    src_dir = PROJECT_ROOT / "src"
+    if str(src_dir) not in sys.path:
+        sys.path.insert(0, str(src_dir))
 
 
 def _cell(row: list[str], index: int) -> str:
@@ -330,6 +339,30 @@ def import_jc_results_history(
     return audit
 
 
+def import_to_xgb_samples(
+    output_path: Path,
+    *,
+    replace: bool = False,
+    sync_ratings: bool = False,
+) -> dict[str, Any]:
+    bootstrap_project()
+    from v24_app.training_samples import import_historical_xgb_samples
+
+    return import_historical_xgb_samples(
+        project_dir=PROJECT_ROOT,
+        input_path=output_path,
+        replace=replace,
+        sync_ratings=sync_ratings,
+    )
+
+
+def train_xgb_model(force_min_samples: int | None = None) -> dict[str, Any]:
+    bootstrap_project()
+    from v24_app.core import train_xgb_v0_now
+
+    return train_xgb_v0_now(force_min_samples=force_min_samples)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Import JC results CSV into normalized local history JSONL.")
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT)
@@ -343,6 +376,16 @@ def main() -> int:
         action="store_true",
         help="Keep rows without complete official closing SPF odds.",
     )
+    parser.add_argument("--import-xgb", action="store_true", help="Import normalized JC history into XGB samples.")
+    parser.add_argument("--replace-xgb", action="store_true", help="Replace existing XGB samples during --import-xgb.")
+    parser.add_argument("--sync-ratings", action="store_true", help="Sync reconstructed Elo ratings during --import-xgb.")
+    parser.add_argument("--train", action="store_true", help="Train XGB v0 after --import-xgb.")
+    parser.add_argument(
+        "--force-min-samples",
+        type=int,
+        default=None,
+        help="Override XGB minimum sample threshold during --train.",
+    )
     args = parser.parse_args()
 
     audit = import_jc_results_history(
@@ -354,7 +397,18 @@ def main() -> int:
         include_unfinished=args.include_unfinished,
         require_close_odds=not args.allow_missing_close_odds,
     )
-    print(json.dumps(audit, ensure_ascii=False, indent=2))
+    result: dict[str, Any] = {"history_import": audit}
+    if args.import_xgb:
+        result["xgb_import"] = import_to_xgb_samples(
+            output_path=args.output,
+            replace=args.replace_xgb,
+            sync_ratings=args.sync_ratings,
+        )
+    if args.train:
+        if not args.import_xgb:
+            result["warning"] = "--train was requested without --import-xgb; training existing samples."
+        result["xgb_train"] = train_xgb_model(force_min_samples=args.force_min_samples)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
 

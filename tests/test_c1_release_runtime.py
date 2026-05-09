@@ -147,6 +147,7 @@ class C1ReleaseRuntimeTests(unittest.TestCase):
             raw_fields=self.base_raw(),
             governance_state={},
             context={"source": "unit"},
+            enable_xgboost=False,
             created_at="2026-04-03 22:08:00",
         )
         self.assertTrue(release_decision.release_allowed)

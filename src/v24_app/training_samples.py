@@ -557,6 +557,7 @@ def _normalize_historical_row(row: dict[str, Any], row_index: int) -> dict[str, 
     match_id = explicit_match_id or f"{match_date}|{league}|{home_team}|{away_team}"
     return {
         "row_index": row_index,
+        "source": _normalize_text(row.get("source")),
         "match_id": match_id,
         "match_date": match_date,
         "match_time": match_time,
@@ -723,7 +724,7 @@ def build_xgb_samples_from_historical_records(
                 },
                 "label": label,
                 "meta": {
-                    "source": "historical_import",
+                    "source": _normalize_text(row.get("source")) or "historical_import",
                     "match_date": row["match_date"],
                     "match_time": row["match_time"],
                     "league": row["league"],
@@ -818,6 +819,8 @@ def import_historical_xgb_samples(
 
     merged_items = list(merged.values())
     store.save_xgb_samples(merged_items)
+    storage_limit = int(getattr(store, "xgb_sample_limit", len(merged_items)) or len(merged_items))
+    saved_total = min(len(merged_items), storage_limit)
     if sync_ratings:
         store.save_ratings(ratings_map)
 
@@ -828,6 +831,9 @@ def import_historical_xgb_samples(
         "existing_samples_before": 0 if replace else existing_count,
         "imported_samples": summary["imported_samples"],
         "merged_total": len(merged_items),
+        "saved_total": saved_total,
+        "storage_limit": storage_limit,
+        "dropped_by_limit": max(0, len(merged_items) - saved_total),
         "skipped_invalid": summary["skipped_invalid"],
         "skipped_duplicate": summary["skipped_duplicate"],
         "label_counts": summary["label_counts"],
