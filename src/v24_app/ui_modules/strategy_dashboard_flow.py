@@ -661,6 +661,25 @@ def _jc_bucket_diagnostics(
     return " | ".join(reasons[:4]) if reasons else "-"
 
 
+def _jc_recovery_label(
+    *,
+    status_text: str,
+    recovery_status: str,
+    recovery_streak: int,
+    recovery_required: int,
+) -> str:
+    required = max(1, int(recovery_required or 1))
+    if recovery_status == "eligible":
+        return f"\u5df2\u8fbe\u5230\u6062\u590d\u6761\u4ef6 {recovery_streak}/{required}\uff0c\u4fdd\u6301\u89c2\u5bdf"
+    if recovery_status == "in_progress":
+        return f"\u6062\u590d\u4e2d {recovery_streak}/{required}\uff0c\u7ee7\u7eed\u8bb0\u5f55\u5f71\u5b50\u7ed3\u7b97"
+    if recovery_status == "recovered" or status_text == "healthy":
+        return "\u6682\u65e0\u6062\u590d\u538b\u529b"
+    if status_text in {"watch", "downgraded"}:
+        return f"\u672a\u8fbe\u6062\u590d\u6761\u4ef6 0/{required}\uff0c\u9700\u8fde\u7eed\u547d\u4e2d"
+    return "\u7b49\u5f85\u66f4\u591a\u8d5b\u540e\u6837\u672c"
+
+
 def build_jc_bucket_feedback_summary(
     status: Mapping[str, object] | object,
     settlements: Sequence[Mapping[str, object]] | object,
@@ -706,9 +725,13 @@ def build_jc_bucket_feedback_summary(
                 ("live_hit_rate", "feedback_live_hit_rate"),
                 ("deviation", "feedback_deviation"),
                 ("miss_streak", "feedback_miss_streak"),
+                ("recovery_streak", "feedback_recovery_streak"),
+                ("recovery_hits_required", "feedback_recovery_hits_required"),
             ):
                 if feedback.get(source_key) is not None:
                     current[target_key] = feedback.get(source_key)
+            if feedback.get("recovery_status"):
+                current["feedback_recovery_status"] = feedback.get("recovery_status")
         for source_key, target_key in (
             ("avg_confidence", "historical_avg_confidence"),
             ("avg_pick_odds", "historical_avg_pick_odds"),
@@ -760,6 +783,16 @@ def build_jc_bucket_feedback_summary(
                 miss_streak += 1
         else:
             miss_streak = _safe_int(bucket.get("feedback_miss_streak"))
+        recovery_streak = 0
+        if hits:
+            for hit in hits:
+                if not hit:
+                    break
+                recovery_streak += 1
+        else:
+            recovery_streak = _safe_int(bucket.get("feedback_recovery_streak"))
+        recovery_required = _safe_int(bucket.get("feedback_recovery_hits_required"), 3)
+        recovery_status = str(bucket.get("feedback_recovery_status") or "")
         historical_accuracy = _safe_float(bucket.get("historical_accuracy"))
         historical_wilson = _safe_float(bucket.get("historical_wilson_lower"))
         deviation = live_hit_rate - historical_accuracy if live_hit_rate is not None else bucket.get("feedback_deviation")
@@ -777,7 +810,12 @@ def build_jc_bucket_feedback_summary(
             explicit_status=str(bucket.get("explicit_status") or ""),
         )
         status_counts[status_text] = status_counts.get(status_text, 0) + 1
-        recovery_text = "\u9700\u7ee7\u7eed\u89c2\u5bdf\u5f71\u5b50\u7ed3\u7b97" if status_text in {"watch", "downgraded"} else "\u6682\u65e0\u6062\u590d\u538b\u529b"
+        recovery_text = _jc_recovery_label(
+            status_text=status_text,
+            recovery_status=recovery_status,
+            recovery_streak=recovery_streak,
+            recovery_required=recovery_required,
+        )
         diagnostics = _jc_bucket_diagnostics(
             status_text=status_text,
             live_count=live_count,
@@ -805,6 +843,8 @@ def build_jc_bucket_feedback_summary(
                 "live_count": str(live_count),
                 "deviation": f"{_safe_float(deviation):.4f}" if deviation is not None else "",
                 "diagnostics": diagnostics,
+                "recovery_status": recovery_status,
+                "recovery_streak": str(recovery_streak),
             }
         )
 

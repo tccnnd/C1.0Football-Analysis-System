@@ -58,6 +58,7 @@ HIGH_ACCURACY_STRATEGY_RECOVERY_HITS = 2
 JC_BUCKET_LIVE_FEEDBACK_WINDOW = 120
 JC_BUCKET_LIVE_PENDING_SAMPLES = 5
 JC_BUCKET_LIVE_DOWNGRADE_SAMPLES = 10
+JC_BUCKET_RECOVERY_REQUIRED_HITS = 3
 JC_STRATEGY_CALIBRATION_MIN_LIVE_BUCKETS = 2
 STRATEGY_ADMISSION_MIN_CONFIDENCE = 0.50
 STRATEGY_ADMISSION_BLOCK_CONFIDENCE = 0.40
@@ -4932,16 +4933,28 @@ def build_jc_bucket_live_feedback(
             if row.get("is_hit"):
                 break
             miss_streak += 1
+        recovery_streak = 0
+        for row in reversed(rows):
+            if not row.get("is_hit"):
+                break
+            recovery_streak += 1
         metadata = metadata_by_key.get(key, {})
         historical_accuracy = _safe_float(metadata.get("accuracy"), default=0.0)
         wilson_lower = _safe_float(metadata.get("wilson_lower"), default=0.0)
         downgrade_floor = max(0.45, wilson_lower - 0.10)
         watch_floor = max(0.45, wilson_lower - 0.05)
+        recovery_required = max(1, int(JC_BUCKET_RECOVERY_REQUIRED_HITS))
+        recovery_recent_ok = bool(recent_10_hit_rate is not None and recent_10_hit_rate >= watch_floor)
+        recovery_eligible = bool(recovery_streak >= recovery_required and recovery_recent_ok)
         status = "pending"
         reason = "insufficient_live_samples"
         if known_count >= JC_BUCKET_LIVE_DOWNGRADE_SAMPLES and live_hit_rate is not None and live_hit_rate < downgrade_floor:
-            status = "downgraded"
-            reason = "live_rate_below_historical_floor"
+            if recovery_eligible:
+                status = "watch"
+                reason = "shadow_recovery_progress"
+            else:
+                status = "downgraded"
+                reason = "live_rate_below_historical_floor"
         elif known_count >= JC_BUCKET_LIVE_PENDING_SAMPLES:
             if miss_streak >= 3:
                 status = "watch"
@@ -4955,6 +4968,16 @@ def build_jc_bucket_live_feedback(
             else:
                 status = "healthy"
                 reason = "live_rate_ok"
+        recovery_status = "not_needed"
+        if status == "healthy":
+            recovery_status = "recovered"
+        elif status in {"watch", "downgraded"}:
+            if recovery_eligible:
+                recovery_status = "eligible"
+            elif recovery_streak > 0:
+                recovery_status = "in_progress"
+            else:
+                recovery_status = "blocked"
         deviation = live_hit_rate - historical_accuracy if live_hit_rate is not None else None
         feedback[key] = {
             "jc_bucket_key": key,
@@ -4968,6 +4991,10 @@ def build_jc_bucket_live_feedback(
             "recent_10_hit_rate": round(recent_10_hit_rate, 4) if recent_10_hit_rate is not None else None,
             "recent_30_hit_rate": round(recent_30_hit_rate, 4) if recent_30_hit_rate is not None else None,
             "miss_streak": miss_streak,
+            "recovery_streak": recovery_streak,
+            "recovery_hits_required": recovery_required,
+            "recovery_status": recovery_status,
+            "recovery_eligible": recovery_eligible,
             "historical_accuracy": round(historical_accuracy, 4),
             "historical_wilson_lower": round(wilson_lower, 4),
             "deviation": round(deviation, 4) if deviation is not None else None,

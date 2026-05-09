@@ -489,6 +489,34 @@ class CorePlayThresholdBucketTuningTests(unittest.TestCase):
         self.assertEqual(bucket["miss_streak"], 10)
         self.assertLess(bucket["live_hit_rate"], bucket["historical_wilson_lower"])
 
+    def test_jc_bucket_live_feedback_marks_recovery_progress(self) -> None:
+        def settlement(hit: bool) -> dict:
+            return {
+                "high_accuracy_strategy_items": [
+                    {
+                        "data_layer": "jc_stratified_market",
+                        "is_hit": hit,
+                        "jc_bucket": {
+                            "dimension": "league_confidence_bucket",
+                            "bucket": "Stable League | >=0.65",
+                            "accuracy": 0.80,
+                            "sample_count": 180,
+                            "hit_count": 144,
+                            "wilson_lower": 0.74,
+                        },
+                    }
+                ]
+            }
+
+        feedback = core.build_jc_bucket_live_feedback([settlement(False) for _ in range(10)] + [settlement(True) for _ in range(7)])
+        bucket = feedback["league_confidence_bucket|Stable League | >=0.65"]
+
+        self.assertEqual(bucket["status"], "watch")
+        self.assertEqual(bucket["reason"], "shadow_recovery_progress")
+        self.assertEqual(bucket["recovery_status"], "eligible")
+        self.assertEqual(bucket["recovery_streak"], 7)
+        self.assertTrue(bucket["recovery_eligible"])
+
     def test_jc_auto_calibration_tightens_thresholds_from_live_feedback(self) -> None:
         status = {
             "enabled": True,

@@ -295,6 +295,43 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("\u8dcc\u7834Wilson", feedback["rows"][0]["body"])
         self.assertIn("\u5747\u8d54 1.95/1.45", feedback["rows"][0]["body"])
         self.assertIn(">=0.65", feedback["rows"][0]["body"])
+        self.assertIn("0/3", feedback["rows"][0]["body"])
+
+    def test_strategy_dashboard_shows_jc_recovery_progress(self) -> None:
+        status = {
+            "enabled": True,
+            "strategy_pool": [
+                {
+                    "role": "primary",
+                    "scope": "jc_bucket",
+                    "scope_value": "L1 | >=0.65",
+                    "dimension": "league_confidence_bucket",
+                    "play_type": "market_1x2",
+                    "layer": {"data_layer": "jc_stratified_market"},
+                    "jc_bucket": {"dimension": "league_confidence_bucket", "bucket": "L1 | >=0.65", "accuracy": 0.80, "wilson_lower": 0.74, "sample_count": 180},
+                    "jc_live_feedback": {
+                        "status": "watch",
+                        "live_count": 17,
+                        "live_hit_count": 7,
+                        "live_hit_rate": 0.4118,
+                        "historical_accuracy": 0.80,
+                        "historical_wilson_lower": 0.74,
+                        "deviation": -0.3882,
+                        "miss_streak": 0,
+                        "recovery_streak": 7,
+                        "recovery_hits_required": 3,
+                        "recovery_status": "eligible",
+                    },
+                }
+            ],
+        }
+
+        dashboard = build_high_accuracy_strategy_dashboard(status, [])
+        row = dashboard["jc_bucket_feedback"]["rows"][0]
+
+        self.assertEqual(row["status"], "watch")
+        self.assertEqual(row["recovery_status"], "eligible")
+        self.assertIn("\u5df2\u8fbe\u5230\u6062\u590d\u6761\u4ef6 7/3", row["body"])
 
     def test_settlement_summary_ignores_unknown_results_for_hit_rate(self) -> None:
         summary = build_high_accuracy_strategy_settlement_summary(
