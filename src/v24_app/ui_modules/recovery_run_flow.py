@@ -70,6 +70,105 @@ def _miss_items_text(value: object, limit: int = 5) -> str:
     return "\n".join(rows) if rows else "- \u65e0"
 
 
+def _hit_stats(items: Sequence[Mapping[str, object]], field: str) -> dict[str, object]:
+    known = [item for item in items if item.get(field) is True or item.get(field) is False]
+    hits = sum(1 for item in known if item.get(field) is True)
+    total = len(known)
+    rate = (hits / total) if total else None
+    return {
+        "hits": hits,
+        "total": total,
+        "rate": rate,
+        "text": f"{hits}/{total} ({rate:.0%})" if rate is not None else "-",
+    }
+
+
+def build_result_recovery_review_summary(settlements: Sequence[Mapping[str, object]] | object) -> dict[str, object]:
+    rows = [item for item in _run_items(settlements) if isinstance(item, Mapping)]
+    play_fields = [
+        ("1X2", "is_correct"),
+        ("\u8ba9\u7403", "handicap_is_correct"),
+        ("\u5927\u5c0f\u7403", "ou_is_correct"),
+        ("\u603b\u8fdb\u7403", "total_goals_is_correct"),
+        ("\u6bd4\u5206", "score_is_correct"),
+    ]
+    plays = {label: _hit_stats(rows, field) for label, field in play_fields}
+    high_total = sum(_safe_int(item.get("high_accuracy_strategy_active_count"), 0) for item in rows)
+    high_hits = sum(_safe_int(item.get("high_accuracy_strategy_hit_count"), 0) for item in rows)
+    high_rate = (high_hits / high_total) if high_total else None
+    allow_rows = [item for item in rows if str(item.get("strategy_allowlist_decision") or "") == "allow"]
+    allow_stats = _hit_stats(allow_rows, "is_correct")
+    misses: list[dict[str, object]] = []
+    for item in rows:
+        if item.get("is_correct") is not False:
+            continue
+        misses.append(
+            {
+                "match_id": item.get("match_id") or "",
+                "match_date": item.get("match_date") or "",
+                "league": item.get("league") or "",
+                "home_team": item.get("home_team") or "",
+                "away_team": item.get("away_team") or "",
+                "predicted": item.get("predicted") or "-",
+                "result": item.get("result") or "-",
+                "confidence": _safe_float(item.get("prediction_confidence"), 0.0),
+            }
+        )
+    misses.sort(key=lambda item: _safe_float(item.get("confidence"), 0.0), reverse=True)
+    handicap_label = "\u8ba9\u7403"
+    ou_label = "\u5927\u5c0f\u7403"
+    lines = [
+        f"\u672c\u8f6e\u65b0\u7ed3\u7b97 {len(rows)} \u573a",
+        f"1X2 {plays['1X2']['text']}",
+        f"{handicap_label} {plays[handicap_label]['text']}",
+        f"{ou_label} {plays[ou_label]['text']}",
+        f"\u9ad8\u51c6\u7b56\u7565 {high_hits}/{high_total} ({high_rate:.0%})" if high_rate is not None else "\u9ad8\u51c6\u7b56\u7565 -",
+        f"\u653e\u884c\u6e05\u5355 1X2 {allow_stats['text']}",
+    ]
+    return {
+        "settlement_count": len(rows),
+        "plays": plays,
+        "high_accuracy_strategy": {
+            "hits": high_hits,
+            "total": high_total,
+            "rate": high_rate,
+            "text": f"{high_hits}/{high_total} ({high_rate:.0%})" if high_rate is not None else "-",
+        },
+        "allowlist": {
+            "count": len(allow_rows),
+            "one_x_two": allow_stats,
+        },
+        "top_misses": misses[:5],
+        "summary_lines": lines,
+        "summary_text": "\n".join(lines),
+    }
+
+
+def _review_summary_text(value: object) -> str:
+    summary = _as_mapping(value)
+    lines = summary.get("summary_lines")
+    if isinstance(lines, Sequence) and not isinstance(lines, (str, bytes)):
+        text = "\n".join(f"- {line}" for line in lines if line)
+    else:
+        text = str(summary.get("summary_text") or "").strip()
+        text = "\n".join(f"- {line}" for line in text.splitlines() if line)
+    misses = summary.get("top_misses")
+    miss_lines: list[str] = []
+    if isinstance(misses, Sequence) and not isinstance(misses, (str, bytes)):
+        for raw in misses:
+            if not isinstance(raw, Mapping):
+                continue
+            teams = f"{raw.get('home_team') or '-'} vs {raw.get('away_team') or '-'}"
+            miss_lines.append(
+                f"- {raw.get('match_date') or '-'} {raw.get('league') or '-'} {teams} | "
+                f"{raw.get('predicted') or '-'} -> {raw.get('result') or '-'} | "
+                f"conf={_safe_float(raw.get('confidence'), 0.0):.0%}"
+            )
+    if miss_lines:
+        text = (text + "\n\n\u9ad8\u7f6e\u4fe1\u5931\u8bef\u6837\u4f8b:\n" if text else "\u9ad8\u7f6e\u4fe1\u5931\u8bef\u6837\u4f8b:\n") + "\n".join(miss_lines)
+    return text or "- \u65e0"
+
+
 def _parse_timestamp(value: object) -> datetime | None:
     text = str(value or "").strip()
     if not text:
@@ -272,6 +371,14 @@ def build_result_recovery_run_rows(
             f"\u4fee\u590d\u5feb\u7167: {_safe_int(item.get('restored_snapshots'), 0)} | "
             f"\u6765\u6e90: {item.get('source') or '-'}"
         )
+        review = _as_mapping(item.get("review_summary"))
+        if review:
+            summary_lines = review.get("summary_lines")
+            if isinstance(summary_lines, Sequence) and not isinstance(summary_lines, (str, bytes)) and summary_lines:
+                review_head = str(summary_lines[0])
+            else:
+                review_head = str(review.get("summary_text") or "-").splitlines()[0]
+            body = f"{body}\n\u590d\u76d8: {review_head}"
         if status == "failed":
             body = f"{body}\n\u9519\u8bef: {item.get('error') or '-'}"
         result.append({"title": title, "body": body, "status": status, "record": dict(item)})
@@ -287,6 +394,7 @@ def build_result_recovery_run_detail(record: Mapping[str, object] | object) -> s
     message_text = "\n".join(f"- {message}" for message in messages if message) or "- \u65e0"
     miss_reasons = item.get("snapshot_result_miss_reasons") or result.get("snapshot_result_miss_reasons")
     miss_items = item.get("snapshot_result_miss_items") or result.get("snapshot_result_miss_items")
+    review_summary = item.get("review_summary") or result.get("review_summary")
     return (
         f"\u8fd0\u884c ID: {item.get('run_id') or '-'}\n"
         f"\u72b6\u6001: {_status_label(item.get('status'))}\n"
@@ -313,6 +421,7 @@ def build_result_recovery_run_detail(record: Mapping[str, object] | object) -> s
         f"- \u7f3a source_id: {_safe_int(item.get('snapshot_missing_source_id') or result.get('snapshot_missing_source_id'), 0)}\n"
         f"- \u975e Titan \u5feb\u7167: {_safe_int(item.get('snapshot_non_titan_source') or result.get('snapshot_non_titan_source'), 0)}\n"
         f"- \u8d85\u51fa\u56de\u770b\u7a97\u53e3: {_safe_int(item.get('snapshot_out_of_window') or result.get('snapshot_out_of_window'), 0)}\n\n"
+        f"\u672c\u8f6e\u590d\u76d8\u6458\u8981:\n{_review_summary_text(review_summary)}\n\n"
         f"\u672a\u547d\u4e2d\u6837\u4f8b:\n{_miss_items_text(miss_items)}\n\n"
         f"\u9519\u8bef:\n- {item.get('error') or '-'}\n\n"
         f"\u6d88\u606f:\n{message_text}"

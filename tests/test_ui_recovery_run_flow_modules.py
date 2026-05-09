@@ -15,6 +15,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from v24_app.ui_modules import (
     build_result_recovery_quality_alerts,
+    build_result_recovery_review_summary,
     build_result_recovery_run_detail,
     build_result_recovery_run_rows,
     build_result_recovery_run_summary,
@@ -23,6 +24,48 @@ from v24_app.ui_modules import (
 
 
 class UIRecoveryRunFlowModuleTests(unittest.TestCase):
+    def test_review_summary_tracks_play_and_strategy_results(self) -> None:
+        summary = build_result_recovery_review_summary(
+            [
+                {
+                    "match_id": "a",
+                    "match_date": "2026-05-09",
+                    "league": "Friendly League",
+                    "home_team": "Alpha FC",
+                    "away_team": "Bravo FC",
+                    "predicted": "主胜",
+                    "result": "主胜",
+                    "prediction_confidence": 0.72,
+                    "is_correct": True,
+                    "handicap_is_correct": True,
+                    "ou_is_correct": False,
+                    "high_accuracy_strategy_active_count": 2,
+                    "high_accuracy_strategy_hit_count": 2,
+                    "strategy_allowlist_decision": "allow",
+                },
+                {
+                    "match_id": "b",
+                    "match_date": "2026-05-09",
+                    "league": "Friendly League",
+                    "home_team": "Charlie FC",
+                    "away_team": "Delta FC",
+                    "predicted": "客胜",
+                    "result": "平局",
+                    "prediction_confidence": 0.81,
+                    "is_correct": False,
+                    "handicap_is_correct": False,
+                    "ou_is_correct": True,
+                    "high_accuracy_strategy_active_count": 1,
+                    "high_accuracy_strategy_hit_count": 0,
+                },
+            ]
+        )
+
+        self.assertEqual(summary["settlement_count"], 2)
+        self.assertEqual(summary["plays"]["1X2"]["text"], "1/2 (50%)")
+        self.assertEqual(summary["high_accuracy_strategy"]["text"], "2/3 (67%)")
+        self.assertIn("Charlie FC", summary["top_misses"][0]["home_team"])
+
     def test_summary_tracks_recent_success_and_elapsed(self) -> None:
         records = [
             {"run_id": "1", "status": "success", "elapsed_seconds": 2.0, "new_settled": 1, "started_at": "a"},
@@ -71,6 +114,21 @@ class UIRecoveryRunFlowModuleTests(unittest.TestCase):
                         "away_goals": 0,
                     }
                 ],
+                "review_summary": {
+                    "settlement_count": 3,
+                    "summary_lines": ["本轮新增结算 3 场", "1X2 2/3 (67%)"],
+                    "top_misses": [
+                        {
+                            "match_date": "2026-05-09",
+                            "league": "Friendly League",
+                            "home_team": "Alpha FC",
+                            "away_team": "Bravo FC",
+                            "predicted": "主胜",
+                            "result": "平局",
+                            "confidence": 0.71,
+                        }
+                    ],
+                },
                 "messages": ["done"],
             }
         ]
@@ -79,6 +137,7 @@ class UIRecoveryRunFlowModuleTests(unittest.TestCase):
         self.assertIn("成功", rows[0]["title"])
         self.assertIn("新增结算 3", rows[0]["title"])
         self.assertIn("完场: 6", rows[0]["body"])
+        self.assertIn("本轮新增结算", rows[0]["body"])
 
         detail = build_result_recovery_run_detail(records[0])
         self.assertIn("运行 ID: run-1", detail)
@@ -87,6 +146,8 @@ class UIRecoveryRunFlowModuleTests(unittest.TestCase):
         self.assertIn("缺 source_id: 1", detail)
         self.assertIn("state_not_finished=1", detail)
         self.assertIn("titan_1", detail)
+        self.assertIn("1X2 2/3", detail)
+        self.assertIn("Alpha FC", detail)
         self.assertIn("- done", detail)
 
     def test_quality_alerts_detect_failures_no_settlement_and_slow_runs(self) -> None:

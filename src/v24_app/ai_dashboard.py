@@ -29,6 +29,7 @@ from .core import (
 )
 from .ui_modules import (
     build_result_recovery_quality_alerts,
+    build_result_recovery_review_summary,
     build_result_recovery_run_detail,
     build_result_recovery_run_rows,
     build_result_recovery_run_summary,
@@ -1241,6 +1242,11 @@ class SmartMatchDashboard:
         messages = result_payload.get("messages", [])
         if not isinstance(messages, list):
             messages = []
+        review_summary = result_payload.get("review_summary")
+        if not isinstance(review_summary, dict):
+            review_summary = build_result_recovery_review_summary(
+                result_payload.get("items", []) if isinstance(result_payload.get("items"), list) else []
+            )
         record.update(
             {
                 "status": status,
@@ -1262,6 +1268,7 @@ class SmartMatchDashboard:
                 "snapshot_result_miss_items": result_payload.get("snapshot_result_miss_items", [])
                 if isinstance(result_payload.get("snapshot_result_miss_items"), list)
                 else [],
+                "review_summary": review_summary,
                 "snapshot_predictions": int(result_payload.get("snapshot_predictions", 0) or 0),
                 "snapshot_recoverable": int(result_payload.get("snapshot_recoverable", 0) or 0),
                 "snapshot_missing_source_id": int(result_payload.get("snapshot_missing_source_id", 0) or 0),
@@ -2498,6 +2505,9 @@ class SmartMatchDashboard:
         self.summary_vars["hit_rate"].set(self._historical_hit_rate())
         self._refresh_current_view_after_release_state_change()
         detail = "\n".join(str(item) for item in result.get("messages", []) if item) or message
+        review_summary = build_result_recovery_review_summary(result.get("items", []) if isinstance(result.get("items"), list) else [])
+        if int(review_summary.get("settlement_count", 0) or 0) > 0:
+            detail = f"{detail}\n\n\u672c\u8f6e\u590d\u76d8:\n{review_summary.get('summary_text') or '-'}"
         self._schedule_auto_result_recovery()
         if show_popup:
             messagebox.showinfo("\u8d5b\u679c\u56de\u6536", detail)

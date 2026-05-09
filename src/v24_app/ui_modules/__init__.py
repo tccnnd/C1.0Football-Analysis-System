@@ -100,6 +100,7 @@ from .auto_settle_flow import (
 )
 from .recovery_run_flow import (
     build_result_recovery_quality_alerts,
+    build_result_recovery_review_summary,
     build_result_recovery_run_detail,
     build_result_recovery_run_rows,
     build_result_recovery_run_summary,
@@ -262,6 +263,7 @@ __all__ = [
     "build_auto_settle_status_text",
     "should_refresh_after_auto_settle",
     "build_result_recovery_quality_alerts",
+    "build_result_recovery_review_summary",
     "build_result_recovery_run_detail",
     "build_result_recovery_run_rows",
     "build_result_recovery_run_summary",
