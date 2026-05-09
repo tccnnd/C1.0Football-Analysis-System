@@ -7923,6 +7923,16 @@ def settle_match_result(
     away_goals: int,
     prediction: dict | None = None,
 ) -> dict:
+    existing_settlements = STATE_STORE.load_settlements()
+    for item in reversed(existing_settlements):
+        if isinstance(item, dict) and str(item.get("match_id") or "") == match.match_id:
+            existing = dict(item)
+            existing["duplicate_skipped"] = True
+            existing["duplicate_checked_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            STATE_STORE.pop_prediction_snapshot(match.match_id)
+            auto_settle_pending_parlays()
+            return existing
+
     enrich_match_from_market_snapshot_store(match)
     ratings_map = _load_match_ratings(match)
     home_rating, away_rating, ratings_map = _resolved_ratings(match, ratings_map)
@@ -8271,6 +8281,9 @@ def auto_settle_finished_matches(
             away_goals=away_goals,
             prediction=prediction,
         )
+        if settlement.get("duplicate_skipped"):
+            summary["already_settled"] += 1
+            continue
         summary["items"].append(settlement)
         summary["new_settled"] += 1
 
