@@ -369,6 +369,7 @@ class FootballPredictionApp:
             "home",
             "away",
             "pick",
+            "high_strategy",
             "c1_action",
             "confidence",
             "upset",
@@ -383,6 +384,7 @@ class FootballPredictionApp:
             "home": "主队",
             "away": "客队",
             "pick": "推荐",
+            "high_strategy": "高准策略",
             "c1_action": "C1动作",
             "confidence": "置信度",
             "upset": "冷门指数",
@@ -396,6 +398,7 @@ class FootballPredictionApp:
             "home": 126,
             "away": 126,
             "pick": 70,
+            "high_strategy": 104,
             "c1_action": 92,
             "confidence": 84,
             "upset": 92,
@@ -502,6 +505,7 @@ class FootballPredictionApp:
                     match.league,
                     match.home_team,
                     match.away_team,
+                    "-",
                     "-",
                     "-",
                     "-",
@@ -774,6 +778,10 @@ class FootballPredictionApp:
 
     def _update_tree_row(self, match: AppMatch, prediction: dict) -> None:
         indices = prediction.get("indices", {})
+        high_strategy = prediction.get("high_accuracy_strategy", {}) if isinstance(prediction.get("high_accuracy_strategy"), dict) else {}
+        high_strategy_text = "-"
+        if high_strategy.get("enabled"):
+            high_strategy_text = high_strategy.get("summary") or ("命中" if high_strategy.get("active") else "未命中")
         self.tree.item(
             match.match_id,
             values=(
@@ -783,6 +791,7 @@ class FootballPredictionApp:
                 match.home_team,
                 match.away_team,
                 self._release_gate_pick_text(match.match_id, prediction),
+                high_strategy_text,
                 self._current_c1_action_text(match.match_id),
                 f"{prediction['confidence']:.1%}",
                 f"{indices.get('upset_index', 0):.1%}",

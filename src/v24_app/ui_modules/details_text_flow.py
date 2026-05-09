@@ -229,12 +229,15 @@ def build_match_details_text(
     )
     high_strategy_block = ""
     if high_strategy.get("enabled"):
+        active_items = high_strategy.get("active_matches", [])
+        active_count = len(active_items) if isinstance(active_items, list) else int(high_strategy.get("active_count", 0) or 0)
         high_strategy_block = (
             "\n\n高准确率策略\n"
-            + f"- 当前命中: {'是' if high_strategy.get('active') else '否'}\n"
+            + f"- 当前命中: {'是' if active_count > 0 else '否'} | 命中策略数 {active_count}\n"
             + f"- 玩法: {high_strategy.get('play_type', '-')} | 选择: {high_strategy.get('pick', '-')}\n"
             + f"- 置信度: {float(high_strategy.get('confidence', 0) or 0):.1%} / 门槛 {float(high_strategy.get('min_confidence', 0) or 0):.1%}\n"
             + f"- 历史命中: {float(high_strategy.get('backtest_accuracy', 0) or 0):.1%} ({int(high_strategy.get('backtest_hits', 0) or 0)}/{int(high_strategy.get('backtest_samples', 0) or 0)})\n"
+            + f"- 策略摘要: {high_strategy.get('summary', '-')}\n"
             + f"- 原因: {high_strategy.get('reason', '-')}"
         )
     confidence_block = _build_confidence_calibration_block(prediction)

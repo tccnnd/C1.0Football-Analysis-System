@@ -346,6 +346,7 @@ def build_high_accuracy_strategy_backtest_message(result: Mapping[str, object] |
     resolved = result if isinstance(result, Mapping) else {}
     strategy = resolved.get("strategy", {}) if isinstance(resolved, Mapping) else {}
     validation = resolved.get("validation", {}) if isinstance(resolved, Mapping) else {}
+    strategy_pool = resolved.get("strategy_pool", []) if isinstance(resolved, Mapping) else []
     report_path = resolved.get("report_path") or "-"
     return (
         "高准确率策略回测完成\n"
@@ -360,6 +361,7 @@ def build_high_accuracy_strategy_backtest_message(result: Mapping[str, object] |
         + f"覆盖率: {float(strategy.get('coverage', 0) or 0):.2%}\n"
         + f"保守下界: {float(strategy.get('wilson_lower', 0) or 0):.2%}\n"
         + f"历史优势: {float(strategy.get('edge', 0) or 0):+.2%}\n\n"
+        + f"策略池数量: {len(strategy_pool) if isinstance(strategy_pool, list) else 0}\n"
         + f"报告: {report_path}"
     )
 

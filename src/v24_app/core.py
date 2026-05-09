@@ -4189,10 +4189,36 @@ def get_high_accuracy_strategy_status() -> dict:
         "enabled": bool(payload.get("enabled", False)),
         "updated_at": payload.get("updated_at"),
         "strategy": payload.get("strategy", {}) if isinstance(payload.get("strategy"), dict) else {},
+        "strategy_pool": payload.get("strategy_pool", []) if isinstance(payload.get("strategy_pool"), list) else [],
         "validation": payload.get("validation", {}) if isinstance(payload.get("validation"), dict) else {},
         "top_candidates": payload.get("top_candidates", []) if isinstance(payload.get("top_candidates"), list) else [],
         "reason": payload.get("reason", "ok"),
     }
+
+
+def _build_high_accuracy_strategy_pool(candidates: list[dict]) -> list[dict]:
+    pool: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in candidates:
+        key = (
+            normalize_text(item.get("scope", "")),
+            normalize_text(item.get("scope_value", "")),
+            normalize_text(item.get("play_type", "")),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        strategy = dict(item)
+        if not pool:
+            strategy["role"] = "primary"
+        elif float(strategy.get("accuracy", 0.0) or 0.0) >= 0.55 and int(strategy.get("sample_count", 0) or 0) >= 18:
+            strategy["role"] = "backup"
+        else:
+            strategy["role"] = "observe"
+        pool.append(strategy)
+        if len(pool) >= 6:
+            break
+    return pool
 
 
 def run_high_accuracy_strategy_backtest(
@@ -4279,6 +4305,7 @@ def run_high_accuracy_strategy_backtest(
         reverse=True,
     )
     best = dict(candidates[0])
+    strategy_pool = _build_high_accuracy_strategy_pool(candidates)
     dates = [normalize_text(row.get("match_date", "")) for row in records if normalize_text(row.get("match_date", ""))]
     validation = {
         "settlement_count": len(settlements),
@@ -4295,6 +4322,7 @@ def run_high_accuracy_strategy_backtest(
         "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "reason": "ok",
         "strategy": best,
+        "strategy_pool": strategy_pool,
         "validation": validation,
         "top_candidates": candidates[:10],
     }
@@ -4303,6 +4331,7 @@ def run_high_accuracy_strategy_backtest(
         "ok": True,
         "reason": "ok",
         "strategy": best,
+        "strategy_pool": strategy_pool,
         "validation": validation,
         "top_candidates": candidates[:10],
         "status": get_high_accuracy_strategy_status(),
@@ -4314,8 +4343,40 @@ def run_high_accuracy_strategy_backtest(
 def _high_accuracy_strategy_match(match: AppMatch, prediction: dict, play_catalog: dict[str, dict]) -> dict:
     status = get_high_accuracy_strategy_status()
     strategy = status.get("strategy", {}) if isinstance(status, dict) else {}
+    strategy_pool = status.get("strategy_pool", []) if isinstance(status, dict) else []
     if not bool(status.get("enabled")) or not isinstance(strategy, dict) or not strategy:
         return {"enabled": False, "active": False, "reason": status.get("reason", "not_calibrated") if isinstance(status, dict) else "not_calibrated"}
+    if not isinstance(strategy_pool, list) or not strategy_pool:
+        strategy_pool = [{**strategy, "role": "primary"}]
+
+    def evaluate(item: dict) -> dict:
+        result = _high_accuracy_strategy_match_single(
+            match=match,
+            prediction=prediction,
+            play_catalog=play_catalog,
+            strategy=item,
+            updated_at=status.get("updated_at"),
+        )
+        return result
+
+    matches = [evaluate(item) for item in strategy_pool if isinstance(item, dict)]
+    primary = matches[0] if matches else evaluate({**strategy, "role": "primary"})
+    active_matches = [item for item in matches if item.get("active")]
+    primary["strategy_pool"] = matches
+    primary["active_matches"] = active_matches
+    primary["active_count"] = len(active_matches)
+    primary["summary"] = " / ".join(f"{item.get('play_type', '-')} {item.get('pick', '-')}" for item in active_matches[:3]) if active_matches else "未命中"
+    return primary
+
+
+def _high_accuracy_strategy_match_single(
+    *,
+    match: AppMatch,
+    prediction: dict,
+    play_catalog: dict[str, dict],
+    strategy: dict,
+    updated_at: object = None,
+) -> dict:
     play_type = normalize_text(strategy.get("play_type", ""))
     if play_type == "ou":
         play_item = {
@@ -4353,7 +4414,8 @@ def _high_accuracy_strategy_match(match: AppMatch, prediction: dict, play_catalo
         "backtest_hits": strategy.get("hit_count", 0),
         "backtest_samples": strategy.get("sample_count", 0),
         "wilson_lower": strategy.get("wilson_lower", 0.0),
-        "updated_at": status.get("updated_at"),
+        "role": strategy.get("role", "primary"),
+        "updated_at": updated_at,
     }
 
 
