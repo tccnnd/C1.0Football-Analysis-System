@@ -18,6 +18,7 @@ from .core import (
     fetch_matches_v24,
     get_high_accuracy_strategy_status,
     get_recent_settlements,
+    mark_strategy_allowlist_snapshots,
     persist_prediction_snapshot,
     predict_match,
 )
@@ -1802,16 +1803,26 @@ class SmartMatchDashboard:
                     "match": match,
                     "prediction": prediction,
                     "market_snapshot": record.get("market_snapshot", {}),
+                    "strategy_allowlist": self._snapshot_allowlist_payload(record, prediction),
                     "status": _snapshot_status(match),
                 }
             )
         return sorted(rows, key=lambda item: str(item.get("saved_at") or ""), reverse=True)
 
+    def _snapshot_allowlist_payload(self, record: dict, prediction: dict) -> dict:
+        payload = record.get("strategy_allowlist") if isinstance(record, dict) else {}
+        if isinstance(payload, dict) and payload:
+            return payload
+        payload = prediction.get("strategy_allowlist") if isinstance(prediction, dict) else {}
+        return payload if isinstance(payload, dict) else {}
+
     def _snapshot_line(self, item: dict) -> str:
         match = item.get("match", {}) if isinstance(item.get("match"), dict) else {}
         prediction = item.get("prediction", {}) if isinstance(item.get("prediction"), dict) else {}
+        allowlist = item.get("strategy_allowlist", {}) if isinstance(item.get("strategy_allowlist"), dict) else {}
+        prefix = "\u653e\u884c\u5f85\u56de\u6536 | " if allowlist else ""
         return (
-            f"{item.get('status', '-')} | {match.get('match_date', '-')} {match.get('match_time', '-')} | "
+            f"{prefix}{item.get('status', '-')} | {match.get('match_date', '-')} {match.get('match_time', '-')} | "
             f"{match.get('league', '-')} | {match.get('home_team', '-')} vs {match.get('away_team', '-')} | "
             f"{prediction.get('recommendation', '-')} | {_pct1(prediction.get('confidence'))}"
         )
@@ -1822,6 +1833,16 @@ class SmartMatchDashboard:
         market = item.get("market_snapshot", {}) if isinstance(item.get("market_snapshot"), dict) else {}
         probs = prediction.get("probabilities", {}) if isinstance(prediction.get("probabilities"), dict) else {}
         indices = prediction.get("indices", {}) if isinstance(prediction.get("indices"), dict) else {}
+        allowlist = item.get("strategy_allowlist", {}) if isinstance(item.get("strategy_allowlist"), dict) else {}
+        allowlist_text = ""
+        if allowlist:
+            allowlist_text = (
+                "\n\n\u7b56\u7565\u653e\u884c\u56de\u6536\n"
+                f"- \u72b6\u6001: \u653e\u884c\u5f85\u56de\u6536\n"
+                f"- \u6e05\u5355: {allowlist.get('file', '-')}\n"
+                f"- \u5bfc\u51fa\u65f6\u95f4: {allowlist.get('exported_at', '-')}\n"
+                f"- \u5019\u9009: {allowlist.get('top_play', '-')} {allowlist.get('top_pick', '-')} / {_pct1(allowlist.get('top_confidence'))}"
+            )
         return (
             f"\u5feb\u7167\u65f6\u95f4: {item.get('saved_at', '-')}\n"
             f"\u72b6\u6001: {item.get('status', '-')}\n"
@@ -1843,12 +1864,14 @@ class SmartMatchDashboard:
             f"\u5feb\u7167\u76d8\u53e3: \u4e3b {market.get('odds_home', match.get('odds_home', '-'))} | "
             f"\u5e73 {market.get('odds_draw', match.get('odds_draw', '-'))} | "
             f"\u5ba2 {market.get('odds_away', match.get('odds_away', '-'))}"
+            f"{allowlist_text}"
         )
 
     def open_snapshot_center(self) -> None:
         rows = self._pending_snapshot_rows()
         total = len(rows)
         pending_review = sum(1 for item in rows if item.get("status") == "\u5f85\u56de\u6536")
+        allowlist_pending = sum(1 for item in rows if isinstance(item.get("strategy_allowlist"), dict) and item.get("strategy_allowlist"))
         high_risk = sum(
             1
             for item in rows
@@ -1899,6 +1922,7 @@ class SmartMatchDashboard:
         for label, value, color in [
             ("\u5feb\u7167\u603b\u6570", str(total), TEXT),
             ("\u5f85\u56de\u6536", str(pending_review), YELLOW if pending_review else GREEN),
+            ("\u653e\u884c\u5f85\u56de\u6536", str(allowlist_pending), YELLOW if allowlist_pending else GREEN),
             ("\u9ad8\u98ce\u9669", str(high_risk), RED if high_risk else GREEN),
             ("\u5e73\u5747\u7f6e\u4fe1", avg_conf, "#7aa2ff"),
         ]:
@@ -1977,8 +2001,14 @@ class SmartMatchDashboard:
         now = datetime.now()
         path = REPORT_DIR / build_strategy_allowlist_filename(now)
         path.write_text("\n".join(build_strategy_allowlist_report_lines(allowed, generated_at=now)), encoding="utf-8")
-        self.status_var.set(f"\u653e\u884c\u6e05\u5355\u5df2\u5bfc\u51fa: {path.name}")
-        messagebox.showinfo("\u5bfc\u51fa\u653e\u884c\u6e05\u5355", f"\u5df2\u751f\u6210\u653e\u884c\u6e05\u5355:\n{path}")
+        link_summary = mark_strategy_allowlist_snapshots(
+            [(row.match, row.prediction) for row in allowed],
+            allowlist_file=path.name,
+            exported_at=now,
+        )
+        marked = int(link_summary.get("marked", 0) or 0)
+        self.status_var.set(f"\u653e\u884c\u6e05\u5355\u5df2\u5bfc\u51fa: {path.name} | \u5f85\u56de\u6536 {marked} \u573a")
+        messagebox.showinfo("\u5bfc\u51fa\u653e\u884c\u6e05\u5355", f"\u5df2\u751f\u6210\u653e\u884c\u6e05\u5355:\n{path}\n\n\u5df2\u63a5\u5165\u590d\u76d8\u56de\u6536: {marked} \u573a")
         return path
 
     def open_strategy_library(self) -> None:

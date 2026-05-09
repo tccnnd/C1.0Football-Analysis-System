@@ -7258,16 +7258,148 @@ def predict_match(match: AppMatch) -> dict:
     return _apply_world_cup_overlay(match, prediction)
 
 
+def _strategy_allowlist_marker(
+    match: AppMatch,
+    prediction: dict,
+    *,
+    allowlist_file: str,
+    exported_at: str,
+) -> dict:
+    admission = prediction.get("strategy_admission") if isinstance(prediction, dict) else {}
+    if not isinstance(admission, dict) or str(admission.get("decision") or "") != "allow":
+        return {}
+    return {
+        "status": "pending_settlement",
+        "decision": "allow",
+        "label": str(admission.get("label") or "\u6b63\u5f0f\u653e\u884c"),
+        "exported_at": exported_at,
+        "file": str(allowlist_file or ""),
+        "match_id": match.match_id,
+        "recommendation": prediction.get("recommendation"),
+        "confidence": round(_safe_float(prediction.get("confidence"), 0.0), 4),
+        "risk_level": prediction.get("risk_level"),
+        "active_count": int(_safe_int(admission.get("active_count"), 0) or 0),
+        "shadow_count": int(_safe_int(admission.get("shadow_count"), 0) or 0),
+        "single_play_count": int(_safe_int(admission.get("single_play_count"), 0) or 0),
+        "top_play": admission.get("top_play"),
+        "top_pick": admission.get("top_pick"),
+        "top_confidence": round(_safe_float(admission.get("top_confidence"), 0.0), 4),
+        "reasons": admission.get("reasons") if isinstance(admission.get("reasons"), list) else [],
+    }
+
+
+def _existing_strategy_allowlist_marker(record: dict | None) -> dict:
+    if not isinstance(record, dict):
+        return {}
+    marker = record.get("strategy_allowlist")
+    if isinstance(marker, dict):
+        return dict(marker)
+    prediction = record.get("prediction")
+    if isinstance(prediction, dict) and isinstance(prediction.get("strategy_allowlist"), dict):
+        return dict(prediction["strategy_allowlist"])
+    return {}
+
+
+def _attach_strategy_allowlist_marker(record: dict, marker: dict) -> dict:
+    if not marker:
+        return record
+    updated = dict(record)
+    updated["strategy_allowlist"] = dict(marker)
+    prediction = dict(updated.get("prediction") or {})
+    prediction["strategy_allowlist"] = dict(marker)
+    updated["prediction"] = prediction
+    return updated
+
+
+def mark_strategy_allowlist_snapshots(
+    items: Iterable[tuple[AppMatch, dict]],
+    *,
+    allowlist_file: str,
+    exported_at: datetime | str | None = None,
+) -> dict:
+    timestamp = (
+        exported_at.strftime("%Y-%m-%d %H:%M:%S")
+        if isinstance(exported_at, datetime)
+        else str(exported_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    )
+    snapshots = STATE_STORE.load_prediction_snapshots()
+    summary = {"marked": 0, "skipped": 0, "items": []}
+    for match, prediction in items:
+        if not isinstance(match, AppMatch) or not isinstance(prediction, dict):
+            summary["skipped"] += 1
+            continue
+        marker = _strategy_allowlist_marker(match, prediction, allowlist_file=allowlist_file, exported_at=timestamp)
+        if not marker:
+            summary["skipped"] += 1
+            continue
+        prediction["strategy_allowlist"] = dict(marker)
+        existing = snapshots.get(match.match_id) if isinstance(snapshots, dict) else None
+        record = dict(existing) if isinstance(existing, dict) else {}
+        record.update(
+            {
+                "saved_at": record.get("saved_at") or timestamp,
+                "match": serialize_match(match),
+                "prediction": dict(prediction),
+                "market_snapshot": record.get("market_snapshot") if isinstance(record.get("market_snapshot"), dict) else _market_snapshot_fields_from_match(match),
+            }
+        )
+        record = _attach_strategy_allowlist_marker(record, marker)
+        STATE_STORE.upsert_prediction_snapshot(match.match_id, record)
+        STATE_STORE.upsert_analysis_history(match.match_id, record)
+        persist_market_snapshot(match)
+        snapshots[match.match_id] = record
+        summary["marked"] += 1
+        if len(summary["items"]) < 20:
+            summary["items"].append(
+                {
+                    "match_id": match.match_id,
+                    "match_date": match.match_date,
+                    "league": match.league,
+                    "home_team": match.home_team,
+                    "away_team": match.away_team,
+                    "file": marker.get("file"),
+                }
+            )
+    return summary
+
+
+def _strategy_allowlist_settlement_fields(prediction: dict | None) -> dict:
+    marker = prediction.get("strategy_allowlist") if isinstance(prediction, dict) else {}
+    if not isinstance(marker, dict) or str(marker.get("decision") or "") != "allow":
+        return {
+            "strategy_allowlist_status": "",
+            "strategy_allowlist_file": "",
+            "strategy_allowlist_exported_at": "",
+            "strategy_allowlist_decision": "",
+            "strategy_allowlist_label": "",
+        }
+    return {
+        "strategy_allowlist_status": "settled",
+        "strategy_allowlist_file": str(marker.get("file") or ""),
+        "strategy_allowlist_exported_at": str(marker.get("exported_at") or ""),
+        "strategy_allowlist_decision": str(marker.get("decision") or ""),
+        "strategy_allowlist_label": str(marker.get("label") or ""),
+    }
+
+
 def persist_prediction_snapshot(match: AppMatch, prediction: dict) -> None:
     if not isinstance(prediction, dict):
         return
+    snapshots = STATE_STORE.load_prediction_snapshots()
+    existing = snapshots.get(match.match_id) if isinstance(snapshots, dict) else None
+    marker = _existing_strategy_allowlist_marker(existing)
+    stored_prediction = dict(prediction)
+    if marker:
+        stored_prediction["strategy_allowlist"] = dict(marker)
+        prediction["strategy_allowlist"] = dict(marker)
     market_snapshot = _market_snapshot_fields_from_match(match)
     record = {
         "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "match": serialize_match(match),
-        "prediction": prediction,
+        "prediction": stored_prediction,
         "market_snapshot": market_snapshot,
     }
+    record = _attach_strategy_allowlist_marker(record, marker)
     STATE_STORE.upsert_prediction_snapshot(match.match_id, record)
     STATE_STORE.upsert_analysis_history(match.match_id, record)
     persist_market_snapshot(match)
@@ -7619,6 +7751,7 @@ def settle_match_result(
         "high_accuracy_strategy_shadow_summary": high_accuracy_strategy_settlement.get("shadow_summary", "-"),
         "high_accuracy_strategy_summary": high_accuracy_strategy_settlement["summary"],
         "high_accuracy_strategy_items": high_accuracy_strategy_settlement["items"],
+        **_strategy_allowlist_settlement_fields(prediction),
         "opening_odds_home": round(_safe_float(match.opening_odds_home, 0.0), 4),
         "opening_odds_draw": round(_safe_float(match.opening_odds_draw, 0.0), 4),
         "opening_odds_away": round(_safe_float(match.opening_odds_away, 0.0), 4),
