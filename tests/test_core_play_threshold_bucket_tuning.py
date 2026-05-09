@@ -414,6 +414,142 @@ class CorePlayThresholdBucketTuningTests(unittest.TestCase):
         self.assertEqual(result["active_matches"][0]["data_layer"], "jc_stratified_market")
         self.assertEqual(result["active_matches"][0]["pick"], "涓昏儨")
 
+    def test_jc_strategy_settlement_records_bucket_metadata(self) -> None:
+        settlement = core._settle_high_accuracy_strategy_results(
+            {
+                "high_accuracy_strategy": {
+                    "enabled": True,
+                    "active_matches": [
+                        {
+                            "role": "primary",
+                            "scope": "jc_bucket",
+                            "scope_value": "Stable League | >=0.65",
+                            "dimension": "league_confidence_bucket",
+                            "play_type": "market_1x2",
+                            "data_layer": "jc_stratified_market",
+                            "pick": "HOME",
+                            "confidence": 0.70,
+                            "min_confidence": 0.65,
+                            "jc_bucket": {
+                                "dimension": "league_confidence_bucket",
+                                "bucket": "Stable League | >=0.65",
+                                "accuracy": 0.80,
+                                "sample_count": 180,
+                                "hit_count": 144,
+                                "wilson_lower": 0.74,
+                                "stability": {"stable": True, "stability_score": 0.8},
+                            },
+                            "jc_context": {"confidence_bucket": ">=0.65", "odds_bucket": "<=1.50", "pick_odds": 1.24},
+                        }
+                    ],
+                }
+            },
+            result="HOME",
+            total_goals=2,
+            actual_score="1-1",
+            handicap_result="HOME",
+            ou_result="OVER",
+        )
+
+        self.assertEqual(settlement["summary"], "1/1")
+        item = settlement["items"][0]
+        self.assertEqual(item["jc_bucket_key"], "league_confidence_bucket|Stable League | >=0.65")
+        self.assertEqual(item["jc_bucket"]["sample_count"], 180)
+        self.assertEqual(item["jc_context"]["pick_odds"], 1.24)
+
+    def test_jc_bucket_live_feedback_downgrades_underperforming_bucket(self) -> None:
+        settlements = [
+            {
+                "high_accuracy_strategy_items": [
+                    {
+                        "data_layer": "jc_stratified_market",
+                        "is_hit": False,
+                        "jc_bucket": {
+                            "dimension": "league_confidence_bucket",
+                            "bucket": "Stable League | >=0.65",
+                            "accuracy": 0.80,
+                            "sample_count": 180,
+                            "hit_count": 144,
+                            "wilson_lower": 0.74,
+                        },
+                    }
+                ]
+            }
+            for _ in range(10)
+        ]
+
+        feedback = core.build_jc_bucket_live_feedback(settlements)
+        bucket = feedback["league_confidence_bucket|Stable League | >=0.65"]
+
+        self.assertEqual(bucket["status"], "downgraded")
+        self.assertEqual(bucket["live_count"], 10)
+        self.assertEqual(bucket["miss_streak"], 10)
+        self.assertLess(bucket["live_hit_rate"], bucket["historical_wilson_lower"])
+
+    def test_jc_live_feedback_turns_runtime_bucket_into_shadow_observation(self) -> None:
+        match = core.AppMatch(
+            home_team="A",
+            away_team="B",
+            league="Stable League",
+            match_time="12:00",
+            match_date="2026-05-09",
+            odds_home=1.24,
+            odds_draw=4.8,
+            odds_away=8.0,
+        )
+        jc_status = {
+            "enabled": True,
+            "updated_at": "now",
+            "top_buckets": [
+                {
+                    "dimension": "league_confidence_bucket",
+                    "bucket": "Stable League | >=0.65",
+                    "sample_count": 180,
+                    "hit_count": 145,
+                    "accuracy": 0.805,
+                    "wilson_lower": 0.75,
+                    "stability": {"stable": True, "stability_score": 0.8},
+                }
+            ],
+        }
+        live_misses = [
+            {
+                "high_accuracy_strategy_items": [
+                    {
+                        "data_layer": "jc_stratified_market",
+                        "is_hit": False,
+                        "jc_bucket": {
+                            "dimension": "league_confidence_bucket",
+                            "bucket": "Stable League | >=0.65",
+                            "accuracy": 0.805,
+                            "sample_count": 180,
+                            "hit_count": 145,
+                            "wilson_lower": 0.75,
+                        },
+                    }
+                ]
+            }
+            for _ in range(10)
+        ]
+
+        with (
+            patch("v24_app.core.get_high_accuracy_strategy_status", return_value={"enabled": False, "reason": "not_calibrated"}),
+            patch("v24_app.core.get_jc_stratified_strategy_status", return_value=jc_status),
+            patch("v24_app.core.get_recent_settlements", return_value=live_misses),
+        ):
+            result = core._high_accuracy_strategy_match(
+                match,
+                {"market_probabilities": {"home": 0.70, "draw": 0.20, "away": 0.10}},
+                {},
+            )
+
+        self.assertTrue(result["enabled"])
+        self.assertFalse(result["active"])
+        self.assertEqual(result["active_count"], 0)
+        self.assertEqual(result["shadow_count"], 1)
+        self.assertEqual(result["shadow_matches"][0]["breaker"]["status"], "jc_live_downgraded")
+        self.assertEqual(result["shadow_matches"][0]["jc_live_feedback"]["status"], "downgraded")
+
     def test_jc_stratified_bucket_requires_runtime_quality(self) -> None:
         match = core.AppMatch(
             home_team="A",

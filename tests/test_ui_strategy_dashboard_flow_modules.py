@@ -209,6 +209,13 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
                         "breaker": {"breaker_on": False, "status": "active"},
                         "jc_bucket": {"dimension": "league_confidence_bucket", "bucket": "L1 | >=0.65"},
                         "jc_context": {"confidence_bucket": ">=0.65", "odds_bucket": "<=1.50", "pick_odds": 1.24},
+                        "jc_live_feedback": {
+                            "status": "watch",
+                            "live_count": 10,
+                            "live_hit_count": 7,
+                            "live_hit_rate": 0.70,
+                            "deviation": -0.0961,
+                        },
                     }
                 ]
             }
@@ -218,6 +225,8 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("\u7ade\u5f69\u7a33\u5b9a\u6876", rows[0]["body"])
         self.assertIn("JC稳定桶: league_confidence_bucket / L1 | >=0.65", rows[0]["body"])
         self.assertIn("pick_odds=1.24", rows[0]["body"])
+        self.assertIn("7/10", rows[0]["body"])
+        self.assertIn("WATCH", rows[0]["body"])
 
     def test_settlement_summary_ignores_unknown_results_for_hit_rate(self) -> None:
         summary = build_high_accuracy_strategy_settlement_summary(

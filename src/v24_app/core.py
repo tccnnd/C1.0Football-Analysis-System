@@ -55,6 +55,9 @@ STRATEGY_ADMISSION_POLICY_FILE = PROJECT_DIR / "data" / "models" / "strategy_adm
 HIGH_ACCURACY_STRATEGY_BREAKER_THRESHOLD = 3
 HIGH_ACCURACY_STRATEGY_BREAKER_WINDOW = 30
 HIGH_ACCURACY_STRATEGY_RECOVERY_HITS = 2
+JC_BUCKET_LIVE_FEEDBACK_WINDOW = 120
+JC_BUCKET_LIVE_PENDING_SAMPLES = 5
+JC_BUCKET_LIVE_DOWNGRADE_SAMPLES = 10
 STRATEGY_ADMISSION_MIN_CONFIDENCE = 0.50
 STRATEGY_ADMISSION_BLOCK_CONFIDENCE = 0.40
 JC_STRATIFIED_MIN_RUNTIME_SAMPLES = 120
@@ -4830,6 +4833,146 @@ def _high_accuracy_strategy_breaker_for_item(
     }
 
 
+def _jc_bucket_key_from_parts(dimension: object, bucket: object) -> str:
+    dimension_text = normalize_text(dimension)
+    bucket_text = normalize_text(bucket)
+    if not dimension_text or not bucket_text:
+        return ""
+    return f"{dimension_text}|{bucket_text}"
+
+
+def _jc_bucket_key(item: dict) -> str:
+    if not isinstance(item, dict):
+        return ""
+    explicit = normalize_text(item.get("jc_bucket_key"))
+    if explicit:
+        return explicit
+    bucket = item.get("jc_bucket", {}) if isinstance(item.get("jc_bucket"), dict) else {}
+    return _jc_bucket_key_from_parts(
+        bucket.get("dimension") or item.get("dimension"),
+        bucket.get("bucket") or item.get("scope_value"),
+    )
+
+
+def _jc_bucket_metadata(item: dict) -> dict:
+    bucket = item.get("jc_bucket", {}) if isinstance(item.get("jc_bucket"), dict) else {}
+    stability = bucket.get("stability", {}) if isinstance(bucket.get("stability"), dict) else {}
+    if not stability and isinstance(item.get("stability"), dict):
+        stability = item.get("stability", {})
+    dimension = bucket.get("dimension") or item.get("dimension")
+    bucket_value = bucket.get("bucket") or item.get("scope_value")
+    metadata = {
+        "dimension": dimension or "-",
+        "bucket": bucket_value or "-",
+        "accuracy": bucket.get("accuracy", item.get("accuracy", item.get("backtest_accuracy", 0.0))),
+        "hit_count": bucket.get("hit_count", item.get("hit_count", item.get("backtest_hits", 0))),
+        "sample_count": bucket.get("sample_count", item.get("sample_count", item.get("backtest_samples", 0))),
+        "wilson_lower": bucket.get("wilson_lower", item.get("wilson_lower", 0.0)),
+        "stability": dict(stability) if isinstance(stability, dict) else {},
+    }
+    return metadata
+
+
+def build_jc_bucket_live_feedback(
+    settlements: list[dict] | None = None,
+    *,
+    limit: int = JC_BUCKET_LIVE_FEEDBACK_WINDOW,
+) -> dict[str, dict]:
+    if settlements is None:
+        try:
+            settlements = get_recent_settlements(limit=max(0, int(limit)))
+        except Exception:
+            settlements = []
+    rows_by_key: dict[str, list[dict]] = defaultdict(list)
+    metadata_by_key: dict[str, dict] = {}
+    for settlement in settlements if isinstance(settlements, list) else []:
+        if not isinstance(settlement, dict):
+            continue
+        items = settlement.get("high_accuracy_strategy_items", [])
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            layer = item.get("layer", {}) if isinstance(item.get("layer"), dict) else {}
+            data_layer = normalize_text(item.get("data_layer") or layer.get("data_layer") or "")
+            if data_layer != "jc_stratified_market" and not isinstance(item.get("jc_bucket"), dict):
+                continue
+            hit = item.get("is_hit")
+            if hit is None:
+                continue
+            key = _jc_bucket_key(item)
+            if not key:
+                continue
+            metadata_by_key[key] = _jc_bucket_metadata(item)
+            rows_by_key[key].append(
+                {
+                    "is_hit": bool(hit),
+                    "is_shadow": bool(item.get("is_shadow")),
+                    "settled_at": settlement.get("settled_at") or settlement.get("created_at") or settlement.get("match_date"),
+                    "match_id": settlement.get("match_id"),
+                }
+            )
+
+    feedback: dict[str, dict] = {}
+    for key, rows in rows_by_key.items():
+        known_count = len(rows)
+        hit_count = sum(1 for row in rows if row.get("is_hit"))
+        live_hit_rate = hit_count / known_count if known_count else None
+        recent_10 = rows[-10:]
+        recent_30 = rows[-30:]
+        recent_10_hit_rate = sum(1 for row in recent_10 if row.get("is_hit")) / len(recent_10) if recent_10 else None
+        recent_30_hit_rate = sum(1 for row in recent_30 if row.get("is_hit")) / len(recent_30) if recent_30 else None
+        miss_streak = 0
+        for row in reversed(rows):
+            if row.get("is_hit"):
+                break
+            miss_streak += 1
+        metadata = metadata_by_key.get(key, {})
+        historical_accuracy = _safe_float(metadata.get("accuracy"), default=0.0)
+        wilson_lower = _safe_float(metadata.get("wilson_lower"), default=0.0)
+        downgrade_floor = max(0.45, wilson_lower - 0.10)
+        watch_floor = max(0.45, wilson_lower - 0.05)
+        status = "pending"
+        reason = "insufficient_live_samples"
+        if known_count >= JC_BUCKET_LIVE_DOWNGRADE_SAMPLES and live_hit_rate is not None and live_hit_rate < downgrade_floor:
+            status = "downgraded"
+            reason = "live_rate_below_historical_floor"
+        elif known_count >= JC_BUCKET_LIVE_PENDING_SAMPLES:
+            if miss_streak >= 3:
+                status = "watch"
+                reason = "live_miss_streak"
+            elif recent_10_hit_rate is not None and recent_10_hit_rate < watch_floor:
+                status = "watch"
+                reason = "recent_10_below_historical_floor"
+            elif live_hit_rate is not None and live_hit_rate < max(0.50, wilson_lower - 0.08):
+                status = "watch"
+                reason = "live_rate_soft_gap"
+            else:
+                status = "healthy"
+                reason = "live_rate_ok"
+        deviation = live_hit_rate - historical_accuracy if live_hit_rate is not None else None
+        feedback[key] = {
+            "jc_bucket_key": key,
+            "dimension": metadata.get("dimension", "-"),
+            "bucket": metadata.get("bucket", "-"),
+            "status": status,
+            "reason": reason,
+            "live_count": known_count,
+            "live_hit_count": hit_count,
+            "live_hit_rate": round(live_hit_rate, 4) if live_hit_rate is not None else None,
+            "recent_10_hit_rate": round(recent_10_hit_rate, 4) if recent_10_hit_rate is not None else None,
+            "recent_30_hit_rate": round(recent_30_hit_rate, 4) if recent_30_hit_rate is not None else None,
+            "miss_streak": miss_streak,
+            "historical_accuracy": round(historical_accuracy, 4),
+            "historical_wilson_lower": round(wilson_lower, 4),
+            "deviation": round(deviation, 4) if deviation is not None else None,
+            "official_count": sum(1 for row in rows if not row.get("is_shadow")),
+            "shadow_count": sum(1 for row in rows if row.get("is_shadow")),
+        }
+    return feedback
+
+
 def _apply_high_accuracy_strategy_breakers(status: dict, settlements: list[dict] | None = None) -> dict:
     resolved = dict(status)
     strategy = resolved.get("strategy", {}) if isinstance(resolved.get("strategy"), dict) else {}
@@ -5052,6 +5195,7 @@ def _jc_stratified_runtime_strategies(match: AppMatch, prediction: dict) -> list
     context = _market_pick_context(match, prediction)
     dimension_values = context.get("dimension_values", {}) if isinstance(context.get("dimension_values"), dict) else {}
     top_buckets = status.get("top_buckets", []) if isinstance(status.get("top_buckets"), list) else []
+    live_feedback = build_jc_bucket_live_feedback(limit=JC_BUCKET_LIVE_FEEDBACK_WINDOW)
     strategies: list[dict] = []
     seen: set[tuple[str, str]] = set()
     for bucket in top_buckets:
@@ -5064,6 +5208,10 @@ def _jc_stratified_runtime_strategies(match: AppMatch, prediction: dict) -> list
         if normalize_text(dimension_values.get(dimension, "")) != bucket_value:
             continue
         seen.add((dimension, bucket_value))
+        bucket_key = _jc_bucket_key_from_parts(dimension, bucket_value)
+        feedback = live_feedback.get(bucket_key, {})
+        feedback_status = normalize_text(feedback.get("status", ""))
+        breaker_on = feedback_status == "downgraded"
         strategy = {
             "role": "primary" if not strategies else "backup",
             "scope": "jc_bucket",
@@ -5082,9 +5230,15 @@ def _jc_stratified_runtime_strategies(match: AppMatch, prediction: dict) -> list
                 "play_layer": "market_1x2",
                 "sample_sources": bucket.get("sample_sources", {}),
             },
-            "breaker": {"breaker_on": False, "status": "active"},
+            "breaker": {
+                "breaker_on": breaker_on,
+                "status": "jc_live_downgraded" if breaker_on else (feedback_status or "active"),
+                "reason": feedback.get("reason"),
+            },
             "jc_bucket": bucket,
             "jc_context": context,
+            "jc_bucket_key": bucket_key,
+            "jc_live_feedback": feedback,
             "updated_at": status.get("updated_at"),
         }
         strategies.append(strategy)
@@ -5323,8 +5477,10 @@ def _high_accuracy_strategy_match_single(
     scope = normalize_text(strategy.get("scope", "global"))
     scope_value = normalize_text(strategy.get("scope_value", "all"))
     league = normalize_text(match.league) or "-"
+    jc_context: dict = {}
     if scope == "jc_bucket":
         context = _market_pick_context(match, prediction)
+        jc_context = context
         dimension = normalize_text(strategy.get("dimension", ""))
         dimension_values = context.get("dimension_values", {}) if isinstance(context.get("dimension_values"), dict) else {}
         scope_ok = bool(dimension and normalize_text(dimension_values.get(dimension, "")) == scope_value)
@@ -5373,6 +5529,11 @@ def _high_accuracy_strategy_match_single(
         "layer": layer,
         "data_layer": layer.get("data_layer", "-"),
         "breaker": breaker,
+        "dimension": strategy.get("dimension"),
+        "jc_bucket": strategy.get("jc_bucket") if isinstance(strategy.get("jc_bucket"), dict) else {},
+        "jc_context": strategy.get("jc_context") if isinstance(strategy.get("jc_context"), dict) else jc_context,
+        "jc_bucket_key": strategy.get("jc_bucket_key") or _jc_bucket_key(strategy),
+        "jc_live_feedback": strategy.get("jc_live_feedback") if isinstance(strategy.get("jc_live_feedback"), dict) else {},
         "updated_at": updated_at,
     }
 
@@ -5447,7 +5608,7 @@ def _settle_high_accuracy_strategy_results(
         layer = item.get("layer", {}) if isinstance(item.get("layer"), dict) else {}
         breaker = item.get("breaker", {}) if isinstance(item.get("breaker"), dict) else {}
         data_layer = item.get("data_layer") or layer.get("data_layer", "-")
-        return {
+        settled = {
             "role": item.get("role", "-"),
             "original_role": item.get("original_role", item.get("role", "-")),
             "play_type": play_type,
@@ -5465,6 +5626,23 @@ def _settle_high_accuracy_strategy_results(
             "blocked_by_breaker": bool(is_shadow and breaker.get("breaker_on")),
             "breaker_status": breaker.get("status", "-"),
         }
+        if normalize_text(data_layer) == "jc_stratified_market" or isinstance(item.get("jc_bucket"), dict):
+            jc_bucket = _jc_bucket_metadata(item)
+            jc_context = item.get("jc_context", {}) if isinstance(item.get("jc_context"), dict) else {}
+            settled.update(
+                {
+                    "dimension": jc_bucket.get("dimension", item.get("dimension")),
+                    "jc_bucket": jc_bucket,
+                    "jc_context": {
+                        "confidence_bucket": jc_context.get("confidence_bucket"),
+                        "odds_bucket": jc_context.get("odds_bucket"),
+                        "pick_odds": jc_context.get("pick_odds"),
+                    },
+                    "jc_bucket_key": _jc_bucket_key(item),
+                    "jc_live_feedback": item.get("jc_live_feedback") if isinstance(item.get("jc_live_feedback"), dict) else {},
+                }
+            )
+        return settled
 
     for item in active_items:
         settled = settle_item(item, is_shadow=False)

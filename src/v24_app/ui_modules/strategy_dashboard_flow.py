@@ -437,6 +437,54 @@ def build_high_accuracy_strategy_settlement_summary(settlements: Sequence[Mappin
     }
 
 
+def _build_high_accuracy_strategy_pool_rows_legacy(status: Mapping[str, object] | object) -> list[dict[str, str]]:
+    resolved = _as_mapping(status)
+    rows: list[dict[str, str]] = []
+    for index, item in enumerate(_strategy_pool(resolved), start=1):
+        layer = _strategy_layer(item)
+        stability = _strategy_stability(item)
+        breaker = _as_mapping(item.get("breaker"))
+        role = _label(ROLE_LABELS, item.get("effective_role") or item.get("role"))
+        original_role = _label(ROLE_LABELS, item.get("original_role") or item.get("role"))
+        if role != original_role:
+            role = f"{role}(\u539f{original_role})"
+        play = _label(PLAY_LABELS, item.get("play_type"))
+        scope = _label(SCOPE_LABELS, item.get("scope"))
+        data_layer = _label(DATA_LAYER_LABELS, layer.get("data_layer"))
+        breaker_status = "ON" if bool(breaker.get("breaker_on")) else str(breaker.get("status") or "pending").upper()
+        title = f"{index}. {role} | {play}"
+        jc_bucket = _as_mapping(item.get("jc_bucket"))
+        jc_context = _as_mapping(item.get("jc_context"))
+        jc_feedback = _as_mapping(item.get("jc_live_feedback"))
+        jc_lines: list[str] = []
+        if str(layer.get("data_layer") or "") == "jc_stratified_market":
+            live_status = str(jc_feedback.get("status") or "pending").upper()
+            live_line = (
+                f"JC实盘: {_safe_int(jc_feedback.get('live_hit_count'))}/{_safe_int(jc_feedback.get('live_count'))}"
+                f" ({_pct(jc_feedback.get('live_hit_rate'))}) | 偏差 {_pct(jc_feedback.get('deviation'))} | 状态 {live_status}"
+                if jc_feedback
+                else "JC实盘: 待积累赛后样本"
+            )
+            jc_lines = [
+                f"JC稳定桶: {jc_bucket.get('dimension') or item.get('dimension') or '-'} / {jc_bucket.get('bucket') or item.get('scope_value') or '-'}",
+                f"JC当前匹配: confidence_bucket={jc_context.get('confidence_bucket') or '-'} | odds_bucket={jc_context.get('odds_bucket') or '-'} | pick_odds={_safe_float(jc_context.get('pick_odds')):.2f}",
+            ]
+        if str(layer.get("data_layer") or "") == "jc_stratified_market":
+            jc_lines.append(live_line)
+        body = "\n".join(
+            [
+                f"\u8303\u56f4: {scope} / {item.get('scope_value') or '-'} | \u6570\u636e\u5c42: {data_layer}",
+                f"\u95e8\u69db: {_safe_float(item.get('min_confidence')):.2f} | \u56de\u6d4b: {_pct(item.get('accuracy'))} ({_safe_int(item.get('hit_count'))}/{_safe_int(item.get('sample_count'))})",
+                f"Wilson: {_pct(item.get('wilson_lower'))} | \u8986\u76d6: {_pct(item.get('coverage'))} | \u8fb9\u9645: {_safe_float(item.get('edge')):+.1%}",
+                f"\u7a33\u5b9a: {'OK' if bool(stability.get('stable')) else 'WATCH'} | \u8bc4\u5206 {_pct(stability.get('stability_score'))} | \u8fd130/90 {_pct(stability.get('recent_30_accuracy'))}/{_pct(stability.get('recent_90_accuracy'))}",
+                f"\u65ad\u8def: {breaker_status} | \u8fde\u9519 {_safe_int(breaker.get('miss_streak'))}/{_safe_int(breaker.get('threshold'), 3)} | \u6062\u590d {_safe_int(breaker.get('recovery_streak'))}/{_safe_int(breaker.get('recovery_hits_required'), 2)} | \u8fd1\u671f {_safe_int(breaker.get('hit_count'))}/{_safe_int(breaker.get('known_count'))}",
+            ]
+            + jc_lines
+        )
+        rows.append({"title": title, "body": body})
+    return rows
+
+
 def build_high_accuracy_strategy_pool_rows(status: Mapping[str, object] | object) -> list[dict[str, str]]:
     resolved = _as_mapping(status)
     rows: list[dict[str, str]] = []
@@ -455,11 +503,21 @@ def build_high_accuracy_strategy_pool_rows(status: Mapping[str, object] | object
         title = f"{index}. {role} | {play}"
         jc_bucket = _as_mapping(item.get("jc_bucket"))
         jc_context = _as_mapping(item.get("jc_context"))
+        jc_feedback = _as_mapping(item.get("jc_live_feedback"))
         jc_lines: list[str] = []
         if str(layer.get("data_layer") or "") == "jc_stratified_market":
+            live_status = str(jc_feedback.get("status") or "pending").upper()
+            if jc_feedback:
+                live_line = (
+                    f"JC\u5b9e\u76d8: {_safe_int(jc_feedback.get('live_hit_count'))}/{_safe_int(jc_feedback.get('live_count'))}"
+                    f" ({_pct(jc_feedback.get('live_hit_rate'))}) | \u504f\u5dee {_pct(jc_feedback.get('deviation'))} | \u72b6\u6001 {live_status}"
+                )
+            else:
+                live_line = "JC\u5b9e\u76d8: \u5f85\u79ef\u7d2f\u8d5b\u540e\u6837\u672c"
             jc_lines = [
-                f"JC稳定桶: {jc_bucket.get('dimension') or item.get('dimension') or '-'} / {jc_bucket.get('bucket') or item.get('scope_value') or '-'}",
-                f"JC当前匹配: confidence_bucket={jc_context.get('confidence_bucket') or '-'} | odds_bucket={jc_context.get('odds_bucket') or '-'} | pick_odds={_safe_float(jc_context.get('pick_odds')):.2f}",
+                f"JC\u7a33\u5b9a\u6876: {jc_bucket.get('dimension') or item.get('dimension') or '-'} / {jc_bucket.get('bucket') or item.get('scope_value') or '-'}",
+                f"JC\u5f53\u524d\u5339\u914d: confidence_bucket={jc_context.get('confidence_bucket') or '-'} | odds_bucket={jc_context.get('odds_bucket') or '-'} | pick_odds={_safe_float(jc_context.get('pick_odds')):.2f}",
+                live_line,
             ]
         body = "\n".join(
             [
