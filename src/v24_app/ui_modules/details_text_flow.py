@@ -5,6 +5,7 @@ from typing import Any, Callable, Mapping
 from .strategy_dashboard_flow import (
     format_strategy_admission_pick,
     format_strategy_admission_reasons,
+    format_strategy_admission_replay_guard,
     format_strategy_admission_thresholds,
 )
 
@@ -212,6 +213,109 @@ def _build_runtime_threshold_block(prediction: Mapping[str, object]) -> str:
     return "\n".join(lines)
 
 
+def _float_value(value: object, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _format_metric_map(values: object, *, percent: bool = False) -> str:
+    if not isinstance(values, Mapping):
+        return "-"
+    parts: list[str] = []
+    for key in ("home", "draw", "away"):
+        value = values.get(key)
+        if value is None:
+            continue
+        numeric = _float_value(value)
+        if percent:
+            parts.append(f"{key}={numeric:+.1%}")
+        else:
+            parts.append(f"{key}={numeric:.3f}")
+    return " / ".join(parts) if parts else "-"
+
+
+def _build_market_entropy_block(prediction: Mapping[str, object]) -> str:
+    entropy = prediction.get("market_entropy")
+    if not isinstance(entropy, Mapping):
+        return ""
+    risk = prediction.get("market_entropy_risk")
+    risk_overlay = risk if isinstance(risk, Mapping) else {}
+    sequence = entropy.get("sequence") if isinstance(entropy.get("sequence"), Mapping) else {}
+    signals = entropy.get("signals")
+    signal_text = ", ".join(str(item) for item in signals) if isinstance(signals, list) and signals else "-"
+    overlay_text = "applied" if bool(risk_overlay.get("applied")) else "none"
+    if risk_overlay.get("reason"):
+        overlay_text += f" ({risk_overlay.get('reason')})"
+    return (
+        "\n\nMarketEntropy"
+        + f"\n- level={entropy.get('level', '-')} | score={_float_value(entropy.get('score')):.1%} | risk_overlay={overlay_text}"
+        + f"\n- odds_slope: {_format_metric_map(entropy.get('odds_slope'), percent=True)}"
+        + f"\n- sequence: samples={int(_float_value(sequence.get('sample_count')))} | interval={_float_value(sequence.get('latest_interval_minutes')):.1f}m | velocity={_format_metric_map(sequence.get('latest_velocity'), percent=True)}"
+        + f"\n- history_step={_float_value(sequence.get('max_step_change')):+.1%} | step_side={sequence.get('step_side', '-')}"
+        + f"\n- strongest_steam={entropy.get('strongest_steam_side', '-')} | market_favorite={entropy.get('market_favorite', '-')}"
+        + f"\n- Kelly: {_format_metric_map(entropy.get('kelly'))} | span={_float_value(entropy.get('kelly_span')):.3f} | low={entropy.get('kelly_low_side', '-')}"
+        + f"\n- pick={entropy.get('pick_side', '-')} | pick_slope={_float_value(entropy.get('pick_slope')):+.1%} | pick_kelly_gap={_float_value(entropy.get('pick_kelly_gap')):.3f}"
+        + f"\n- signals: {signal_text}"
+    )
+
+
+def _build_handicap_margin_block(prediction: Mapping[str, object]) -> str:
+    signal = prediction.get("handicap_margin_consistency")
+    if not isinstance(signal, Mapping):
+        return ""
+    signals = signal.get("signals")
+    signal_text = ", ".join(str(item) for item in signals) if isinstance(signals, list) and signals else "-"
+    return (
+        "\n\nHandicap Margin Consistency"
+        + f"\n- level={signal.get('level', '-')} | score={_float_value(signal.get('score')):.1%}"
+        + f"\n- handicap_line={_float_value(signal.get('handicap_line')):+.2f} | model_margin={_float_value(signal.get('model_margin_goals')):+.2f}"
+        + f"\n- market_side={signal.get('market_side', '-')} | model_side={signal.get('model_side', '-')}"
+        + f"\n- line_depth={_float_value(signal.get('line_depth')):.2f} | margin_depth={_float_value(signal.get('margin_depth')):.2f} | depth_gap={_float_value(signal.get('depth_gap')):+.2f}"
+        + f"\n- handicap_pick={signal.get('handicap_pick_side', '-')} | model_pick={signal.get('model_pick_side', '-')}"
+        + f"\n- signals: {signal_text}"
+    )
+
+
+def _build_supervisor_block(prediction: Mapping[str, object]) -> str:
+    supervisor = prediction.get("supervisor")
+    if not isinstance(supervisor, Mapping):
+        return ""
+    decision = supervisor.get("decision") if isinstance(supervisor.get("decision"), Mapping) else {}
+    agents = supervisor.get("agents") if isinstance(supervisor.get("agents"), list) else []
+    actions = supervisor.get("next_actions") if isinstance(supervisor.get("next_actions"), list) else []
+    lines = [
+        "",
+        "Supervisor / Orchestrator",
+        (
+            f"- status={supervisor.get('status', '-')} | "
+            f"release_allowed={bool(decision.get('release_allowed'))} | "
+            f"human_review={bool(decision.get('requires_human_review'))}"
+        ),
+        f"- next_actions: {', '.join(str(item) for item in actions) if actions else '-'}",
+    ]
+    for item in agents:
+        if not isinstance(item, Mapping):
+            continue
+        outputs = item.get("outputs") if isinstance(item.get("outputs"), Mapping) else {}
+        actions = item.get("actions") if isinstance(item.get("actions"), list) else []
+        summary_parts: list[str] = []
+        if outputs.get("signals"):
+            summary_parts.append(f"signals={len(outputs.get('signals') or [])}")
+        if outputs.get("recommendation"):
+            summary_parts.append(f"pick={outputs.get('recommendation')}")
+        if outputs.get("admission_decision"):
+            summary_parts.append(f"decision={outputs.get('admission_decision')}")
+        if item.get("rationale"):
+            summary_parts.append(f"why={item.get('rationale')}")
+        if actions:
+            summary_parts.append(f"actions={','.join(str(action) for action in actions[:3])}")
+        summary = " | ".join(summary_parts) if summary_parts else str(item.get("trigger") or "-")
+        lines.append(f"- {item.get('name', '-')}: {item.get('status', '-')} | {summary}")
+    return "\n".join(lines)
+
+
 def build_match_details_text(
     *,
     diagnostics_text: str,
@@ -294,6 +398,7 @@ def build_match_details_text(
         reason_text = format_strategy_admission_reasons(admission, limit=5)
         threshold_text = format_strategy_admission_thresholds(admission)
         pick_text = format_strategy_admission_pick(admission)
+        replay_guard_text = format_strategy_admission_replay_guard(admission)
         admission_block = (
             "\n\n策略准入白名单\n"
             + f"- 准入结论: {admission.get('label', '-')}\n"
@@ -302,9 +407,13 @@ def build_match_details_text(
             + f"- 候选玩法: {pick_text}\n"
             + f"- 原因: {reason_text}\n"
             + f"- 准入门槛: {threshold_text}"
+            + (f"\n- Agent Replay: {replay_guard_text}" if replay_guard_text != "-" else "")
         )
     confidence_block = _build_confidence_calibration_block(prediction)
     runtime_threshold_block = _build_runtime_threshold_block(prediction)
+    market_entropy_block = _build_market_entropy_block(prediction)
+    handicap_margin_block = _build_handicap_margin_block(prediction)
+    supervisor_block = _build_supervisor_block(prediction)
     release = release_row if isinstance(release_row, Mapping) else {}
     release_block = ""
     if release:
@@ -350,6 +459,12 @@ def build_match_details_text(
         + f"- 主胜: {probs['home']:.1%}\n"
         + f"- 平局: {probs['draw']:.1%}\n"
         + f"- 客胜: {probs['away']:.1%}\n\n"
+        + market_entropy_block
+        + ("\n" if market_entropy_block else "")
+        + handicap_margin_block
+        + ("\n" if handicap_margin_block else "")
+        + supervisor_block
+        + ("\n" if supervisor_block else "")
         + poisson_block_text
         + strategy_block
         + high_strategy_block

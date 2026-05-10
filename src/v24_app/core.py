@@ -22,6 +22,7 @@ from .models.poisson import PoissonScoreEngine
 from .models.play_xgboost import ScorelineXGBoostModel, TotalGoalsXGBoostModel, VolatileScorelineXGBoostModel
 from .models.xgboost_v0 import XGBoostProbabilityModel
 from .models.bayesian_calibration import calibrate_three_way_probabilities
+from .orchestrator import build_supervisor_orchestration
 from .storage.state_store import StateStore
 from .training_samples import build_recent_form_feature_map, build_team_histories_from_state
 
@@ -52,6 +53,7 @@ BAYES_CALIBRATION_FILE = PROJECT_DIR / "data" / "models" / "bayes_calibration_v1
 HIGH_ACCURACY_STRATEGY_FILE = PROJECT_DIR / "data" / "models" / "high_accuracy_strategy_v1.json"
 JC_STRATIFIED_STRATEGY_FILE = PROJECT_DIR / "data" / "models" / "jc_stratified_strategy_backtest_v1.json"
 STRATEGY_ADMISSION_POLICY_FILE = PROJECT_DIR / "data" / "models" / "strategy_admission_policy_v1.json"
+STRATEGY_ADMISSION_POLICY_HISTORY_FILE = PROJECT_DIR / "data" / "models" / "strategy_admission_policy_history_v1.json"
 HIGH_ACCURACY_STRATEGY_BREAKER_THRESHOLD = 3
 HIGH_ACCURACY_STRATEGY_BREAKER_WINDOW = 30
 HIGH_ACCURACY_STRATEGY_RECOVERY_HITS = 2
@@ -72,6 +74,10 @@ DEFAULT_STRATEGY_ADMISSION_POLICY = {
     "active_strategy_min": 1,
     "medium_risk_allowed": True,
     "high_risk_allowed": False,
+    "agent_replay_guard_enabled": True,
+    "agent_replay_min_samples": 5,
+    "agent_replay_prediction_miss_threshold": 0.55,
+    "agent_replay_handicap_miss_threshold": 0.60,
 }
 
 
@@ -633,6 +639,10 @@ def _market_snapshot_source_key(source_id: str) -> str:
 
 def _market_snapshot_fields_from_match(match: AppMatch) -> dict[str, float]:
     return {
+        "odds_home": round(_safe_float(match.odds_home, default=0.0), 4),
+        "odds_draw": round(_safe_float(match.odds_draw, default=0.0), 4),
+        "odds_away": round(_safe_float(match.odds_away, default=0.0), 4),
+        "handicap_line": round(_safe_float(match.handicap_line, default=0.0), 4),
         "opening_odds_home": round(_safe_float(match.opening_odds_home, default=0.0), 4),
         "opening_odds_draw": round(_safe_float(match.opening_odds_draw, default=0.0), 4),
         "opening_odds_away": round(_safe_float(match.opening_odds_away, default=0.0), 4),
@@ -646,6 +656,22 @@ def _market_snapshot_fields_from_match(match: AppMatch) -> dict[str, float]:
 def _has_market_snapshot_fields(match: AppMatch) -> bool:
     fields = _market_snapshot_fields_from_match(match)
     return any(value > 0.0 for value in fields.values())
+
+
+def _has_market_enrichment_fields(match: AppMatch) -> bool:
+    fields = _market_snapshot_fields_from_match(match)
+    return any(
+        fields.get(name, 0.0) > 0.0
+        for name in (
+            "opening_odds_home",
+            "opening_odds_draw",
+            "opening_odds_away",
+            "return_rate",
+            "kelly_home",
+            "kelly_draw",
+            "kelly_away",
+        )
+    )
 
 
 def _apply_market_snapshot_fields(match: AppMatch, fields: dict) -> bool:
@@ -709,7 +735,7 @@ def persist_market_snapshots(matches: Iterable[AppMatch]) -> int:
 
 
 def enrich_match_from_market_snapshot_store(match: AppMatch) -> bool:
-    if not isinstance(match, AppMatch) or _has_market_snapshot_fields(match):
+    if not isinstance(match, AppMatch) or _has_market_enrichment_fields(match):
         return False
     items = STATE_STORE.load_market_snapshots()
     candidates: list[str] = []
@@ -1087,6 +1113,420 @@ def _distribution_entropy(probs: tuple[float, float, float]) -> float:
         p = max(prob, 1e-12)
         entropy -= p * log2(p)
     return entropy / log2(3.0)
+
+
+def _market_entropy_side_label(side: str) -> str:
+    return {"home": "home", "draw": "draw", "away": "away"}.get(str(side or ""), "-")
+
+
+def _market_snapshot_candidate_keys(match: AppMatch) -> list[str]:
+    keys: list[str] = []
+    source_id = normalize_text(match.source_id)
+    if source_id:
+        keys.append(_market_snapshot_source_key(source_id))
+    keys.append(_market_snapshot_exact_key(match.match_date, match.league, match.home_team, match.away_team))
+    keys.append(_market_snapshot_team_key(match.match_date, match.home_team, match.away_team))
+    return keys
+
+
+def _normalize_market_history_point(item: object, *, fallback_saved_at: object = "") -> dict | None:
+    if not isinstance(item, dict):
+        return None
+    market = item.get("market") if isinstance(item.get("market"), dict) else item
+    if not isinstance(market, dict):
+        return None
+    point = {
+        "saved_at": normalize_text(item.get("saved_at") or fallback_saved_at),
+        "odds_home": round(_safe_float(market.get("odds_home"), default=0.0), 4),
+        "odds_draw": round(_safe_float(market.get("odds_draw"), default=0.0), 4),
+        "odds_away": round(_safe_float(market.get("odds_away"), default=0.0), 4),
+        "kelly_home": round(_safe_float(market.get("kelly_home"), default=0.0), 4),
+        "kelly_draw": round(_safe_float(market.get("kelly_draw"), default=0.0), 4),
+        "kelly_away": round(_safe_float(market.get("kelly_away"), default=0.0), 4),
+        "return_rate": round(_safe_float(market.get("return_rate"), default=0.0), 4),
+    }
+    if not any(point.get(name, 0.0) > 0.0 for name in ("odds_home", "odds_draw", "odds_away")):
+        return None
+    return point
+
+
+def _market_snapshot_history_for_match(match: AppMatch) -> list[dict]:
+    if not isinstance(match, AppMatch):
+        return []
+    try:
+        items = STATE_STORE.load_market_snapshots()
+    except Exception:
+        return []
+    if not isinstance(items, dict):
+        return []
+    points: list[dict] = []
+    for key in _market_snapshot_candidate_keys(match):
+        record = items.get(key)
+        if not isinstance(record, dict):
+            continue
+        history = record.get("history")
+        if isinstance(history, list):
+            for item in history:
+                point = _normalize_market_history_point(item, fallback_saved_at=record.get("saved_at"))
+                if point is not None:
+                    points.append(point)
+        point = _normalize_market_history_point(record, fallback_saved_at=record.get("saved_at"))
+        if point is not None:
+            points.append(point)
+    deduped: dict[str, dict] = {}
+    for point in points:
+        key = "|".join(
+            [
+                str(point.get("saved_at") or ""),
+                f"{_safe_float(point.get('odds_home'), 0.0):.4f}",
+                f"{_safe_float(point.get('odds_draw'), 0.0):.4f}",
+                f"{_safe_float(point.get('odds_away'), 0.0):.4f}",
+            ]
+        )
+        deduped[key] = point
+    return sorted(
+        deduped.values(),
+        key=lambda point: _parse_datetime_text(point.get("saved_at")) or datetime.min,
+    )
+
+
+def _market_entropy_sequence_metrics(history_points: object, current: dict[str, float], kelly: dict[str, float]) -> dict:
+    points: list[dict] = []
+    if isinstance(history_points, list):
+        for item in history_points:
+            point = _normalize_market_history_point(item)
+            if point is not None:
+                points.append(point)
+    points.append(
+        {
+            "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "odds_home": round(_safe_float(current.get("home"), default=0.0), 4),
+            "odds_draw": round(_safe_float(current.get("draw"), default=0.0), 4),
+            "odds_away": round(_safe_float(current.get("away"), default=0.0), 4),
+            "kelly_home": round(_safe_float(kelly.get("home"), default=0.0), 4),
+            "kelly_draw": round(_safe_float(kelly.get("draw"), default=0.0), 4),
+            "kelly_away": round(_safe_float(kelly.get("away"), default=0.0), 4),
+        }
+    )
+    deduped: dict[str, dict] = {}
+    for point in points:
+        key = "|".join(
+            [
+                str(point.get("saved_at") or ""),
+                f"{_safe_float(point.get('odds_home'), 0.0):.4f}",
+                f"{_safe_float(point.get('odds_draw'), 0.0):.4f}",
+                f"{_safe_float(point.get('odds_away'), 0.0):.4f}",
+            ]
+        )
+        deduped[key] = point
+    points = sorted(
+        deduped.values(),
+        key=lambda point: _parse_datetime_text(point.get("saved_at")) or datetime.min,
+    )
+    if len(points) < 2:
+        return {
+            "sample_count": len(points),
+            "latest_interval_minutes": 0.0,
+            "latest_velocity": {},
+            "max_abs_velocity_per_minute": 0.0,
+            "max_step_change": 0.0,
+            "step_side": "-",
+        }
+
+    latest_velocity: dict[str, float] = {}
+    max_abs_velocity = 0.0
+    max_step_change = 0.0
+    step_side = "-"
+    latest_interval_minutes = 0.0
+    sides = {"home": "odds_home", "draw": "odds_draw", "away": "odds_away"}
+    for index in range(1, len(points)):
+        prev = points[index - 1]
+        curr = points[index]
+        prev_dt = _parse_datetime_text(prev.get("saved_at"))
+        curr_dt = _parse_datetime_text(curr.get("saved_at"))
+        interval = 0.0
+        if prev_dt is not None and curr_dt is not None:
+            interval = max((curr_dt - prev_dt).total_seconds() / 60.0, 1.0)
+        if index == len(points) - 1:
+            latest_interval_minutes = round(interval, 3)
+        for side, field_name in sides.items():
+            prev_value = _safe_float(prev.get(field_name), default=0.0)
+            curr_value = _safe_float(curr.get(field_name), default=0.0)
+            if prev_value <= 1.0 or curr_value <= 1.0:
+                continue
+            change = (prev_value - curr_value) / max(prev_value, 1e-9)
+            if abs(change) > abs(max_step_change):
+                max_step_change = change
+                step_side = side
+            velocity = change / interval if interval > 0 else 0.0
+            if index == len(points) - 1:
+                latest_velocity[side] = round(velocity, 5)
+            max_abs_velocity = max(max_abs_velocity, abs(velocity))
+    return {
+        "sample_count": len(points),
+        "latest_interval_minutes": latest_interval_minutes,
+        "latest_velocity": latest_velocity,
+        "max_abs_velocity_per_minute": round(max_abs_velocity, 5),
+        "max_step_change": round(max_step_change, 4),
+        "step_side": _market_entropy_side_label(step_side),
+    }
+
+
+def build_market_entropy_signal(
+    match: AppMatch,
+    *,
+    recommendation_key: str = "",
+    recommendation_confidence: float = 0.0,
+    history_points: list[dict] | None = None,
+) -> dict:
+    current = {
+        "home": _safe_float(match.odds_home, default=0.0),
+        "draw": _safe_float(match.odds_draw, default=0.0),
+        "away": _safe_float(match.odds_away, default=0.0),
+    }
+    opening = {
+        "home": _safe_float(match.opening_odds_home, default=0.0),
+        "draw": _safe_float(match.opening_odds_draw, default=0.0),
+        "away": _safe_float(match.opening_odds_away, default=0.0),
+    }
+    kelly = {
+        "home": _safe_float(match.kelly_home, default=0.0),
+        "draw": _safe_float(match.kelly_draw, default=0.0),
+        "away": _safe_float(match.kelly_away, default=0.0),
+    }
+    valid_current = {side: value for side, value in current.items() if value > 1.0}
+    valid_opening = {
+        side: value
+        for side, value in opening.items()
+        if value > 1.0 and current.get(side, 0.0) > 1.0
+    }
+    valid_kelly = {side: value for side, value in kelly.items() if value > 0.0}
+    implied_probs: dict[str, float] = {}
+    if len(valid_current) == 3:
+        implied = {side: 1.0 / max(value, 1.01) for side, value in current.items()}
+        total = max(sum(implied.values()), 1e-9)
+        implied_probs = {side: round(value / total, 4) for side, value in implied.items()}
+    market_favorite = max(implied_probs, key=implied_probs.get) if implied_probs else "-"
+    odds_slope: dict[str, float] = {}
+    for side, open_value in valid_opening.items():
+        odds_slope[side] = round((open_value - current[side]) / max(open_value, 1e-9), 4)
+    strongest_steam_side = max(odds_slope, key=odds_slope.get) if odds_slope else "-"
+    max_abs_slope = max((abs(value) for value in odds_slope.values()), default=0.0)
+    sequence_metrics = _market_entropy_sequence_metrics(history_points or [], current, kelly)
+    max_abs_velocity = _safe_float(sequence_metrics.get("max_abs_velocity_per_minute"), default=0.0)
+    max_step_change = abs(_safe_float(sequence_metrics.get("max_step_change"), default=0.0))
+    kelly_span = max(valid_kelly.values()) - min(valid_kelly.values()) if len(valid_kelly) == 3 else 0.0
+    kelly_avg = sum(valid_kelly.values()) / len(valid_kelly) if valid_kelly else 0.0
+    kelly_deviation = max((abs(value - kelly_avg) for value in valid_kelly.values()), default=0.0)
+    kelly_low_side = min(valid_kelly, key=valid_kelly.get) if valid_kelly else "-"
+    pick_key = recommendation_key if recommendation_key in {"home", "draw", "away"} else ""
+    pick_slope = odds_slope.get(pick_key, 0.0) if pick_key else 0.0
+    pick_kelly_gap = (valid_kelly.get(pick_key, 0.0) - min(valid_kelly.values())) if pick_key and valid_kelly else 0.0
+
+    signals: list[str] = []
+    slope_score = _clamp(max_abs_slope / 0.08)
+    velocity_score = _clamp(max_abs_velocity / 0.006)
+    history_step_score = _clamp(max_step_change / 0.08)
+    kelly_score = _clamp(max(0.0, kelly_span - 0.03) / 0.09)
+    conflict_score = 0.0
+    if pick_key and recommendation_confidence >= 0.55 and pick_slope <= -0.04:
+        conflict_score = max(conflict_score, _clamp(abs(pick_slope) / 0.08))
+        signals.append("pick_odds_drifting_out")
+    if pick_key and strongest_steam_side in {"home", "draw", "away"} and strongest_steam_side != pick_key and odds_slope.get(strongest_steam_side, 0.0) >= 0.04:
+        conflict_score = max(conflict_score, _clamp(odds_slope.get(strongest_steam_side, 0.0) / 0.08))
+        signals.append("market_steam_against_pick")
+    if pick_key and pick_kelly_gap >= 0.05:
+        conflict_score = max(conflict_score, _clamp(pick_kelly_gap / 0.12))
+        signals.append("kelly_against_pick")
+    if max_abs_slope >= 0.06:
+        signals.append("odds_step_change")
+    elif max_abs_slope >= 0.035:
+        signals.append("odds_slope_watch")
+    if max_abs_velocity >= 0.006:
+        signals.append("odds_velocity_alert")
+    elif max_abs_velocity >= 0.003:
+        signals.append("odds_velocity_watch")
+    if max_step_change >= 0.07:
+        signals.append("odds_history_step_alert")
+    elif max_step_change >= 0.04:
+        signals.append("odds_history_step_watch")
+    if kelly_span >= 0.08:
+        signals.append("kelly_span_alert")
+    elif kelly_span >= 0.05:
+        signals.append("kelly_span_watch")
+    if market_favorite != "-" and pick_key and market_favorite != pick_key and recommendation_confidence >= 0.60:
+        conflict_score = max(conflict_score, 0.45)
+        signals.append("market_favorite_mismatch")
+
+    score = _clamp(
+        0.25 * slope_score
+        + 0.18 * velocity_score
+        + 0.12 * history_step_score
+        + 0.25 * kelly_score
+        + 0.20 * conflict_score
+    )
+    if score >= 0.66:
+        level = "HIGH"
+    elif score >= 0.38:
+        level = "MEDIUM"
+    else:
+        level = "LOW"
+    return {
+        "score": round(score, 4),
+        "level": level,
+        "signals": signals,
+        "odds_slope": odds_slope,
+        "max_abs_odds_slope": round(max_abs_slope, 4),
+        "sequence": sequence_metrics,
+        "strongest_steam_side": _market_entropy_side_label(strongest_steam_side),
+        "market_favorite": _market_entropy_side_label(market_favorite),
+        "pick_side": _market_entropy_side_label(pick_key),
+        "pick_slope": round(pick_slope, 4),
+        "kelly": {side: round(value, 4) for side, value in kelly.items()},
+        "kelly_span": round(kelly_span, 4),
+        "kelly_deviation": round(kelly_deviation, 4),
+        "kelly_low_side": _market_entropy_side_label(kelly_low_side),
+        "pick_kelly_gap": round(pick_kelly_gap, 4),
+        "return_rate": round(_safe_float(match.return_rate, default=0.0), 4),
+        "implied_probabilities": implied_probs,
+    }
+
+
+def _edge_side_from_margin(value: float, *, threshold: float = 0.20) -> str:
+    if value > threshold:
+        return "home"
+    if value < -threshold:
+        return "away"
+    return "balanced"
+
+
+def _market_side_from_handicap_line(handicap_line: float, *, threshold: float = 0.25) -> str:
+    line = _safe_float(handicap_line, default=0.0)
+    if line < -threshold:
+        return "home"
+    if line > threshold:
+        return "away"
+    return "balanced"
+
+
+def build_handicap_margin_consistency_signal(
+    match: AppMatch,
+    *,
+    model_margin_goals: float,
+    probabilities: dict | None = None,
+    handicap_probabilities: dict | None = None,
+    recommendation_key: str = "",
+    handicap_pick_key: str = "",
+) -> dict:
+    handicap_line = _safe_float(getattr(match, "handicap_line", 0.0), default=0.0)
+    model_margin = _safe_float(model_margin_goals, default=0.0)
+    market_side = _market_side_from_handicap_line(handicap_line)
+    model_side = _edge_side_from_margin(model_margin)
+    handicap_pick_side = handicap_pick_key if handicap_pick_key in {"home", "draw", "away"} else "-"
+    model_pick_side = recommendation_key if recommendation_key in {"home", "draw", "away"} else model_side
+    line_depth = abs(handicap_line)
+    margin_depth = abs(model_margin)
+    depth_gap = line_depth - margin_depth
+
+    signals: list[str] = []
+    direction_score = 0.0
+    depth_score = 0.0
+    pick_score = 0.0
+
+    if market_side in {"home", "away"} and model_side in {"home", "away"} and market_side != model_side:
+        signals.append("handicap_direction_mismatch")
+        direction_score = 1.0
+    elif market_side in {"home", "away"} and model_side == "balanced" and line_depth >= 0.75:
+        signals.append("line_strong_but_model_balanced")
+        direction_score = 0.70
+    elif market_side == "balanced" and model_side in {"home", "away"} and margin_depth >= 0.75:
+        signals.append("model_edge_not_priced")
+        direction_score = 0.55
+
+    if line_depth >= 0.75 and margin_depth <= max(0.35, line_depth - 0.55):
+        signals.append("line_too_deep_for_model")
+        depth_score = max(depth_score, _clamp((line_depth - margin_depth) / 1.20))
+    if margin_depth >= 0.75 and line_depth <= max(0.25, margin_depth - 0.55):
+        signals.append("model_margin_stronger_than_line")
+        depth_score = max(depth_score, _clamp((margin_depth - line_depth) / 1.20))
+
+    if handicap_pick_side in {"home", "away"} and model_side in {"home", "away"} and handicap_pick_side != model_side:
+        signals.append("handicap_pick_margin_mismatch")
+        pick_score = max(pick_score, 0.55)
+    if model_pick_side in {"home", "away"} and model_side in {"home", "away"} and model_pick_side != model_side:
+        signals.append("model_pick_margin_mismatch")
+        pick_score = max(pick_score, 0.40)
+
+    probs = probabilities if isinstance(probabilities, dict) else {}
+    handicap_probs = handicap_probabilities if isinstance(handicap_probabilities, dict) else {}
+    if model_side in {"home", "away"} and probs:
+        opposite = "away" if model_side == "home" else "home"
+        prob_gap = _safe_float(probs.get(model_side), default=0.0) - _safe_float(probs.get(opposite), default=0.0)
+        if prob_gap < 0.08 and margin_depth >= 0.55:
+            signals.append("margin_probability_gap_weak")
+            pick_score = max(pick_score, 0.35)
+    if handicap_pick_side in {"home", "away"} and handicap_probs:
+        draw_prob = _safe_float(handicap_probs.get("draw"), default=0.0)
+        pick_prob = _safe_float(handicap_probs.get(handicap_pick_side), default=0.0)
+        if pick_prob - draw_prob < 0.06 and line_depth >= 0.75:
+            signals.append("handicap_pick_edge_thin")
+            pick_score = max(pick_score, 0.30)
+
+    score = _clamp(0.45 * direction_score + 0.38 * depth_score + 0.17 * pick_score)
+    if "handicap_direction_mismatch" in signals and (
+        "handicap_pick_margin_mismatch" in signals or line_depth >= 0.75
+    ):
+        score = max(score, 0.70)
+    if score >= 0.66:
+        level = "HIGH"
+    elif score >= 0.38:
+        level = "MEDIUM"
+    else:
+        level = "LOW"
+
+    return {
+        "score": round(score, 4),
+        "level": level,
+        "signals": signals,
+        "handicap_line": round(handicap_line, 4),
+        "model_margin_goals": round(model_margin, 4),
+        "market_side": market_side,
+        "model_side": model_side,
+        "model_pick_side": model_pick_side,
+        "handicap_pick_side": handicap_pick_side,
+        "line_depth": round(line_depth, 4),
+        "margin_depth": round(margin_depth, 4),
+        "depth_gap": round(depth_gap, 4),
+    }
+
+
+def _market_entropy_risk_overlay(base_risk_level: object, market_entropy: dict | None) -> dict:
+    entropy = market_entropy if isinstance(market_entropy, dict) else {}
+    base_bucket = _risk_bucket_from_label(base_risk_level)
+    entropy_level = str(entropy.get("level") or "LOW").upper()
+    entropy_score = _safe_float(entropy.get("score"), default=0.0)
+    signals = entropy.get("signals") if isinstance(entropy.get("signals"), list) else []
+    adjusted = base_risk_level
+    applied = False
+    reason = ""
+
+    if entropy_level == "HIGH" and signals and base_bucket != "high":
+        adjusted = "HIGH"
+        applied = True
+        reason = "market_entropy_high"
+    elif entropy_level == "MEDIUM" and signals and base_bucket == "low":
+        adjusted = "MEDIUM"
+        applied = True
+        reason = "market_entropy_medium"
+
+    return {
+        "applied": applied,
+        "base_risk_level": base_risk_level,
+        "adjusted_risk_level": adjusted,
+        "entropy_level": entropy_level,
+        "entropy_score": round(entropy_score, 4),
+        "reason": reason,
+    }
 
 
 def _model_distance(a: tuple[float, float, float], b: tuple[float, float, float]) -> float:
@@ -4670,6 +5110,19 @@ def _normalize_strategy_admission_policy(policy: dict | None) -> dict:
     resolved["active_strategy_min"] = max(1, min(3, int(_safe_int(resolved.get("active_strategy_min"), 1) or 1)))
     resolved["medium_risk_allowed"] = bool(resolved.get("medium_risk_allowed", True))
     resolved["high_risk_allowed"] = bool(resolved.get("high_risk_allowed", False))
+    resolved["agent_replay_guard_enabled"] = bool(resolved.get("agent_replay_guard_enabled", True))
+    resolved["agent_replay_min_samples"] = max(
+        3,
+        min(20, int(_safe_int(resolved.get("agent_replay_min_samples"), 5) or 5)),
+    )
+    resolved["agent_replay_prediction_miss_threshold"] = round(
+        _clamp(_safe_float(resolved.get("agent_replay_prediction_miss_threshold"), 0.55), 0.45, 0.80),
+        2,
+    )
+    resolved["agent_replay_handicap_miss_threshold"] = round(
+        _clamp(_safe_float(resolved.get("agent_replay_handicap_miss_threshold"), 0.60), 0.45, 0.85),
+        2,
+    )
     return resolved
 
 
@@ -4710,14 +5163,46 @@ def get_strategy_admission_policy_status() -> dict:
     return {
         "mode": report.get("mode", "default"),
         "updated_at": report.get("updated_at", "-"),
+        "version_id": report.get("version_id", "-"),
         "reason": report.get("reason", "-"),
         "policy": _normalize_strategy_admission_policy(report.get("policy") if isinstance(report.get("policy"), dict) else {}),
         "source": str(STRATEGY_ADMISSION_POLICY_FILE),
+        "history_source": str(STRATEGY_ADMISSION_POLICY_HISTORY_FILE),
     }
 
 
 def _current_strategy_admission_policy() -> dict:
     return get_strategy_admission_policy_status().get("policy", dict(DEFAULT_STRATEGY_ADMISSION_POLICY))
+
+
+def _load_strategy_admission_policy_history_entries() -> list[dict]:
+    if not STRATEGY_ADMISSION_POLICY_HISTORY_FILE.exists():
+        return []
+    try:
+        data = json.loads(STRATEGY_ADMISSION_POLICY_HISTORY_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    items = data.get("items") if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        return []
+    return [dict(item) for item in items if isinstance(item, dict)]
+
+
+def _write_strategy_admission_policy_history_entries(items: list[dict]) -> None:
+    STRATEGY_ADMISSION_POLICY_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "items": items[-200:],
+    }
+    STRATEGY_ADMISSION_POLICY_HISTORY_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def get_strategy_admission_policy_history(*, limit: int = 20) -> list[dict]:
+    items = _load_strategy_admission_policy_history_entries()
+    items.sort(key=lambda item: (str(item.get("updated_at") or ""), str(item.get("version_id") or "")), reverse=True)
+    if limit <= 0:
+        return items
+    return items[: max(0, int(limit))]
 
 
 def apply_strategy_admission_policy_update(update: dict, *, source: str = "manual") -> dict:
@@ -4726,19 +5211,58 @@ def apply_strategy_admission_policy_update(update: dict, *, source: str = "manua
     if isinstance(update, dict):
         policy.update(update)
     normalized = _normalize_strategy_admission_policy(policy)
+    updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    history_items = _load_strategy_admission_policy_history_entries()
+    version_id = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{len(history_items) + 1:04d}"
     report = {
         "mode": "manual",
-        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "updated_at": updated_at,
+        "version_id": version_id,
         "reason": str(source or "manual"),
         "policy": normalized,
         "previous_policy": current.get("policy", {}),
     }
     STRATEGY_ADMISSION_POLICY_FILE.parent.mkdir(parents=True, exist_ok=True)
     STRATEGY_ADMISSION_POLICY_FILE.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    history_items.append(
+        {
+            "version_id": version_id,
+            "updated_at": updated_at,
+            "source": str(source or "manual"),
+            "policy": normalized,
+            "previous_policy": current.get("policy", {}),
+            "update": dict(update) if isinstance(update, dict) else {},
+        }
+    )
+    _write_strategy_admission_policy_history_entries(history_items)
     _STRATEGY_ADMISSION_POLICY_CACHE["mtime"] = _strategy_admission_policy_mtime()
     _STRATEGY_ADMISSION_POLICY_CACHE["policy"] = dict(normalized)
     _STRATEGY_ADMISSION_POLICY_CACHE["report"] = dict(report)
     return get_strategy_admission_policy_status()
+
+
+def rollback_strategy_admission_policy(*, version_id: str | None = None, source: str = "policy_rollback") -> dict:
+    history_items = get_strategy_admission_policy_history(limit=0)
+    if not history_items:
+        return get_strategy_admission_policy_status()
+    target: dict | None = None
+    rollback_source = str(source or "policy_rollback")
+    if version_id:
+        target_entry = next((item for item in history_items if str(item.get("version_id") or "") == str(version_id)), None)
+        if isinstance(target_entry, dict):
+            policy = target_entry.get("policy")
+            if isinstance(policy, dict):
+                target = dict(policy)
+                rollback_source = f"{rollback_source}:{version_id}"
+    else:
+        latest = history_items[0]
+        previous = latest.get("previous_policy")
+        if isinstance(previous, dict):
+            target = dict(previous)
+            rollback_source = f"{rollback_source}:{latest.get('version_id', '-')}"
+    if not target:
+        return get_strategy_admission_policy_status()
+    return apply_strategy_admission_policy_update(target, source=rollback_source)
 
 
 def _high_accuracy_strategy_identity(item: dict) -> tuple[str, str, str, str, str]:
@@ -5812,12 +6336,113 @@ def _risk_bucket_from_label(label: object) -> str:
     return "low"
 
 
+def _agent_replay_admission_guard(
+    *,
+    agent_names: list[str] | None = None,
+    actions: list[str] | None = None,
+    settlements: list[dict] | None = None,
+    min_samples: int = 5,
+    prediction_miss_threshold: float = 0.55,
+    handicap_miss_threshold: float = 0.60,
+) -> dict:
+    names = [normalize_text(name) for name in (agent_names or []) if normalize_text(name)]
+    action_items = [normalize_text(action) for action in (actions or []) if normalize_text(action)]
+    if not names and not action_items:
+        return {"applied": False, "decision": "pass", "reason": "", "rows": []}
+    if settlements is None:
+        try:
+            settlement_items = get_recent_settlements(limit=120)
+        except Exception:
+            settlement_items = []
+    else:
+        settlement_items = settlements
+    rows: list[dict] = []
+    for name in names:
+        triggered = []
+        for item in settlement_items:
+            if not isinstance(item, dict):
+                continue
+            statuses = item.get("supervisor_agent_statuses") if isinstance(item.get("supervisor_agent_statuses"), dict) else {}
+            status = normalize_text(statuses.get(name)).lower()
+            if status in {"alert", "watch", "blocked"}:
+                triggered.append(item)
+        prediction_known = [item for item in triggered if item.get("is_correct") is not None]
+        handicap_known = [item for item in triggered if item.get("handicap_is_correct") is not None]
+        prediction_miss_rate = (
+            sum(1 for item in prediction_known if item.get("is_correct") is False) / len(prediction_known)
+            if prediction_known
+            else None
+        )
+        handicap_miss_rate = (
+            sum(1 for item in handicap_known if item.get("handicap_is_correct") is False) / len(handicap_known)
+            if handicap_known
+            else None
+        )
+        sample_count = max(len(prediction_known), len(handicap_known))
+        rows.append(
+            {
+                "agent": name,
+                "sample_count": sample_count,
+                "prediction_known": len(prediction_known),
+                "prediction_miss_rate": round(prediction_miss_rate, 4) if prediction_miss_rate is not None else None,
+                "handicap_known": len(handicap_known),
+                "handicap_miss_rate": round(handicap_miss_rate, 4) if handicap_miss_rate is not None else None,
+            }
+        )
+    triggered_rows = [
+        row
+        for row in rows
+        if int(row.get("sample_count") or 0) >= max(1, int(min_samples))
+        and (
+            (
+                row.get("prediction_miss_rate") is not None
+                and _safe_float(row.get("prediction_miss_rate"), 0.0) >= prediction_miss_threshold
+            )
+            or (
+                row.get("handicap_miss_rate") is not None
+                and _safe_float(row.get("handicap_miss_rate"), 0.0) >= handicap_miss_threshold
+            )
+        )
+    ]
+    if not triggered_rows:
+        return {
+            "applied": False,
+            "decision": "pass",
+            "reason": "",
+            "agent_names": names,
+            "actions": action_items,
+            "rows": rows,
+        }
+    triggered_rows.sort(
+        key=lambda row: (
+            -max(
+                _safe_float(row.get("prediction_miss_rate"), 0.0),
+                _safe_float(row.get("handicap_miss_rate"), 0.0),
+            ),
+            str(row.get("agent") or ""),
+        )
+    )
+    top = triggered_rows[0]
+    return {
+        "applied": True,
+        "decision": "observe",
+        "reason": "agent_replay_policy_watch",
+        "agent_names": names,
+        "actions": action_items,
+        "top_agent": top.get("agent", "-"),
+        "top_prediction_miss_rate": top.get("prediction_miss_rate"),
+        "top_handicap_miss_rate": top.get("handicap_miss_rate"),
+        "rows": rows,
+    }
+
+
 def _strategy_admission_gate(
     *,
     risk_level: object,
     confidence: object,
     high_strategy: dict | None,
     play_strategy: dict | None = None,
+    agent_replay_context: dict | None = None,
 ) -> dict:
     high = high_strategy if isinstance(high_strategy, dict) else {}
     play = play_strategy if isinstance(play_strategy, dict) else {}
@@ -5865,6 +6490,33 @@ def _strategy_admission_gate(
         reasons.append("confidence_watch")
     if single_count <= 0:
         reasons.append("no_single_play_passed")
+    replay_context = agent_replay_context if isinstance(agent_replay_context, dict) else {}
+    replay_guard_policy = {
+        "enabled": bool(admission_policy.get("agent_replay_guard_enabled", True)),
+        "min_samples": max(1, int(_safe_int(admission_policy.get("agent_replay_min_samples"), 5) or 5)),
+        "prediction_miss_threshold": _safe_float(admission_policy.get("agent_replay_prediction_miss_threshold"), 0.55),
+        "handicap_miss_threshold": _safe_float(admission_policy.get("agent_replay_handicap_miss_threshold"), 0.60),
+    }
+    if replay_guard_policy["enabled"]:
+        replay_guard = _agent_replay_admission_guard(
+            agent_names=replay_context.get("agent_names") if isinstance(replay_context.get("agent_names"), list) else [],
+            actions=replay_context.get("actions") if isinstance(replay_context.get("actions"), list) else [],
+            min_samples=int(replay_guard_policy["min_samples"]),
+            prediction_miss_threshold=float(replay_guard_policy["prediction_miss_threshold"]),
+            handicap_miss_threshold=float(replay_guard_policy["handicap_miss_threshold"]),
+        )
+    else:
+        replay_guard = {
+            "applied": False,
+            "decision": "pass",
+            "reason": "agent_replay_guard_disabled",
+            "agent_names": replay_context.get("agent_names") if isinstance(replay_context.get("agent_names"), list) else [],
+            "actions": replay_context.get("actions") if isinstance(replay_context.get("actions"), list) else [],
+            "rows": [],
+        }
+    replay_guard["policy"] = dict(replay_guard_policy)
+    if replay_guard.get("applied"):
+        reasons.append(str(replay_guard.get("reason") or "agent_replay_policy_watch"))
 
     if active_count >= active_strategy_min and risk_allowed and confidence_value >= min_confidence:
         decision = "allow"
@@ -5880,6 +6532,11 @@ def _strategy_admission_gate(
     else:
         decision = "observe"
         label = "观察"
+        action = "OBSERVE"
+
+    if decision == "allow" and replay_guard.get("applied"):
+        decision = "observe"
+        label = "瑙傚療"
         action = "OBSERVE"
 
     candidate = active_matches[0] if active_matches else shadow_matches[0] if shadow_matches else high
@@ -5900,6 +6557,7 @@ def _strategy_admission_gate(
         "active_strategy_min": active_strategy_min,
         "medium_risk_allowed": medium_risk_allowed,
         "high_risk_allowed": high_risk_allowed,
+        "agent_replay_policy": replay_guard_policy,
         "active_count": active_count,
         "shadow_count": shadow_count,
         "single_play_count": single_count,
@@ -5908,6 +6566,7 @@ def _strategy_admission_gate(
         "top_confidence": round(_safe_float(candidate.get("confidence"), default=0.0), 4),
         "summary": high.get("summary", "-"),
         "reasons": reasons,
+        "agent_replay_guard": replay_guard,
     }
 
 
@@ -7906,6 +8565,16 @@ def _predict_match_with_inputs(
         "home_score": round(_strength_score(home_rating), 1),
         "away_score": round(_strength_score(away_rating), 1),
     }
+    model_margin_goals = _safe_float(poisson.home_lambda, default=0.0) - _safe_float(poisson.away_lambda, default=0.0)
+    handicap_margin_consistency = build_handicap_margin_consistency_signal(
+        match,
+        model_margin_goals=model_margin_goals,
+        probabilities=probabilities,
+        handicap_probabilities=handicap_probabilities,
+        recommendation_key=recommendation_key,
+        handicap_pick_key=handicap_pick_key,
+    )
+
     indices = {
         "upset_index": round(upset_index, 4),
         "stability_index": round(stability_index, 4),
@@ -7913,6 +8582,17 @@ def _predict_match_with_inputs(
         "draw_index": round(draw_score, 4),
         "specialist_index": round(_safe_float(specialist_result.get("fusion_alpha"), default=0.0), 4),
     }
+    market_entropy = build_market_entropy_signal(
+        match,
+        recommendation_key=recommendation_key,
+        recommendation_confidence=recommendation_confidence,
+        history_points=_market_snapshot_history_for_match(match),
+    )
+    indices["market_entropy_index"] = round(_safe_float(market_entropy.get("score"), default=0.0), 4)
+    indices["handicap_margin_consistency_index"] = round(
+        _safe_float(handicap_margin_consistency.get("score"), default=0.0),
+        4,
+    )
     play_thresholds_base = _current_play_thresholds()
     play_thresholds, play_threshold_adjustment = _runtime_dynamic_play_thresholds(play_thresholds_base)
     play_confidences = {
@@ -7997,7 +8677,26 @@ def _predict_match_with_inputs(
         ],
         "blocked": blocked_plays,
     }
-    risk_level = _risk_level_from_upset(upset_index)
+    risk_level_base = _risk_level_from_upset(upset_index)
+    market_entropy_risk = _market_entropy_risk_overlay(risk_level_base, market_entropy)
+    risk_level = market_entropy_risk.get("adjusted_risk_level", risk_level_base)
+    replay_agent_names: list[str] = []
+    replay_actions: list[str] = []
+    entropy_level_for_replay = normalize_text(market_entropy.get("level")).upper()
+    handicap_margin_level_for_replay = normalize_text(handicap_margin_consistency.get("level")).upper()
+    if entropy_level_for_replay in {"HIGH", "MEDIUM"}:
+        replay_agent_names.append("MarketEntropy")
+        replay_actions.append("manual_market_review" if entropy_level_for_replay == "HIGH" else "watch_market_movement")
+    if handicap_margin_level_for_replay in {"HIGH", "MEDIUM"}:
+        replay_agent_names.append("RiskGuardian")
+        replay_actions.append(
+            "review_handicap_margin_consistency"
+            if handicap_margin_level_for_replay == "HIGH"
+            else "downgrade_handicap_watch"
+        )
+    if _risk_bucket_from_label(risk_level) in {"high", "medium"} and "RiskGuardian" not in replay_agent_names:
+        replay_agent_names.append("RiskGuardian")
+        replay_actions.append("keep_observation")
     high_accuracy_strategy = _high_accuracy_strategy_match(
         match,
         {
@@ -8013,6 +8712,23 @@ def _predict_match_with_inputs(
         confidence=recommendation_confidence,
         high_strategy=high_accuracy_strategy,
         play_strategy=play_strategy,
+        agent_replay_context={"agent_names": replay_agent_names, "actions": replay_actions},
+    )
+    supervisor = build_supervisor_orchestration(
+        match=match,
+        prediction_context={
+            "recommendation": recommendation,
+            "confidence": round(recommendation_confidence, 4),
+            "risk_level": risk_level,
+            "risk_level_base": risk_level_base,
+            "market_entropy": market_entropy,
+            "market_entropy_risk": market_entropy_risk,
+            "handicap_margin_consistency": handicap_margin_consistency,
+            "probabilities": probabilities,
+            "expected_goals": round(poisson.home_lambda + poisson.away_lambda, 2),
+            "model": "V24-Stage5(Ensemble+Specialists+Bayes:Market+ELO+Poisson+XGBv0)",
+            "strategy_admission": strategy_admission,
+        },
     )
 
     return {
@@ -8022,6 +8738,11 @@ def _predict_match_with_inputs(
         "confidence_raw": round(recommendation_confidence_raw, 4),
         "confidence_calibration": recommendation_confidence_calibration,
         "risk_level": risk_level,
+        "risk_level_base": risk_level_base,
+        "market_entropy": market_entropy,
+        "market_entropy_risk": market_entropy_risk,
+        "handicap_margin_consistency": handicap_margin_consistency,
+        "supervisor": supervisor,
         "probabilities": {key: round(_safe_float(probabilities.get(key), default=0.0), 4) for key in ("home", "draw", "away")},
         "pre_bayes_probabilities": {
             key: round(_safe_float(pre_bayes_probabilities.get(key), default=0.0), 4) for key in ("home", "draw", "away")
@@ -8267,6 +8988,124 @@ def _strategy_allowlist_settlement_fields(prediction: dict | None) -> dict:
         "strategy_allowlist_exported_at": str(marker.get("exported_at") or ""),
         "strategy_allowlist_decision": str(marker.get("decision") or ""),
         "strategy_allowlist_label": str(marker.get("label") or ""),
+    }
+
+
+def _strategy_admission_settlement_fields(prediction: dict | None) -> dict:
+    admission = prediction.get("strategy_admission") if isinstance(prediction, dict) else {}
+    if not isinstance(admission, dict):
+        admission = {}
+    guard = admission.get("agent_replay_guard") if isinstance(admission.get("agent_replay_guard"), dict) else {}
+    reasons = admission.get("reasons") if isinstance(admission.get("reasons"), list) else []
+    actions = guard.get("actions") if isinstance(guard.get("actions"), list) else []
+    return {
+        "strategy_admission_decision": str(admission.get("decision") or ""),
+        "strategy_admission_label": str(admission.get("label") or ""),
+        "strategy_admission_release_allowed": bool(admission.get("release_allowed")),
+        "strategy_admission_reasons": [str(item) for item in reasons if item],
+        "agent_replay_guard_applied": bool(guard.get("applied")),
+        "agent_replay_guard_top_agent": str(guard.get("top_agent") or ""),
+        "agent_replay_guard_prediction_miss_rate": (
+            round(_safe_float(guard.get("top_prediction_miss_rate"), 0.0), 4)
+            if guard.get("top_prediction_miss_rate") is not None
+            else None
+        ),
+        "agent_replay_guard_handicap_miss_rate": (
+            round(_safe_float(guard.get("top_handicap_miss_rate"), 0.0), 4)
+            if guard.get("top_handicap_miss_rate") is not None
+            else None
+        ),
+        "agent_replay_guard_actions": [str(item) for item in actions if item],
+    }
+
+
+def _market_entropy_settlement_fields(prediction: dict | None) -> dict:
+    entropy = prediction.get("market_entropy") if isinstance(prediction, dict) else {}
+    if not isinstance(entropy, dict):
+        entropy = {}
+    risk = prediction.get("market_entropy_risk") if isinstance(prediction, dict) else {}
+    if not isinstance(risk, dict):
+        risk = {}
+    sequence = entropy.get("sequence") if isinstance(entropy.get("sequence"), dict) else {}
+    signals = entropy.get("signals") if isinstance(entropy.get("signals"), list) else []
+    supervisor = prediction.get("supervisor") if isinstance(prediction, dict) else {}
+    if not isinstance(supervisor, dict):
+        supervisor = {}
+    next_actions = supervisor.get("next_actions") if isinstance(supervisor.get("next_actions"), list) else []
+    return {
+        "market_entropy_level": str(entropy.get("level") or ""),
+        "market_entropy_score": round(_safe_float(entropy.get("score"), 0.0), 4) if entropy else None,
+        "market_entropy_signals": [str(item) for item in signals if item],
+        "market_entropy_max_step_change": round(_safe_float(sequence.get("max_step_change"), 0.0), 4) if sequence else None,
+        "market_entropy_max_velocity": round(_safe_float(sequence.get("max_abs_velocity_per_minute"), 0.0), 5) if sequence else None,
+        "market_entropy_history_samples": int(_safe_int(sequence.get("sample_count"), 0) or 0) if sequence else 0,
+        "market_entropy_kelly_span": round(_safe_float(entropy.get("kelly_span"), 0.0), 4) if entropy else None,
+        "market_entropy_pick_kelly_gap": round(_safe_float(entropy.get("pick_kelly_gap"), 0.0), 4) if entropy else None,
+        "market_entropy_risk_applied": bool(risk.get("applied")),
+        "market_entropy_risk_reason": str(risk.get("reason") or ""),
+        "supervisor_status": str(supervisor.get("status") or ""),
+        "supervisor_next_actions": [str(item) for item in next_actions if item],
+    }
+
+
+def _handicap_margin_settlement_fields(prediction: dict | None) -> dict:
+    signal = prediction.get("handicap_margin_consistency") if isinstance(prediction, dict) else {}
+    if not isinstance(signal, dict):
+        signal = {}
+    signals = signal.get("signals") if isinstance(signal.get("signals"), list) else []
+    return {
+        "handicap_margin_level": str(signal.get("level") or ""),
+        "handicap_margin_score": round(_safe_float(signal.get("score"), 0.0), 4) if signal else None,
+        "handicap_margin_signals": [str(item) for item in signals if item],
+        "handicap_margin_line": round(_safe_float(signal.get("handicap_line"), 0.0), 4) if signal else None,
+        "handicap_margin_model_goals": round(_safe_float(signal.get("model_margin_goals"), 0.0), 4) if signal else None,
+        "handicap_margin_market_side": str(signal.get("market_side") or ""),
+        "handicap_margin_model_side": str(signal.get("model_side") or ""),
+        "handicap_margin_depth_gap": round(_safe_float(signal.get("depth_gap"), 0.0), 4) if signal else None,
+        "handicap_margin_pick_side": str(signal.get("handicap_pick_side") or ""),
+    }
+
+
+def _agent_trace_settlement_fields(prediction: dict | None) -> dict:
+    supervisor = prediction.get("supervisor") if isinstance(prediction, dict) else {}
+    if not isinstance(supervisor, dict):
+        supervisor = {}
+    agents = supervisor.get("agents") if isinstance(supervisor.get("agents"), list) else []
+    agent_statuses: dict[str, str] = {}
+    agent_actions: list[str] = []
+    alert_agents: list[str] = []
+    watch_agents: list[str] = []
+    blocked_agents: list[str] = []
+    agent_rationales: dict[str, str] = {}
+    for item in agents:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        status = str(item.get("status") or "").strip().lower()
+        agent_statuses[name] = status
+        if status == "alert":
+            alert_agents.append(name)
+        elif status == "watch":
+            watch_agents.append(name)
+        elif status == "blocked":
+            blocked_agents.append(name)
+        rationale = str(item.get("rationale") or "").strip()
+        if rationale:
+            agent_rationales[name] = rationale
+        actions = item.get("actions") if isinstance(item.get("actions"), list) else []
+        for action in actions:
+            action_text = str(action or "").strip()
+            if action_text and action_text not in agent_actions:
+                agent_actions.append(action_text)
+    return {
+        "supervisor_agent_statuses": agent_statuses,
+        "supervisor_alert_agents": alert_agents,
+        "supervisor_watch_agents": watch_agents,
+        "supervisor_blocked_agents": blocked_agents,
+        "supervisor_agent_actions": agent_actions,
+        "supervisor_agent_rationales": agent_rationales,
     }
 
 
@@ -8739,6 +9578,10 @@ def settle_match_result(
         "high_accuracy_strategy_summary": high_accuracy_strategy_settlement["summary"],
         "high_accuracy_strategy_items": high_accuracy_strategy_settlement["items"],
         **_strategy_allowlist_settlement_fields(prediction),
+        **_strategy_admission_settlement_fields(prediction),
+        **_market_entropy_settlement_fields(prediction),
+        **_handicap_margin_settlement_fields(prediction),
+        **_agent_trace_settlement_fields(prediction),
         "opening_odds_home": round(_safe_float(match.opening_odds_home, 0.0), 4),
         "opening_odds_draw": round(_safe_float(match.opening_odds_draw, 0.0), 4),
         "opening_odds_away": round(_safe_float(match.opening_odds_away, 0.0), 4),
@@ -8796,6 +9639,37 @@ def settle_match_result(
 
 def get_recent_settlements(limit: int = 20) -> list[dict]:
     items = STATE_STORE.load_settlements()
+    try:
+        history = STATE_STORE.load_analysis_history()
+    except Exception:
+        history = {}
+    if isinstance(history, dict):
+        enriched: list[dict] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            record = dict(item)
+            history_record = history.get(str(record.get("match_id") or ""))
+            prediction = history_record.get("prediction") if isinstance(history_record, dict) else None
+            if isinstance(prediction, dict):
+                if record.get("market_entropy_score") is None:
+                    for key, value in _market_entropy_settlement_fields(prediction).items():
+                        if record.get(key) in (None, "", []):
+                            record[key] = value
+                if record.get("handicap_margin_score") is None:
+                    for key, value in _handicap_margin_settlement_fields(prediction).items():
+                        if record.get(key) in (None, "", []):
+                            record[key] = value
+                if record.get("strategy_admission_decision") in (None, ""):
+                    for key, value in _strategy_admission_settlement_fields(prediction).items():
+                        if record.get(key) in (None, "", [], {}):
+                            record[key] = value
+                if not record.get("supervisor_agent_statuses"):
+                    for key, value in _agent_trace_settlement_fields(prediction).items():
+                        if record.get(key) in (None, "", [], {}):
+                            record[key] = value
+            enriched.append(record)
+        items = enriched
     if limit <= 0:
         return items
     return items[-limit:]

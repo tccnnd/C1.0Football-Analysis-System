@@ -22,10 +22,12 @@ from .core import (
     get_recent_settlements,
     get_result_recovery_runs,
     get_strategy_admission_policy_status,
+    get_strategy_admission_policy_history,
     mark_strategy_allowlist_snapshots,
     persist_prediction_snapshot,
     predict_match,
     record_result_recovery_run,
+    rollback_strategy_admission_policy,
 )
 from .ui_modules import (
     build_result_recovery_quality_alerts,
@@ -34,18 +36,25 @@ from .ui_modules import (
     build_result_recovery_run_rows,
     build_result_recovery_run_summary,
     build_result_recovery_strategy_adjustment,
+    build_agent_trace_nodes,
     mark_stale_result_recovery_runs,
+    format_agent_trace_detail,
     build_high_accuracy_strategy_dashboard,
     build_strategy_allowlist_settlement_summary,
     build_strategy_allowlist_tuning_recommendation,
     build_strategy_allowlist_filename,
     build_strategy_allowlist_report_lines,
+    build_strategy_policy_audit_csv_filename,
+    build_strategy_policy_audit_csv_text,
+    build_strategy_policy_audit_report_filename,
+    build_strategy_policy_audit_report_lines,
     build_strategy_release_recovery_alerts,
     build_strategy_release_pool_rows,
     compute_strategy_admission_counts,
     filter_strategy_admission_rows,
     format_strategy_admission_pick,
     format_strategy_admission_reasons,
+    format_strategy_admission_replay_guard,
     format_strategy_admission_thresholds,
     select_strategy_allowlist_rows,
 )
@@ -329,6 +338,10 @@ def _admission_reasons_text(prediction: dict, *, limit: int = 4) -> str:
     return format_strategy_admission_reasons(_admission_payload(prediction), limit=limit)
 
 
+def _admission_replay_guard_text(prediction: dict) -> str:
+    return format_strategy_admission_replay_guard(_admission_payload(prediction))
+
+
 def _admission_color(prediction: dict) -> str:
     decision = str(_admission_payload(prediction).get("decision") or "")
     if decision == "allow":
@@ -403,6 +416,8 @@ def _analysis_report(row: DashboardRow) -> str:
     admission = _admission_payload(pred)
     admission_reason_text = _admission_reasons_text(pred, limit=4)
     admission_threshold_text = format_strategy_admission_thresholds(admission)
+    admission_replay_text = format_strategy_admission_replay_guard(admission)
+    admission_replay_line = f"- Agent Replay\uff1a{admission_replay_text}\n" if admission_replay_text != "-" else ""
 
     risk_reason = {
         "high": "\u51b7\u95e8\u6307\u6570\u504f\u9ad8\uff0c\u5e02\u573a\u4e0e\u6a21\u578b\u53ef\u80fd\u5b58\u5728\u660e\u663e\u5206\u6b67\u3002",
@@ -426,6 +441,7 @@ def _analysis_report(row: DashboardRow) -> str:
         f"- \u7b56\u7565\u51c6\u5165\uff1a{_admission_text(pred)}\n"
         f"- \u51c6\u5165\u539f\u56e0\uff1a{admission_reason_text}\n"
         f"- \u51c6\u5165\u95e8\u69db\uff1a{admission_threshold_text}\n"
+        f"{admission_replay_line}"
         f"- \u98ce\u9669\u7b49\u7ea7\uff1a{_risk_label(pred.get('risk_level'))}\n"
         f"- \u7efc\u5408\u7f6e\u4fe1\u5ea6\uff1a{_pct1(pred.get('confidence'))}\n"
         f"- \u9884\u8ba1\u603b\u8fdb\u7403\uff1a{_num(pred.get('expected_goals'))}\n\n"
@@ -479,6 +495,120 @@ def _index_table(indices: dict) -> str:
     )
 
 
+def _fmt_metric_map(values: object, *, percent: bool = False) -> str:
+    if not isinstance(values, dict):
+        return "-"
+    parts: list[str] = []
+    for key in ("home", "draw", "away"):
+        if key not in values:
+            continue
+        value = values.get(key)
+        if percent:
+            parts.append(f"{key}={_pct1(value)}")
+        else:
+            parts.append(f"{key}={_num(value, 3)}")
+    return " / ".join(parts) if parts else "-"
+
+
+def _market_entropy_markdown(pred: dict) -> str:
+    entropy = pred.get("market_entropy") if isinstance(pred.get("market_entropy"), dict) else {}
+    if not entropy:
+        return "## 7. MarketEntropy 盘口异常识别\n\n暂无 MarketEntropy 数据。\n\n"
+    sequence = entropy.get("sequence") if isinstance(entropy.get("sequence"), dict) else {}
+    risk = pred.get("market_entropy_risk") if isinstance(pred.get("market_entropy_risk"), dict) else {}
+    signals = entropy.get("signals") if isinstance(entropy.get("signals"), list) else []
+    return (
+        "## 7. MarketEntropy 盘口异常识别\n\n"
+        "| 指标 | 数值 |\n"
+        "|---|---:|\n"
+        f"| 熵值等级 | {_md_cell(entropy.get('level', '-'))} |\n"
+        f"| 熵值评分 | {_pct1(entropy.get('score'))} |\n"
+        f"| 风险覆盖 | {_md_cell(risk.get('reason') or ('applied' if risk.get('applied') else 'none'))} |\n"
+        f"| 开盘到即时斜率 | {_md_cell(_fmt_metric_map(entropy.get('odds_slope'), percent=True))} |\n"
+        f"| 历史样本数 | {_num(sequence.get('sample_count'), 0)} |\n"
+        f"| 最近盘口速度 | {_md_cell(_fmt_metric_map(sequence.get('latest_velocity'), percent=True))} |\n"
+        f"| 历史最大阶跃 | {_pct1(sequence.get('max_step_change'))} |\n"
+        f"| 阶跃方向 | {_md_cell(sequence.get('step_side', '-'))} |\n"
+        f"| 最强降赔方向 | {_md_cell(entropy.get('strongest_steam_side', '-'))} |\n"
+        f"| 市场热门方向 | {_md_cell(entropy.get('market_favorite', '-'))} |\n"
+        f"| Kelly | {_md_cell(_fmt_metric_map(entropy.get('kelly')))} |\n"
+        f"| Kelly 跨度 | {_num(entropy.get('kelly_span'), 3)} |\n"
+        f"| 推荐侧 Kelly 差 | {_num(entropy.get('pick_kelly_gap'), 3)} |\n"
+        f"| 触发信号 | {_md_cell(', '.join(str(item) for item in signals) if signals else '-')} |\n\n"
+    )
+
+
+def _handicap_margin_markdown(pred: dict) -> str:
+    signal = pred.get("handicap_margin_consistency") if isinstance(pred.get("handicap_margin_consistency"), dict) else {}
+    if not signal:
+        return "## Handicap Margin Consistency\n\nNo handicap/model margin consistency data.\n\n"
+    signals = signal.get("signals") if isinstance(signal.get("signals"), list) else []
+    return (
+        "## Handicap Margin Consistency\n\n"
+        "| Item | Value |\n"
+        "|---|---:|\n"
+        f"| Level | {_md_cell(signal.get('level', '-'))} |\n"
+        f"| Score | {_pct1(signal.get('score'))} |\n"
+        f"| Handicap line | {_num(signal.get('handicap_line'), 2)} |\n"
+        f"| Model margin goals | {_num(signal.get('model_margin_goals'), 2)} |\n"
+        f"| Market side | {_md_cell(signal.get('market_side', '-'))} |\n"
+        f"| Model side | {_md_cell(signal.get('model_side', '-'))} |\n"
+        f"| Depth gap | {_num(signal.get('depth_gap'), 2)} |\n"
+        f"| Handicap pick side | {_md_cell(signal.get('handicap_pick_side', '-'))} |\n"
+        f"| Signals | {_md_cell(', '.join(str(item) for item in signals) if signals else '-')} |\n\n"
+    )
+
+
+def _supervisor_markdown(pred: dict) -> str:
+    supervisor = pred.get("supervisor") if isinstance(pred.get("supervisor"), dict) else {}
+    if not supervisor:
+        return "## 8. Supervisor / Agent Trace\n\n暂无 Supervisor 编排数据。\n\n"
+    decision = supervisor.get("decision") if isinstance(supervisor.get("decision"), dict) else {}
+    actions = supervisor.get("next_actions") if isinstance(supervisor.get("next_actions"), list) else []
+    nodes = build_agent_trace_nodes(supervisor)
+    lines = [
+        "## 8. Supervisor / Agent Trace",
+        "",
+        "| 项目 | 结果 |",
+        "|---|---|",
+        f"| Supervisor 状态 | {_md_cell(supervisor.get('status', '-'))} |",
+        f"| 是否允许放行 | {_md_cell('yes' if decision.get('release_allowed') else 'no')} |",
+        f"| 是否需要人工复核 | {_md_cell('yes' if decision.get('requires_human_review') else 'no')} |",
+        f"| 风险桶 | {_md_cell(decision.get('risk_bucket', '-'))} |",
+        f"| MarketEntropy 等级 | {_md_cell(decision.get('market_entropy_level', '-'))} |",
+        f"| 下一步动作 | {_md_cell(', '.join(str(item) for item in actions) if actions else '-')} |",
+        "",
+        "| Agent | 状态 | 触发 | 摘要 |",
+        "|---|---|---|---|",
+    ]
+    for node in nodes:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    _md_cell(node.get("name", "-")),
+                    _md_cell(node.get("status_label", "-")),
+                    _md_cell(node.get("trigger", "-")),
+                    _md_cell(node.get("summary", "-")),
+                ]
+            )
+            + " |"
+        )
+    lines.extend(["", "### Agent 输入输出摘要", ""])
+    for node in nodes:
+        lines.extend(
+            [
+                f"#### {_md_cell(node.get('name', '-'))}",
+                "",
+                "```text",
+                format_agent_trace_detail(node),
+                "```",
+                "",
+            ]
+        )
+    return "\n".join(lines)
+
+
 def _markdown_report(row: DashboardRow, generated_at: datetime | None = None) -> str:
     now = generated_at or datetime.now()
     match = row.match
@@ -492,6 +622,9 @@ def _markdown_report(row: DashboardRow, generated_at: datetime | None = None) ->
     ou_probs = pred.get("ou_probabilities", {}) if isinstance(pred.get("ou_probabilities"), dict) else {}
     indices = pred.get("indices", {}) if isinstance(pred.get("indices"), dict) else {}
     admission = _admission_payload(pred)
+    market_entropy_section = _market_entropy_markdown(pred)
+    handicap_margin_section = _handicap_margin_markdown(pred)
+    supervisor_section = _supervisor_markdown(pred)
     return (
         f"# {match.home_team} vs {match.away_team} \u8d5b\u4e8b\u5206\u6790\u62a5\u544a\n\n"
         "## 1. 基本信息\n\n"
@@ -509,6 +642,7 @@ def _markdown_report(row: DashboardRow, generated_at: datetime | None = None) ->
         f"| 策略准入 | {_md_cell(_admission_text(pred))} |\n"
         f"| \u51c6\u5165\u539f\u56e0 | {_md_cell(format_strategy_admission_reasons(admission, limit=6))} |\n"
         f"| \u51c6\u5165\u95e8\u69db | {_md_cell(format_strategy_admission_thresholds(admission))} |\n"
+        f"| Agent Replay | {_md_cell(format_strategy_admission_replay_guard(admission))} |\n"
         f"| 风险等级 | {_md_cell(_risk_label(pred.get('risk_level')))} |\n"
         f"| 综合置信度 | {_pct1(pred.get('confidence'))} |\n"
         f"| 预计总进球 | {_num(pred.get('expected_goals'))} |\n"
@@ -544,6 +678,9 @@ def _markdown_report(row: DashboardRow, generated_at: datetime | None = None) ->
         f"| Kelly 平局 | {_num(match.kelly_draw, 3)} |\n"
         f"| Kelly 客胜 | {_num(match.kelly_away, 3)} |\n\n"
         "## 7. AI 分析摘要\n\n"
+        f"{market_entropy_section}"
+        f"{handicap_margin_section}"
+        f"{supervisor_section}"
         f"{_analysis_report(row)}\n\n"
         "## 8. 复核清单\n\n"
         "- [ ] 复核首发阵容与关键伤停\n"
@@ -1564,6 +1701,17 @@ class SmartMatchDashboard:
                 self.match_canvas.yview_scroll(delta, "units")
             return "break"
 
+    def _bind_canvas_mousewheel(self, widget: tk.Widget, canvas: tk.Canvas) -> None:
+        widget.bind("<MouseWheel>", lambda event, target=canvas: self._on_bound_canvas_mousewheel(event, target), add="+")
+        for child in widget.winfo_children():
+            self._bind_canvas_mousewheel(child, canvas)
+
+    def _on_bound_canvas_mousewheel(self, event, canvas: tk.Canvas) -> str:
+        delta = int(-1 * (event.delta / 120)) if event.delta else 0
+        if delta:
+            canvas.yview_scroll(delta, "units")
+        return "break"
+
     def _refresh_matches(self) -> None:
         for child in self.match_list.winfo_children():
             child.destroy()
@@ -1692,6 +1840,8 @@ class SmartMatchDashboard:
         ]:
             self._detail_metric(summary, label, value, color)
 
+        self._draw_agent_trace_panel(shell, row)
+
         body = tk.Frame(shell, bg=BG)
         body.pack(fill=tk.BOTH, expand=True)
 
@@ -1717,6 +1867,136 @@ class SmartMatchDashboard:
         text.pack(fill=tk.BOTH, expand=True, padx=2, pady=(0, 14))
         text.insert("1.0", _analysis_report(row))
         text.configure(state=tk.DISABLED)
+
+    def _agent_status_color(self, status: object) -> str:
+        return {
+            "ready": GREEN,
+            "completed": GREEN,
+            "watch": YELLOW,
+            "alert": RED,
+            "blocked": RED,
+        }.get(str(status or "").lower(), MUTED)
+
+    def _set_agent_trace_detail(
+        self,
+        detail_widget: tk.Text,
+        node: dict,
+        node_frames: list[tuple[tk.Frame, dict]],
+    ) -> None:
+        detail_widget.configure(state=tk.NORMAL)
+        detail_widget.delete("1.0", tk.END)
+        detail_widget.insert("1.0", format_agent_trace_detail(node))
+        detail_widget.configure(state=tk.DISABLED)
+        for frame, item in node_frames:
+            selected = item is node
+            frame.configure(
+                highlightbackground=self._agent_status_color(item.get("status")) if selected else "#172638",
+                highlightthickness=2 if selected else 1,
+            )
+
+    def _draw_agent_trace_panel(self, parent: tk.Widget, row: DashboardRow) -> None:
+        supervisor = row.prediction.get("supervisor") if isinstance(row.prediction, dict) else {}
+        nodes = build_agent_trace_nodes(supervisor)
+        if not nodes:
+            return
+
+        frame = self._card(parent, PANEL)
+        frame.pack(fill=tk.X, pady=(0, 16))
+        header = tk.Frame(frame, bg=PANEL)
+        header.pack(fill=tk.X, padx=18, pady=(14, 8))
+        tk.Label(
+            header,
+            text="Agent 思考链路",
+            bg=PANEL,
+            fg=TEXT,
+            font=("Microsoft YaHei UI", 13, "bold"),
+        ).pack(side=tk.LEFT)
+        supervisor_status = str((supervisor or {}).get("status") or "-") if isinstance(supervisor, dict) else "-"
+        actions = (supervisor or {}).get("next_actions") if isinstance(supervisor, dict) else []
+        action_text = ", ".join(str(item) for item in actions) if isinstance(actions, list) and actions else "-"
+        tk.Label(
+            header,
+            text=f"Supervisor: {supervisor_status} | next: {action_text}",
+            bg=PANEL,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 9),
+        ).pack(side=tk.RIGHT)
+
+        node_row = tk.Frame(frame, bg=PANEL)
+        node_row.pack(fill=tk.X, padx=18, pady=(0, 8))
+        node_frames: list[tuple[tk.Frame, dict]] = []
+
+        for index, node in enumerate(nodes):
+            color = self._agent_status_color(node.get("status"))
+            checks = node.get("checks") if isinstance(node.get("checks"), list) else []
+            actions_for_node = node.get("actions") if isinstance(node.get("actions"), list) else []
+            node_frame = tk.Frame(node_row, bg=PANEL_2, highlightbackground="#172638", highlightthickness=1)
+            node_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+            node_frame.configure(cursor="hand2")
+            tk.Label(
+                node_frame,
+                text=str(node.get("name") or "-"),
+                bg=PANEL_2,
+                fg=TEXT,
+                font=("Microsoft YaHei UI", 9, "bold"),
+                wraplength=120,
+            ).pack(anchor=tk.W, padx=10, pady=(8, 2))
+            tk.Label(
+                node_frame,
+                text=str(node.get("status_label") or "-"),
+                bg=PANEL_2,
+                fg=color,
+                font=("Microsoft YaHei UI", 10, "bold"),
+            ).pack(anchor=tk.W, padx=10)
+            tk.Label(
+                node_frame,
+                text=str(node.get("summary") or "-"),
+                bg=PANEL_2,
+                fg=MUTED,
+                font=("Microsoft YaHei UI", 8),
+                wraplength=120,
+                justify=tk.LEFT,
+            ).pack(anchor=tk.W, padx=10, pady=(2, 8))
+            tk.Label(
+                node_frame,
+                text=f"checks {len(checks)} | actions {len(actions_for_node)}",
+                bg=PANEL_2,
+                fg=color if actions_for_node else MUTED,
+                font=("Microsoft YaHei UI", 8),
+                wraplength=120,
+                justify=tk.LEFT,
+            ).pack(anchor=tk.W, padx=10, pady=(0, 8))
+            node_frames.append((node_frame, node))
+            command = lambda item=node: self._set_agent_trace_detail(detail_text, item, node_frames)
+            node_frame.bind("<Button-1>", lambda _event, cmd=command: cmd())
+            for child in node_frame.winfo_children():
+                child.configure(cursor="hand2")
+                child.bind("<Button-1>", lambda _event, cmd=command: cmd())
+            if index < len(nodes) - 1:
+                tk.Label(node_row, text="->", bg=PANEL, fg=MUTED, font=("Microsoft YaHei UI", 12, "bold")).pack(
+                    side=tk.LEFT,
+                    padx=(0, 6),
+                )
+
+        detail_shell = tk.Frame(frame, bg="#0a111c", highlightbackground="#172638", highlightthickness=1)
+        detail_shell.pack(fill=tk.X, padx=18, pady=(0, 14))
+        detail_text = tk.Text(
+            detail_shell,
+            height=9,
+            wrap=tk.WORD,
+            bg="#0a111c",
+            fg=TEXT,
+            insertbackground=TEXT,
+            font=("Consolas", 9),
+            relief=tk.FLAT,
+            padx=12,
+            pady=10,
+        )
+        detail_scroll = tk.Scrollbar(detail_shell, orient=tk.VERTICAL, command=detail_text.yview)
+        detail_text.configure(yscrollcommand=detail_scroll.set)
+        detail_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        detail_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._set_agent_trace_detail(detail_text, nodes[0], node_frames)
 
     def save_match_report(self, row: DashboardRow) -> Path:
         REPORT_DIR.mkdir(parents=True, exist_ok=True)
@@ -2079,7 +2359,15 @@ class SmartMatchDashboard:
         right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         tk.Label(left, text="Agent \u72b6\u6001", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
+        supervisor_statuses = [
+            str((row.prediction.get("supervisor") or {}).get("status") or "")
+            for row in self.rows
+            if isinstance(row.prediction.get("supervisor"), dict)
+        ]
+        supervisor_alerts = sum(1 for status in supervisor_statuses if status in {"alert", "blocked"})
+        supervisor_watch = sum(1 for status in supervisor_statuses if status == "watch")
         agent_rows = [
+            ("Supervisor", f"alert/block {supervisor_alerts} / watch {supervisor_watch}" if supervisor_statuses else "\u7b49\u5f85\u7f16\u6392"),
             ("DataHunter", f"\u5df2\u63a5\u5165 {len(self.rows)}/{fetched_count} \u573a" if self.rows else "\u7b49\u5f85\u6570\u636e"),
             ("MarketEntropy", f"\u9ad8\u98ce\u9669 {risk_counts.get('high', 0)} / \u4e2d\u98ce\u9669 {risk_counts.get('medium', 0)}"),
             ("Simulation", f"\u5df2\u63a8\u6f14 {len(self.rows)} \u573a"),
@@ -2275,9 +2563,7 @@ class SmartMatchDashboard:
         tk.Label(left, text="\u6700\u8fd1\u590d\u76d8", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
         table_wrap = tk.Frame(left, bg=PANEL)
         table_wrap.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
-        style = ttk.Style()
-        style.configure("Review.Treeview", background=PANEL, foreground=TEXT, fieldbackground=PANEL, rowheight=26, borderwidth=0)
-        style.configure("Review.Treeview.Heading", background=PANEL_2, foreground=TEXT, font=("Microsoft YaHei UI", 9, "bold"))
+        self._configure_dark_tree_style("Review.Treeview", rowheight=26)
         columns = ("date", "league", "match", "score", "pick", "result", "hit", "confidence")
         review_tree = ttk.Treeview(table_wrap, columns=columns, show="headings", style="Review.Treeview", height=16)
         headings = {
@@ -3214,6 +3500,233 @@ class SmartMatchDashboard:
         messagebox.showinfo("\u5bfc\u51fa\u653e\u884c\u6e05\u5355", f"\u5df2\u751f\u6210\u653e\u884c\u6e05\u5355:\n{path}\n\n\u5df2\u63a5\u5165\u590d\u76d8\u56de\u6536: {marked} \u573a")
         return path
 
+    def export_strategy_policy_audit_report(self) -> tuple[Path, Path] | None:
+        policy_history = get_strategy_admission_policy_history(limit=50)
+        if not policy_history:
+            messagebox.showinfo("\u7b56\u7565\u8c03\u53c2\u5ba1\u8ba1", "\u5c1a\u65e0\u53ef\u5bfc\u51fa\u7684\u7b56\u7565\u53c2\u6570\u7248\u672c\u8bb0\u5f55\u3002")
+            return None
+        settlements = list(reversed(get_recent_settlements(limit=300)))
+        status = get_high_accuracy_strategy_status()
+        dashboard = build_high_accuracy_strategy_dashboard(status, settlements, policy_history)
+        policy_effect = dashboard.get("policy_effect_review", {}) if isinstance(dashboard.get("policy_effect_review"), dict) else {}
+        now = datetime.now()
+        REPORT_DIR.mkdir(parents=True, exist_ok=True)
+        md_path = REPORT_DIR / build_strategy_policy_audit_report_filename(now)
+        csv_path = REPORT_DIR / build_strategy_policy_audit_csv_filename(now)
+        md_path.write_text(
+            "\n".join(build_strategy_policy_audit_report_lines(policy_effect, generated_at=now)),
+            encoding="utf-8",
+        )
+        csv_path.write_text(build_strategy_policy_audit_csv_text(policy_effect), encoding="utf-8-sig")
+        self.status_var.set(f"\u7b56\u7565\u8c03\u53c2\u5ba1\u8ba1\u5df2\u5bfc\u51fa: {md_path.name}")
+        messagebox.showinfo(
+            "\u7b56\u7565\u8c03\u53c2\u5ba1\u8ba1",
+            f"\u5df2\u751f\u6210\u5ba1\u8ba1\u62a5\u544a:\n{md_path}\n\n\u660e\u7ec6CSV:\n{csv_path}",
+        )
+        return md_path, csv_path
+
+    def open_strategy_policy_audit_history(self) -> None:
+        self.current_nav_index = 4
+        self.current_view = "strategy_audit_history"
+        self._refresh_nav_highlight()
+        REPORT_DIR.mkdir(parents=True, exist_ok=True)
+        files = sorted(
+            list(REPORT_DIR.glob("strategy_policy_audit_*.md"))
+            + list(REPORT_DIR.glob("strategy_policy_audit_samples_*.csv")),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        shell = self._page_shell("\u8c03\u53c2\u5ba1\u8ba1\u5386\u53f2", f"\u62a5\u544a\u76ee\u5f55: {REPORT_DIR}")
+
+        header = tk.Frame(shell, bg=BG)
+        header.pack(fill=tk.X, pady=(0, 12))
+        tk.Button(
+            header,
+            text="\u8fd4\u56de\u7b56\u7565\u770b\u677f",
+            command=self.open_strategy_library,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=18,
+            pady=7,
+        ).pack(side=tk.RIGHT)
+        tk.Button(
+            header,
+            text="\u5bfc\u51fa\u65b0\u5ba1\u8ba1",
+            command=lambda: (self.export_strategy_policy_audit_report(), self.open_strategy_policy_audit_history()),
+            bg=BLUE,
+            fg="white",
+            activebackground="#3d5ee7",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=18,
+            pady=7,
+        ).pack(side=tk.RIGHT, padx=(0, 10))
+
+        body = tk.Frame(shell, bg=BG)
+        body.pack(fill=tk.BOTH, expand=True)
+        left = self._card(body, PANEL)
+        left.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 14))
+        right = self._card(body, PANEL)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        listbox = tk.Listbox(
+            left,
+            bg=PANEL,
+            fg=TEXT,
+            selectbackground=BLUE,
+            selectforeground="white",
+            relief=tk.FLAT,
+            width=46,
+            font=("Microsoft YaHei UI", 10),
+            activestyle="none",
+        )
+        listbox.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        preview = tk.Text(
+            right,
+            wrap=tk.WORD,
+            bg=PANEL,
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief=tk.FLAT,
+            font=("Consolas", 10),
+            padx=16,
+            pady=12,
+        )
+        preview_scroll = tk.Scrollbar(right, orient=tk.VERTICAL, command=preview.yview)
+        preview.configure(yscrollcommand=preview_scroll.set)
+        preview.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(2, 0), pady=2)
+        preview_scroll.pack(side=tk.RIGHT, fill=tk.Y, pady=2)
+
+        def show_file(index: int) -> None:
+            if index < 0 or index >= len(files):
+                return
+            path = files[index]
+            try:
+                encoding = "utf-8-sig" if path.suffix.lower() == ".csv" else "utf-8"
+                content = path.read_text(encoding=encoding)
+            except Exception as exc:
+                content = f"\u8bfb\u53d6\u5931\u8d25: {exc}"
+            preview.configure(state=tk.NORMAL)
+            preview.delete("1.0", tk.END)
+            preview.insert("1.0", content)
+            preview.configure(state=tk.DISABLED)
+            self.status_var.set(f"\u6b63\u5728\u67e5\u770b\u8c03\u53c2\u5ba1\u8ba1: {path.name}")
+
+        for path in files:
+            stamp = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+            kind = "CSV" if path.suffix.lower() == ".csv" else "MD"
+            listbox.insert(tk.END, f"{stamp}  [{kind}] {path.name}")
+
+        if files:
+            listbox.selection_set(0)
+            show_file(0)
+        else:
+            preview.insert("1.0", "\u6682\u65e0\u7b56\u7565\u8c03\u53c2\u5ba1\u8ba1\u62a5\u544a\u3002\u8bf7\u5148\u5728\u7b56\u7565\u770b\u677f\u5bfc\u51fa\u8c03\u53c2\u5ba1\u8ba1\u3002")
+            preview.configure(state=tk.DISABLED)
+
+        listbox.bind("<<ListboxSelect>>", lambda _event: show_file(listbox.curselection()[0] if listbox.curselection() else -1))
+
+    def _strategy_toolbar_button(
+        self,
+        parent: tk.Widget,
+        text: str,
+        command,
+        *,
+        primary: bool = False,
+        danger: bool = False,
+    ) -> None:
+        bg = RED if danger else BLUE if primary else PANEL_2
+        active = "#d94743" if danger else "#3d5ee7" if primary else "#172638"
+        tk.Button(
+            parent,
+            text=text,
+            command=command,
+            bg=bg,
+            fg="white" if primary or danger else TEXT,
+            activebackground=active,
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=16,
+            pady=7,
+        ).pack(side=tk.RIGHT, padx=(10, 0))
+
+    def _configure_dark_tree_style(
+        self,
+        style_name: str,
+        *,
+        master: tk.Widget | None = None,
+        rowheight: int = 28,
+    ) -> None:
+        style = ttk.Style(master)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+        heading_style = f"{style_name}.Heading"
+        style.configure(
+            style_name,
+            background=PANEL,
+            foreground=TEXT,
+            fieldbackground=PANEL,
+            rowheight=rowheight,
+            borderwidth=0,
+        )
+        style.configure(
+            heading_style,
+            background=PANEL_2,
+            foreground=TEXT,
+            fieldbackground=PANEL_2,
+            font=("Microsoft YaHei UI", 9, "bold"),
+        )
+        style.map(
+            style_name,
+            background=[("selected", BLUE), ("!selected", PANEL)],
+            foreground=[("selected", "white"), ("!selected", TEXT)],
+            fieldbackground=[("!selected", PANEL)],
+        )
+        style.map(
+            heading_style,
+            background=[("active", PANEL_2), ("!active", PANEL_2)],
+            foreground=[("active", TEXT), ("!active", TEXT)],
+        )
+
+    def _strategy_section_title(self, parent: tk.Widget, text: str, *, first: bool = False) -> None:
+        wrap = tk.Frame(parent, bg=BG)
+        wrap.pack(fill=tk.X, padx=18, pady=(2 if first else 18, 8))
+        tk.Label(wrap, text=text, bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(side=tk.LEFT)
+        tk.Frame(wrap, bg=BORDER, height=1).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(12, 0), pady=(13, 0))
+
+    def _strategy_metric_grid(self, parent: tk.Widget, metrics: object, *, columns: int = 4) -> None:
+        items = [item for item in metrics if isinstance(item, dict)] if isinstance(metrics, list) else []
+        column_count = max(1, int(columns))
+        for col in range(column_count):
+            parent.grid_columnconfigure(col, weight=1, uniform="strategy_metric")
+        for index, metric in enumerate(items):
+            row_index = index // column_count
+            col_index = index % column_count
+            frame = self._card(parent, PANEL)
+            frame.grid(row=row_index, column=col_index, sticky="ew", padx=(0, 12), pady=(0, 10))
+            label = str(metric.get("label") or "-")
+            value = str(metric.get("value") or "-")
+            color = self._tone_color(str(metric.get("tone") or "neutral"))
+            tk.Label(frame, text=label, bg=PANEL, fg=MUTED, font=("Microsoft YaHei UI", 9)).pack(anchor=tk.W, padx=14, pady=(12, 3))
+            tk.Label(
+                frame,
+                text=value,
+                bg=PANEL,
+                fg=color,
+                font=("Microsoft YaHei UI", 14, "bold"),
+                wraplength=185,
+                justify=tk.LEFT,
+            ).pack(anchor=tk.W, padx=14, pady=(0, 12))
+
     def apply_strategy_allowlist_tuning(self, tuning: dict | object) -> None:
         if not isinstance(tuning, dict):
             messagebox.showinfo("\u653e\u884c\u95e8\u69db", "\u5f53\u524d\u6ca1\u6709\u53ef\u5e94\u7528\u7684\u95e8\u69db\u5efa\u8bae\u3002")
@@ -3245,6 +3758,241 @@ class SmartMatchDashboard:
         messagebox.showinfo("\u653e\u884c\u95e8\u69db", "\u95e8\u69db\u5df2\u5199\u5165\u672c\u5730\u914d\u7f6e\uff0c\u540e\u7eed\u5206\u6790\u5c06\u6309\u65b0\u51c6\u5165\u7b56\u7565\u6267\u884c\u3002")
         self.open_strategy_library()
 
+    def apply_agent_replay_guard_tuning(self, tuning: dict | object) -> None:
+        if not isinstance(tuning, dict):
+            messagebox.showinfo("Replay Guard", "\u5f53\u524d\u6ca1\u6709\u53ef\u5e94\u7528\u7684 Replay Guard \u5efa\u8bae\u3002")
+            return
+        if str(tuning.get("action") or "") not in {"tighten_guard", "loosen_guard"}:
+            messagebox.showinfo("Replay Guard", f"\u5f53\u524d\u5efa\u8bae\u4e3a: {tuning.get('label', '-')}\n\u4e0d\u9700\u8981\u5199\u5165\u65b0\u53c2\u6570\u3002")
+            return
+        update = tuning.get("policy_update") if isinstance(tuning.get("policy_update"), dict) else {}
+        if not update:
+            messagebox.showinfo("Replay Guard", "\u5efa\u8bae\u4e2d\u6ca1\u6709\u53ef\u5199\u5165\u7684 Replay Guard \u53c2\u6570\u3002")
+            return
+        current = get_strategy_admission_policy_status().get("policy", {})
+        reason_text = "\n".join(str(item) for item in tuning.get("reasons", []) if item) if isinstance(tuning.get("reasons"), list) else "-"
+        confirm = messagebox.askyesno(
+            "\u5e94\u7528 Replay Guard \u8c03\u53c2",
+            (
+                f"\u5c06\u5199\u5165\u672c\u5730 Replay Guard \u51c6\u5165\u53c2\u6570:\n\n"
+                f"\u6700\u5c0f\u6837\u672c: {int(current.get('agent_replay_min_samples', 5) or 5)} -> {int(update.get('agent_replay_min_samples', 5) or 5)}\n"
+                f"1X2\u5931\u8bef\u7ebf: {float(current.get('agent_replay_prediction_miss_threshold', 0.55) or 0.55):.2f} -> {float(update.get('agent_replay_prediction_miss_threshold', 0.55) or 0.55):.2f}\n"
+                f"\u8ba9\u7403\u5931\u8bef\u7ebf: {float(current.get('agent_replay_handicap_miss_threshold', 0.60) or 0.60):.2f} -> {float(update.get('agent_replay_handicap_miss_threshold', 0.60) or 0.60):.2f}\n\n"
+                f"\u539f\u56e0:\n{reason_text}\n\n\u786e\u8ba4\u540e\uff0c\u540e\u7eed\u5206\u6790\u4f1a\u6309\u65b0 Replay Guard \u95e8\u69db\u5224\u5b9a\u662f\u5426\u964d\u7ea7\u4e3a\u89c2\u5bdf\u3002"
+            ),
+        )
+        if not confirm:
+            return
+        status = apply_strategy_admission_policy_update(update, source="agent_replay_guard_tuning")
+        policy = status.get("policy", {}) if isinstance(status.get("policy"), dict) else {}
+        self.status_var.set(
+            "Replay Guard \u53c2\u6570\u5df2\u5e94\u7528: "
+            f"samples={int(policy.get('agent_replay_min_samples', 5) or 5)}, "
+            f"1X2={float(policy.get('agent_replay_prediction_miss_threshold', 0) or 0):.2f}, "
+            f"handicap={float(policy.get('agent_replay_handicap_miss_threshold', 0) or 0):.2f}"
+        )
+        messagebox.showinfo("Replay Guard", "Replay Guard \u8c03\u53c2\u5df2\u5199\u5165\u672c\u5730\u914d\u7f6e\uff0c\u540e\u7eed\u5206\u6790\u5c06\u6309\u65b0\u53c2\u6570\u6267\u884c\u3002")
+        self.open_strategy_library()
+
+    def rollback_latest_strategy_policy(self) -> None:
+        history = get_strategy_admission_policy_history(limit=1)
+        if not history:
+            messagebox.showinfo("\u7b56\u7565\u53c2\u6570\u56de\u6eda", "\u5c1a\u65e0\u53ef\u56de\u6eda\u7684\u53c2\u6570\u7248\u672c\u3002")
+            return
+        latest = history[0]
+        previous = latest.get("previous_policy") if isinstance(latest.get("previous_policy"), dict) else {}
+        if not previous:
+            messagebox.showinfo("\u7b56\u7565\u53c2\u6570\u56de\u6eda", "\u6700\u8fd1\u4e00\u6b21\u8c03\u53c2\u6ca1\u6709\u53ef\u6062\u590d\u7684\u4e0a\u4e00\u7248\u53c2\u6570\u3002")
+            return
+        confirm = messagebox.askyesno(
+            "\u56de\u6eda\u4e0a\u4e00\u7248\u7b56\u7565\u53c2\u6570",
+            (
+                f"\u5c06\u56de\u6eda\u6700\u8fd1\u4e00\u6b21\u8c03\u53c2:\n\n"
+                f"\u7248\u672c: {latest.get('version_id', '-')}\n"
+                f"\u6765\u6e90: {latest.get('source', '-')}\n"
+                f"\u65f6\u95f4: {latest.get('updated_at', '-')}\n\n"
+                "\u786e\u8ba4\u540e\uff0c\u540e\u7eed\u5206\u6790\u4f1a\u6062\u590d\u4e3a\u8be5\u6b21\u8c03\u53c2\u524d\u7684\u51c6\u5165\u53c2\u6570\u3002"
+            ),
+        )
+        if not confirm:
+            return
+        status = rollback_strategy_admission_policy()
+        policy = status.get("policy", {}) if isinstance(status.get("policy"), dict) else {}
+        self.status_var.set(
+            f"\u7b56\u7565\u53c2\u6570\u5df2\u56de\u6eda: min={float(policy.get('min_confidence', 0) or 0):.2f}, "
+            f"Replay={int(policy.get('agent_replay_min_samples', 5) or 5)}"
+        )
+        messagebox.showinfo("\u7b56\u7565\u53c2\u6570\u56de\u6eda", "\u5df2\u6062\u590d\u4e0a\u4e00\u7248\u7b56\u7565\u53c2\u6570\u3002")
+        self.open_strategy_library()
+
+    def open_policy_effect_detail_window(self, policy_effect: dict | object) -> None:
+        review = policy_effect if isinstance(policy_effect, dict) else {}
+        rows = review.get("rows", []) if isinstance(review.get("rows"), list) else []
+        window = tk.Toplevel(self.root)
+        window.title("\u53c2\u6570\u751f\u6548\u590d\u76d8\u8be6\u60c5")
+        window.configure(bg=BG)
+        window.geometry("1080x680")
+        header = tk.Frame(window, bg=BG)
+        header.pack(fill=tk.X, padx=16, pady=(14, 8))
+        tk.Label(
+            header,
+            text=f"\u53c2\u6570\u751f\u6548\u590d\u76d8 | {review.get('summary_text', '-')}",
+            bg=BG,
+            fg=TEXT,
+            font=("Microsoft YaHei UI", 14, "bold"),
+        ).pack(anchor=tk.W)
+        tk.Label(
+            header,
+            text="\u9009\u62e9\u4e0a\u65b9\u7248\u672c\u884c\uff0c\u4e0b\u65b9\u67e5\u770b\u8be5\u53c2\u6570\u751f\u6548\u671f\u95f4\u7684\u5177\u4f53\u8d5b\u4e8b\u6837\u672c\u3002",
+            bg=BG,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 10),
+        ).pack(anchor=tk.W, pady=(4, 0))
+        diagnostic_bar = tk.Frame(window, bg=PANEL_2, highlightbackground="#172638", highlightthickness=1)
+        diagnostic_bar.pack(fill=tk.X, padx=16, pady=(0, 10))
+        diagnostic_var = tk.StringVar(value="\u8bf7\u9009\u62e9\u4e00\u4e2a\u53c2\u6570\u7248\u672c\u67e5\u770b\u8bca\u65ad\u3002")
+        diagnostic_label = tk.Label(
+            diagnostic_bar,
+            textvariable=diagnostic_var,
+            bg=PANEL_2,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 10),
+            justify=tk.LEFT,
+            wraplength=780,
+        )
+        diagnostic_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=12, pady=9)
+        rollback_button = tk.Button(
+            diagnostic_bar,
+            text="\u56de\u6eda\u4e0a\u4e00\u7248",
+            command=lambda: (window.destroy(), self.rollback_latest_strategy_policy()),
+            bg=RED,
+            fg="white",
+            activebackground="#d94743",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=14,
+            pady=6,
+            state=tk.DISABLED,
+        )
+        rollback_button.pack(side=tk.RIGHT, padx=12, pady=8)
+
+        panes = tk.PanedWindow(window, orient=tk.VERTICAL, bg=BG, sashwidth=5, bd=0)
+        panes.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 16))
+
+        version_frame = tk.Frame(panes, bg=BG)
+        sample_frame = tk.Frame(panes, bg=BG)
+        panes.add(version_frame, minsize=180)
+        panes.add(sample_frame, minsize=260)
+
+        self._configure_dark_tree_style("PolicyEffect.Treeview", master=window, rowheight=28)
+
+        version_columns = ("version", "time", "source", "status", "samples", "allow", "replay", "action")
+        version_tree = ttk.Treeview(version_frame, columns=version_columns, show="headings", style="PolicyEffect.Treeview", height=7)
+        headings = {
+            "version": "\u7248\u672c",
+            "time": "\u8c03\u53c2\u65f6\u95f4",
+            "source": "\u6765\u6e90",
+            "status": "\u6548\u679c",
+            "samples": "\u6837\u672c",
+            "allow": "\u653e\u884c\u547d\u4e2d",
+            "replay": "Replay\u51c0\u503c",
+            "action": "\u5efa\u8bae",
+        }
+        widths = {"version": 135, "time": 145, "source": 155, "status": 100, "samples": 65, "allow": 95, "replay": 80, "action": 130}
+        for col in version_columns:
+            version_tree.heading(col, text=headings[col])
+            version_tree.column(col, width=widths[col], anchor=tk.W, stretch=True)
+        version_scroll = tk.Scrollbar(version_frame, orient=tk.VERTICAL, command=version_tree.yview)
+        version_tree.configure(yscrollcommand=version_scroll.set)
+        version_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        version_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        sample_columns = ("time", "match", "decision", "prediction", "handicap", "replay", "agent", "net", "reason")
+        sample_tree = ttk.Treeview(sample_frame, columns=sample_columns, show="headings", style="PolicyEffect.Treeview", height=13)
+        sample_headings = {
+            "time": "\u65f6\u95f4",
+            "match": "\u8d5b\u4e8b",
+            "decision": "\u51c6\u5165",
+            "prediction": "1X2",
+            "handicap": "\u8ba9\u7403",
+            "replay": "Replay",
+            "agent": "Agent",
+            "net": "\u51c0\u503c\u8d21\u732e",
+            "reason": "\u5f71\u54cd\u539f\u56e0",
+        }
+        sample_widths = {"time": 130, "match": 255, "decision": 70, "prediction": 60, "handicap": 60, "replay": 70, "agent": 105, "net": 70, "reason": 220}
+        for col in sample_columns:
+            sample_tree.heading(col, text=sample_headings[col])
+            sample_tree.column(col, width=sample_widths[col], anchor=tk.W, stretch=True)
+        sample_scroll = tk.Scrollbar(sample_frame, orient=tk.VERTICAL, command=sample_tree.yview)
+        sample_tree.configure(yscrollcommand=sample_scroll.set)
+        sample_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sample_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        row_by_iid: dict[str, dict] = {}
+        for index, row in enumerate(rows):
+            if not isinstance(row, dict):
+                continue
+            iid = str(index)
+            row_by_iid[iid] = row
+            version_tree.insert(
+                "",
+                tk.END,
+                iid=iid,
+                values=(
+                    row.get("version_id", "-"),
+                    row.get("updated_at", "-"),
+                    row.get("source", "-"),
+                    row.get("effect_label", "-"),
+                    row.get("sample_count", 0),
+                    row.get("allow_hit_rate_text", "-"),
+                    f"{int(row.get('replay_guard_net', 0) or 0):+d}",
+                    (row.get("negative_diagnostics", {}) if isinstance(row.get("negative_diagnostics"), dict) else {}).get("action_label", "-"),
+                ),
+            )
+
+        def show_samples(row: dict | None) -> None:
+            for item in sample_tree.get_children():
+                sample_tree.delete(item)
+            sample_rows = row.get("sample_rows", []) if isinstance(row, dict) and isinstance(row.get("sample_rows"), list) else []
+            diagnostics = row.get("negative_diagnostics", {}) if isinstance(row, dict) and isinstance(row.get("negative_diagnostics"), dict) else {}
+            if isinstance(row, dict):
+                diagnostic_var.set(str(diagnostics.get("summary_text") or row.get("body") or "-"))
+                is_latest = rows and isinstance(rows[0], dict) and row.get("version_id") == rows[0].get("version_id")
+                rollback_button.configure(state=tk.NORMAL if is_latest and bool(diagnostics.get("rollback_recommended")) else tk.DISABLED)
+            else:
+                diagnostic_var.set("\u8bf7\u9009\u62e9\u4e00\u4e2a\u53c2\u6570\u7248\u672c\u67e5\u770b\u8bca\u65ad\u3002")
+                rollback_button.configure(state=tk.DISABLED)
+            for sample in sample_rows:
+                if not isinstance(sample, dict):
+                    continue
+                sample_tree.insert(
+                    "",
+                    tk.END,
+                    values=(
+                        sample.get("time", "-"),
+                        sample.get("title", "-"),
+                        sample.get("decision", "-"),
+                        sample.get("prediction_result", "-"),
+                        sample.get("handicap_result", "-"),
+                        sample.get("replay_guard", "-"),
+                        sample.get("replay_agent", "-"),
+                        f"{int(sample.get('replay_net_hint', 0) or 0):+d}",
+                        sample.get("drag_reason_text", "-"),
+                    ),
+                )
+
+        def on_select(_event=None) -> None:
+            selected = version_tree.selection()
+            show_samples(row_by_iid.get(selected[0]) if selected else None)
+
+        version_tree.bind("<<TreeviewSelect>>", on_select)
+        children = version_tree.get_children()
+        if children:
+            version_tree.selection_set(children[0])
+            show_samples(row_by_iid.get(children[0]))
+
     def open_strategy_library(self) -> None:
         self.current_nav_index = 4
         self.current_view = "strategy"
@@ -3253,7 +4001,8 @@ class SmartMatchDashboard:
         admission_status = get_strategy_admission_policy_status()
         admission_policy = admission_status.get("policy", {}) if isinstance(admission_status.get("policy"), dict) else {}
         settlements = list(reversed(get_recent_settlements(limit=200)))
-        dashboard = build_high_accuracy_strategy_dashboard(status, settlements)
+        policy_history = get_strategy_admission_policy_history(limit=20)
+        dashboard = build_high_accuracy_strategy_dashboard(status, settlements, policy_history)
         release_pool_rows = self._strategy_release_pool_rows(settlements)
         shell = self._page_shell(
             "\u7b56\u7565\u770b\u677f",
@@ -3261,58 +4010,55 @@ class SmartMatchDashboard:
         )
 
         header = tk.Frame(shell, bg=BG)
-        header.pack(fill=tk.X, pady=(0, 12))
+        header.pack(fill=tk.X, pady=(0, 8))
         tk.Label(
             header,
             text=(
                 f"\u72b6\u6001: {'ON' if dashboard.get('enabled') else 'OFF'} | \u66f4\u65b0: {dashboard.get('updated_at', '-')} | "
                 f"\u51c6\u5165 min={float(admission_policy.get('min_confidence', 0.5) or 0.5):.2f} / "
                 f"\u9ad8\u51c6\u6570 {int(admission_policy.get('active_strategy_min', 1) or 1)} / "
-                f"\u4e2d\u98ce\u9669 {'ON' if admission_policy.get('medium_risk_allowed', True) else 'OFF'}"
+                f"\u4e2d\u98ce\u9669 {'ON' if admission_policy.get('medium_risk_allowed', True) else 'OFF'} / "
+                f"Replay {int(admission_policy.get('agent_replay_min_samples', 5) or 5)}@"
+                f"{float(admission_policy.get('agent_replay_prediction_miss_threshold', 0.55) or 0.55):.2f}/"
+                f"{float(admission_policy.get('agent_replay_handicap_miss_threshold', 0.60) or 0.60):.2f}"
             ),
             bg=BG,
             fg=MUTED,
             font=("Microsoft YaHei UI", 10),
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        primary_tools = tk.Frame(shell, bg=BG)
+        primary_tools.pack(fill=tk.X, pady=(0, 6))
+        self._strategy_toolbar_button(primary_tools, "\u5237\u65b0\u770b\u677f", self.open_strategy_library)
+        self._strategy_toolbar_button(primary_tools, "\u5bfc\u51fa\u653e\u884c\u6e05\u5355", self.export_strategy_allowlist, primary=True)
+        self._strategy_toolbar_button(
+            primary_tools,
+            "\u5e94\u7528Replay\u5efa\u8bae",
+            lambda tuning=dashboard.get("agent_replay_guard_tuning", {}): self.apply_agent_replay_guard_tuning(tuning),
+        )
+        self._strategy_toolbar_button(
+            primary_tools,
+            "\u5e94\u7528\u95e8\u69db\u5efa\u8bae",
+            lambda tuning=dashboard.get("allowlist_tuning", {}): self.apply_strategy_allowlist_tuning(tuning),
+        )
+
+        audit_tools = tk.Frame(shell, bg=BG)
+        audit_tools.pack(fill=tk.X, pady=(0, 12))
+        self._strategy_toolbar_button(audit_tools, "\u5ba1\u8ba1\u5386\u53f2", self.open_strategy_policy_audit_history)
+        self._strategy_toolbar_button(audit_tools, "\u5bfc\u51fa\u8c03\u53c2\u5ba1\u8ba1", self.export_strategy_policy_audit_report)
+        self._strategy_toolbar_button(
+            audit_tools,
+            "\u751f\u6548\u8be6\u60c5",
+            lambda review=dashboard.get("policy_effect_review", {}): self.open_policy_effect_detail_window(review),
+        )
+        self._strategy_toolbar_button(audit_tools, "\u56de\u6eda\u4e0a\u4e00\u7248", self.rollback_latest_strategy_policy, danger=True)
+        tk.Label(
+            audit_tools,
+            text="\u53c2\u6570\u5ba1\u8ba1\u4e0e\u56de\u6eda",
+            bg=BG,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 10),
         ).pack(side=tk.LEFT)
-        tk.Button(
-            header,
-            text="\u5e94\u7528\u95e8\u69db\u5efa\u8bae",
-            command=lambda tuning=dashboard.get("allowlist_tuning", {}): self.apply_strategy_allowlist_tuning(tuning),
-            bg=PANEL_2,
-            fg=TEXT,
-            activebackground="#172638",
-            activeforeground="white",
-            relief=tk.FLAT,
-            font=("Microsoft YaHei UI", 10, "bold"),
-            padx=18,
-            pady=7,
-        ).pack(side=tk.RIGHT, padx=(10, 0))
-        tk.Button(
-            header,
-            text="\u5bfc\u51fa\u653e\u884c\u6e05\u5355",
-            command=self.export_strategy_allowlist,
-            bg=BLUE,
-            fg="white",
-            activebackground="#3d5ee7",
-            activeforeground="white",
-            relief=tk.FLAT,
-            font=("Microsoft YaHei UI", 10, "bold"),
-            padx=18,
-            pady=7,
-        ).pack(side=tk.RIGHT, padx=(10, 0))
-        tk.Button(
-            header,
-            text="\u5237\u65b0\u770b\u677f",
-            command=self.open_strategy_library,
-            bg=PANEL_2,
-            fg=TEXT,
-            activebackground="#172638",
-            activeforeground="white",
-            relief=tk.FLAT,
-            font=("Microsoft YaHei UI", 10, "bold"),
-            padx=18,
-            pady=7,
-        ).pack(side=tk.RIGHT)
 
         scroll_wrap = tk.Frame(shell, bg=BG)
         scroll_wrap.pack(fill=tk.BOTH, expand=True)
@@ -3328,11 +4074,7 @@ class SmartMatchDashboard:
 
         top = tk.Frame(content, bg=BG)
         top.pack(fill=tk.X, pady=(0, 16))
-        for metric in dashboard.get("metrics", []):
-            if not isinstance(metric, dict):
-                continue
-            color = self._tone_color(str(metric.get("tone") or "neutral"))
-            self._detail_metric(top, str(metric.get("label") or "-"), str(metric.get("value") or "-"), color)
+        self._strategy_metric_grid(top, dashboard.get("metrics", []), columns=4)
 
         body = tk.Frame(content, bg=BG)
         body.pack(fill=tk.BOTH, expand=True)
@@ -3341,7 +4083,7 @@ class SmartMatchDashboard:
         right = tk.Frame(body, bg=BG)
         right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        tk.Label(left, text="\u5f53\u524d\u7b56\u7565\u6c60", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(2, 8))
+        self._strategy_section_title(left, "\u5f53\u524d\u7b56\u7565\u6c60", first=True)
         pool_rows = dashboard.get("pool_rows", [])
         if pool_rows:
             for row in pool_rows:
@@ -3351,7 +4093,7 @@ class SmartMatchDashboard:
             self._strategy_row(left, "\u6682\u65e0\u53ef\u7528\u7b56\u7565", "\u8bf7\u5148\u6267\u884c\u9ad8\u51c6\u7b56\u7565\u56de\u6d4b\uff0c\u8ba9\u7cfb\u7edf\u4ece\u5386\u53f2\u6837\u672c\u4e2d\u751f\u6210\u7b56\u7565\u6c60\u3002")
 
         jc_feedback = dashboard.get("jc_bucket_feedback", {}) if isinstance(dashboard.get("jc_bucket_feedback"), dict) else {}
-        tk.Label(left, text="JC\u7a33\u5b9a\u6876\u5b9e\u76d8\u6392\u540d", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
+        self._strategy_section_title(left, "JC\u7a33\u5b9a\u6876\u5b9e\u76d8\u6392\u540d")
         jc_rows = jc_feedback.get("rows", []) if isinstance(jc_feedback.get("rows"), list) else []
         if jc_rows:
             for row in jc_rows:
@@ -3360,11 +4102,11 @@ class SmartMatchDashboard:
         else:
             self._strategy_row(left, "\u6682\u65e0JC\u6876\u5b9e\u76d8\u7edf\u8ba1", "\u5f53\u7ade\u5f69\u7a33\u5b9a\u6876\u7b56\u7565\u5b8c\u6210\u8d5b\u679c\u56de\u6536\u540e\uff0c\u8fd9\u91cc\u4f1a\u663e\u793a\u5404\u6876\u7684\u5b9e\u76d8\u547d\u4e2d\u3001\u504f\u5dee\u548c\u964d\u7ea7\u72b6\u6001\u3002")
 
-        tk.Label(left, text="\u56de\u6d4b\u4e0e\u6837\u672c", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
+        self._strategy_section_title(left, "\u56de\u6d4b\u4e0e\u6837\u672c")
         for label, value in dashboard.get("validation_rows", []):
             self._strategy_row(left, str(label), str(value))
 
-        tk.Label(right, text="\u771f\u5b9e\u7ed3\u7b97\u53cd\u9988", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(2, 8))
+        self._strategy_section_title(right, "\u771f\u5b9e\u7ed3\u7b97\u53cd\u9988", first=True)
         settlement_rows = dashboard.get("settlement_rows", [])
         if settlement_rows:
             for row in settlement_rows:
@@ -3374,7 +4116,7 @@ class SmartMatchDashboard:
             self._strategy_row(right, "\u5c1a\u65e0\u547d\u4e2d\u53cd\u9988", "\u8fd1\u671f\u7ed3\u7b97\u4e2d\u8fd8\u6ca1\u6709\u8bb0\u5f55\u5230\u9ad8\u51c6\u7b56\u7565\u547d\u4e2d\u9879\u3002\u540e\u7eed\u8d5b\u679c\u56de\u6536\u540e\u4f1a\u5728\u8fd9\u91cc\u663e\u793a\u3002")
 
         error_attribution = dashboard.get("error_attribution", {}) if isinstance(dashboard.get("error_attribution"), dict) else {}
-        tk.Label(right, text="\u7b56\u7565\u9519\u56e0\u5f52\u7c7b", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
+        self._strategy_section_title(right, "\u7b56\u7565\u9519\u56e0\u5f52\u7c7b")
         self._strategy_row(
             right,
             f"\u4e3b\u8981\u9519\u56e0: {error_attribution.get('top_reason', '-')}",
@@ -3384,8 +4126,110 @@ class SmartMatchDashboard:
             if isinstance(row, dict):
                 self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
 
+        agent_trace_replay = dashboard.get("agent_trace_replay", {}) if isinstance(dashboard.get("agent_trace_replay"), dict) else {}
+        self._strategy_section_title(right, "Agent Replay 复盘")
+        self._strategy_row(
+            right,
+            f"最高关联: {agent_trace_replay.get('top_agent', '-')} | {agent_trace_replay.get('summary_text', '-')}",
+            f"主要动作: {agent_trace_replay.get('top_action', '-')}",
+        )
+        for row in agent_trace_replay.get("rows", []) if isinstance(agent_trace_replay.get("rows"), list) else []:
+            if isinstance(row, dict):
+                self._strategy_row(
+                    right,
+                    f"{row.get('agent', '-')} | 触发 {row.get('trigger_count', 0)} | alert {row.get('alert_count', 0)} / watch {row.get('watch_count', 0)}",
+                    (
+                        f"胜平负失误 {row.get('prediction_miss_rate_text', '-')} | "
+                        f"让球失误 {row.get('handicap_miss_rate_text', '-')} | "
+                        f"主要动作 {row.get('top_action', '-')}"
+                    ),
+                )
+
+        replay_downgrade = dashboard.get("agent_replay_downgrade", {}) if isinstance(dashboard.get("agent_replay_downgrade"), dict) else {}
+        self._strategy_section_title(right, "Agent Replay 降级回测")
+        self._strategy_row(
+            right,
+            f"{replay_downgrade.get('recommendation', '-')}: {replay_downgrade.get('summary_text', '-')}",
+            str(replay_downgrade.get("recommendation_text") or "-"),
+        )
+        for row in replay_downgrade.get("rows", []) if isinstance(replay_downgrade.get("rows"), list) else []:
+            if isinstance(row, dict):
+                self._strategy_row(
+                    right,
+                    f"{row.get('agent', '-')} | 样本 {row.get('count', 0)} | 净值 {row.get('prediction_net', 0)}/{row.get('handicap_net', 0)}",
+                    (
+                        f"1X2避错 {row.get('prediction_avoided_misses', 0)} / 成本 {row.get('prediction_opportunity_cost', 0)} | "
+                        f"让球避错 {row.get('handicap_avoided_misses', 0)} / 成本 {row.get('handicap_opportunity_cost', 0)} | "
+                        f"主要动作 {row.get('top_action', '-')}"
+                    ),
+                )
+
+        replay_tuning = dashboard.get("agent_replay_guard_tuning", {}) if isinstance(dashboard.get("agent_replay_guard_tuning"), dict) else {}
+        self._strategy_section_title(right, "Replay Guard \u8c03\u53c2\u5efa\u8bae")
+        tuning_rows = replay_tuning.get("rows", []) if isinstance(replay_tuning.get("rows"), list) else []
+        tuning_body = "\n".join(f"{label}: {value}" for label, value in tuning_rows if isinstance(label, str)) if tuning_rows else "-"
+        tuning_net = replay_tuning.get("net", 0)
+        self._strategy_row(
+            right,
+            f"{replay_tuning.get('label', '-')} | \u51c0\u503c {int(tuning_net):+d}" if isinstance(tuning_net, int) else str(replay_tuning.get("label", "-")),
+            tuning_body,
+        )
+
+        policy_effect = dashboard.get("policy_effect_review", {}) if isinstance(dashboard.get("policy_effect_review"), dict) else {}
+        self._strategy_section_title(right, "\u53c2\u6570\u751f\u6548\u590d\u76d8")
+        self._strategy_row(
+            right,
+            str(policy_effect.get("latest_label") or "-"),
+            f"{policy_effect.get('summary_text', '-')}\n\u70b9\u51fb\u67e5\u770b\u7248\u672c\u4e0e\u8d5b\u4e8b\u660e\u7ec6",
+            command=lambda review=policy_effect: self.open_policy_effect_detail_window(review),
+        )
+        for row in policy_effect.get("rows", []) if isinstance(policy_effect.get("rows"), list) else []:
+            if isinstance(row, dict):
+                self._strategy_row(
+                    right,
+                    str(row.get("title") or "-"),
+                    f"{row.get('body', '-')}\n\u70b9\u51fb\u67e5\u770b\u8be5\u7248\u672c\u6837\u672c",
+                    command=lambda review=policy_effect: self.open_policy_effect_detail_window(review),
+                )
+
+        entropy_backtest = dashboard.get("market_entropy_backtest", {}) if isinstance(dashboard.get("market_entropy_backtest"), dict) else {}
+        self._strategy_section_title(right, "MarketEntropy 避险回测")
+        self._strategy_row(
+            right,
+            f"{entropy_backtest.get('recommendation', '-')}: {entropy_backtest.get('summary_text', '-')}",
+            str(entropy_backtest.get("recommendation_text") or "-"),
+        )
+        for row in entropy_backtest.get("rows", []) if isinstance(entropy_backtest.get("rows"), list) else []:
+            if isinstance(row, dict):
+                self._strategy_row(
+                    right,
+                    f"{row.get('label', '-')} | 样本 {row.get('count', 0)} | 命中 {row.get('hit_rate_text', '-')}",
+                    (
+                        f"失误率 {row.get('miss_rate_text', '-')} | 平均熵值 {row.get('avg_score_text', '-')} | "
+                        f"风险覆盖 {row.get('risk_applied_count', 0)} | 主要信号 {row.get('top_signal', '-')}"
+                    ),
+                )
+
+        handicap_margin_backtest = dashboard.get("handicap_margin_backtest", {}) if isinstance(dashboard.get("handicap_margin_backtest"), dict) else {}
+        self._strategy_section_title(right, "Handicap Margin 回测")
+        self._strategy_row(
+            right,
+            f"{handicap_margin_backtest.get('recommendation', '-')}: {handicap_margin_backtest.get('summary_text', '-')}",
+            str(handicap_margin_backtest.get("recommendation_text") or "-"),
+        )
+        for row in handicap_margin_backtest.get("rows", []) if isinstance(handicap_margin_backtest.get("rows"), list) else []:
+            if isinstance(row, dict):
+                self._strategy_row(
+                    right,
+                    f"{row.get('label', '-')} | 样本 {row.get('count', 0)} | 让球命中 {row.get('hit_rate_text', '-')}",
+                    (
+                        f"让球失误率 {row.get('miss_rate_text', '-')} | 平均分 {row.get('avg_score_text', '-')} | "
+                        f"主要信号 {row.get('top_signal', '-')}"
+                    ),
+                )
+
         evaluation_agent = dashboard.get("evaluation_agent", {}) if isinstance(dashboard.get("evaluation_agent"), dict) else {}
-        tk.Label(right, text="Evaluation Agent", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
+        self._strategy_section_title(right, "Evaluation Agent")
         self._strategy_row(
             right,
             f"{evaluation_agent.get('status', '-')} / score {evaluation_agent.get('score', '-')}",
@@ -3396,7 +4240,7 @@ class SmartMatchDashboard:
                 self._strategy_row(right, str(item.get("title") or "-"), str(item.get("body") or "-"))
 
         allowlist_summary = dashboard.get("allowlist_settlement_summary", {}) if isinstance(dashboard.get("allowlist_settlement_summary"), dict) else {}
-        tk.Label(right, text="\u653e\u884c\u590d\u76d8\u7edf\u8ba1", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
+        self._strategy_section_title(right, "\u653e\u884c\u590d\u76d8\u7edf\u8ba1")
         self._strategy_row(
             right,
             f"\u653e\u884c\u547d\u4e2d: {allowlist_summary.get('hit_rate_text', '-')} | \u6837\u672c {allowlist_summary.get('known_count', 0)}",
@@ -3418,7 +4262,7 @@ class SmartMatchDashboard:
                 if isinstance(row, dict):
                     self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
 
-        tk.Label(right, text="\u6b63\u5f0f\u653e\u884c\u5f85\u590d\u76d8\u6c60", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
+        self._strategy_section_title(right, "\u6b63\u5f0f\u653e\u884c\u5f85\u590d\u76d8\u6c60")
         if release_pool_rows:
             for title, body_text in release_pool_rows:
                 self._strategy_row(right, title, body_text)
@@ -3429,18 +4273,19 @@ class SmartMatchDashboard:
                 "\u5237\u65b0\u5e76\u5206\u6790\u8d5b\u4e8b\u540e\uff0c\u7b56\u7565\u51c6\u5165\u4e3a\u6b63\u5f0f\u653e\u884c\u7684\u573a\u6b21\u4f1a\u5728\u8fd9\u91cc\u5f62\u6210\u5f85\u590d\u76d8\u6c60\u3002",
             )
 
-        tk.Label(right, text="\u4f7f\u7528\u5efa\u8bae", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
+        self._strategy_section_title(right, "\u4f7f\u7528\u5efa\u8bae")
         for row in dashboard.get("guidance_rows", []):
             if isinstance(row, dict):
                 self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
 
-        tk.Label(right, text="当前准入清单", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
+        self._strategy_section_title(right, "当前准入清单")
         admission_rows = self._strategy_admission_rows()
         if admission_rows:
             for title, body_text in admission_rows:
                 self._strategy_row(right, title, body_text)
         else:
             self._strategy_row(right, "暂无准入结果", "加载并分析赛事后，这里会显示正式放行、观察和阻断清单。")
+        self._bind_canvas_mousewheel(content, canvas)
 
     def _strategy_release_pool_rows(self, settlements: list[dict] | None = None, limit: int = 10) -> list[tuple[str, str]]:
         snapshots = _load_prediction_snapshot_records()
@@ -3470,11 +4315,15 @@ class SmartMatchDashboard:
             items.append((title, body))
         return items
 
-    def _strategy_row(self, parent: tk.Widget, title: str, body: str) -> None:
+    def _strategy_row(self, parent: tk.Widget, title: str, body: str, command=None) -> None:
         frame = tk.Frame(parent, bg=PANEL_2, highlightbackground="#172638", highlightthickness=1)
         frame.pack(fill=tk.X, padx=18, pady=6)
-        tk.Label(frame, text=title, bg=PANEL_2, fg=TEXT, font=("Microsoft YaHei UI", 11, "bold")).pack(anchor=tk.W, padx=14, pady=(10, 3))
-        tk.Label(
+        if command:
+            frame.configure(cursor="hand2")
+            frame.bind("<Button-1>", lambda _event: command())
+        title_label = tk.Label(frame, text=title, bg=PANEL_2, fg=TEXT, font=("Microsoft YaHei UI", 11, "bold"))
+        title_label.pack(anchor=tk.W, padx=14, pady=(10, 3))
+        body_label = tk.Label(
             frame,
             text=body,
             bg=PANEL_2,
@@ -3482,7 +4331,13 @@ class SmartMatchDashboard:
             font=("Microsoft YaHei UI", 9),
             justify=tk.LEFT,
             wraplength=350,
-        ).pack(anchor=tk.W, padx=14, pady=(0, 10))
+        )
+        body_label.pack(anchor=tk.W, padx=14, pady=(0, 10))
+        if command:
+            title_label.configure(cursor="hand2")
+            body_label.configure(cursor="hand2")
+            title_label.bind("<Button-1>", lambda _event: command())
+            body_label.bind("<Button-1>", lambda _event: command())
 
     def _strategy_admission_rows(self, limit: int = 12) -> list[tuple[str, str]]:
         order = {"allow": 0, "observe": 1, "block": 2}
@@ -3499,6 +4354,7 @@ class SmartMatchDashboard:
             reason_text = format_strategy_admission_reasons(admission, limit=4)
             threshold_text = format_strategy_admission_thresholds(admission)
             pick_text = format_strategy_admission_pick(admission)
+            replay_guard_text = format_strategy_admission_replay_guard(admission)
             title = f"{_admission_text(row.prediction)} | {row.match.league} | {row.match.home_team} vs {row.match.away_team}"
             body = (
                 f"推荐: {_strategy_text(row.prediction)} | 风险 {_risk_label(row.prediction.get('risk_level'))} | 置信 {_pct1(row.prediction.get('confidence'))}\n"
@@ -3507,6 +4363,8 @@ class SmartMatchDashboard:
                 f"原因: {reason_text}\n"
                 f"门槛: {threshold_text}"
             )
+            if replay_guard_text != "-":
+                body += f"\nAgent Replay: {replay_guard_text}"
             items.append((title, body))
         return items
 

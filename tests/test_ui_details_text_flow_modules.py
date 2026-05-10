@@ -126,6 +126,65 @@ class UIDetailsTextFlowModuleTests(unittest.TestCase):
             "xgb_model_ready": True,
             "elo": {"home_rating": 1520.1, "home_score": 61.2, "away_rating": 1498.4, "away_score": 58.7, "rating_diff": 21.7},
             "indices": {"upset_index": 0.11, "stability_index": 0.67, "confidence_index": 0.62},
+            "market_entropy": {
+                "level": "HIGH",
+                "score": 0.72,
+                "signals": ["market_steam_against_pick", "kelly_against_pick"],
+                "odds_slope": {"home": -0.05, "draw": 0.01, "away": 0.08},
+                "sequence": {
+                    "sample_count": 3,
+                    "latest_interval_minutes": 10.0,
+                    "latest_velocity": {"home": -0.004, "draw": 0.001, "away": 0.006},
+                    "max_step_change": 0.08,
+                    "step_side": "away",
+                },
+                "strongest_steam_side": "away",
+                "market_favorite": "home",
+                "kelly": {"home": 0.96, "draw": 0.91, "away": 0.88},
+                "kelly_span": 0.08,
+                "kelly_low_side": "away",
+                "pick_side": "home",
+                "pick_slope": -0.05,
+                "pick_kelly_gap": 0.08,
+            },
+            "market_entropy_risk": {
+                "applied": True,
+                "reason": "market_entropy_high",
+                "base_risk_level": "LOW",
+                "adjusted_risk_level": "HIGH",
+            },
+            "handicap_margin_consistency": {
+                "level": "HIGH",
+                "score": 0.79,
+                "signals": ["line_too_deep_for_model", "handicap_pick_margin_mismatch"],
+                "handicap_line": -1.25,
+                "model_margin_goals": 0.10,
+                "market_side": "home",
+                "model_side": "balanced",
+                "model_pick_side": "home",
+                "handicap_pick_side": "away",
+                "line_depth": 1.25,
+                "margin_depth": 0.10,
+                "depth_gap": 1.15,
+            },
+            "supervisor": {
+                "status": "alert",
+                "decision": {"release_allowed": False, "requires_human_review": True},
+                "next_actions": ["manual_market_review", "capture_next_market_snapshot"],
+                "agents": [
+                    {"name": "DataHunter", "status": "ready", "trigger": "match_loaded", "outputs": {"history_samples": 3}},
+                    {
+                        "name": "MarketEntropy",
+                        "status": "alert",
+                        "trigger": "market_signal_check",
+                        "outputs": {"signals": ["market_steam_against_pick"]},
+                        "rationale": "Market pressure is abnormal and requires review.",
+                        "actions": ["manual_market_review"],
+                    },
+                    {"name": "Simulation", "status": "ready", "trigger": "probability_fusion", "outputs": {"recommendation": "涓昏儨"}},
+                    {"name": "RiskGuardian", "status": "alert", "trigger": "risk_overlay", "outputs": {"admission_decision": "observe"}},
+                ],
+            },
             "draw_score": 0.34,
             "draw_grade": "B",
             "play_strategy": {
@@ -148,6 +207,13 @@ class UIDetailsTextFlowModuleTests(unittest.TestCase):
                 "top_pick": "涓昏儨",
                 "top_confidence": 0.62,
                 "reasons": ["high_accuracy_strategy_active", "risk_low"],
+                "agent_replay_guard": {
+                    "applied": True,
+                    "top_agent": "RiskGuardian",
+                    "top_prediction_miss_rate": 0.60,
+                    "top_handicap_miss_rate": 0.80,
+                    "actions": ["review_handicap_margin_consistency"],
+                },
             },
             "high_accuracy_strategy": {
                 "enabled": True,
@@ -230,9 +296,20 @@ class UIDetailsTextFlowModuleTests(unittest.TestCase):
         self.assertIn("正式放行", text)
         self.assertIn("\u547d\u4e2d\u6b63\u5f0f\u9ad8\u51c6\u7b56\u7565", text)
         self.assertIn("\u51c6\u5165\u95e8\u69db", text)
+        self.assertIn("Agent Replay", text)
+        self.assertIn("RiskGuardian", text)
         self.assertIn("\u9ad8\u51c6 1/1", text)
         self.assertIn("Confidence Calibration", text)
         self.assertIn("Runtime Threshold Guard", text)
+        self.assertIn("MarketEntropy", text)
+        self.assertIn("Kelly", text)
+        self.assertIn("sequence", text)
+        self.assertIn("Handicap Margin Consistency", text)
+        self.assertIn("line_too_deep_for_model", text)
+        self.assertIn("Supervisor / Orchestrator", text)
+        self.assertIn("manual_market_review", text)
+        self.assertIn("Market pressure is abnormal", text)
+        self.assertIn("market_steam_against_pick", text)
         self.assertIn("JC stable bucket", text)
         self.assertIn("L1 | >=0.65", text)
         self.assertIn("Wilson 75.8%", text)

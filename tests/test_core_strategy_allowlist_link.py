@@ -156,11 +156,22 @@ class CoreStrategyAllowlistLinkTests(unittest.TestCase):
         cache_backup = dict(core._STRATEGY_ADMISSION_POLICY_CACHE)
         with tempfile.TemporaryDirectory() as tmp:
             policy_path = Path(tmp) / "strategy_admission_policy_v1.json"
+            history_path = Path(tmp) / "strategy_admission_policy_history_v1.json"
             try:
                 core._STRATEGY_ADMISSION_POLICY_CACHE.update({"mtime": object(), "policy": {}, "report": {}})
-                with patch("v24_app.core.STRATEGY_ADMISSION_POLICY_FILE", policy_path):
+                with patch("v24_app.core.STRATEGY_ADMISSION_POLICY_FILE", policy_path), patch(
+                    "v24_app.core.STRATEGY_ADMISSION_POLICY_HISTORY_FILE",
+                    history_path,
+                ):
                     status = core.apply_strategy_admission_policy_update(
-                        {"min_confidence": 0.59, "active_strategy_min": 2, "medium_risk_allowed": False},
+                        {
+                            "min_confidence": 0.59,
+                            "active_strategy_min": 2,
+                            "medium_risk_allowed": False,
+                            "agent_replay_min_samples": 21,
+                            "agent_replay_prediction_miss_threshold": 0.42,
+                            "agent_replay_handicap_miss_threshold": 0.90,
+                        },
                         source="unit_test",
                     )
 
@@ -169,7 +180,35 @@ class CoreStrategyAllowlistLinkTests(unittest.TestCase):
                     self.assertEqual(policy["min_confidence"], 0.59)
                     self.assertEqual(policy["active_strategy_min"], 2)
                     self.assertFalse(policy["medium_risk_allowed"])
+                    self.assertEqual(policy["agent_replay_min_samples"], 20)
+                    self.assertEqual(policy["agent_replay_prediction_miss_threshold"], 0.45)
+                    self.assertEqual(policy["agent_replay_handicap_miss_threshold"], 0.85)
                     self.assertEqual(status["reason"], "unit_test")
+                    history = core.get_strategy_admission_policy_history(limit=5)
+                    self.assertEqual(len(history), 1)
+                    self.assertEqual(history[0]["source"], "unit_test")
+                    self.assertEqual(history[0]["policy"]["min_confidence"], 0.59)
+            finally:
+                core._STRATEGY_ADMISSION_POLICY_CACHE.clear()
+                core._STRATEGY_ADMISSION_POLICY_CACHE.update(cache_backup)
+
+    def test_rollback_strategy_admission_policy_restores_previous_policy(self) -> None:
+        cache_backup = dict(core._STRATEGY_ADMISSION_POLICY_CACHE)
+        with tempfile.TemporaryDirectory() as tmp:
+            policy_path = Path(tmp) / "strategy_admission_policy_v1.json"
+            history_path = Path(tmp) / "strategy_admission_policy_history_v1.json"
+            try:
+                core._STRATEGY_ADMISSION_POLICY_CACHE.update({"mtime": object(), "policy": {}, "report": {}})
+                with patch("v24_app.core.STRATEGY_ADMISSION_POLICY_FILE", policy_path), patch(
+                    "v24_app.core.STRATEGY_ADMISSION_POLICY_HISTORY_FILE",
+                    history_path,
+                ):
+                    core.apply_strategy_admission_policy_update({"min_confidence": 0.61}, source="unit_test_raise")
+                    rolled_back = core.rollback_strategy_admission_policy()
+
+                    self.assertEqual(rolled_back["policy"]["min_confidence"], core.STRATEGY_ADMISSION_MIN_CONFIDENCE)
+                    history = core.get_strategy_admission_policy_history(limit=5)
+                    self.assertEqual(history[0]["source"].split(":")[0], "policy_rollback")
             finally:
                 core._STRATEGY_ADMISSION_POLICY_CACHE.clear()
                 core._STRATEGY_ADMISSION_POLICY_CACHE.update(cache_backup)

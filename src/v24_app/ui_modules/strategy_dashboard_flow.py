@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import io
 from datetime import datetime
 from typing import Mapping, Sequence
 
@@ -60,6 +62,7 @@ ADMISSION_REASON_LABELS = {
     "confidence_block": "\u7f6e\u4fe1\u5ea6\u4f4e\u4e8e\u963b\u65ad\u7ebf",
     "confidence_watch": "\u7f6e\u4fe1\u5ea6\u4f4e\u4e8e\u6b63\u5f0f\u653e\u884c\u7ebf",
     "no_single_play_passed": "\u6682\u65e0\u5355\u73a9\u6cd5\u901a\u8fc7\u95e8\u69db",
+    "agent_replay_policy_watch": "Agent Replay \u663e\u793a\u5f53\u524d\u98ce\u9669\u4fe1\u53f7\u4e0e\u5386\u53f2\u5931\u8bef\u5f3a\u76f8\u5173",
 }
 PRE_MATCH_REVIEW_CHECKLIST = (
     "\u786e\u8ba4\u9996\u53d1\u3001\u4f24\u505c\u3001\u8f6e\u6362\u4e0e\u4e34\u573a\u540d\u5355\u6ca1\u6709\u53cd\u5411\u53d8\u5316\u3002",
@@ -262,6 +265,30 @@ def format_strategy_admission_thresholds(admission: Mapping[str, object] | objec
         f"\u9ad8\u51c6 {active_count}/{active_min}\uff1b"
         f"\u4e2d\u98ce\u9669{medium_policy}\uff1b\u9ad8\u98ce\u9669{high_policy}"
     )
+
+
+def format_strategy_admission_replay_guard(admission: Mapping[str, object] | object) -> str:
+    resolved = _as_mapping(admission)
+    guard = _as_mapping(resolved.get("agent_replay_guard"))
+    if not guard:
+        return "-"
+    if not _safe_bool(guard.get("applied")):
+        agent_names = guard.get("agent_names") if isinstance(guard.get("agent_names"), list) else []
+        if not agent_names:
+            return "-"
+        return f"未触发降级 | 当前Agent: {', '.join(str(item) for item in agent_names)}"
+    top_agent = _text(guard.get("top_agent"))
+    prediction_rate = guard.get("top_prediction_miss_rate")
+    handicap_rate = guard.get("top_handicap_miss_rate")
+    parts = [f"触发观察降级 | Agent {top_agent}"]
+    if prediction_rate is not None:
+        parts.append(f"胜平负历史失误 {_pct(prediction_rate)}")
+    if handicap_rate is not None:
+        parts.append(f"让球历史失误 {_pct(handicap_rate)}")
+    actions = guard.get("actions") if isinstance(guard.get("actions"), list) else []
+    if actions:
+        parts.append(f"动作 {', '.join(str(item) for item in actions[:3])}")
+    return "；".join(parts)
 
 
 def compute_strategy_admission_counts(rows: Sequence[object] | object) -> dict[str, int]:
@@ -547,6 +574,602 @@ def build_strategy_error_attribution_summary(
         "top_reason": top_reason,
         "rows": rows[: max(0, int(limit))],
         "summary_text": f"\u9519\u56e0 {miss_count}\u9879 | \u4e3b\u56e0 {top_reason}",
+    }
+
+
+def build_agent_trace_replay_summary(
+    settlements: Sequence[Mapping[str, object]] | object,
+    *,
+    limit: int = 8,
+) -> dict[str, object]:
+    settlement_items = [item for item in settlements if isinstance(item, Mapping)] if isinstance(settlements, Sequence) else []
+    known = [
+        item
+        for item in settlement_items
+        if isinstance(item.get("supervisor_agent_statuses"), Mapping)
+        and (item.get("is_correct") is not None or item.get("handicap_is_correct") is not None)
+    ]
+    agent_rows: dict[str, dict[str, object]] = {}
+    action_counts: dict[str, int] = {}
+    for item in known:
+        statuses = _as_mapping(item.get("supervisor_agent_statuses"))
+        actions = item.get("supervisor_agent_actions") if isinstance(item.get("supervisor_agent_actions"), list) else []
+        for action in actions:
+            key = str(action)
+            action_counts[key] = _safe_int(action_counts.get(key)) + 1
+        for agent_name, status_value in statuses.items():
+            status = _text(status_value).lower()
+            if status not in {"alert", "watch", "blocked"}:
+                continue
+            name = str(agent_name)
+            row = agent_rows.setdefault(
+                name,
+                {
+                    "agent": name,
+                    "trigger_count": 0,
+                    "alert_count": 0,
+                    "watch_count": 0,
+                    "blocked_count": 0,
+                    "prediction_known": 0,
+                    "prediction_miss": 0,
+                    "handicap_known": 0,
+                    "handicap_miss": 0,
+                    "actions": {},
+                },
+            )
+            row["trigger_count"] = _safe_int(row.get("trigger_count")) + 1
+            if status == "alert":
+                row["alert_count"] = _safe_int(row.get("alert_count")) + 1
+            elif status == "watch":
+                row["watch_count"] = _safe_int(row.get("watch_count")) + 1
+            elif status == "blocked":
+                row["blocked_count"] = _safe_int(row.get("blocked_count")) + 1
+            if item.get("is_correct") is not None:
+                row["prediction_known"] = _safe_int(row.get("prediction_known")) + 1
+                row["prediction_miss"] = _safe_int(row.get("prediction_miss")) + (1 if item.get("is_correct") is False else 0)
+            if item.get("handicap_is_correct") is not None:
+                row["handicap_known"] = _safe_int(row.get("handicap_known")) + 1
+                row["handicap_miss"] = _safe_int(row.get("handicap_miss")) + (1 if item.get("handicap_is_correct") is False else 0)
+            row_actions = row.get("actions")
+            if not isinstance(row_actions, dict):
+                row_actions = {}
+                row["actions"] = row_actions
+            for action in actions:
+                key = str(action)
+                row_actions[key] = _safe_int(row_actions.get(key)) + 1
+
+    rows: list[dict[str, object]] = []
+    for row in agent_rows.values():
+        prediction_known = _safe_int(row.get("prediction_known"))
+        handicap_known = _safe_int(row.get("handicap_known"))
+        prediction_miss_rate = _safe_int(row.get("prediction_miss")) / prediction_known if prediction_known else None
+        handicap_miss_rate = _safe_int(row.get("handicap_miss")) / handicap_known if handicap_known else None
+        row_actions = row.get("actions") if isinstance(row.get("actions"), dict) else {}
+        top_action = "-"
+        if row_actions:
+            top_action = sorted(row_actions.items(), key=lambda item: (-_safe_int(item[1]), str(item[0])))[0][0]
+        rows.append(
+            {
+                **row,
+                "prediction_miss_rate": prediction_miss_rate,
+                "prediction_miss_rate_text": _pct(prediction_miss_rate),
+                "handicap_miss_rate": handicap_miss_rate,
+                "handicap_miss_rate_text": _pct(handicap_miss_rate),
+                "top_action": top_action,
+            }
+        )
+    rows.sort(
+        key=lambda row: (
+            -_safe_int(row.get("alert_count")) - _safe_int(row.get("blocked_count")),
+            -_safe_float(row.get("prediction_miss_rate"), 0.0),
+            -_safe_float(row.get("handicap_miss_rate"), 0.0),
+            str(row.get("agent") or ""),
+        )
+    )
+    top_agent = rows[0].get("agent") if rows else "-"
+    top_action = "-"
+    if action_counts:
+        top_action = sorted(action_counts.items(), key=lambda item: (-_safe_int(item[1]), str(item[0])))[0][0]
+    return {
+        "sample_count": len(known),
+        "agent_count": len(rows),
+        "top_agent": top_agent,
+        "top_action": top_action,
+        "rows": rows[: max(0, int(limit))],
+        "summary_text": f"样本 {len(known)} | 风险Agent {len(rows)} | 最高关联 {top_agent} | 主要动作 {top_action}",
+    }
+
+
+def build_agent_replay_downgrade_backtest_summary(
+    settlements: Sequence[Mapping[str, object]] | object,
+    *,
+    limit: int = 8,
+) -> dict[str, object]:
+    settlement_items = [item for item in settlements if isinstance(item, Mapping)] if isinstance(settlements, Sequence) else []
+    known = [
+        item
+        for item in settlement_items
+        if _safe_bool(item.get("agent_replay_guard_applied"))
+        and (item.get("is_correct") is not None or item.get("handicap_is_correct") is not None)
+    ]
+    by_agent: dict[str, dict[str, object]] = {}
+    for item in known:
+        agent = _text(item.get("agent_replay_guard_top_agent"), "unknown")
+        row = by_agent.setdefault(
+            agent,
+            {
+                "agent": agent,
+                "count": 0,
+                "prediction_known": 0,
+                "prediction_avoided_misses": 0,
+                "prediction_opportunity_cost": 0,
+                "handicap_known": 0,
+                "handicap_avoided_misses": 0,
+                "handicap_opportunity_cost": 0,
+                "actions": {},
+            },
+        )
+        row["count"] = _safe_int(row.get("count")) + 1
+        if item.get("is_correct") is not None:
+            row["prediction_known"] = _safe_int(row.get("prediction_known")) + 1
+            if item.get("is_correct") is False:
+                row["prediction_avoided_misses"] = _safe_int(row.get("prediction_avoided_misses")) + 1
+            else:
+                row["prediction_opportunity_cost"] = _safe_int(row.get("prediction_opportunity_cost")) + 1
+        if item.get("handicap_is_correct") is not None:
+            row["handicap_known"] = _safe_int(row.get("handicap_known")) + 1
+            if item.get("handicap_is_correct") is False:
+                row["handicap_avoided_misses"] = _safe_int(row.get("handicap_avoided_misses")) + 1
+            else:
+                row["handicap_opportunity_cost"] = _safe_int(row.get("handicap_opportunity_cost")) + 1
+        row_actions = row.get("actions") if isinstance(row.get("actions"), dict) else {}
+        row["actions"] = row_actions
+        actions = item.get("agent_replay_guard_actions") if isinstance(item.get("agent_replay_guard_actions"), list) else []
+        for action in actions:
+            key = str(action)
+            row_actions[key] = _safe_int(row_actions.get(key)) + 1
+
+    rows: list[dict[str, object]] = []
+    for row in by_agent.values():
+        prediction_known = _safe_int(row.get("prediction_known"))
+        handicap_known = _safe_int(row.get("handicap_known"))
+        prediction_net = _safe_int(row.get("prediction_avoided_misses")) - _safe_int(row.get("prediction_opportunity_cost"))
+        handicap_net = _safe_int(row.get("handicap_avoided_misses")) - _safe_int(row.get("handicap_opportunity_cost"))
+        actions = row.get("actions") if isinstance(row.get("actions"), dict) else {}
+        top_action = "-"
+        if actions:
+            top_action = sorted(actions.items(), key=lambda item: (-_safe_int(item[1]), str(item[0])))[0][0]
+        rows.append(
+            {
+                **row,
+                "prediction_avoid_rate": (
+                    _safe_int(row.get("prediction_avoided_misses")) / prediction_known if prediction_known else None
+                ),
+                "prediction_avoid_rate_text": _pct(_safe_int(row.get("prediction_avoided_misses")) / prediction_known) if prediction_known else "-",
+                "prediction_net": prediction_net,
+                "handicap_avoid_rate": (
+                    _safe_int(row.get("handicap_avoided_misses")) / handicap_known if handicap_known else None
+                ),
+                "handicap_avoid_rate_text": _pct(_safe_int(row.get("handicap_avoided_misses")) / handicap_known) if handicap_known else "-",
+                "handicap_net": handicap_net,
+                "top_action": top_action,
+            }
+        )
+    rows.sort(
+        key=lambda row: (
+            -_safe_int(row.get("prediction_net")) - _safe_int(row.get("handicap_net")),
+            -_safe_int(row.get("count")),
+            str(row.get("agent") or ""),
+        )
+    )
+    sample_count = len(known)
+    prediction_known_total = sum(1 for item in known if item.get("is_correct") is not None)
+    prediction_avoided = sum(1 for item in known if item.get("is_correct") is False)
+    prediction_cost = sum(1 for item in known if item.get("is_correct") is True)
+    handicap_known_total = sum(1 for item in known if item.get("handicap_is_correct") is not None)
+    handicap_avoided = sum(1 for item in known if item.get("handicap_is_correct") is False)
+    handicap_cost = sum(1 for item in known if item.get("handicap_is_correct") is True)
+    net = (prediction_avoided - prediction_cost) + (handicap_avoided - handicap_cost)
+    if sample_count < 5:
+        recommendation = "collecting"
+        recommendation_text = "Agent Replay 降级样本不足，继续观察。"
+    elif net > 0:
+        recommendation = "keep_guard"
+        recommendation_text = "Agent Replay 降级的理论净收益为正，建议继续保留观察降级。"
+    elif net < 0:
+        recommendation = "review_guard"
+        recommendation_text = "Agent Replay 降级机会成本偏高，建议复核触发门槛。"
+    else:
+        recommendation = "monitor"
+        recommendation_text = "Agent Replay 降级收益与成本接近，继续监控。"
+    return {
+        "sample_count": sample_count,
+        "prediction_known": prediction_known_total,
+        "prediction_avoided_misses": prediction_avoided,
+        "prediction_opportunity_cost": prediction_cost,
+        "prediction_net": prediction_avoided - prediction_cost,
+        "handicap_known": handicap_known_total,
+        "handicap_avoided_misses": handicap_avoided,
+        "handicap_opportunity_cost": handicap_cost,
+        "handicap_net": handicap_avoided - handicap_cost,
+        "net": net,
+        "rows": rows[: max(0, int(limit))],
+        "recommendation": recommendation,
+        "recommendation_text": recommendation_text,
+        "summary_text": (
+            f"样本 {sample_count} | 1X2避错 {prediction_avoided}/成本 {prediction_cost} | "
+            f"让球避错 {handicap_avoided}/成本 {handicap_cost} | 净值 {net:+d}"
+        ),
+    }
+
+
+def build_agent_replay_guard_tuning_recommendation(
+    settlements: Sequence[Mapping[str, object]] | object,
+    *,
+    base_min_samples: int = 5,
+    base_prediction_miss_threshold: float = 0.55,
+    base_handicap_miss_threshold: float = 0.60,
+) -> dict[str, object]:
+    summary = build_agent_replay_downgrade_backtest_summary(settlements)
+    sample_count = _safe_int(summary.get("sample_count"))
+    net = _safe_int(summary.get("net"))
+    prediction_net = _safe_int(summary.get("prediction_net"))
+    handicap_net = _safe_int(summary.get("handicap_net"))
+    min_samples = max(3, min(20, _safe_int(base_min_samples, 5)))
+    prediction_threshold = max(0.45, min(0.80, _safe_float(base_prediction_miss_threshold, 0.55)))
+    handicap_threshold = max(0.45, min(0.85, _safe_float(base_handicap_miss_threshold, 0.60)))
+    next_min_samples = min_samples
+    next_prediction_threshold = prediction_threshold
+    next_handicap_threshold = handicap_threshold
+    action = "collect"
+    label = "\u7ee7\u7eed\u79ef\u7d2f\u6837\u672c"
+    tone = "neutral"
+    reasons: list[str] = []
+
+    if sample_count < 8:
+        reasons.append(f"Replay Guard \u5df2\u7ed3\u7b97\u6837\u672c {sample_count} \u573a\uff0c\u6682\u4e0d\u6839\u636e\u5c0f\u6837\u672c\u6539\u53d8\u89e6\u53d1\u95e8\u69db\u3002")
+    elif net >= 3:
+        action = "tighten_guard"
+        label = "\u6536\u7d27 Replay Guard"
+        tone = "good"
+        if prediction_net > 0:
+            next_prediction_threshold = max(0.45, prediction_threshold - 0.03)
+        if handicap_net > 0:
+            next_handicap_threshold = max(0.45, handicap_threshold - 0.03)
+        reasons.append(f"Replay Guard \u7406\u8bba\u51c0\u503c {net:+d}\uff0c\u964d\u7ea7\u5e2e\u52a9\u56de\u907f\u7684\u9519\u8bef\u5927\u4e8e\u673a\u4f1a\u6210\u672c\u3002")
+    elif net <= -2:
+        action = "loosen_guard"
+        label = "\u653e\u5bbd Replay Guard"
+        tone = "warning"
+        next_min_samples = min(20, min_samples + 1)
+        next_prediction_threshold = min(0.80, prediction_threshold + 0.03)
+        next_handicap_threshold = min(0.85, handicap_threshold + 0.03)
+        reasons.append(f"Replay Guard \u7406\u8bba\u51c0\u503c {net:+d}\uff0c\u673a\u4f1a\u6210\u672c\u9ad8\u4e8e\u53ef\u56de\u907f\u9519\u8bef\u3002")
+    elif net > 0:
+        action = "keep_guard"
+        label = "\u4fdd\u6301 Replay Guard"
+        tone = "good"
+        reasons.append(f"Replay Guard \u51c0\u503c {net:+d}\uff0c\u5df2\u4e3a\u6b63\u4f46\u5c1a\u672a\u8fbe\u5230\u81ea\u52a8\u6536\u7d27\u6761\u4ef6\u3002")
+    else:
+        action = "monitor"
+        label = "\u7ee7\u7eed\u89c2\u5bdf"
+        tone = "neutral"
+        reasons.append("Replay Guard \u51c0\u503c\u63a5\u8fd1 0\uff0c\u5efa\u8bae\u4fdd\u6301\u73b0\u6709\u95e8\u69db\u5e76\u7ee7\u7eed\u56de\u6536\u8d5b\u679c\u3002")
+
+    next_prediction_threshold = round(next_prediction_threshold, 2)
+    next_handicap_threshold = round(next_handicap_threshold, 2)
+    policy_update = {
+        "agent_replay_guard_enabled": True,
+        "agent_replay_min_samples": next_min_samples,
+        "agent_replay_prediction_miss_threshold": next_prediction_threshold,
+        "agent_replay_handicap_miss_threshold": next_handicap_threshold,
+    }
+    if action in {"collect", "keep_guard", "monitor"}:
+        policy_update = {}
+    rows = [
+        ("\u52a8\u4f5c", label),
+        ("\u56de\u6d4b\u51c0\u503c", f"{net:+d} | 1X2 {prediction_net:+d} / \u8ba9\u7403 {handicap_net:+d}"),
+        ("\u6837\u672c", f"{sample_count} \u573a | {summary.get('summary_text', '-')}"),
+        ("\u89e6\u53d1\u6837\u672c", f"{min_samples} -> {next_min_samples}"),
+        ("\u80dc\u5e73\u8d1f\u5931\u8bef\u7ebf", f"{prediction_threshold:.2f} -> {next_prediction_threshold:.2f}"),
+        ("\u8ba9\u7403\u5931\u8bef\u7ebf", f"{handicap_threshold:.2f} -> {next_handicap_threshold:.2f}"),
+        ("\u8c03\u6574\u4f9d\u636e", "\n".join(reasons) if reasons else "-"),
+    ]
+    return {
+        "action": action,
+        "label": label,
+        "tone": tone,
+        "sample_count": sample_count,
+        "net": net,
+        "next_min_samples": next_min_samples,
+        "next_prediction_miss_threshold": next_prediction_threshold,
+        "next_handicap_miss_threshold": next_handicap_threshold,
+        "policy_update": policy_update,
+        "reasons": reasons,
+        "rows": rows,
+        "summary": summary,
+    }
+
+
+def _parse_policy_review_time(value: object) -> datetime | None:
+    text = _text(value, "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y/%m/%d %H:%M:%S", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(text, fmt)
+        except Exception:
+            try:
+                return datetime.strptime(text[:10], fmt)
+            except Exception:
+                continue
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).replace(tzinfo=None)
+    except Exception:
+        return None
+
+
+def _settlement_review_time(item: Mapping[str, object]) -> datetime | None:
+    for key in ("settled_at", "timestamp", "updated_at", "match_date"):
+        parsed = _parse_policy_review_time(item.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _policy_effect_settlement_title(item: Mapping[str, object]) -> str:
+    league = _text(item.get("league"), "-")
+    home = _text(item.get("home_team"), "-")
+    away = _text(item.get("away_team"), "-")
+    return f"{league} | {home} vs {away}"
+
+
+def _policy_effect_bool_label(value: object) -> str:
+    if value is True:
+        return "\u547d\u4e2d"
+    if value is False:
+        return "\u5931\u8bef"
+    return "\u672a\u5224\u5b9a"
+
+
+def _policy_effect_drag_reasons(item: Mapping[str, object], replay_net_hint: int) -> list[str]:
+    reasons: list[str] = []
+    decision = str(item.get("strategy_admission_decision") or "").strip()
+    if decision == "allow" and item.get("is_correct") is False:
+        reasons.append("\u653e\u884c\u540e1X2\u5931\u8bef")
+    if decision == "allow" and item.get("handicap_is_correct") is False:
+        reasons.append("\u653e\u884c\u540e\u8ba9\u7403\u5931\u8bef")
+    if bool(item.get("agent_replay_guard_applied")) and replay_net_hint < 0:
+        reasons.append("Replay Guard\u673a\u4f1a\u6210\u672c")
+    if bool(item.get("agent_replay_guard_applied")) and replay_net_hint > 0:
+        reasons.append("Replay Guard\u56de\u907f\u9519\u8bef")
+    return reasons
+
+
+def _policy_effect_settlement_rows(items: Sequence[Mapping[str, object]], *, limit: int = 20) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    ordered = sorted(
+        [item for item in items if isinstance(item, Mapping)],
+        key=lambda item: _settlement_review_time(item) or datetime.min,
+        reverse=True,
+    )
+    for item in ordered[: max(0, int(limit))]:
+        replay_applied = bool(item.get("agent_replay_guard_applied"))
+        replay_agent = _text(item.get("agent_replay_guard_top_agent"), "-")
+        replay_net_hint = 0
+        if replay_applied:
+            if item.get("is_correct") is False:
+                replay_net_hint += 1
+            elif item.get("is_correct") is True:
+                replay_net_hint -= 1
+            if item.get("handicap_is_correct") is False:
+                replay_net_hint += 1
+            elif item.get("handicap_is_correct") is True:
+                replay_net_hint -= 1
+        drag_reasons = _policy_effect_drag_reasons(item, replay_net_hint)
+        drag_score = 0
+        if "\u653e\u884c\u540e1X2\u5931\u8bef" in drag_reasons:
+            drag_score += 2
+        if "\u653e\u884c\u540e\u8ba9\u7403\u5931\u8bef" in drag_reasons:
+            drag_score += 1
+        if "Replay Guard\u673a\u4f1a\u6210\u672c" in drag_reasons:
+            drag_score += abs(replay_net_hint)
+        elif replay_net_hint < 0:
+            drag_score += abs(replay_net_hint)
+        rows.append(
+            {
+                "match_id": _text(item.get("match_id"), "-"),
+                "time": _text(item.get("settled_at") or item.get("timestamp") or item.get("match_date"), "-"),
+                "title": _policy_effect_settlement_title(item),
+                "league": _text(item.get("league"), "-"),
+                "home_team": _text(item.get("home_team"), "-"),
+                "away_team": _text(item.get("away_team"), "-"),
+                "decision": _text(item.get("strategy_admission_decision"), "-"),
+                "prediction_result": _policy_effect_bool_label(item.get("is_correct")),
+                "handicap_result": _policy_effect_bool_label(item.get("handicap_is_correct")),
+                "replay_guard": "\u89e6\u53d1" if replay_applied else "\u672a\u89e6\u53d1",
+                "replay_agent": replay_agent,
+                "replay_net_hint": replay_net_hint,
+                "drag_score": drag_score,
+                "drag_reasons": drag_reasons,
+                "drag_reason_text": "\u3001".join(drag_reasons) if drag_reasons else "-",
+                "summary": (
+                    f"{_policy_effect_settlement_title(item)} | "
+                    f"\u51c6\u5165 {_text(item.get('strategy_admission_decision'), '-')} | "
+                    f"1X2 {_policy_effect_bool_label(item.get('is_correct'))} | "
+                    f"\u8ba9\u7403 {_policy_effect_bool_label(item.get('handicap_is_correct'))} | "
+                    f"Replay {'ON' if replay_applied else 'OFF'} {replay_agent}"
+                ),
+            }
+        )
+    return rows
+
+
+def _policy_effect_negative_diagnostics(
+    sample_rows: Sequence[Mapping[str, object]],
+    *,
+    effect_status: str,
+    allow_hit_rate: float | None,
+    replay_net: int,
+) -> dict[str, object]:
+    negative_rows = [dict(row) for row in sample_rows if _safe_int(row.get("drag_score")) > 0]
+    negative_rows.sort(
+        key=lambda row: (
+            -_safe_int(row.get("drag_score")),
+            _safe_float(row.get("replay_net_hint"), 0.0),
+            str(row.get("time") or ""),
+        )
+    )
+    reason_counts: dict[str, int] = {}
+    for row in negative_rows:
+        for reason in row.get("drag_reasons", []) if isinstance(row.get("drag_reasons"), list) else []:
+            key = _text(reason, "-")
+            reason_counts[key] = reason_counts.get(key, 0) + 1
+    top_reason = "-"
+    if reason_counts:
+        top_reason = sorted(reason_counts.items(), key=lambda item: (-_safe_int(item[1]), str(item[0])))[0][0]
+    rollback_recommended = (
+        effect_status == "negative"
+        and (
+            (allow_hit_rate is not None and allow_hit_rate < 0.55)
+            or replay_net < 0
+            or len(negative_rows) >= 2
+        )
+    )
+    if rollback_recommended:
+        action_label = "\u5efa\u8bae\u590d\u6838\u56de\u6eda"
+    elif effect_status == "negative":
+        action_label = "\u5efa\u8bae\u4eba\u5de5\u590d\u6838"
+    else:
+        action_label = "\u6682\u65e0\u56de\u6eda\u5efa\u8bae"
+    return {
+        "top_negative_rows": negative_rows[:5],
+        "negative_count": len(negative_rows),
+        "negative_reason_counts": reason_counts,
+        "top_negative_reason": top_reason,
+        "rollback_recommended": rollback_recommended,
+        "action_label": action_label,
+        "summary_text": (
+            f"{action_label} | \u4e3b\u56e0 {top_reason} | "
+            f"\u62d6\u7d2f\u6837\u672c {len(negative_rows)} | Replay\u51c0\u503c {replay_net:+d}"
+        ),
+    }
+
+
+def build_strategy_policy_effect_review(
+    policy_history: Sequence[Mapping[str, object]] | object,
+    settlements: Sequence[Mapping[str, object]] | object,
+    *,
+    limit: int = 5,
+) -> dict[str, object]:
+    history_items = [item for item in policy_history if isinstance(item, Mapping)] if isinstance(policy_history, Sequence) else []
+    settlement_items = [item for item in settlements if isinstance(item, Mapping)] if isinstance(settlements, Sequence) else []
+    parsed_history: list[dict[str, object]] = []
+    for item in history_items:
+        updated_at = _parse_policy_review_time(item.get("updated_at"))
+        if updated_at is None:
+            continue
+        parsed_history.append({**dict(item), "_updated_dt": updated_at})
+    parsed_history.sort(key=lambda item: item["_updated_dt"])
+    rows: list[dict[str, object]] = []
+    previous_hit_rate: float | None = None
+    previous_replay_net: int | None = None
+    for index, item in enumerate(parsed_history):
+        start = item["_updated_dt"]
+        end = parsed_history[index + 1]["_updated_dt"] if index + 1 < len(parsed_history) else None
+        window_items = []
+        for settlement in settlement_items:
+            settled_at = _settlement_review_time(settlement)
+            if settled_at is None or settled_at < start:
+                continue
+            if end is not None and settled_at >= end:
+                continue
+            window_items.append(settlement)
+        allowed = [settlement for settlement in window_items if str(settlement.get("strategy_admission_decision") or "").strip() == "allow"]
+        known_allowed = [settlement for settlement in allowed if settlement.get("is_correct") is not None]
+        allow_hits = sum(1 for settlement in known_allowed if settlement.get("is_correct") is True)
+        allow_misses = sum(1 for settlement in known_allowed if settlement.get("is_correct") is False)
+        allow_hit_rate = allow_hits / len(known_allowed) if known_allowed else None
+        replay_summary = build_agent_replay_downgrade_backtest_summary(window_items)
+        sample_rows = _policy_effect_settlement_rows(window_items)
+        replay_net = _safe_int(replay_summary.get("net"))
+        sample_count = len(known_allowed)
+        if sample_count < 3 and _safe_int(replay_summary.get("sample_count")) < 3:
+            effect_status = "collecting"
+            effect_label = "\u6837\u672c\u79ef\u7d2f\u4e2d"
+            tone = "neutral"
+        else:
+            hit_delta = None if previous_hit_rate is None or allow_hit_rate is None else allow_hit_rate - previous_hit_rate
+            replay_delta = None if previous_replay_net is None else replay_net - previous_replay_net
+            if (hit_delta is not None and hit_delta >= 0.05) or replay_net > 0 or (replay_delta is not None and replay_delta > 0):
+                effect_status = "effective"
+                effect_label = "\u6b63\u5411\u751f\u6548"
+                tone = "good"
+            elif (hit_delta is not None and hit_delta <= -0.05) or replay_net < 0:
+                effect_status = "negative"
+                effect_label = "\u9700\u8981\u590d\u6838"
+                tone = "bad"
+            else:
+                effect_status = "flat"
+                effect_label = "\u65e0\u660e\u663e\u53d8\u5316"
+                tone = "warning"
+        previous_hit_rate = allow_hit_rate if allow_hit_rate is not None else previous_hit_rate
+        previous_replay_net = replay_net
+        diagnostics = _policy_effect_negative_diagnostics(
+            sample_rows,
+            effect_status=effect_status,
+            allow_hit_rate=allow_hit_rate,
+            replay_net=replay_net,
+        )
+        source = _text(item.get("source") or item.get("reason"), "-")
+        version_id = _text(item.get("version_id"), "-")
+        title = f"{effect_label} | {source} | {item.get('updated_at', '-')}"
+        body = (
+            f"\u7248\u672c {version_id} | \u533a\u95f4\u6837\u672c {len(window_items)} | "
+            f"\u653e\u884c {allow_hits}/{len(known_allowed)} ({_pct(allow_hit_rate) if allow_hit_rate is not None else '-'}) | "
+            f"\u653e\u884c\u9519\u8bef {allow_misses} | Replay Guard \u51c0\u503c {replay_net:+d} | "
+            f"{diagnostics.get('action_label', '-')}"
+        )
+        rows.append(
+            {
+                "version_id": version_id,
+                "updated_at": item.get("updated_at", "-"),
+                "source": source,
+                "sample_count": len(window_items),
+                "allow_count": len(allowed),
+                "known_allow_count": len(known_allowed),
+                "allow_hit_rate": allow_hit_rate,
+                "allow_hit_rate_text": _pct(allow_hit_rate) if allow_hit_rate is not None else "-",
+                "allow_misses": allow_misses,
+                "replay_guard_net": replay_net,
+                "sample_rows": sample_rows,
+                "sample_rows_total": len(window_items),
+                "negative_diagnostics": diagnostics,
+                "top_negative_rows": diagnostics.get("top_negative_rows", []),
+                "rollback_recommended": bool(diagnostics.get("rollback_recommended")),
+                "effect_status": effect_status,
+                "effect_label": effect_label,
+                "tone": tone,
+                "title": title,
+                "body": body,
+            }
+        )
+    rows.sort(key=lambda row: str(row.get("updated_at") or ""), reverse=True)
+    latest = rows[0] if rows else {}
+    status_counts: dict[str, int] = {}
+    for row in rows:
+        key = str(row.get("effect_status") or "unknown")
+        status_counts[key] = status_counts.get(key, 0) + 1
+    return {
+        "history_count": len(parsed_history),
+        "rows": rows[: max(0, int(limit))],
+        "latest_status": latest.get("effect_status", "none") if latest else "none",
+        "latest_label": latest.get("effect_label", "\u6682\u65e0\u7248\u672c") if latest else "\u6682\u65e0\u7248\u672c",
+        "status_counts": status_counts,
+        "summary_text": (
+            f"\u7248\u672c {len(parsed_history)} | \u6700\u65b0 {latest.get('effect_label', '-') if latest else '-'} | "
+            f"\u6b63\u5411 {status_counts.get('effective', 0)} / \u590d\u6838 {status_counts.get('negative', 0)}"
+        ),
     }
 
 
@@ -1209,6 +1832,234 @@ def build_strategy_allowlist_settlement_rows(
     return rows
 
 
+def _market_entropy_bucket(item: Mapping[str, object]) -> str:
+    level = _text(item.get("market_entropy_level")).upper()
+    score = _safe_float(item.get("market_entropy_score"))
+    if level == "HIGH" or score >= 0.66:
+        return "high"
+    if level == "MEDIUM" or score >= 0.38:
+        return "medium"
+    return "low"
+
+
+def _market_entropy_bucket_label(bucket: str) -> str:
+    return {"high": "HIGH", "medium": "MEDIUM", "low": "LOW"}.get(str(bucket or ""), "-")
+
+
+def _handicap_margin_bucket(item: Mapping[str, object]) -> str:
+    level = _text(item.get("handicap_margin_level")).upper()
+    score = _safe_float(item.get("handicap_margin_score"))
+    if level == "HIGH" or score >= 0.66:
+        return "high"
+    if level == "MEDIUM" or score >= 0.38:
+        return "medium"
+    return "low"
+
+
+def build_handicap_margin_backtest_summary(settlements: Sequence[Mapping[str, object]] | object) -> dict[str, object]:
+    settlement_items = [item for item in settlements if isinstance(item, Mapping)] if isinstance(settlements, Sequence) else []
+    known = [
+        item
+        for item in settlement_items
+        if item.get("handicap_is_correct") is not None and item.get("handicap_margin_score") is not None
+    ]
+    buckets: dict[str, dict[str, object]] = {
+        "low": {"bucket": "low", "count": 0, "hit_count": 0, "score_sum": 0.0, "signals": {}},
+        "medium": {"bucket": "medium", "count": 0, "hit_count": 0, "score_sum": 0.0, "signals": {}},
+        "high": {"bucket": "high", "count": 0, "hit_count": 0, "score_sum": 0.0, "signals": {}},
+    }
+    for item in known:
+        bucket = _handicap_margin_bucket(item)
+        row = buckets[bucket]
+        row["count"] = _safe_int(row.get("count")) + 1
+        row["hit_count"] = _safe_int(row.get("hit_count")) + (1 if item.get("handicap_is_correct") is True else 0)
+        row["score_sum"] = _safe_float(row.get("score_sum")) + _safe_float(item.get("handicap_margin_score"))
+        signal_counts = row.get("signals")
+        if not isinstance(signal_counts, dict):
+            signal_counts = {}
+            row["signals"] = signal_counts
+        signals = item.get("handicap_margin_signals") if isinstance(item.get("handicap_margin_signals"), list) else []
+        for signal in signals:
+            key = str(signal)
+            signal_counts[key] = _safe_int(signal_counts.get(key)) + 1
+
+    total = len(known)
+    total_hits = sum(_safe_int(row.get("hit_count")) for row in buckets.values())
+    overall_accuracy = total_hits / total if total else None
+    rows: list[dict[str, object]] = []
+    for bucket in ("high", "medium", "low"):
+        row = buckets[bucket]
+        count = _safe_int(row.get("count"))
+        hit_count = _safe_int(row.get("hit_count"))
+        miss_count = max(0, count - hit_count)
+        hit_rate = hit_count / count if count else None
+        avg_score = _safe_float(row.get("score_sum")) / count if count else None
+        signal_counts = row.get("signals") if isinstance(row.get("signals"), dict) else {}
+        top_signal = "-"
+        if signal_counts:
+            top_signal = sorted(signal_counts.items(), key=lambda item: (-_safe_int(item[1]), str(item[0])))[0][0]
+        rows.append(
+            {
+                "bucket": bucket,
+                "label": _market_entropy_bucket_label(bucket),
+                "count": count,
+                "hit_count": hit_count,
+                "miss_count": miss_count,
+                "hit_rate": hit_rate,
+                "hit_rate_text": _pct(hit_rate),
+                "miss_rate_text": _pct(1.0 - hit_rate) if hit_rate is not None else "-",
+                "avg_score": avg_score,
+                "avg_score_text": _pct(avg_score),
+                "top_signal": top_signal,
+            }
+        )
+    high = next((row for row in rows if row.get("bucket") == "high"), {})
+    medium = next((row for row in rows if row.get("bucket") == "medium"), {})
+    low = next((row for row in rows if row.get("bucket") == "low"), {})
+    high_count = _safe_int(high.get("count"))
+    high_misses = _safe_int(high.get("miss_count"))
+    high_hits = _safe_int(high.get("hit_count"))
+    retained_count = _safe_int(medium.get("count")) + _safe_int(low.get("count"))
+    retained_hits = _safe_int(medium.get("hit_count")) + _safe_int(low.get("hit_count"))
+    retained_accuracy = retained_hits / retained_count if retained_count else None
+    high_miss_rate = high_misses / high_count if high_count else None
+    overall_miss_rate = 1.0 - overall_accuracy if overall_accuracy is not None else None
+    if total < 5:
+        recommendation = "collecting"
+        recommendation_text = "样本不足，继续积累让球胜差一致性与让球赛果的联动。"
+    elif high_count >= 3 and high_miss_rate is not None and overall_miss_rate is not None and high_miss_rate >= overall_miss_rate + 0.12:
+        recommendation = "block_high_handicap_margin"
+        recommendation_text = "HIGH 冲突场次让球失误明显更高，建议正式放行时过滤让球玩法。"
+    elif high_count >= 3 and high_miss_rate is not None and high_miss_rate >= 0.45:
+        recommendation = "observe_high_handicap_margin"
+        recommendation_text = "HIGH 冲突场次让球失误偏高，建议降级为观察并增加人工复核。"
+    else:
+        recommendation = "monitor"
+        recommendation_text = "暂未证明该过滤能稳定提升让球命中率，继续监控。"
+    return {
+        "sample_count": total,
+        "overall_accuracy": overall_accuracy,
+        "overall_accuracy_text": _pct(overall_accuracy),
+        "retained_accuracy": retained_accuracy,
+        "retained_accuracy_text": _pct(retained_accuracy),
+        "avoidable_handicap_misses": high_misses,
+        "opportunity_cost": high_hits,
+        "high_bucket_count": high_count,
+        "high_bucket_miss_rate": high_miss_rate,
+        "high_bucket_miss_rate_text": _pct(high_miss_rate),
+        "rows": rows,
+        "recommendation": recommendation,
+        "recommendation_text": recommendation_text,
+        "summary_text": (
+            f"样本 {total} | 让球全量 {_pct(overall_accuracy)} | 过滤HIGH后 {_pct(retained_accuracy)} | "
+            f"可避让球错 {high_misses} / 机会成本 {high_hits}"
+        ),
+    }
+
+
+def build_market_entropy_backtest_summary(settlements: Sequence[Mapping[str, object]] | object) -> dict[str, object]:
+    settlement_items = [item for item in settlements if isinstance(item, Mapping)] if isinstance(settlements, Sequence) else []
+    known = [
+        item
+        for item in settlement_items
+        if item.get("is_correct") is not None and item.get("market_entropy_score") is not None
+    ]
+    buckets: dict[str, dict[str, object]] = {
+        "low": {"bucket": "low", "count": 0, "hit_count": 0, "score_sum": 0.0, "risk_applied": 0, "signals": {}},
+        "medium": {"bucket": "medium", "count": 0, "hit_count": 0, "score_sum": 0.0, "risk_applied": 0, "signals": {}},
+        "high": {"bucket": "high", "count": 0, "hit_count": 0, "score_sum": 0.0, "risk_applied": 0, "signals": {}},
+    }
+    for item in known:
+        bucket = _market_entropy_bucket(item)
+        row = buckets[bucket]
+        row["count"] = _safe_int(row.get("count")) + 1
+        row["hit_count"] = _safe_int(row.get("hit_count")) + (1 if item.get("is_correct") is True else 0)
+        row["score_sum"] = _safe_float(row.get("score_sum")) + _safe_float(item.get("market_entropy_score"))
+        row["risk_applied"] = _safe_int(row.get("risk_applied")) + (1 if item.get("market_entropy_risk_applied") else 0)
+        signal_counts = row.get("signals")
+        if not isinstance(signal_counts, dict):
+            signal_counts = {}
+            row["signals"] = signal_counts
+        signals = item.get("market_entropy_signals") if isinstance(item.get("market_entropy_signals"), list) else []
+        for signal in signals:
+            key = str(signal)
+            signal_counts[key] = _safe_int(signal_counts.get(key)) + 1
+
+    total = len(known)
+    total_hits = sum(_safe_int(row.get("hit_count")) for row in buckets.values())
+    overall_accuracy = total_hits / total if total else None
+    rows: list[dict[str, object]] = []
+    for bucket in ("high", "medium", "low"):
+        row = buckets[bucket]
+        count = _safe_int(row.get("count"))
+        hit_count = _safe_int(row.get("hit_count"))
+        miss_count = max(0, count - hit_count)
+        hit_rate = hit_count / count if count else None
+        avg_score = _safe_float(row.get("score_sum")) / count if count else None
+        signal_counts = row.get("signals") if isinstance(row.get("signals"), dict) else {}
+        top_signal = "-"
+        if signal_counts:
+            top_signal = sorted(signal_counts.items(), key=lambda item: (-_safe_int(item[1]), str(item[0])))[0][0]
+        rows.append(
+            {
+                "bucket": bucket,
+                "label": _market_entropy_bucket_label(bucket),
+                "count": count,
+                "hit_count": hit_count,
+                "miss_count": miss_count,
+                "hit_rate": hit_rate,
+                "hit_rate_text": _pct(hit_rate),
+                "miss_rate_text": _pct(1.0 - hit_rate) if hit_rate is not None else "-",
+                "avg_score": avg_score,
+                "avg_score_text": _pct(avg_score),
+                "risk_applied_count": _safe_int(row.get("risk_applied")),
+                "top_signal": top_signal,
+            }
+        )
+    high = next((row for row in rows if row.get("bucket") == "high"), {})
+    medium = next((row for row in rows if row.get("bucket") == "medium"), {})
+    low = next((row for row in rows if row.get("bucket") == "low"), {})
+    high_count = _safe_int(high.get("count"))
+    high_misses = _safe_int(high.get("miss_count"))
+    high_hits = _safe_int(high.get("hit_count"))
+    retained_count = _safe_int(medium.get("count")) + _safe_int(low.get("count"))
+    retained_hits = _safe_int(medium.get("hit_count")) + _safe_int(low.get("hit_count"))
+    retained_accuracy = retained_hits / retained_count if retained_count else None
+    high_miss_rate = high_misses / high_count if high_count else None
+    overall_miss_rate = 1.0 - overall_accuracy if overall_accuracy is not None else None
+    if total < 5:
+        recommendation = "collecting"
+        recommendation_text = "样本不足，继续记录 MarketEntropy 与赛果联动。"
+    elif high_count >= 3 and high_miss_rate is not None and overall_miss_rate is not None and high_miss_rate >= overall_miss_rate + 0.12:
+        recommendation = "block_high_entropy"
+        recommendation_text = "高熵值场次显著更容易失误，建议正式放行时阻断 HIGH 桶。"
+    elif high_count >= 3 and high_miss_rate is not None and high_miss_rate >= 0.45:
+        recommendation = "observe_high_entropy"
+        recommendation_text = "高熵值场次失误偏高，建议降级为观察并增加人工复核。"
+    else:
+        recommendation = "monitor"
+        recommendation_text = "暂未证明高熵值过滤能显著提升命中率，继续监控。"
+    return {
+        "sample_count": total,
+        "overall_accuracy": overall_accuracy,
+        "overall_accuracy_text": _pct(overall_accuracy),
+        "retained_accuracy": retained_accuracy,
+        "retained_accuracy_text": _pct(retained_accuracy),
+        "avoidable_misses": high_misses,
+        "opportunity_cost": high_hits,
+        "high_bucket_count": high_count,
+        "high_bucket_miss_rate": high_miss_rate,
+        "high_bucket_miss_rate_text": _pct(high_miss_rate),
+        "rows": rows,
+        "recommendation": recommendation,
+        "recommendation_text": recommendation_text,
+        "summary_text": (
+            f"样本 {total} | 全量 {_pct(overall_accuracy)} | 过滤HIGH后 {_pct(retained_accuracy)} | "
+            f"可避错 {high_misses} / 机会成本 {high_hits}"
+        ),
+    }
+
+
 def build_strategy_allowlist_tuning_recommendation(
     settlements: Sequence[Mapping[str, object]] | object,
     *,
@@ -1310,6 +2161,181 @@ def select_strategy_allowlist_rows(rows: Sequence[object] | object) -> list[obje
 def build_strategy_allowlist_filename(now: datetime | None = None) -> str:
     current = now or datetime.now()
     return f"strategy_allowlist_{current.strftime('%Y%m%d_%H%M%S')}.md"
+
+
+def build_strategy_policy_audit_report_filename(now: datetime | None = None) -> str:
+    current = now or datetime.now()
+    return f"strategy_policy_audit_{current.strftime('%Y%m%d_%H%M%S')}.md"
+
+
+def build_strategy_policy_audit_csv_filename(now: datetime | None = None) -> str:
+    current = now or datetime.now()
+    return f"strategy_policy_audit_samples_{current.strftime('%Y%m%d_%H%M%S')}.csv"
+
+
+def build_strategy_policy_audit_report_lines(
+    policy_effect_review: Mapping[str, object] | object,
+    *,
+    generated_at: datetime | None = None,
+) -> list[str]:
+    review = _as_mapping(policy_effect_review)
+    current = generated_at or datetime.now()
+    rows = [row for row in _as_list(review.get("rows")) if isinstance(row, Mapping)]
+    lines = [
+        "# \u7b56\u7565\u8c03\u53c2\u5ba1\u8ba1\u62a5\u544a",
+        "",
+        f"- \u751f\u6210\u65f6\u95f4: {current.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- \u7248\u672c\u6570: {review.get('history_count', 0)}",
+        f"- \u6700\u65b0\u72b6\u6001: {review.get('latest_label', '-')}",
+        f"- \u6458\u8981: {review.get('summary_text', '-')}",
+        "",
+        "## \u7248\u672c\u6548\u679c\u603b\u89c8",
+        "",
+        "| \u7248\u672c | \u65f6\u95f4 | \u6765\u6e90 | \u6548\u679c | \u6837\u672c | \u653e\u884c\u547d\u4e2d | Replay\u51c0\u503c | \u56de\u6eda\u5efa\u8bae |",
+        "| --- | --- | --- | --- | ---: | --- | ---: | --- |",
+    ]
+    if not rows:
+        lines.extend(["| - | - | - | \u6682\u65e0\u7248\u672c | 0 | - | 0 | - |", ""])
+        return lines
+    for row in rows:
+        diagnostics = _as_mapping(row.get("negative_diagnostics"))
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    _text(row.get("version_id"), "-"),
+                    _text(row.get("updated_at"), "-"),
+                    _text(row.get("source"), "-"),
+                    _text(row.get("effect_label"), "-"),
+                    str(_safe_int(row.get("sample_count"))),
+                    _text(row.get("allow_hit_rate_text"), "-"),
+                    f"{_safe_int(row.get('replay_guard_net')):+d}",
+                    _text(diagnostics.get("action_label"), "-"),
+                ]
+            )
+            + " |"
+        )
+    lines.extend(["", "## \u8d1f\u5411\u7248\u672c\u5b9a\u4f4d", ""])
+    for row in rows:
+        diagnostics = _as_mapping(row.get("negative_diagnostics"))
+        negative_rows = [item for item in _as_list(diagnostics.get("top_negative_rows")) if isinstance(item, Mapping)]
+        if not negative_rows and not bool(diagnostics.get("rollback_recommended")):
+            continue
+        lines.extend(
+            [
+                f"### {_text(row.get('version_id'), '-')} | {_text(row.get('effect_label'), '-')}",
+                "",
+                f"- \u8bca\u65ad: {diagnostics.get('summary_text', '-')}",
+                f"- \u4e3b\u56e0: {diagnostics.get('top_negative_reason', '-')}",
+                f"- \u662f\u5426\u5efa\u8bae\u56de\u6eda: {'YES' if diagnostics.get('rollback_recommended') else 'NO'}",
+                "",
+                "| \u65f6\u95f4 | \u8d5b\u4e8b | \u51c6\u5165 | 1X2 | \u8ba9\u7403 | Replay | Agent | \u51c0\u503c | \u62d6\u7d2f\u539f\u56e0 |",
+                "| --- | --- | --- | --- | --- | --- | --- | ---: | --- |",
+            ]
+        )
+        for sample in negative_rows:
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        _text(sample.get("time"), "-"),
+                        _text(sample.get("title"), "-"),
+                        _text(sample.get("decision"), "-"),
+                        _text(sample.get("prediction_result"), "-"),
+                        _text(sample.get("handicap_result"), "-"),
+                        _text(sample.get("replay_guard"), "-"),
+                        _text(sample.get("replay_agent"), "-"),
+                        f"{_safe_int(sample.get('replay_net_hint')):+d}",
+                        _text(sample.get("drag_reason_text"), "-"),
+                    ]
+                )
+                + " |"
+            )
+        lines.append("")
+    lines.extend(["## \u5168\u91cf\u6837\u672c\u660e\u7ec6", ""])
+    for row in rows:
+        sample_rows = [item for item in _as_list(row.get("sample_rows")) if isinstance(item, Mapping)]
+        lines.extend(
+            [
+                f"### {_text(row.get('version_id'), '-')} | {_text(row.get('updated_at'), '-')}",
+                "",
+                "| \u65f6\u95f4 | \u8d5b\u4e8b | \u51c6\u5165 | 1X2 | \u8ba9\u7403 | Replay | Agent | \u51c0\u503c | \u5f71\u54cd\u539f\u56e0 |",
+                "| --- | --- | --- | --- | --- | --- | --- | ---: | --- |",
+            ]
+        )
+        if not sample_rows:
+            lines.append("| - | - | - | - | - | - | - | 0 | - |")
+        for sample in sample_rows:
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        _text(sample.get("time"), "-"),
+                        _text(sample.get("title"), "-"),
+                        _text(sample.get("decision"), "-"),
+                        _text(sample.get("prediction_result"), "-"),
+                        _text(sample.get("handicap_result"), "-"),
+                        _text(sample.get("replay_guard"), "-"),
+                        _text(sample.get("replay_agent"), "-"),
+                        f"{_safe_int(sample.get('replay_net_hint')):+d}",
+                        _text(sample.get("drag_reason_text"), "-"),
+                    ]
+                )
+                + " |"
+            )
+        lines.append("")
+    return lines
+
+
+def build_strategy_policy_audit_csv_text(policy_effect_review: Mapping[str, object] | object) -> str:
+    review = _as_mapping(policy_effect_review)
+    rows = [row for row in _as_list(review.get("rows")) if isinstance(row, Mapping)]
+    output = io.StringIO()
+    writer = csv.writer(output, lineterminator="\n")
+    writer.writerow(
+        [
+            "version_id",
+            "updated_at",
+            "source",
+            "effect_label",
+            "rollback_recommended",
+            "match_id",
+            "time",
+            "match",
+            "decision",
+            "prediction_result",
+            "handicap_result",
+            "replay_guard",
+            "replay_agent",
+            "replay_net_hint",
+            "drag_score",
+            "drag_reason",
+        ]
+    )
+    for row in rows:
+        diagnostics = _as_mapping(row.get("negative_diagnostics"))
+        for sample in [item for item in _as_list(row.get("sample_rows")) if isinstance(item, Mapping)]:
+            writer.writerow(
+                [
+                    _text(row.get("version_id"), "-"),
+                    _text(row.get("updated_at"), "-"),
+                    _text(row.get("source"), "-"),
+                    _text(row.get("effect_label"), "-"),
+                    "YES" if diagnostics.get("rollback_recommended") else "NO",
+                    _text(sample.get("match_id"), "-"),
+                    _text(sample.get("time"), "-"),
+                    _text(sample.get("title"), "-"),
+                    _text(sample.get("decision"), "-"),
+                    _text(sample.get("prediction_result"), "-"),
+                    _text(sample.get("handicap_result"), "-"),
+                    _text(sample.get("replay_guard"), "-"),
+                    _text(sample.get("replay_agent"), "-"),
+                    _safe_int(sample.get("replay_net_hint")),
+                    _safe_int(sample.get("drag_score")),
+                    _text(sample.get("drag_reason_text"), "-"),
+                ]
+            )
+    return output.getvalue()
 
 
 def build_strategy_allowlist_report_lines(
@@ -1418,6 +2444,7 @@ def build_strategy_allowlist_report_lines(
 def build_high_accuracy_strategy_dashboard(
     status: Mapping[str, object] | object,
     settlements: Sequence[Mapping[str, object]] | object,
+    policy_history: Sequence[Mapping[str, object]] | object | None = None,
 ) -> dict[str, object]:
     resolved = _as_mapping(status)
     settlement_items = [item for item in settlements if isinstance(item, Mapping)] if isinstance(settlements, Sequence) else []
@@ -1426,8 +2453,14 @@ def build_high_accuracy_strategy_dashboard(
     breaker = _as_mapping(resolved.get("breaker"))
     settlement_summary = build_high_accuracy_strategy_settlement_summary(settlement_items)
     error_attribution = build_strategy_error_attribution_summary(settlement_items)
+    agent_trace_replay = build_agent_trace_replay_summary(settlement_items)
+    agent_replay_downgrade = build_agent_replay_downgrade_backtest_summary(settlement_items)
+    agent_replay_guard_tuning = build_agent_replay_guard_tuning_recommendation(settlement_items)
     allowlist_summary = build_strategy_allowlist_settlement_summary(settlement_items)
     allowlist_tuning = build_strategy_allowlist_tuning_recommendation(settlement_items)
+    policy_effect_review = build_strategy_policy_effect_review(policy_history or [], settlement_items)
+    market_entropy_backtest = build_market_entropy_backtest_summary(settlement_items)
+    handicap_margin_backtest = build_handicap_margin_backtest_summary(settlement_items)
     jc_bucket_feedback = build_jc_bucket_feedback_summary(resolved, settlement_items)
     evaluation_agent = build_strategy_evaluation_agent_summary(resolved, settlement_items)
     stable_count = sum(1 for item in pool if bool(_strategy_stability(item).get("stable")))
@@ -1456,6 +2489,34 @@ def build_high_accuracy_strategy_dashboard(
             "tone": "warning" if _safe_int(error_attribution.get("miss_count")) else "good",
         },
         {
+            "label": "Agent Replay",
+            "value": str(agent_trace_replay.get("top_agent") or "-"),
+            "tone": "warning" if _safe_int(agent_trace_replay.get("agent_count")) else "neutral",
+        },
+        {
+            "label": "Replay Guard",
+            "value": str(agent_replay_downgrade.get("net", 0)),
+            "tone": "good"
+            if _safe_int(agent_replay_downgrade.get("net")) > 0
+            else "bad"
+            if _safe_int(agent_replay_downgrade.get("net")) < 0
+            else "neutral",
+        },
+        {
+            "label": "Replay Tuning",
+            "value": str(agent_replay_guard_tuning.get("label") or "-"),
+            "tone": str(agent_replay_guard_tuning.get("tone") or "neutral"),
+        },
+        {
+            "label": "\u8c03\u53c2\u751f\u6548",
+            "value": str(policy_effect_review.get("latest_label") or "-"),
+            "tone": "good"
+            if str(policy_effect_review.get("latest_status") or "") == "effective"
+            else "bad"
+            if str(policy_effect_review.get("latest_status") or "") == "negative"
+            else "neutral",
+        },
+        {
             "label": "Evaluation",
             "value": f"{evaluation_agent.get('status', '-')} / {evaluation_agent.get('score', '-')}",
             "tone": "bad"
@@ -1479,6 +2540,24 @@ def build_high_accuracy_strategy_dashboard(
             "label": "\u653e\u884c\u547d\u4e2d",
             "value": str(allowlist_summary.get("hit_rate_text") or "-"),
             "tone": "good" if _safe_float(allowlist_summary.get("hit_rate")) >= 0.6 else "warning" if _safe_int(allowlist_summary.get("known_count")) else "neutral",
+        },
+        {
+            "label": "Entropy避险",
+            "value": str(market_entropy_backtest.get("retained_accuracy_text") or "-"),
+            "tone": "good"
+            if str(market_entropy_backtest.get("recommendation") or "") == "block_high_entropy"
+            else "warning"
+            if str(market_entropy_backtest.get("recommendation") or "") in {"observe_high_entropy", "collecting"}
+            else "neutral",
+        },
+        {
+            "label": "Handicap Margin",
+            "value": str(handicap_margin_backtest.get("retained_accuracy_text") or "-"),
+            "tone": "good"
+            if str(handicap_margin_backtest.get("recommendation") or "") == "block_high_handicap_margin"
+            else "warning"
+            if str(handicap_margin_backtest.get("recommendation") or "") in {"observe_high_handicap_margin", "collecting"}
+            else "neutral",
         },
     ]
     validation_rows = [
@@ -1530,6 +2609,9 @@ def build_high_accuracy_strategy_dashboard(
         "pool_rows": build_high_accuracy_strategy_pool_rows(resolved),
         "settlement_rows": build_high_accuracy_strategy_settlement_rows(settlement_items),
         "error_attribution": error_attribution,
+        "agent_trace_replay": agent_trace_replay,
+        "agent_replay_downgrade": agent_replay_downgrade,
+        "agent_replay_guard_tuning": agent_replay_guard_tuning,
         "evaluation_agent": evaluation_agent,
         "jc_bucket_feedback": jc_bucket_feedback,
         "allowlist_settlement_rows": build_strategy_allowlist_settlement_rows(settlement_items),
@@ -1538,4 +2620,7 @@ def build_high_accuracy_strategy_dashboard(
         "settlement_summary": settlement_summary,
         "allowlist_settlement_summary": allowlist_summary,
         "allowlist_tuning": allowlist_tuning,
+        "policy_effect_review": policy_effect_review,
+        "market_entropy_backtest": market_entropy_backtest,
+        "handicap_margin_backtest": handicap_margin_backtest,
     }

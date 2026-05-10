@@ -18,6 +18,12 @@ from v24_app.ui_modules import (
     build_high_accuracy_strategy_dashboard,
     build_high_accuracy_strategy_pool_rows,
     build_high_accuracy_strategy_settlement_summary,
+    build_agent_trace_replay_summary,
+    build_agent_replay_downgrade_backtest_summary,
+    build_agent_replay_guard_tuning_recommendation,
+    build_strategy_policy_effect_review,
+    build_handicap_margin_backtest_summary,
+    build_market_entropy_backtest_summary,
     build_strategy_evaluation_agent_summary,
     build_strategy_error_attribution_summary,
     build_strategy_allowlist_filename,
@@ -25,6 +31,8 @@ from v24_app.ui_modules import (
     build_strategy_allowlist_settlement_rows,
     build_strategy_allowlist_settlement_summary,
     build_strategy_allowlist_tuning_recommendation,
+    build_strategy_policy_audit_csv_text,
+    build_strategy_policy_audit_report_lines,
     build_strategy_release_recovery_alerts,
     build_strategy_release_pool_rows,
     compute_strategy_admission_counts,
@@ -32,6 +40,7 @@ from v24_app.ui_modules import (
     format_strategy_admission_label,
     format_strategy_admission_pick,
     format_strategy_admission_reasons,
+    format_strategy_admission_replay_guard,
     format_strategy_admission_thresholds,
     select_strategy_allowlist_rows,
 )
@@ -51,13 +60,23 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
             "active_strategy_min": 2,
             "medium_risk_allowed": False,
             "high_risk_allowed": False,
-            "reasons": ["high_accuracy_strategy_count_below_policy", "risk_medium_policy_watch"],
+            "reasons": ["high_accuracy_strategy_count_below_policy", "risk_medium_policy_watch", "agent_replay_policy_watch"],
+            "agent_replay_guard": {
+                "applied": True,
+                "top_agent": "RiskGuardian",
+                "top_prediction_miss_rate": 0.56,
+                "top_handicap_miss_rate": 0.67,
+                "actions": ["review_handicap_margin_consistency"],
+            },
         }
 
         self.assertEqual(format_strategy_admission_label(admission), "\u89c2\u5bdf")
         self.assertIn("\u9ad8\u51c6\u7b56\u7565\u6570\u91cf\u4f4e\u4e8e\u5f53\u524d\u51c6\u5165\u95e8\u69db", format_strategy_admission_reasons(admission))
         self.assertIn("\u5f53\u524d\u95e8\u69db\u5c06\u4e2d\u98ce\u9669\u964d\u4e3a\u89c2\u5bdf", format_strategy_admission_reasons(admission))
+        self.assertIn("Agent Replay", format_strategy_admission_reasons(admission))
         self.assertIn("\u5e02\u573a\u80dc\u5e73\u8d1f HOME / 62.0%", format_strategy_admission_pick(admission))
+        self.assertIn("RiskGuardian", format_strategy_admission_replay_guard(admission))
+        self.assertIn("让球历史失误 67.0%", format_strategy_admission_replay_guard(admission))
         self.assertIn("\u9ad8\u51c6 1/2", format_strategy_admission_thresholds(admission))
         self.assertIn("\u4e2d\u98ce\u9669\u89c2\u5bdf", format_strategy_admission_thresholds(admission))
 
@@ -76,6 +95,344 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertEqual(len(filter_strategy_admission_rows(rows, "observe")), 2)
         self.assertEqual(len(filter_strategy_admission_rows(rows, "\u963b\u65ad")), 1)
         self.assertEqual(len(filter_strategy_admission_rows(rows, "all")), 4)
+
+    def test_market_entropy_backtest_recommends_high_entropy_block(self) -> None:
+        settlements = [
+            {"is_correct": False, "market_entropy_level": "HIGH", "market_entropy_score": 0.82, "market_entropy_signals": ["kelly_against_pick"], "market_entropy_risk_applied": True},
+            {"is_correct": False, "market_entropy_level": "HIGH", "market_entropy_score": 0.74, "market_entropy_signals": ["odds_velocity_alert"], "market_entropy_risk_applied": True},
+            {"is_correct": True, "market_entropy_level": "HIGH", "market_entropy_score": 0.70, "market_entropy_signals": ["odds_step_change"], "market_entropy_risk_applied": True},
+            {"is_correct": True, "market_entropy_level": "LOW", "market_entropy_score": 0.12},
+            {"is_correct": True, "market_entropy_level": "LOW", "market_entropy_score": 0.18},
+            {"is_correct": True, "market_entropy_level": "MEDIUM", "market_entropy_score": 0.45},
+        ]
+
+        summary = build_market_entropy_backtest_summary(settlements)
+
+        self.assertEqual(summary["sample_count"], 6)
+        self.assertEqual(summary["avoidable_misses"], 2)
+        self.assertEqual(summary["opportunity_cost"], 1)
+        self.assertEqual(summary["recommendation"], "block_high_entropy")
+        high_row = next(row for row in summary["rows"] if row["bucket"] == "high")
+        self.assertEqual(high_row["count"], 3)
+        self.assertEqual(high_row["miss_count"], 2)
+        self.assertIn("kelly_against_pick", {row["top_signal"] for row in summary["rows"]})
+
+    def test_agent_trace_replay_summarizes_risk_agent_misses(self) -> None:
+        settlements = [
+            {
+                "is_correct": False,
+                "handicap_is_correct": False,
+                "supervisor_agent_statuses": {"MarketEntropy": "alert", "RiskGuardian": "alert"},
+                "supervisor_agent_actions": ["manual_market_review", "keep_observation"],
+            },
+            {
+                "is_correct": True,
+                "handicap_is_correct": False,
+                "supervisor_agent_statuses": {"MarketEntropy": "watch", "RiskGuardian": "watch"},
+                "supervisor_agent_actions": ["watch_market_movement"],
+            },
+            {
+                "is_correct": True,
+                "handicap_is_correct": True,
+                "supervisor_agent_statuses": {"Simulation": "ready"},
+                "supervisor_agent_actions": [],
+            },
+        ]
+
+        summary = build_agent_trace_replay_summary(settlements)
+
+        self.assertEqual(summary["sample_count"], 3)
+        self.assertEqual(summary["agent_count"], 2)
+        self.assertEqual(summary["top_agent"], "MarketEntropy")
+        market_row = next(row for row in summary["rows"] if row["agent"] == "MarketEntropy")
+        self.assertEqual(market_row["trigger_count"], 2)
+        self.assertEqual(market_row["alert_count"], 1)
+        self.assertEqual(market_row["prediction_miss_rate_text"], "50.0%")
+        self.assertEqual(market_row["handicap_miss_rate_text"], "100.0%")
+
+    def test_agent_replay_downgrade_backtest_summarizes_avoided_errors(self) -> None:
+        settlements = [
+            {
+                "is_correct": False,
+                "handicap_is_correct": False,
+                "agent_replay_guard_applied": True,
+                "agent_replay_guard_top_agent": "RiskGuardian",
+                "agent_replay_guard_actions": ["review_handicap_margin_consistency"],
+            },
+            {
+                "is_correct": False,
+                "handicap_is_correct": True,
+                "agent_replay_guard_applied": True,
+                "agent_replay_guard_top_agent": "RiskGuardian",
+                "agent_replay_guard_actions": ["review_handicap_margin_consistency"],
+            },
+            {
+                "is_correct": True,
+                "handicap_is_correct": False,
+                "agent_replay_guard_applied": True,
+                "agent_replay_guard_top_agent": "MarketEntropy",
+                "agent_replay_guard_actions": ["manual_market_review"],
+            },
+            {"is_correct": True, "handicap_is_correct": True, "agent_replay_guard_applied": False},
+        ]
+
+        summary = build_agent_replay_downgrade_backtest_summary(settlements)
+
+        self.assertEqual(summary["sample_count"], 3)
+        self.assertEqual(summary["prediction_avoided_misses"], 2)
+        self.assertEqual(summary["prediction_opportunity_cost"], 1)
+        self.assertEqual(summary["handicap_avoided_misses"], 2)
+        self.assertEqual(summary["handicap_opportunity_cost"], 1)
+        self.assertEqual(summary["net"], 2)
+        self.assertEqual(summary["recommendation"], "collecting")
+        risk_row = next(row for row in summary["rows"] if row["agent"] == "RiskGuardian")
+        self.assertEqual(risk_row["prediction_net"], 2)
+        self.assertEqual(risk_row["top_action"], "review_handicap_margin_consistency")
+
+    def test_agent_replay_guard_tuning_tightens_positive_net(self) -> None:
+        settlements = [
+            {
+                "is_correct": False,
+                "handicap_is_correct": False,
+                "agent_replay_guard_applied": True,
+                "agent_replay_guard_top_agent": "RiskGuardian",
+            }
+            for _ in range(5)
+        ] + [
+            {
+                "is_correct": True,
+                "handicap_is_correct": True,
+                "agent_replay_guard_applied": True,
+                "agent_replay_guard_top_agent": "RiskGuardian",
+            }
+            for _ in range(3)
+        ]
+
+        recommendation = build_agent_replay_guard_tuning_recommendation(settlements)
+
+        self.assertEqual(recommendation["action"], "tighten_guard")
+        self.assertEqual(recommendation["policy_update"]["agent_replay_prediction_miss_threshold"], 0.52)
+        self.assertEqual(recommendation["policy_update"]["agent_replay_handicap_miss_threshold"], 0.57)
+
+    def test_agent_replay_guard_tuning_loosens_negative_net(self) -> None:
+        settlements = [
+            {
+                "is_correct": False,
+                "handicap_is_correct": False,
+                "agent_replay_guard_applied": True,
+                "agent_replay_guard_top_agent": "RiskGuardian",
+            }
+            for _ in range(2)
+        ] + [
+            {
+                "is_correct": True,
+                "handicap_is_correct": True,
+                "agent_replay_guard_applied": True,
+                "agent_replay_guard_top_agent": "RiskGuardian",
+            }
+            for _ in range(6)
+        ]
+
+        recommendation = build_agent_replay_guard_tuning_recommendation(settlements)
+
+        self.assertEqual(recommendation["action"], "loosen_guard")
+        self.assertEqual(recommendation["policy_update"]["agent_replay_min_samples"], 6)
+        self.assertEqual(recommendation["policy_update"]["agent_replay_prediction_miss_threshold"], 0.58)
+        self.assertEqual(recommendation["policy_update"]["agent_replay_handicap_miss_threshold"], 0.63)
+
+    def test_strategy_policy_effect_review_tracks_version_windows(self) -> None:
+        history = [
+            {"version_id": "v1", "updated_at": "2026-05-01 10:00:00", "source": "strategy_allowlist_tuning"},
+            {"version_id": "v2", "updated_at": "2026-05-02 10:00:00", "source": "agent_replay_guard_tuning"},
+        ]
+        settlements = [
+            {
+                "timestamp": "2026-05-01 12:00:00",
+                "strategy_admission_decision": "allow",
+                "is_correct": True,
+                "agent_replay_guard_applied": False,
+            },
+            {
+                "timestamp": "2026-05-01 13:00:00",
+                "strategy_admission_decision": "allow",
+                "is_correct": False,
+                "agent_replay_guard_applied": False,
+            },
+            {
+                "timestamp": "2026-05-02 12:00:00",
+                "strategy_admission_decision": "allow",
+                "is_correct": True,
+                "handicap_is_correct": False,
+                "agent_replay_guard_applied": True,
+                "agent_replay_guard_top_agent": "RiskGuardian",
+            },
+            {
+                "timestamp": "2026-05-02 13:00:00",
+                "strategy_admission_decision": "allow",
+                "is_correct": True,
+                "handicap_is_correct": False,
+                "agent_replay_guard_applied": True,
+                "agent_replay_guard_top_agent": "RiskGuardian",
+            },
+            {
+                "timestamp": "2026-05-02 14:00:00",
+                "strategy_admission_decision": "observe",
+                "is_correct": False,
+                "handicap_is_correct": False,
+                "agent_replay_guard_applied": True,
+                "agent_replay_guard_top_agent": "RiskGuardian",
+            },
+        ]
+
+        review = build_strategy_policy_effect_review(history, settlements)
+
+        self.assertEqual(review["history_count"], 2)
+        self.assertEqual(review["rows"][0]["version_id"], "v2")
+        self.assertEqual(review["rows"][0]["effect_status"], "effective")
+        self.assertEqual(review["rows"][0]["allow_hit_rate_text"], "100.0%")
+        self.assertIn("Replay Guard", review["rows"][0]["body"])
+        self.assertEqual(len(review["rows"][0]["sample_rows"]), 3)
+        self.assertEqual(review["rows"][0]["sample_rows"][0]["replay_guard"], "\u89e6\u53d1")
+        self.assertIn("RiskGuardian", review["rows"][0]["sample_rows"][0]["summary"])
+
+    def test_strategy_policy_effect_review_pinpoints_negative_drivers(self) -> None:
+        history = [
+            {"version_id": "v1", "updated_at": "2026-05-01 10:00:00", "source": "strategy_allowlist_tuning"},
+            {"version_id": "v2", "updated_at": "2026-05-02 10:00:00", "source": "agent_replay_guard_tuning"},
+        ]
+        settlements = [
+            {
+                "timestamp": "2026-05-01 12:00:00",
+                "league": "A",
+                "home_team": "H1",
+                "away_team": "A1",
+                "strategy_admission_decision": "allow",
+                "is_correct": True,
+                "handicap_is_correct": True,
+            },
+            {
+                "timestamp": "2026-05-01 13:00:00",
+                "league": "A",
+                "home_team": "H2",
+                "away_team": "A2",
+                "strategy_admission_decision": "allow",
+                "is_correct": True,
+                "handicap_is_correct": True,
+            },
+            {
+                "timestamp": "2026-05-01 14:00:00",
+                "league": "A",
+                "home_team": "H3",
+                "away_team": "A3",
+                "strategy_admission_decision": "allow",
+                "is_correct": True,
+                "handicap_is_correct": True,
+            },
+            {
+                "timestamp": "2026-05-02 12:00:00",
+                "league": "B",
+                "home_team": "Bad1",
+                "away_team": "X1",
+                "strategy_admission_decision": "allow",
+                "is_correct": False,
+                "handicap_is_correct": False,
+                "agent_replay_guard_applied": False,
+            },
+            {
+                "timestamp": "2026-05-02 13:00:00",
+                "league": "B",
+                "home_team": "Bad2",
+                "away_team": "X2",
+                "strategy_admission_decision": "allow",
+                "is_correct": False,
+                "handicap_is_correct": True,
+                "agent_replay_guard_applied": False,
+            },
+            {
+                "timestamp": "2026-05-02 14:00:00",
+                "league": "B",
+                "home_team": "Bad3",
+                "away_team": "X3",
+                "strategy_admission_decision": "allow",
+                "is_correct": False,
+                "handicap_is_correct": True,
+                "agent_replay_guard_applied": False,
+            },
+            {
+                "timestamp": "2026-05-02 15:00:00",
+                "league": "B",
+                "home_team": "Cost",
+                "away_team": "X4",
+                "strategy_admission_decision": "observe",
+                "is_correct": True,
+                "handicap_is_correct": True,
+                "agent_replay_guard_applied": True,
+                "agent_replay_guard_top_agent": "RiskGuardian",
+            },
+        ]
+
+        review = build_strategy_policy_effect_review(history, settlements)
+        row = review["rows"][0]
+
+        self.assertEqual(row["version_id"], "v2")
+        self.assertEqual(row["effect_status"], "negative")
+        self.assertTrue(row["rollback_recommended"])
+        self.assertIn("\u5efa\u8bae\u590d\u6838\u56de\u6eda", row["body"])
+        self.assertEqual(row["negative_diagnostics"]["top_negative_reason"], "\u653e\u884c\u540e1X2\u5931\u8bef")
+        self.assertGreaterEqual(row["top_negative_rows"][0]["drag_score"], 2)
+        self.assertIn("Bad1", row["top_negative_rows"][0]["title"])
+
+    def test_strategy_policy_audit_report_exports_review_and_samples(self) -> None:
+        history = [
+            {"version_id": "v1", "updated_at": "2026-05-01 10:00:00", "source": "strategy_allowlist_tuning"},
+        ]
+        settlements = [
+            {
+                "match_id": "m1",
+                "timestamp": "2026-05-01 12:00:00",
+                "league": "B",
+                "home_team": "Bad1",
+                "away_team": "X1",
+                "strategy_admission_decision": "allow",
+                "is_correct": False,
+                "handicap_is_correct": False,
+                "agent_replay_guard_applied": False,
+            }
+        ]
+        review = build_strategy_policy_effect_review(history, settlements)
+
+        lines = build_strategy_policy_audit_report_lines(review, generated_at=datetime(2026, 5, 3, 9, 0, 0))
+        csv_text = build_strategy_policy_audit_csv_text(review)
+
+        report = "\n".join(lines)
+        self.assertIn("# \u7b56\u7565\u8c03\u53c2\u5ba1\u8ba1\u62a5\u544a", report)
+        self.assertIn("\u7248\u672c\u6548\u679c\u603b\u89c8", report)
+        self.assertIn("v1", report)
+        self.assertIn("Bad1", report)
+        self.assertIn("version_id,updated_at,source", csv_text)
+        self.assertIn("m1", csv_text)
+        self.assertIn("\u653e\u884c\u540e1X2\u5931\u8bef", csv_text)
+
+    def test_handicap_margin_backtest_recommends_high_conflict_block(self) -> None:
+        settlements = [
+            {"handicap_is_correct": False, "handicap_margin_level": "HIGH", "handicap_margin_score": 0.82, "handicap_margin_signals": ["handicap_direction_mismatch"]},
+            {"handicap_is_correct": False, "handicap_margin_level": "HIGH", "handicap_margin_score": 0.74, "handicap_margin_signals": ["line_too_deep_for_model"]},
+            {"handicap_is_correct": True, "handicap_margin_level": "HIGH", "handicap_margin_score": 0.70, "handicap_margin_signals": ["handicap_pick_margin_mismatch"]},
+            {"handicap_is_correct": True, "handicap_margin_level": "LOW", "handicap_margin_score": 0.12},
+            {"handicap_is_correct": True, "handicap_margin_level": "LOW", "handicap_margin_score": 0.18},
+            {"handicap_is_correct": True, "handicap_margin_level": "MEDIUM", "handicap_margin_score": 0.45},
+        ]
+
+        summary = build_handicap_margin_backtest_summary(settlements)
+
+        self.assertEqual(summary["sample_count"], 6)
+        self.assertEqual(summary["avoidable_handicap_misses"], 2)
+        self.assertEqual(summary["opportunity_cost"], 1)
+        self.assertEqual(summary["recommendation"], "block_high_handicap_margin")
+        high_row = next(row for row in summary["rows"] if row["bucket"] == "high")
+        self.assertEqual(high_row["count"], 3)
+        self.assertEqual(high_row["miss_count"], 2)
+        self.assertIn("handicap_direction_mismatch", {row["top_signal"] for row in summary["rows"]})
 
     def test_strategy_dashboard_summarizes_pool_and_settlements(self) -> None:
         status = {
@@ -175,6 +532,13 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertEqual(metrics["\u7a33\u5b9a\u7b56\u7565"], "2/2")
         self.assertEqual(metrics["\u65ad\u8def\u6682\u505c"], "1")
         self.assertEqual(metrics["\u771f\u5b9e\u547d\u4e2d"], "50.0%")
+        self.assertIn("Handicap Margin", metrics)
+        self.assertIn("Agent Replay", metrics)
+        self.assertIn("Replay Guard", metrics)
+        self.assertIn("Replay Tuning", metrics)
+        self.assertIn("\u8c03\u53c2\u751f\u6548", metrics)
+        self.assertIn("agent_replay_guard_tuning", dashboard)
+        self.assertIn("policy_effect_review", dashboard)
         self.assertIn("APP 40", dashboard["validation_rows"][0][1])
         self.assertEqual(len(dashboard["pool_rows"]), 2)
         self.assertIn("\u89c2\u5bdf(\u539f\u4e3b\u7b56\u7565)", dashboard["pool_rows"][0]["title"])

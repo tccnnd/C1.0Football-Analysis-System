@@ -765,6 +765,108 @@ class CorePlayThresholdBucketTuningTests(unittest.TestCase):
         self.assertTrue(admission["blocked"])
         self.assertIn("risk_high", admission["reasons"])
 
+    def test_strategy_admission_gate_observes_when_agent_replay_guard_applies(self) -> None:
+        settlements = [
+            {
+                "is_correct": False,
+                "handicap_is_correct": False,
+                "supervisor_agent_statuses": {"RiskGuardian": "alert"},
+            }
+            for _ in range(5)
+        ]
+
+        with patch("v24_app.core.get_recent_settlements", return_value=settlements):
+            admission = core._strategy_admission_gate(
+                risk_level="LOW",
+                confidence=0.72,
+                high_strategy={
+                    "enabled": True,
+                    "active_matches": [{"play_type": "market_1x2", "pick": "HOME", "confidence": 0.72}],
+                    "active_count": 1,
+                    "summary": "market_1x2 HOME",
+                },
+                play_strategy={"single": [{"play_type": "1x2"}]},
+                agent_replay_context={
+                    "agent_names": ["RiskGuardian"],
+                    "actions": ["review_handicap_margin_consistency"],
+                },
+            )
+
+        self.assertEqual(admission["decision"], "observe")
+        self.assertFalse(admission["release_allowed"])
+        self.assertIn("agent_replay_policy_watch", admission["reasons"])
+        self.assertTrue(admission["agent_replay_guard"]["applied"])
+        self.assertEqual(admission["agent_replay_guard"]["top_agent"], "RiskGuardian")
+
+    def test_strategy_admission_gate_skips_disabled_agent_replay_guard(self) -> None:
+        settlements = [
+            {
+                "is_correct": False,
+                "handicap_is_correct": False,
+                "supervisor_agent_statuses": {"RiskGuardian": "alert"},
+            }
+            for _ in range(5)
+        ]
+        policy = {
+            **core.DEFAULT_STRATEGY_ADMISSION_POLICY,
+            "agent_replay_guard_enabled": False,
+        }
+
+        with patch("v24_app.core._current_strategy_admission_policy", return_value=policy), patch(
+            "v24_app.core.get_recent_settlements",
+            return_value=settlements,
+        ):
+            admission = core._strategy_admission_gate(
+                risk_level="LOW",
+                confidence=0.72,
+                high_strategy={
+                    "enabled": True,
+                    "active_matches": [{"play_type": "market_1x2", "pick": "HOME", "confidence": 0.72}],
+                    "active_count": 1,
+                },
+                play_strategy={"single": [{"play_type": "1x2"}]},
+                agent_replay_context={"agent_names": ["RiskGuardian"]},
+            )
+
+        self.assertEqual(admission["decision"], "allow")
+        self.assertFalse(admission["agent_replay_guard"]["applied"])
+        self.assertEqual(admission["agent_replay_guard"]["reason"], "agent_replay_guard_disabled")
+
+    def test_strategy_admission_gate_respects_agent_replay_policy_thresholds(self) -> None:
+        settlements = [
+            {
+                "is_correct": index < 2,
+                "handicap_is_correct": index < 2,
+                "supervisor_agent_statuses": {"RiskGuardian": "alert"},
+            }
+            for index in range(5)
+        ]
+        policy = {
+            **core.DEFAULT_STRATEGY_ADMISSION_POLICY,
+            "agent_replay_prediction_miss_threshold": 0.80,
+            "agent_replay_handicap_miss_threshold": 0.85,
+        }
+
+        with patch("v24_app.core._current_strategy_admission_policy", return_value=policy), patch(
+            "v24_app.core.get_recent_settlements",
+            return_value=settlements,
+        ):
+            admission = core._strategy_admission_gate(
+                risk_level="LOW",
+                confidence=0.72,
+                high_strategy={
+                    "enabled": True,
+                    "active_matches": [{"play_type": "market_1x2", "pick": "HOME", "confidence": 0.72}],
+                    "active_count": 1,
+                },
+                play_strategy={"single": [{"play_type": "1x2"}]},
+                agent_replay_context={"agent_names": ["RiskGuardian"]},
+            )
+
+        self.assertEqual(admission["decision"], "allow")
+        self.assertFalse(admission["agent_replay_guard"]["applied"])
+        self.assertEqual(admission["agent_replay_policy"]["prediction_miss_threshold"], 0.80)
+
     def test_settle_high_accuracy_strategy_results_marks_hits(self) -> None:
         result = core._settle_high_accuracy_strategy_results(
             {

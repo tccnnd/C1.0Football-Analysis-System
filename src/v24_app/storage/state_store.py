@@ -227,6 +227,36 @@ class StateStore:
         if not snapshot_id or not isinstance(record, dict):
             return
         items = self.load_market_snapshots()
+        existing = items.get(snapshot_id)
+        history: list[dict] = []
+        if isinstance(existing, dict):
+            existing_history = existing.get("history")
+            if isinstance(existing_history, list):
+                history.extend(item for item in existing_history if isinstance(item, dict))
+            else:
+                existing_market = existing.get("market")
+                if isinstance(existing_market, dict):
+                    history.append(
+                        {
+                            "saved_at": str(existing.get("saved_at") or ""),
+                            "market": dict(existing_market),
+                        }
+                    )
+        market = record.get("market")
+        if isinstance(market, dict):
+            history.append(
+                {
+                    "saved_at": str(record.get("saved_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                    "market": dict(market),
+                }
+            )
+        deduped: dict[str, dict] = {}
+        for item in history:
+            key = f"{item.get('saved_at', '')}|{json.dumps(item.get('market', {}), sort_keys=True, ensure_ascii=False)}"
+            deduped[key] = item
+        history = list(deduped.values())[-48:]
+        record = dict(record)
+        record["history"] = history
         if snapshot_id in items:
             del items[snapshot_id]
         items[snapshot_id] = record
