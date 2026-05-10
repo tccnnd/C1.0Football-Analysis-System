@@ -45,6 +45,9 @@ from v24_app.ui_modules import (
     build_statsbomb_fewshot_merge_apply_preview,
     build_statsbomb_fewshot_merge_apply_preview_filename,
     build_statsbomb_fewshot_merge_apply_preview_lines,
+    build_statsbomb_fewshot_merge_apply_report_filename,
+    build_statsbomb_fewshot_merge_apply_report_lines,
+    build_statsbomb_fewshot_merge_apply_result,
     build_statsbomb_fewshot_memory_summary,
     build_statsbomb_fewshot_memory_monitor,
     build_statsbomb_fewshot_memory_quality_alerts,
@@ -1630,6 +1633,74 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertEqual(preview["status"], "blocked")
         self.assertEqual(preview["summary"]["append_count"], 0)
         self.assertGreater(preview["summary"]["high_count"], 0)
+
+    def test_statsbomb_fewshot_merge_apply_result_builds_updated_memory(self) -> None:
+        item = {
+            "id": "draft:new",
+            "review_status": "draft",
+            "prompt": "review",
+            "completion": "done",
+            "labels": {
+                "simulated_pick": "AWAY",
+                "actual": "HOME",
+                "is_hit": False,
+                "root_cause": "statsbomb_finishing_variance",
+                "tags": ["statsbomb_post_match_review", "strategy_miss", "xg_direction_failed"],
+            },
+            "features": {
+                "home_xg": 1.0,
+                "away_xg": 1.5,
+                "xg_margin": -0.5,
+                "home_shots": 10,
+                "away_shots": 15,
+                "shot_margin": -5,
+                "event_count": 3000,
+            },
+            "meta": {
+                "match_id": "m2",
+                "match_date": "2024-06-16",
+                "league": "UEFA Euro",
+                "home_team": "A",
+                "away_team": "B",
+                "score": "1-0",
+            },
+        }
+        existing = {
+            "source": "StatsBomb Open Data event baseline",
+            "purpose": "evaluation_agent_fewshot_post_match_review",
+            "summary": {"sample_count": 1, "tag_counts": {"strategy_hit": 1}},
+            "items": [
+                {
+                    "id": "official:1",
+                    "labels": {"is_hit": True, "tags": ["statsbomb_post_match_review", "strategy_hit"]},
+                    "meta": {"match_id": "m1"},
+                }
+            ],
+        }
+        bundle = {
+            "purpose": "manual_apply_bundle",
+            "status": "pending_manual_apply",
+            "approval_required": True,
+            "items": [item],
+        }
+
+        result = build_statsbomb_fewshot_merge_apply_result(bundle, existing, generated_at=datetime(2026, 5, 10, 22, 15, 30))
+        lines = build_statsbomb_fewshot_merge_apply_report_lines(result)
+        payload = "\n".join(lines)
+        updated_memory = result["updated_memory"]
+
+        self.assertEqual(result["status"], "ready_to_write")
+        self.assertEqual(result["summary"]["applied_count"], 1)
+        self.assertEqual(result["summary"]["final_count"], 2)
+        self.assertEqual(updated_memory["summary"]["sample_count"], 2)
+        self.assertEqual(updated_memory["summary"]["miss_count"], 1)
+        self.assertEqual(updated_memory["items"][1]["review_status"], "approved")
+        self.assertEqual(
+            build_statsbomb_fewshot_merge_apply_report_filename(datetime(2026, 5, 10, 22, 15, 30)),
+            "statsbomb_fewshot_merge_applied_20260510_221530.md",
+        )
+        self.assertIn("StatsBomb Few-shot Merge Apply", payload)
+        self.assertIn("draft:new", payload)
 
     def test_high_accuracy_dashboard_exposes_statsbomb_backfill_queue(self) -> None:
         memory = {

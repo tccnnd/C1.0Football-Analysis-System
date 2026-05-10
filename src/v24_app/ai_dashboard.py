@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import json
 import re
+import shutil
 import threading
 import tkinter as tk
 import time
@@ -37,6 +38,7 @@ from .core import (
     rollback_strategy_admission_policy,
     run_high_accuracy_strategy_backtest,
     run_play_model_backtest,
+    STATSBOMB_SANDBOX_FEWSHOT_FILE,
     train_play_models_now,
 )
 from .ui_modules import (
@@ -86,6 +88,9 @@ from .ui_modules import (
     build_statsbomb_fewshot_merge_apply_preview,
     build_statsbomb_fewshot_merge_apply_preview_filename,
     build_statsbomb_fewshot_merge_apply_preview_lines,
+    build_statsbomb_fewshot_merge_apply_report_filename,
+    build_statsbomb_fewshot_merge_apply_report_lines,
+    build_statsbomb_fewshot_merge_apply_result,
     build_strategy_allowlist_filename,
     build_strategy_allowlist_report_lines,
     build_strategy_policy_audit_csv_filename,
@@ -4183,6 +4188,81 @@ class SmartMatchDashboard:
         )
         return preview_path
 
+    def apply_statsbomb_fewshot_merge_bundle(self) -> tuple[Path, Path | None] | None:
+        REPORT_DIR.mkdir(parents=True, exist_ok=True)
+        selected = filedialog.askopenfilename(
+            title="Select StatsBomb few-shot merge bundle to apply",
+            initialdir=str(REPORT_DIR),
+            filetypes=[
+                ("StatsBomb merge bundle", "statsbomb_fewshot_merge_bundle_*.json"),
+                ("JSON", "*.json"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not selected:
+            return None
+        source_path = Path(selected)
+        try:
+            bundle = json.loads(source_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            messagebox.showerror("StatsBomb few-shot apply", f"Failed to read bundle:\n{source_path}\n\n{exc}")
+            return None
+        now = datetime.now()
+        result = build_statsbomb_fewshot_merge_apply_result(
+            bundle,
+            get_statsbomb_sandbox_fewshot_memory(),
+            generated_at=now,
+        )
+        report_path = REPORT_DIR / build_statsbomb_fewshot_merge_apply_report_filename(now)
+        report_path.write_text(
+            "\n".join(build_statsbomb_fewshot_merge_apply_report_lines(result)),
+            encoding="utf-8",
+        )
+        summary = result.get("summary", {}) if isinstance(result.get("summary"), dict) else {}
+        if result.get("status") != "ready_to_write":
+            self.status_var.set(f"StatsBomb few-shot apply blocked: {result.get('status', '-')} | report {report_path.name}")
+            messagebox.showwarning(
+                "StatsBomb few-shot apply",
+                f"Apply was blocked or empty.\n\nReport:\n{report_path}\n\nStatus: {result.get('status', '-')}",
+            )
+            return report_path, None
+        applied_count = int(summary.get("applied_count", 0) or 0)
+        final_count = int(summary.get("final_count", 0) or 0)
+        backup_name = str(((result.get("preview") or {}) if isinstance(result.get("preview"), dict) else {}).get("backup_filename") or "")
+        confirmed = messagebox.askyesno(
+            "StatsBomb few-shot apply",
+            (
+                "This will write approved post-match few-shot samples into the official Evaluation Agent memory.\n\n"
+                f"Bundle:\n{source_path}\n\n"
+                f"Apply samples: {applied_count}\n"
+                f"Final memory samples: {final_count}\n"
+                f"Backup file: {backup_name or '-'}\n\n"
+                "Continue?"
+            ),
+        )
+        if not confirmed:
+            self.status_var.set(f"StatsBomb few-shot apply cancelled: {report_path.name}")
+            return report_path, None
+        updated_memory = result.get("updated_memory") if isinstance(result.get("updated_memory"), dict) else None
+        if not updated_memory:
+            messagebox.showerror("StatsBomb few-shot apply", "Apply result did not include updated memory payload.")
+            return report_path, None
+        STATSBOMB_SANDBOX_FEWSHOT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        backup_path: Path | None = None
+        if STATSBOMB_SANDBOX_FEWSHOT_FILE.exists():
+            backup_path = STATSBOMB_SANDBOX_FEWSHOT_FILE.parent / (backup_name or f"{STATSBOMB_SANDBOX_FEWSHOT_FILE.name}.backup_{now.strftime('%Y%m%d_%H%M%S')}.json")
+            shutil.copy2(STATSBOMB_SANDBOX_FEWSHOT_FILE, backup_path)
+        tmp_path = STATSBOMB_SANDBOX_FEWSHOT_FILE.with_suffix(".json.tmp")
+        tmp_path.write_text(json.dumps(updated_memory, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path.replace(STATSBOMB_SANDBOX_FEWSHOT_FILE)
+        self.status_var.set(f"StatsBomb few-shot applied: +{applied_count} | total {final_count}")
+        self._refresh_current_view_after_release_state_change()
+        messagebox.showinfo(
+            "StatsBomb few-shot apply",
+            f"Applied {applied_count} samples.\n\nMemory:\n{STATSBOMB_SANDBOX_FEWSHOT_FILE}\n\nBackup:\n{backup_path or '-'}\n\nReport:\n{report_path}",
+        )
+        return report_path, backup_path
+
     def open_strategy_policy_audit_history(self) -> None:
         self.current_nav_index = 4
         self.current_view = "strategy_audit_history"
@@ -4197,7 +4277,8 @@ class SmartMatchDashboard:
             + list(REPORT_DIR.glob("statsbomb_fewshot_merge_plan_*.md"))
             + list(REPORT_DIR.glob("statsbomb_fewshot_merge_bundle_*.json"))
             + list(REPORT_DIR.glob("statsbomb_fewshot_merge_bundle_review_*.md"))
-            + list(REPORT_DIR.glob("statsbomb_fewshot_merge_apply_preview_*.md")),
+            + list(REPORT_DIR.glob("statsbomb_fewshot_merge_apply_preview_*.md"))
+            + list(REPORT_DIR.glob("statsbomb_fewshot_merge_applied_*.md")),
             key=lambda path: path.stat().st_mtime,
             reverse=True,
         )
@@ -4946,6 +5027,7 @@ class SmartMatchDashboard:
         self._strategy_toolbar_button(audit_tools, "StatsBomb\u8865\u6837", self.export_statsbomb_fewshot_backfill_report)
         self._strategy_toolbar_button(audit_tools, "StatsBomb\u8349\u7a3f", self.export_statsbomb_fewshot_draft)
         self._strategy_toolbar_button(audit_tools, "StatsBomb\u9884\u89c8", self.preview_statsbomb_fewshot_merge_bundle)
+        self._strategy_toolbar_button(audit_tools, "StatsBomb\u5e94\u7528", self.apply_statsbomb_fewshot_merge_bundle, danger=True)
         self._strategy_toolbar_button(
             audit_tools,
             "\u751f\u6548\u8be6\u60c5",

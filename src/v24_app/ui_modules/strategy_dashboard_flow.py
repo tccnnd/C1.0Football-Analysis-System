@@ -1971,6 +1971,163 @@ def build_statsbomb_fewshot_merge_apply_preview_lines(preview: Mapping[str, obje
     return lines
 
 
+def build_statsbomb_fewshot_merge_apply_report_filename(now: datetime | None = None) -> str:
+    current = now or datetime.now()
+    return f"statsbomb_fewshot_merge_applied_{current.strftime('%Y%m%d_%H%M%S')}.md"
+
+
+def build_statsbomb_fewshot_merge_apply_result(
+    bundle: Mapping[str, object] | object,
+    existing_memory: Mapping[str, object] | object | None = None,
+    *,
+    generated_at: datetime | None = None,
+) -> dict[str, object]:
+    current = generated_at or datetime.now()
+    preview = build_statsbomb_fewshot_merge_apply_preview(bundle, existing_memory or {}, generated_at=current)
+    preview_summary = _as_mapping(preview.get("summary"))
+    preview_status = str(preview.get("status") or "")
+    append_items = [item for item in _as_list(preview.get("append_items")) if isinstance(item, Mapping)]
+    if preview_status not in {"ready_for_manual_apply", "review_required"} or not append_items:
+        return {
+            "updated_at": current.strftime("%Y-%m-%d %H:%M:%S"),
+            "source": "StatsBomb few-shot merge bundle",
+            "purpose": "manual_apply_result",
+            "status": "blocked" if preview_status == "blocked" else "empty",
+            "preview": preview,
+            "summary": {
+                "applied_count": 0,
+                "existing_count": _safe_int(preview_summary.get("existing_count")),
+                "final_count": _safe_int(preview_summary.get("existing_count")),
+                "skipped_count": _safe_int(preview_summary.get("skipped_count")),
+            },
+            "updated_memory": None,
+        }
+
+    existing = _as_mapping(existing_memory or {})
+    existing_items = [dict(item) for item in _statsbomb_memory_items(existing)]
+    approved_items: list[dict[str, object]] = []
+    for item in append_items:
+        approved = dict(item)
+        approved["review_status"] = "approved"
+        approved["applied_at"] = current.strftime("%Y-%m-%d %H:%M:%S")
+        approved_items.append(approved)
+    merged_items = existing_items + approved_items
+    tag_counts: dict[str, int] = {}
+    hit_count = 0
+    miss_count = 0
+    for item in merged_items:
+        labels = _as_mapping(item.get("labels"))
+        if labels.get("is_hit") is True:
+            hit_count += 1
+        elif labels.get("is_hit") is False:
+            miss_count += 1
+        for tag in _as_list(labels.get("tags")):
+            tag_text = str(tag)
+            if tag_text:
+                tag_counts[tag_text] = tag_counts.get(tag_text, 0) + 1
+    existing_summary = dict(_as_mapping(existing.get("summary")))
+    existing_summary.update(
+        {
+            "sample_count": len(merged_items),
+            "tag_counts": dict(sorted(tag_counts.items())),
+            "hit_count": hit_count,
+            "miss_count": miss_count,
+            "last_manual_apply_at": current.strftime("%Y-%m-%d %H:%M:%S"),
+            "last_manual_apply_count": len(approved_items),
+        }
+    )
+    leakage_note = (
+        str(existing.get("leakage_note") or "")
+        or str(_as_mapping(bundle).get("leakage_note") or "")
+        or "These few-shot samples use post-match event data and must not be used as pre-match prediction features."
+    )
+    updated_memory = dict(existing)
+    updated_memory.update(
+        {
+            "updated_at": current.strftime("%Y-%m-%d %H:%M:%S"),
+            "source": existing.get("source") or "StatsBomb few-shot memory with manual merge",
+            "purpose": existing.get("purpose") or "evaluation_agent_fewshot_post_match_review",
+            "leakage_note": leakage_note,
+            "summary": existing_summary,
+            "items": merged_items,
+            "last_manual_apply": {
+                "applied_at": current.strftime("%Y-%m-%d %H:%M:%S"),
+                "applied_count": len(approved_items),
+                "skipped_count": _safe_int(preview_summary.get("skipped_count")),
+                "backup_filename": preview.get("backup_filename") or "-",
+            },
+        }
+    )
+    return {
+        "updated_at": current.strftime("%Y-%m-%d %H:%M:%S"),
+        "source": "StatsBomb few-shot merge bundle",
+        "purpose": "manual_apply_result",
+        "status": "ready_to_write",
+        "preview": preview,
+        "summary": {
+            "applied_count": len(approved_items),
+            "existing_count": len(existing_items),
+            "final_count": len(merged_items),
+            "skipped_count": _safe_int(preview_summary.get("skipped_count")),
+        },
+        "updated_memory": updated_memory,
+    }
+
+
+def build_statsbomb_fewshot_merge_apply_report_lines(result: Mapping[str, object] | object) -> list[str]:
+    resolved = _as_mapping(result)
+    summary = _as_mapping(resolved.get("summary"))
+    preview = _as_mapping(resolved.get("preview"))
+    lines = [
+        "# StatsBomb Few-shot Merge Apply",
+        "",
+        f"- Applied at: {resolved.get('updated_at') or '-'}",
+        f"- Status: {resolved.get('status') or '-'}",
+        f"- Preview status: {preview.get('status') or '-'}",
+        f"- Applied samples: {_safe_int(summary.get('applied_count'))}",
+        f"- Skipped samples: {_safe_int(summary.get('skipped_count'))}",
+        f"- Existing samples before apply: {_safe_int(summary.get('existing_count'))}",
+        f"- Final memory samples: {_safe_int(summary.get('final_count'))}",
+        f"- Backup filename: {preview.get('backup_filename') or '-'}",
+        f"- Leakage boundary: {preview.get('leakage_note') or '-'}",
+        "",
+        "## Applied Items",
+        "",
+        "| ID | Match | Root cause | Tags |",
+        "| --- | --- | --- | --- |",
+    ]
+    for item in [item for item in _as_list(preview.get("append_items")) if isinstance(item, Mapping)]:
+        labels = _as_mapping(item.get("labels"))
+        meta = _as_mapping(item.get("meta"))
+        title = f"{meta.get('match_date') or '-'} | {meta.get('league') or '-'} | {meta.get('home_team') or '-'} vs {meta.get('away_team') or '-'}"
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    _md_cell(item.get("id")),
+                    _md_cell(title),
+                    _md_cell(labels.get("root_cause")),
+                    _md_cell(", ".join(str(tag) for tag in _as_list(labels.get("tags")))),
+                ]
+            )
+            + " |"
+        )
+    if _safe_int(summary.get("applied_count")) == 0:
+        lines.append("| - | No sample was applied | - | - |")
+    lines.extend(
+        [
+            "",
+            "## Required Follow-up",
+            "",
+            "- Re-open the strategy dashboard and confirm the few-shot monitor sample count increased.",
+            "- Export the backfill queue again to verify coverage gaps changed as expected.",
+            "- Keep this report with the backup file for rollback reference.",
+            "",
+        ]
+    )
+    return lines
+
+
 def build_statsbomb_fewshot_draft_review_lines(payload: Mapping[str, object] | object) -> list[str]:
     resolved = _as_mapping(payload)
     summary = _as_mapping(resolved.get("summary"))
