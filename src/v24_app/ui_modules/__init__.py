@@ -107,7 +107,10 @@ from .background_task_flow import (
     build_background_task_detail_lines,
     build_background_task_group_rows,
     build_background_task_rows,
+    build_background_task_stability_cards,
+    build_background_task_stability_summary,
     build_background_task_summary,
+    classify_background_task_failure,
 )
 from .recovery_run_flow import (
     build_result_recovery_quality_alerts,
@@ -294,7 +297,10 @@ __all__ = [
     "build_background_task_detail_lines",
     "build_background_task_group_rows",
     "build_background_task_rows",
+    "build_background_task_stability_cards",
+    "build_background_task_stability_summary",
     "build_background_task_summary",
+    "classify_background_task_failure",
     "should_refresh_after_auto_settle",
     "build_result_recovery_quality_alerts",
     "build_result_recovery_review_summary",

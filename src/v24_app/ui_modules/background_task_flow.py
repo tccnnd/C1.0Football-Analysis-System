@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
+from datetime import datetime, timedelta
 from typing import Mapping, Sequence
 
 
@@ -24,6 +26,15 @@ GROUP_LABELS = {
     "model": "模型任务",
 }
 
+FAILURE_REASON_LABELS = {
+    "data_source_error": "数据源异常",
+    "model_error": "模型异常",
+    "timeout": "执行超时",
+    "process_error": "进程异常",
+    "cancelled": "任务取消",
+    "unknown": "未知异常",
+}
+
 
 def _as_mapping(value: object) -> Mapping[str, object]:
     return value if isinstance(value, Mapping) else {}
@@ -34,6 +45,147 @@ def _safe_float(value: object, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _parse_dt(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text or text == "-":
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def classify_background_task_failure(task: Mapping[str, object] | object) -> str:
+    item = _as_mapping(task)
+    status = str(item.get("status") or "")
+    if status == "cancelled":
+        return "cancelled"
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), Mapping) else {}
+    text = " ".join(
+        [
+            str(item.get("error") or ""),
+            str(item.get("label") or ""),
+            str(item.get("key") or ""),
+            str(metadata.get("traceback") or "") if isinstance(metadata, Mapping) else "",
+        ]
+    ).lower()
+    if any(token in text for token in ("timeout", "timed out", "超时")):
+        return "timeout"
+    if any(token in text for token in ("process", "brokenprocesspool", "进程", "pickle", "subprocess")):
+        return "process_error"
+    if any(token in text for token in ("model", "xgb", "训练", "推理", "predict", "calibration")):
+        return "model_error"
+    if any(token in text for token in ("source", "api", "http", "network", "fetch", "数据源", "接口", "连接")):
+        return "data_source_error"
+    return "unknown"
+
+
+def build_background_task_stability_summary(
+    tasks: Sequence[Mapping[str, object]] | object,
+    *,
+    now: datetime | None = None,
+    window_hours: int = 24,
+) -> dict[str, object]:
+    items = [item for item in tasks if isinstance(item, Mapping)] if isinstance(tasks, Sequence) else []
+    reference_time = now or datetime.now()
+    cutoff = reference_time - timedelta(hours=max(1, int(window_hours)))
+    recent: list[Mapping[str, object]] = []
+    for item in items:
+        stamp = _parse_dt(item.get("finished_at")) or _parse_dt(item.get("started_at")) or _parse_dt(item.get("queued_at"))
+        if stamp is None or stamp >= cutoff:
+            recent.append(item)
+    success = sum(1 for item in recent if str(item.get("status") or "") == "success")
+    failed_items = [item for item in recent if str(item.get("status") or "") == "failed"]
+    cancelled = sum(1 for item in recent if str(item.get("status") or "") == "cancelled")
+    active = sum(1 for item in recent if str(item.get("status") or "") in {"queued", "running"})
+    completed = success + len(failed_items)
+    failure_rate = (len(failed_items) / completed) if completed else 0.0
+    elapsed_values = [
+        _safe_float(item.get("elapsed_seconds"))
+        for item in recent
+        if item.get("elapsed_seconds") is not None and _safe_float(item.get("elapsed_seconds")) >= 0
+    ]
+    avg_elapsed = sum(elapsed_values) / len(elapsed_values) if elapsed_values else 0.0
+    slowest = max(
+        (item for item in recent if item.get("elapsed_seconds") is not None),
+        key=lambda item: _safe_float(item.get("elapsed_seconds")),
+        default=None,
+    )
+    reason_counts = Counter(classify_background_task_failure(item) for item in failed_items)
+    group_failures = Counter(str(item.get("group") or "default") for item in failed_items)
+    latest_failure = failed_items[0] if failed_items else None
+    if failure_rate >= 0.25 or len(failed_items) >= 3:
+        health = "abnormal"
+        tone = "bad"
+        recommendation = "优先查看失败分组和最近一次失败，必要时暂停低优先级模型任务。"
+    elif len(failed_items) > 0 or active >= 4:
+        health = "watch"
+        tone = "warning"
+        recommendation = "继续观察失败原因，若同类错误重复出现再增加重试或降级规则。"
+    else:
+        health = "normal"
+        tone = "good"
+        recommendation = "后台任务稳定，可继续推进批量回测和自动复盘。"
+    return {
+        "window_hours": max(1, int(window_hours)),
+        "total": len(recent),
+        "active": active,
+        "success": success,
+        "failed": len(failed_items),
+        "cancelled": cancelled,
+        "failure_rate": round(failure_rate, 4),
+        "avg_elapsed_seconds": round(avg_elapsed, 2),
+        "slowest_label": str(slowest.get("label") or "-") if isinstance(slowest, Mapping) else "-",
+        "slowest_elapsed_seconds": round(_safe_float(slowest.get("elapsed_seconds")), 2) if isinstance(slowest, Mapping) else 0.0,
+        "failure_reasons": dict(reason_counts),
+        "top_failure_reason": reason_counts.most_common(1)[0][0] if reason_counts else "-",
+        "top_failure_group": group_failures.most_common(1)[0][0] if group_failures else "-",
+        "latest_failure_label": str(latest_failure.get("label") or "-") if isinstance(latest_failure, Mapping) else "-",
+        "latest_failure_error": str(latest_failure.get("error") or "-") if isinstance(latest_failure, Mapping) else "-",
+        "health": health,
+        "tone": tone,
+        "recommendation": recommendation,
+    }
+
+
+def build_background_task_stability_cards(summary: Mapping[str, object] | object) -> list[dict[str, object]]:
+    item = _as_mapping(summary)
+    health_labels = {"normal": "正常", "watch": "观察", "abnormal": "异常"}
+    top_reason = str(item.get("top_failure_reason") or "-")
+    top_group = str(item.get("top_failure_group") or "-")
+    cards = [
+        {
+            "title": f"后台健康: {health_labels.get(str(item.get('health') or ''), item.get('health', '-'))}",
+            "body": (
+                f"窗口 {item.get('window_hours', 24)}h | 任务 {item.get('total', 0)} | "
+                f"失败率 {_safe_float(item.get('failure_rate')) * 100:.1f}% | "
+                f"平均耗时 {_safe_float(item.get('avg_elapsed_seconds')):.2f}s"
+            ),
+            "tone": str(item.get("tone") or "neutral"),
+        },
+        {
+            "title": "失败归因",
+            "body": (
+                f"主要原因: {FAILURE_REASON_LABELS.get(top_reason, top_reason)}\n"
+                f"失败最多分组: {GROUP_LABELS.get(top_group, top_group)} | "
+                f"最近失败: {item.get('latest_failure_label', '-')}"
+            ),
+            "tone": "warning" if int(_safe_float(item.get("failed"), 0)) else "good",
+        },
+        {
+            "title": "耗时与建议",
+            "body": (
+                f"最慢任务: {item.get('slowest_label', '-')} / {_safe_float(item.get('slowest_elapsed_seconds')):.2f}s\n"
+                f"{item.get('recommendation', '-')}"
+            ),
+            "tone": str(item.get("tone") or "neutral"),
+        },
+    ]
+    return cards
 
 
 def build_background_task_rows(tasks: Sequence[Mapping[str, object]] | object, *, limit: int = 8) -> list[dict[str, object]]:

@@ -5,6 +5,7 @@ import os
 import sys
 import threading
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -21,7 +22,10 @@ from v24_app.ui_modules import (
     build_background_task_detail_lines,
     build_background_task_group_rows,
     build_background_task_rows,
+    build_background_task_stability_cards,
+    build_background_task_stability_summary,
     build_background_task_summary,
+    classify_background_task_failure,
 )
 
 
@@ -267,6 +271,61 @@ class BackgroundTaskCenterTests(unittest.TestCase):
         self.assertIn("2 排队", rows[0]["title"])
         self.assertIn("玩法模型训练", rows[0]["body"])
         self.assertEqual(rows[0]["tone"], "warning")
+
+    def test_classify_background_task_failure(self) -> None:
+        self.assertEqual(classify_background_task_failure({"status": "cancelled"}), "cancelled")
+        self.assertEqual(classify_background_task_failure({"status": "failed", "error": "API source timeout"}), "timeout")
+        self.assertEqual(classify_background_task_failure({"status": "failed", "error": "BrokenProcessPool"}), "process_error")
+        self.assertEqual(classify_background_task_failure({"status": "failed", "label": "玩法模型训练失败"}), "model_error")
+        self.assertEqual(classify_background_task_failure({"status": "failed", "error": "HTTP 502 数据源"}), "data_source_error")
+        self.assertEqual(classify_background_task_failure({"status": "failed", "error": "boom"}), "unknown")
+
+    def test_build_background_task_stability_summary_and_cards(self) -> None:
+        now = datetime(2026, 5, 10, 12, 0, 0)
+        recent_time = (now - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+        stale_time = (now - timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+        tasks = [
+            {
+                "task_id": "t1",
+                "label": "赛果回收",
+                "group": "recovery",
+                "status": "success",
+                "finished_at": recent_time,
+                "elapsed_seconds": 2.0,
+            },
+            {
+                "task_id": "t2",
+                "label": "玩法模型训练",
+                "group": "model",
+                "status": "failed",
+                "finished_at": recent_time,
+                "elapsed_seconds": 8.0,
+                "error": "model calibration failed",
+            },
+            {
+                "task_id": "t3",
+                "label": "历史旧任务",
+                "group": "backtest",
+                "status": "failed",
+                "finished_at": stale_time,
+                "elapsed_seconds": 100.0,
+                "error": "old failure",
+            },
+        ]
+
+        summary = build_background_task_stability_summary(tasks, now=now, window_hours=24)
+        cards = build_background_task_stability_cards(summary)
+
+        self.assertEqual(summary["total"], 2)
+        self.assertEqual(summary["success"], 1)
+        self.assertEqual(summary["failed"], 1)
+        self.assertEqual(summary["health"], "abnormal")
+        self.assertEqual(summary["top_failure_reason"], "model_error")
+        self.assertEqual(summary["top_failure_group"], "model")
+        self.assertEqual(summary["slowest_label"], "玩法模型训练")
+        self.assertEqual(len(cards), 3)
+        self.assertIn("后台健康", cards[0]["title"])
+        self.assertIn("模型异常", cards[1]["body"])
 
     def test_build_background_task_detail_lines_includes_metadata_and_traceback(self) -> None:
         lines = build_background_task_detail_lines(

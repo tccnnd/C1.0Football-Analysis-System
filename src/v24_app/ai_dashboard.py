@@ -39,6 +39,8 @@ from .ui_modules import (
     build_background_task_detail_lines,
     build_background_task_group_rows,
     build_background_task_summary,
+    build_background_task_stability_cards,
+    build_background_task_stability_summary,
     build_high_accuracy_strategy_backtest_message,
     build_high_accuracy_strategy_backtest_status_text,
     build_play_model_backtest_apply_status_text,
@@ -2591,9 +2593,11 @@ class SmartMatchDashboard:
         top.pack(fill=tk.X, pady=(0, 16))
         risk_counts = self._risk_counts()
         load_report = self.last_load_diagnostics if isinstance(self.last_load_diagnostics, dict) else {}
-        background_task_snapshot = self.background_tasks.snapshot(limit=10)
+        background_task_history = self.background_tasks.snapshot()
+        background_task_snapshot = background_task_history[:10]
         background_task_summary = build_background_task_summary(background_task_snapshot)
         background_queue_state = self.background_tasks.queue_state()
+        background_stability = build_background_task_stability_summary(background_task_history)
         load_failure_count = int(load_report.get("failure_count", 0) or 0)
         snapshot_failure_count = int(load_report.get("snapshot_failure_count", 0) or 0)
         fetched_count = int(load_report.get("fetched_count", len(self.rows)) or 0)
@@ -2615,6 +2619,11 @@ class SmartMatchDashboard:
             ("\u56de\u6536\u544a\u8b66", str(len(recovery_quality_alerts)), RED if any(item.get("severity") == "high" for item in recovery_quality_alerts) else YELLOW if recovery_quality_alerts else GREEN),
             ("\u540e\u53f0\u4efb\u52a1", str(background_task_summary.get("running", 0)), YELLOW if int(background_task_summary.get("running", 0) or 0) else GREEN),
             ("\u591a\u8fdb\u7a0b", str(background_task_summary.get("process_running", 0)), "#7aa2ff"),
+            (
+                "\u540e\u53f0\u5065\u5eb7",
+                {"normal": "\u6b63\u5e38", "watch": "\u89c2\u5bdf", "abnormal": "\u5f02\u5e38"}.get(str(background_stability.get("health") or ""), "-"),
+                self._tone_color(str(background_stability.get("tone") or "neutral")),
+            ),
             (
                 "\u961f\u5217\u8d44\u6e90",
                 f"T {background_queue_state.get('thread_running', 0)}/{background_queue_state.get('thread_limit', 0)} | P {background_queue_state.get('process_running', 0)}/{background_queue_state.get('process_limit', 0)}",
@@ -2694,6 +2703,16 @@ class SmartMatchDashboard:
                 self._alert_card(left, str(alert.get("title") or "-"), str(alert.get("body") or "-"), tone=str(alert.get("tone") or "warning"))
 
         tk.Label(right, text="\u540e\u53f0\u4efb\u52a1", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
+        tk.Label(right, text="\u7a33\u5b9a\u6027\u9762\u677f", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
+        for row in build_background_task_stability_cards(background_stability):
+            self._alert_card(
+                right,
+                str(row.get("title") or "-"),
+                str(row.get("body") or "-"),
+                tone=str(row.get("tone") or "neutral"),
+            )
+
+        tk.Label(right, text="\u961f\u5217\u5206\u7ec4", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
         group_rows = build_background_task_group_rows(background_queue_state)
         if group_rows:
             for row in group_rows:
