@@ -48,6 +48,9 @@ from v24_app.ui_modules import (
     build_statsbomb_fewshot_merge_apply_report_filename,
     build_statsbomb_fewshot_merge_apply_report_lines,
     build_statsbomb_fewshot_merge_apply_result,
+    build_statsbomb_fewshot_memory_rollback_preview,
+    build_statsbomb_fewshot_memory_rollback_report_filename,
+    build_statsbomb_fewshot_memory_rollback_report_lines,
     build_statsbomb_fewshot_memory_summary,
     build_statsbomb_fewshot_memory_monitor,
     build_statsbomb_fewshot_memory_quality_alerts,
@@ -1701,6 +1704,72 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         )
         self.assertIn("StatsBomb Few-shot Merge Apply", payload)
         self.assertIn("draft:new", payload)
+
+    def test_statsbomb_fewshot_memory_rollback_preview_validates_backup(self) -> None:
+        backup = {
+            "updated_at": "2026-05-10 22:15:30",
+            "purpose": "evaluation_agent_fewshot_post_match_review",
+            "leakage_note": "post-match only",
+            "items": [
+                {
+                    "id": "official:old",
+                    "review_status": "approved",
+                    "prompt": "review",
+                    "completion": "done",
+                    "labels": {
+                        "simulated_pick": "HOME",
+                        "actual": "HOME",
+                        "is_hit": True,
+                        "root_cause": "event_evidence_aligned",
+                        "tags": ["statsbomb_post_match_review", "strategy_hit"],
+                    },
+                    "features": {
+                        "home_xg": 1.0,
+                        "away_xg": 0.5,
+                        "xg_margin": 0.5,
+                        "home_shots": 10,
+                        "away_shots": 5,
+                        "shot_margin": 5,
+                        "event_count": 3000,
+                    },
+                    "meta": {
+                        "match_id": "m1",
+                        "match_date": "2024-06-15",
+                        "league": "UEFA Euro",
+                        "home_team": "A",
+                        "away_team": "B",
+                        "score": "1-0",
+                    },
+                }
+            ],
+        }
+        current = {"updated_at": "2026-05-10 23:00:00", "items": [backup["items"][0], {**backup["items"][0], "id": "official:new", "meta": {**backup["items"][0]["meta"], "match_id": "m2"}}]}
+
+        preview = build_statsbomb_fewshot_memory_rollback_preview(
+            backup,
+            current,
+            backup_name="statsbomb_sandbox_fewshot_samples.backup_20260510_221530.json",
+            generated_at=datetime(2026, 5, 10, 23, 30, 0),
+        )
+        lines = build_statsbomb_fewshot_memory_rollback_report_lines(preview)
+        payload = "\n".join(lines)
+
+        self.assertEqual(preview["status"], "ready_to_restore")
+        self.assertEqual(preview["summary"]["backup_count"], 1)
+        self.assertEqual(preview["summary"]["current_count"], 2)
+        self.assertEqual(preview["summary"]["delta"], -1)
+        self.assertEqual(
+            build_statsbomb_fewshot_memory_rollback_report_filename(datetime(2026, 5, 10, 23, 30, 0)),
+            "statsbomb_fewshot_memory_rollback_20260510_233000.md",
+        )
+        self.assertIn("StatsBomb Few-shot Memory Rollback", payload)
+        self.assertIn("ready_to_restore", payload)
+
+    def test_statsbomb_fewshot_memory_rollback_preview_blocks_invalid_backup(self) -> None:
+        preview = build_statsbomb_fewshot_memory_rollback_preview({}, {"items": []})
+
+        self.assertEqual(preview["status"], "blocked")
+        self.assertGreater(preview["summary"]["high_count"], 0)
 
     def test_high_accuracy_dashboard_exposes_statsbomb_backfill_queue(self) -> None:
         memory = {

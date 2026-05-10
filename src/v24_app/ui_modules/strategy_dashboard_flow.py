@@ -2128,6 +2128,108 @@ def build_statsbomb_fewshot_merge_apply_report_lines(result: Mapping[str, object
     return lines
 
 
+def build_statsbomb_fewshot_memory_rollback_report_filename(now: datetime | None = None) -> str:
+    current = now or datetime.now()
+    return f"statsbomb_fewshot_memory_rollback_{current.strftime('%Y%m%d_%H%M%S')}.md"
+
+
+def build_statsbomb_fewshot_memory_rollback_preview(
+    backup_memory: Mapping[str, object] | object,
+    current_memory: Mapping[str, object] | object | None = None,
+    *,
+    backup_name: str = "-",
+    generated_at: datetime | None = None,
+) -> dict[str, object]:
+    current = generated_at or datetime.now()
+    backup = _as_mapping(backup_memory)
+    current_payload = _as_mapping(current_memory or {})
+    backup_items = [item for item in _statsbomb_memory_items(backup) if isinstance(item, Mapping)]
+    current_items = [item for item in _statsbomb_memory_items(current_payload) if isinstance(item, Mapping)]
+    validation = validate_statsbomb_fewshot_draft_payload({"items": backup_items})
+    structural_issues: list[dict[str, object]] = []
+    if not backup:
+        structural_issues.append({"severity": "high", "code": "empty_backup_payload", "field": "backup"})
+    if "items" not in backup or not isinstance(backup.get("items"), list):
+        structural_issues.append({"severity": "high", "code": "missing_backup_items", "field": "items"})
+    purpose = str(backup.get("purpose") or "")
+    if purpose and purpose != "evaluation_agent_fewshot_post_match_review":
+        structural_issues.append({"severity": "medium", "code": "unexpected_purpose", "field": "purpose"})
+    high_count = _safe_int(validation.get("high_count")) + sum(1 for issue in structural_issues if issue.get("severity") == "high")
+    medium_count = _safe_int(validation.get("medium_count")) + sum(1 for issue in structural_issues if issue.get("severity") == "medium")
+    status = "ready_to_restore" if high_count == 0 else "blocked"
+    return {
+        "updated_at": current.strftime("%Y-%m-%d %H:%M:%S"),
+        "source": "StatsBomb few-shot memory backup",
+        "purpose": "manual_rollback_preview",
+        "status": status,
+        "approval_required": True,
+        "no_state_write": True,
+        "backup_name": backup_name,
+        "summary": {
+            "backup_count": len(backup_items),
+            "current_count": len(current_items),
+            "delta": len(backup_items) - len(current_items),
+            "high_count": high_count,
+            "medium_count": medium_count,
+        },
+        "backup_updated_at": backup.get("updated_at") or "-",
+        "current_updated_at": current_payload.get("updated_at") or "-",
+        "validation": validation,
+        "structural_issues": structural_issues,
+        "leakage_note": backup.get("leakage_note")
+        or "Restored few-shot memory remains post-match review evidence for Evaluation Agent only.",
+    }
+
+
+def build_statsbomb_fewshot_memory_rollback_report_lines(preview: Mapping[str, object] | object) -> list[str]:
+    resolved = _as_mapping(preview)
+    summary = _as_mapping(resolved.get("summary"))
+    validation = _as_mapping(resolved.get("validation"))
+    structural_issues = [item for item in _as_list(resolved.get("structural_issues")) if isinstance(item, Mapping)]
+    lines = [
+        "# StatsBomb Few-shot Memory Rollback",
+        "",
+        f"- Generated at: {resolved.get('updated_at') or '-'}",
+        f"- Status: {resolved.get('status') or '-'}",
+        f"- Backup file: {resolved.get('backup_name') or '-'}",
+        f"- Approval required: {'YES' if resolved.get('approval_required') else 'NO'}",
+        f"- No state write in preview: {'YES' if resolved.get('no_state_write') else 'NO'}",
+        f"- Backup updated at: {resolved.get('backup_updated_at') or '-'}",
+        f"- Current updated at: {resolved.get('current_updated_at') or '-'}",
+        f"- Leakage boundary: {resolved.get('leakage_note') or '-'}",
+        "",
+        "## Summary",
+        "",
+        f"- Backup samples: {_safe_int(summary.get('backup_count'))}",
+        f"- Current samples: {_safe_int(summary.get('current_count'))}",
+        f"- Restore delta: {_safe_int(summary.get('delta'))}",
+        f"- Validation high/medium: {_safe_int(summary.get('high_count'))} / {_safe_int(summary.get('medium_count'))}",
+        f"- Backup validation: {validation.get('summary_text') or '-'}",
+        "",
+    ]
+    if structural_issues:
+        lines.extend(["## Structural Issues", "", "| Severity | Code | Field |", "| --- | --- | --- |"])
+        for issue in structural_issues:
+            lines.append(
+                "| "
+                + " | ".join([_md_cell(issue.get("severity")), _md_cell(issue.get("code")), _md_cell(issue.get("field"))])
+                + " |"
+            )
+        lines.append("")
+    lines.extend(
+        [
+            "## Required Manual Checks",
+            "",
+            "- Confirm the selected backup is the intended rollback target.",
+            "- Confirm restore delta is expected.",
+            "- Keep the pre-rollback safety backup generated by the APP.",
+            "- Re-open the strategy dashboard and verify the few-shot monitor after rollback.",
+            "",
+        ]
+    )
+    return lines
+
+
 def build_statsbomb_fewshot_draft_review_lines(payload: Mapping[str, object] | object) -> list[str]:
     resolved = _as_mapping(payload)
     summary = _as_mapping(resolved.get("summary"))

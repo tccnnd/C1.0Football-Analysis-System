@@ -91,6 +91,9 @@ from .ui_modules import (
     build_statsbomb_fewshot_merge_apply_report_filename,
     build_statsbomb_fewshot_merge_apply_report_lines,
     build_statsbomb_fewshot_merge_apply_result,
+    build_statsbomb_fewshot_memory_rollback_preview,
+    build_statsbomb_fewshot_memory_rollback_report_filename,
+    build_statsbomb_fewshot_memory_rollback_report_lines,
     build_strategy_allowlist_filename,
     build_strategy_allowlist_report_lines,
     build_strategy_policy_audit_csv_filename,
@@ -4263,6 +4266,77 @@ class SmartMatchDashboard:
         )
         return report_path, backup_path
 
+    def rollback_statsbomb_fewshot_memory(self) -> tuple[Path, Path | None] | None:
+        state_dir = STATSBOMB_SANDBOX_FEWSHOT_FILE.parent
+        state_dir.mkdir(parents=True, exist_ok=True)
+        selected = filedialog.askopenfilename(
+            title="Select StatsBomb few-shot memory backup",
+            initialdir=str(state_dir),
+            filetypes=[
+                ("StatsBomb few-shot backup", "statsbomb_sandbox_fewshot_samples.backup_*.json"),
+                ("JSON", "*.json"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not selected:
+            return None
+        backup_path = Path(selected)
+        try:
+            backup_payload = json.loads(backup_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            messagebox.showerror("StatsBomb few-shot rollback", f"Failed to read backup:\n{backup_path}\n\n{exc}")
+            return None
+        current_payload = get_statsbomb_sandbox_fewshot_memory()
+        now = datetime.now()
+        preview = build_statsbomb_fewshot_memory_rollback_preview(
+            backup_payload,
+            current_payload,
+            backup_name=backup_path.name,
+            generated_at=now,
+        )
+        REPORT_DIR.mkdir(parents=True, exist_ok=True)
+        report_path = REPORT_DIR / build_statsbomb_fewshot_memory_rollback_report_filename(now)
+        report_path.write_text(
+            "\n".join(build_statsbomb_fewshot_memory_rollback_report_lines(preview)),
+            encoding="utf-8",
+        )
+        summary = preview.get("summary", {}) if isinstance(preview.get("summary"), dict) else {}
+        if preview.get("status") != "ready_to_restore":
+            self.status_var.set(f"StatsBomb few-shot rollback blocked: {report_path.name}")
+            messagebox.showwarning(
+                "StatsBomb few-shot rollback",
+                f"Rollback was blocked.\n\nReport:\n{report_path}\n\nStatus: {preview.get('status', '-')}",
+            )
+            return report_path, None
+        confirmed = messagebox.askyesno(
+            "StatsBomb few-shot rollback",
+            (
+                "This will restore the official Evaluation Agent few-shot memory from the selected backup.\n\n"
+                f"Backup:\n{backup_path}\n\n"
+                f"Backup samples: {summary.get('backup_count', 0)}\n"
+                f"Current samples: {summary.get('current_count', 0)}\n"
+                f"Restore delta: {summary.get('delta', 0)}\n\n"
+                "Continue?"
+            ),
+        )
+        if not confirmed:
+            self.status_var.set(f"StatsBomb few-shot rollback cancelled: {report_path.name}")
+            return report_path, None
+        safety_backup_path: Path | None = None
+        if STATSBOMB_SANDBOX_FEWSHOT_FILE.exists():
+            safety_backup_path = state_dir / f"statsbomb_sandbox_fewshot_samples.pre_rollback_{now.strftime('%Y%m%d_%H%M%S')}.json"
+            shutil.copy2(STATSBOMB_SANDBOX_FEWSHOT_FILE, safety_backup_path)
+        tmp_path = STATSBOMB_SANDBOX_FEWSHOT_FILE.with_suffix(".json.tmp")
+        tmp_path.write_text(json.dumps(backup_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path.replace(STATSBOMB_SANDBOX_FEWSHOT_FILE)
+        self.status_var.set(f"StatsBomb few-shot rolled back: {summary.get('backup_count', 0)} samples")
+        self._refresh_current_view_after_release_state_change()
+        messagebox.showinfo(
+            "StatsBomb few-shot rollback",
+            f"Rollback completed.\n\nRestored from:\n{backup_path}\n\nSafety backup:\n{safety_backup_path or '-'}\n\nReport:\n{report_path}",
+        )
+        return report_path, safety_backup_path
+
     def open_strategy_policy_audit_history(self) -> None:
         self.current_nav_index = 4
         self.current_view = "strategy_audit_history"
@@ -4278,7 +4352,8 @@ class SmartMatchDashboard:
             + list(REPORT_DIR.glob("statsbomb_fewshot_merge_bundle_*.json"))
             + list(REPORT_DIR.glob("statsbomb_fewshot_merge_bundle_review_*.md"))
             + list(REPORT_DIR.glob("statsbomb_fewshot_merge_apply_preview_*.md"))
-            + list(REPORT_DIR.glob("statsbomb_fewshot_merge_applied_*.md")),
+            + list(REPORT_DIR.glob("statsbomb_fewshot_merge_applied_*.md"))
+            + list(REPORT_DIR.glob("statsbomb_fewshot_memory_rollback_*.md")),
             key=lambda path: path.stat().st_mtime,
             reverse=True,
         )
@@ -5028,6 +5103,7 @@ class SmartMatchDashboard:
         self._strategy_toolbar_button(audit_tools, "StatsBomb\u8349\u7a3f", self.export_statsbomb_fewshot_draft)
         self._strategy_toolbar_button(audit_tools, "StatsBomb\u9884\u89c8", self.preview_statsbomb_fewshot_merge_bundle)
         self._strategy_toolbar_button(audit_tools, "StatsBomb\u5e94\u7528", self.apply_statsbomb_fewshot_merge_bundle, danger=True)
+        self._strategy_toolbar_button(audit_tools, "StatsBomb\u56de\u6eda", self.rollback_statsbomb_fewshot_memory, danger=True)
         self._strategy_toolbar_button(
             audit_tools,
             "\u751f\u6548\u8be6\u60c5",
