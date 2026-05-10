@@ -209,6 +209,95 @@ class ImportStatsBombOpenDataTests(unittest.TestCase):
             self.assertEqual(audit["match_date_from"], "2024-04-01")
             self.assertEqual(audit["match_date_to"], "2024-04-30")
 
+    def test_import_can_skip_existing_records_without_loading_events(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            offline_dir = root / "offline"
+            state_dir = root / "data" / "state"
+            write_json(
+                offline_dir / "competitions.json",
+                [
+                    {
+                        "competition_id": 9,
+                        "season_id": 281,
+                        "competition_name": "1. Bundesliga",
+                        "season_name": "2023/2024",
+                    }
+                ],
+            )
+            write_json(offline_dir / "matches" / "9" / "281.json", [fake_match(1001), fake_match(1002)])
+            write_json(offline_dir / "events" / "1002.json", fake_events())
+            write_json(
+                state_dir / "statsbomb_event_summaries.json",
+                {
+                    "items": [
+                        {
+                            "match_id": "statsbomb:1001",
+                            "source_match_id": 1001,
+                            "match_date": "2024-04-14",
+                            "league": "1. Bundesliga",
+                            "home_team": "Existing",
+                            "away_team": "Match",
+                            "event_summary": {"event_count": 99},
+                        }
+                    ]
+                },
+            )
+
+            result = importer.import_statsbomb_open_data(
+                project_root=root,
+                offline_dir=offline_dir,
+                competition_id=9,
+                season_id=281,
+                skip_existing=True,
+            )
+
+            summary = json.loads((state_dir / "statsbomb_event_summaries.json").read_text(encoding="utf-8"))
+            audit = json.loads((state_dir / "statsbomb_import_audit.json").read_text(encoding="utf-8"))
+
+            self.assertEqual(result["records"], 1)
+            self.assertEqual(result["skipped_existing"], 1)
+            self.assertEqual(result["output_records"], 2)
+            self.assertEqual(len(summary["items"]), 2)
+            self.assertEqual(summary["items"][0]["event_summary"]["event_count"], 99)
+            self.assertTrue(audit["skip_existing"])
+            self.assertEqual(audit["skipped_existing"], 1)
+
+    def test_import_does_not_persist_empty_summary_when_events_fail(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            offline_dir = root / "offline"
+            write_json(
+                offline_dir / "competitions.json",
+                [
+                    {
+                        "competition_id": 9,
+                        "season_id": 281,
+                        "competition_name": "1. Bundesliga",
+                        "season_name": "2023/2024",
+                    }
+                ],
+            )
+            write_json(offline_dir / "matches" / "9" / "281.json", [fake_match(1001), fake_match(1002)])
+            write_json(offline_dir / "events" / "1002.json", fake_events())
+
+            result = importer.import_statsbomb_open_data(
+                project_root=root,
+                offline_dir=offline_dir,
+                competition_id=9,
+                season_id=281,
+            )
+
+            summary = json.loads(
+                (root / "data" / "state" / "statsbomb_event_summaries.json").read_text(encoding="utf-8")
+            )
+            audit = json.loads((root / "data" / "state" / "statsbomb_import_audit.json").read_text(encoding="utf-8"))
+
+            self.assertEqual(result["records"], 1)
+            self.assertEqual(result["failure_count"], 1)
+            self.assertEqual([item["source_match_id"] for item in summary["items"]], [1002])
+            self.assertEqual(len(audit["event_failures"]), 1)
+
     def test_filter_matches_accepts_explicit_match_ids(self) -> None:
         selected = importer.filter_matches(
             [fake_match(1001), fake_match(1002)],

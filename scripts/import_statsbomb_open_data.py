@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import sys
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = PROJECT_ROOT / "src"
@@ -34,8 +35,12 @@ def write_json(path: Path, payload: object) -> None:
 
 
 def fetch_json(url: str, timeout: int = 30) -> object:
-    with urlopen(url, timeout=timeout) as response:
-        return json.loads(response.read().decode("utf-8"))
+    request = Request(url, headers={"Accept-Encoding": "gzip", "User-Agent": "ELO-StatsBomb-Importer/1.0"})
+    with urlopen(request, timeout=timeout) as response:
+        body = response.read()
+        if str(response.headers.get("Content-Encoding") or "").lower() == "gzip":
+            body = gzip.decompress(body)
+        return json.loads(body.decode("utf-8"))
 
 
 def load_competitions(*, offline_dir: Path | None, timeout: int) -> list[dict]:
@@ -329,6 +334,29 @@ def load_existing_records(path: Path) -> list[dict]:
     return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
 
 
+def existing_statsbomb_match_ids(records: list[dict]) -> set[int]:
+    match_ids: set[int] = set()
+    for item in records:
+        summary = item.get("event_summary") if isinstance(item.get("event_summary"), dict) else {}
+        if int(summary.get("event_count") or 0) <= 0:
+            continue
+        source_match_id = item.get("source_match_id")
+        try:
+            if source_match_id is not None:
+                match_ids.add(int(source_match_id))
+                continue
+        except Exception:
+            pass
+
+        raw_match_id = str(item.get("match_id") or "").strip()
+        if raw_match_id.startswith("statsbomb:"):
+            try:
+                match_ids.add(int(raw_match_id.split(":", 1)[1]))
+            except Exception:
+                pass
+    return match_ids
+
+
 def merge_records(existing: list[dict], incoming: list[dict]) -> list[dict]:
     merged: dict[str, dict] = {}
     for item in existing + incoming:
@@ -387,8 +415,15 @@ def import_statsbomb_open_data(
     match_date_to: str | None = None,
     match_ids: list[int] | None = None,
     merge: bool = False,
+    skip_existing: bool = False,
     timeout: int = 30,
 ) -> dict:
+    state_dir = project_root / "data" / "state"
+    summaries_path = state_dir / "statsbomb_event_summaries.json"
+    audit_path = state_dir / "statsbomb_import_audit.json"
+    existing_records = load_existing_records(summaries_path) if merge or skip_existing else []
+    existing_match_ids = existing_statsbomb_match_ids(existing_records) if skip_existing else set()
+
     competitions = filter_competitions(
         load_competitions(offline_dir=offline_dir, timeout=timeout),
         competition_id=competition_id,
@@ -401,6 +436,7 @@ def import_statsbomb_open_data(
     records: list[dict] = []
     failures: list[str] = []
     event_failures: list[str] = []
+    skipped_existing = 0
     for competition in competitions:
         current_competition_id = int(competition.get("competition_id"))
         current_season_id = int(competition.get("season_id"))
@@ -425,21 +461,21 @@ def import_statsbomb_open_data(
 
         for match in matches:
             match_id = int(match.get("match_id"))
+            if skip_existing and match_id in existing_match_ids:
+                skipped_existing += 1
+                continue
             try:
                 events = load_events(match_id=match_id, offline_dir=offline_dir, timeout=timeout)
             except (HTTPError, URLError, OSError, TimeoutError, json.JSONDecodeError) as exc:
                 event_failures.append(f"{match_id}: {exc}")
-                events = []
+                continue
             records.append(convert_match(match, events))
 
     records.sort(key=lambda item: (str(item.get("match_date") or ""), str(item.get("match_id") or "")))
-    if not records:
+    if not records and not (skip_existing and skipped_existing and existing_records):
         raise SystemExit("No StatsBomb matches imported.")
 
-    state_dir = project_root / "data" / "state"
-    summaries_path = state_dir / "statsbomb_event_summaries.json"
-    audit_path = state_dir / "statsbomb_import_audit.json"
-    output_records = merge_records(load_existing_records(summaries_path), records) if merge else records
+    output_records = merge_records(existing_records, records) if merge or skip_existing else records
     payload = {
         "updated_at": now_text(),
         "source": SOURCE_NAME,
@@ -449,6 +485,8 @@ def import_statsbomb_open_data(
     }
     audit = build_audit(competitions=competitions, records=records, failures=failures, event_failures=event_failures)
     audit["merge"] = bool(merge)
+    audit["skip_existing"] = bool(skip_existing)
+    audit["skipped_existing"] = skipped_existing
     audit["output_records"] = len(output_records)
     audit["match_date_from"] = match_date_from
     audit["match_date_to"] = match_date_to
@@ -460,6 +498,7 @@ def import_statsbomb_open_data(
         "output_records": len(output_records),
         "total_events": audit["total_events"],
         "failure_count": audit["failure_count"],
+        "skipped_existing": skipped_existing,
         "summaries_path": str(summaries_path),
         "audit_path": str(audit_path),
     }
@@ -477,6 +516,7 @@ def main() -> int:
     parser.add_argument("--match-date-to", default=None)
     parser.add_argument("--match-ids", nargs="*", type=int, default=None)
     parser.add_argument("--merge", action="store_true", help="Merge imported summaries with existing statsbomb_event_summaries.json.")
+    parser.add_argument("--skip-existing", action="store_true", help="Skip event downloads for matches already present in the local summary file.")
     parser.add_argument("--timeout", type=int, default=30)
     args = parser.parse_args()
 
@@ -491,6 +531,7 @@ def main() -> int:
         match_date_to=args.match_date_to,
         match_ids=args.match_ids,
         merge=args.merge,
+        skip_existing=args.skip_existing,
         timeout=max(1, int(args.timeout)),
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
