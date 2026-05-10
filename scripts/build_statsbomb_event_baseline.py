@@ -74,6 +74,29 @@ def team_stats(record: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     return home_stats if isinstance(home_stats, dict) else {}, away_stats if isinstance(away_stats, dict) else {}
 
 
+def backfill_tags(row: dict[str, Any]) -> list[str]:
+    tags = ["statsbomb_post_match_review"]
+    if bool(row.get("finishing_variance")):
+        tags.extend(["statsbomb_finishing_variance", "xg_result_divergence"])
+    if "xg_aligned_with_score" in row and not bool(row.get("xg_aligned_with_score")):
+        tags.extend(["xg_result_divergence", "xg_direction_failed"])
+    if "shot_aligned_with_score" in row and not bool(row.get("shot_aligned_with_score")):
+        tags.append("shot_result_divergence")
+    goal_margin = safe_float(row.get("goal_margin"))
+    shot_margin = safe_int(row.get("shot_margin"))
+    if (goal_margin > 0 and shot_margin < -3) or (goal_margin < 0 and shot_margin > 3):
+        tags.append("event_control_gap")
+    if "xg_aligned_with_score" in row and bool(row.get("xg_aligned_with_score")):
+        tags.append("strategy_hit")
+    else:
+        tags.append("strategy_miss")
+    deduped: list[str] = []
+    for tag in tags:
+        if tag not in deduped:
+            deduped.append(tag)
+    return deduped
+
+
 def baseline_row(record: dict[str, Any], *, xg_threshold: float = 0.25) -> dict[str, Any] | None:
     home_stats, away_stats = team_stats(record)
     if not home_stats or not away_stats:
@@ -93,7 +116,7 @@ def baseline_row(record: dict[str, Any], *, xg_threshold: float = 0.25) -> dict[
     goal_margin = home_goals - away_goals
     finishing_delta_home = round(home_goals - home_xg, 4)
     finishing_delta_away = round(away_goals - away_xg, 4)
-    return {
+    row = {
         "match_id": record.get("match_id"),
         "source_match_id": record.get("source_match_id"),
         "match_date": record.get("match_date"),
@@ -123,6 +146,8 @@ def baseline_row(record: dict[str, Any], *, xg_threshold: float = 0.25) -> dict[
         "finishing_delta_away": finishing_delta_away,
         "event_count": safe_int((record.get("event_summary") or {}).get("event_count") if isinstance(record.get("event_summary"), dict) else 0),
     }
+    row["backfill_tags"] = backfill_tags(row)
+    return row
 
 
 def summarize_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -164,11 +189,15 @@ def build_statsbomb_event_baseline(records: list[dict[str, Any]]) -> dict[str, A
     by_competition: dict[str, list[dict[str, Any]]] = defaultdict(list)
     by_bucket: dict[str, list[dict[str, Any]]] = defaultdict(list)
     result_counts: Counter[str] = Counter()
+    backfill_tag_index: dict[str, list[int]] = defaultdict(list)
     for row in rows:
         key = f"{row.get('league') or '-'} | {row.get('season') or '-'}"
         by_competition[key].append(row)
         by_bucket[bucket_label(safe_float(row.get("xg_margin")))].append(row)
         result_counts[str(row.get("score_winner") or "-")] += 1
+    for index, row in enumerate(rows):
+        for tag in row.get("backfill_tags", []) if isinstance(row.get("backfill_tags"), list) else []:
+            backfill_tag_index[str(tag)].append(index)
     return {
         "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "source": "StatsBomb Open Data",
@@ -186,6 +215,10 @@ def build_statsbomb_event_baseline(records: list[dict[str, Any]]) -> dict[str, A
         "xg_margin_buckets": {
             key: summarize_rows(value)
             for key, value in sorted(by_bucket.items())
+        },
+        "backfill_tag_index": {
+            key: value
+            for key, value in sorted(backfill_tag_index.items())
         },
         "variance_rows": [
             item

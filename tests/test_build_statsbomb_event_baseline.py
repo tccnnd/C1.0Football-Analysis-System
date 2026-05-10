@@ -14,7 +14,7 @@ SCRIPTS_ROOT = PROJECT_ROOT / "scripts"
 if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
-from build_statsbomb_event_baseline import build_statsbomb_event_baseline, baseline_row, main
+from build_statsbomb_event_baseline import backfill_tags, build_statsbomb_event_baseline, baseline_row, main
 
 
 def record(
@@ -55,6 +55,8 @@ class BuildStatsBombEventBaselineTests(unittest.TestCase):
         self.assertTrue(row["finishing_variance"])
         self.assertAlmostEqual(row["xg_margin"], 1.4)
         self.assertEqual(row["shot_winner"], "home")
+        self.assertIn("xg_direction_failed", row["backfill_tags"])
+        self.assertEqual(row["backfill_tags"], backfill_tags(row))
 
     def test_build_baseline_summarizes_competitions_and_buckets(self) -> None:
         baseline = build_statsbomb_event_baseline(
@@ -70,6 +72,8 @@ class BuildStatsBombEventBaselineTests(unittest.TestCase):
         self.assertIn("UEFA Euro | 2024", baseline["competition_profiles"])
         self.assertIn("dominant_edge", baseline["xg_margin_buckets"])
         self.assertEqual(len(baseline["variance_rows"]), 1)
+        self.assertIn("backfill_tag_index", baseline)
+        self.assertIn("xg_direction_failed", baseline["backfill_tag_index"])
 
     def test_main_writes_baseline_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

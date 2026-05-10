@@ -1409,6 +1409,42 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("候选 12", queue["summary_text"])
         self.assertEqual([row["match_id"] for row in queue["candidate_rows"]], ["sb0", "sb1", "sb2"])
 
+    def test_statsbomb_fewshot_backfill_queue_uses_baseline_tag_index(self) -> None:
+        monitor = {
+            "sample_count": 3,
+            "current_matched_count": 0,
+            "current_query_tags": [],
+            "missing_tags": ["xg_direction_failed"],
+        }
+        quality = {"alert_count": 0, "alerts": []}
+        baseline = {
+            "backfill_tag_index": {"xg_direction_failed": [1]},
+            "items": [
+                {
+                    "match_id": "irrelevant",
+                    "match_date": "2024-06-01",
+                    "league": "UEFA Euro",
+                    "home_team": "A",
+                    "away_team": "B",
+                    "backfill_tags": ["strategy_hit"],
+                },
+                {
+                    "match_id": "target",
+                    "match_date": "2024-06-02",
+                    "league": "UEFA Euro",
+                    "home_team": "C",
+                    "away_team": "D",
+                    "backfill_tags": ["xg_direction_failed", "strategy_miss"],
+                },
+            ],
+        }
+
+        queue = build_statsbomb_fewshot_backfill_queue(monitor, quality, [], baseline, limit=5)
+
+        self.assertEqual(queue["candidate_count"], 1)
+        self.assertEqual([row["match_id"] for row in queue["candidate_rows"]], ["target"])
+        self.assertIn("xg_direction_failed", queue["candidate_rows"][0]["matched_tags"])
+
     def test_statsbomb_fewshot_backfill_queue_can_defer_candidates(self) -> None:
         monitor = {
             "sample_count": 3,

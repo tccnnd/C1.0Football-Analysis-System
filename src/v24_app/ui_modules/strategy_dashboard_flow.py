@@ -1029,6 +1029,13 @@ def _statsbomb_backfill_task_title(tag: str) -> str:
 
 
 def _statsbomb_baseline_backfill_tags(row: Mapping[str, object]) -> list[str]:
+    precomputed = [str(tag) for tag in _as_list(row.get("backfill_tags")) if str(tag)]
+    if precomputed:
+        deduped_precomputed: list[str] = []
+        for tag in precomputed:
+            if tag not in deduped_precomputed:
+                deduped_precomputed.append(tag)
+        return deduped_precomputed
     tags = ["statsbomb_post_match_review"]
     if bool(row.get("finishing_variance")):
         tags.extend(["statsbomb_finishing_variance", "xg_result_divergence"])
@@ -1051,6 +1058,27 @@ def _statsbomb_baseline_backfill_tags(row: Mapping[str, object]) -> list[str]:
         if tag not in deduped:
             deduped.append(tag)
     return deduped
+
+
+def _statsbomb_baseline_backfill_items(
+    baseline: Mapping[str, object] | object,
+    target_tags: set[str],
+) -> list[Mapping[str, object]]:
+    resolved = _as_mapping(baseline)
+    items = [item for item in _as_list(resolved.get("items")) if isinstance(item, Mapping)]
+    tag_index = _as_mapping(resolved.get("backfill_tag_index"))
+    if not tag_index or not target_tags:
+        return items
+    selected: list[Mapping[str, object]] = []
+    seen_indexes: set[int] = set()
+    for tag in sorted(target_tags):
+        for value in _as_list(tag_index.get(tag)):
+            index = _safe_int(value, -1)
+            if index < 0 or index >= len(items) or index in seen_indexes:
+                continue
+            seen_indexes.add(index)
+            selected.append(items[index])
+    return selected
 
 
 def _statsbomb_settlement_backfill_row(
@@ -1197,11 +1225,7 @@ def build_statsbomb_fewshot_backfill_queue(
             if tags:
                 score_candidate(_statsbomb_settlement_backfill_row(item, tags, source="recent_settlement", priority_base=20))
 
-        baseline_items = [
-            item
-            for item in _as_list(_as_mapping(statsbomb_event_baseline).get("items"))
-            if isinstance(item, Mapping)
-        ]
+        baseline_items = _statsbomb_baseline_backfill_items(statsbomb_event_baseline or {}, target_tag_set)
         for item in baseline_items:
             tags = _statsbomb_baseline_backfill_tags(item)
             settlement = {
