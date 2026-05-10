@@ -154,6 +154,10 @@ DEFAULT_PLAY_MODEL_POLICY = {
     },
 }
 PLAY_MODEL_TOTAL_GOALS_MIN_CALIBRATION_UPLIFT = 0.03
+PLAY_MODEL_TOTAL_GOALS_MIN_HOLDOUT_UPLIFT = 0.0
+PLAY_MODEL_SCORELINE_MAX_HOLDOUT_REGRESSION = 0.03
+PLAY_MODEL_POLICY_HOLDOUT_RATIO = 0.25
+PLAY_MODEL_POLICY_MIN_HOLDOUT_ROWS = 100
 DEFAULT_BAYES_CALIBRATION = {
     "enabled": True,
     "prior_source": "market",
@@ -7379,6 +7383,44 @@ def _finalize_play_backtest_bucket(bucket: dict[str, float]) -> dict[str, float 
     }
 
 
+def _split_play_model_policy_rows(rows: list[dict]) -> tuple[list[dict], list[dict]]:
+    if len(rows) < PLAY_MODEL_POLICY_MIN_HOLDOUT_ROWS * 2:
+        return list(rows), []
+    holdout_count = int(len(rows) * PLAY_MODEL_POLICY_HOLDOUT_RATIO)
+    holdout_count = max(PLAY_MODEL_POLICY_MIN_HOLDOUT_ROWS, holdout_count)
+    holdout_count = min(holdout_count, len(rows) // 2)
+    if holdout_count <= 0:
+        return list(rows), []
+    return list(rows[:-holdout_count]), list(rows[-holdout_count:])
+
+
+def _play_model_policy_metrics(rows: list[dict], policy: dict | None) -> dict[str, float | int]:
+    score_hits = 0
+    score_total = 0
+    total_goals_hits = 0
+    total_goals_total = 0
+    for row in rows:
+        output = _simulate_play_model_policy(row.get("prediction"), policy)
+        total_goals_pick = _safe_int(output.get("total_goals_value"))
+        score_pick = str(output.get("score_recommendation") or "").strip() or None
+        if total_goals_pick is not None:
+            total_goals_total += 1
+            if int(total_goals_pick) == int(row.get("actual_total_goals", -1)):
+                total_goals_hits += 1
+        if score_pick:
+            score_total += 1
+            if score_pick == row.get("actual_score"):
+                score_hits += 1
+    return {
+        "score_hits": score_hits,
+        "score_total": score_total,
+        "score_accuracy": round(score_hits / max(score_total, 1), 6),
+        "total_goals_hits": total_goals_hits,
+        "total_goals_total": total_goals_total,
+        "total_goals_accuracy": round(total_goals_hits / max(total_goals_total, 1), 6),
+    }
+
+
 def calibrate_play_model_policy_now(
     validation_ratio: float = 0.20,
     min_validation_samples: int = 1000,
@@ -7415,23 +7457,13 @@ def calibrate_play_model_policy_now(
     if not rows:
         return {"calibrated": False, "reason": "no_valid_rows"}
 
+    tuning_rows, holdout_rows = _split_play_model_policy_rows(rows)
     current_policy = _current_play_model_policy()
-    current_score_hits = 0
-    current_score_total = 0
-    current_total_goals_hits = 0
-    current_total_goals_total = 0
-    for row in rows:
-        current_output = _simulate_play_model_policy(row.get("prediction"), current_policy)
-        current_total_goals_pick = _safe_int(current_output.get("total_goals_value"))
-        current_score_pick = str(current_output.get("score_recommendation") or "").strip() or None
-        if current_total_goals_pick is not None:
-            current_total_goals_total += 1
-            if int(current_total_goals_pick) == int(row.get("actual_total_goals", -1)):
-                current_total_goals_hits += 1
-        if current_score_pick:
-            current_score_total += 1
-            if current_score_pick == row.get("actual_score"):
-                current_score_hits += 1
+    current_metrics = _play_model_policy_metrics(tuning_rows, current_policy)
+    current_score_hits = int(current_metrics.get("score_hits", 0) or 0)
+    current_score_total = int(current_metrics.get("score_total", 0) or 0)
+    current_total_goals_hits = int(current_metrics.get("total_goals_hits", 0) or 0)
+    current_total_goals_total = int(current_metrics.get("total_goals_total", 0) or 0)
 
     candidates: list[dict] = []
     if str(search_profile).strip().lower() == "full":
@@ -7475,7 +7507,7 @@ def calibrate_play_model_policy_now(
                                     score_covered = 0
                                     total_goals_hits = 0
                                     total_goals_covered = 0
-                                    for row in rows:
+                                    for row in tuning_rows:
                                         output = _simulate_play_model_policy(row.get("prediction"), candidate_policy)
                                         total_goals_pick = _safe_int(output.get("total_goals_value"))
                                         score_pick = str(output.get("score_recommendation") or "").strip() or None
@@ -7533,21 +7565,6 @@ def calibrate_play_model_policy_now(
         "accuracy": float(best.get("total_goals_accuracy", 0.0)),
         "takeover_enabled": bool(best.get("total_goals_takeover_enabled", False)),
     }
-    current_total_goals_accuracy = current_total_goals_hits / max(current_total_goals_total, 1)
-    total_goals_uplift = float(best_total_goals["accuracy"]) - current_total_goals_accuracy
-    total_goals_takeover_allowed = bool(
-        best_total_goals["takeover_enabled"]
-        and int(best_total_goals["covered"]) > 0
-        and current_total_goals_total > 0
-        and total_goals_uplift >= PLAY_MODEL_TOTAL_GOALS_MIN_CALIBRATION_UPLIFT
-    )
-    if not bool(best_total_goals["takeover_enabled"]):
-        total_goals_policy_reason = "candidate_disabled"
-    elif total_goals_takeover_allowed:
-        total_goals_policy_reason = "calibration_uplift_passed"
-    else:
-        total_goals_policy_reason = "insufficient_calibration_uplift"
-    policy["total_goals"]["takeover_enabled"] = total_goals_takeover_allowed
     policy["total_goals"]["min_confidence"] = float(best.get("total_goals_min_confidence", 0.24))
     policy["scoreline"]["takeover_enabled"] = True
     policy["scoreline"]["regular_same_outcome_min_confidence"] = float(best.get("regular_same_outcome_min_confidence", 0.07))
@@ -7556,6 +7573,49 @@ def calibrate_play_model_policy_now(
     policy["scoreline"]["volatile_same_outcome_min_confidence"] = float(best.get("volatile_same_outcome_min_confidence", 0.13))
     policy["scoreline"]["volatile_cross_outcome_enabled"] = bool(best.get("volatile_cross_outcome_enabled", False))
     policy["scoreline"]["volatile_cross_outcome_min_confidence"] = float(best.get("volatile_cross_outcome_min_confidence", 0.17))
+
+    candidate_policy = json.loads(json.dumps(policy))
+    candidate_policy["total_goals"]["takeover_enabled"] = bool(best_total_goals["takeover_enabled"])
+    candidate_holdout_metrics = _play_model_policy_metrics(holdout_rows, candidate_policy) if holdout_rows else {}
+    current_holdout_metrics = _play_model_policy_metrics(holdout_rows, current_policy) if holdout_rows else {}
+    holdout_total_goals_uplift = (
+        float(candidate_holdout_metrics.get("total_goals_accuracy", 0) or 0)
+        - float(current_holdout_metrics.get("total_goals_accuracy", 0) or 0)
+    ) if holdout_rows else None
+    holdout_scoreline_delta = (
+        float(candidate_holdout_metrics.get("score_accuracy", 0) or 0)
+        - float(current_holdout_metrics.get("score_accuracy", 0) or 0)
+    ) if holdout_rows else None
+    current_total_goals_accuracy = current_total_goals_hits / max(current_total_goals_total, 1)
+    total_goals_uplift = float(best_total_goals["accuracy"]) - current_total_goals_accuracy
+    holdout_total_goals_passed = (
+        True
+        if holdout_total_goals_uplift is None
+        else holdout_total_goals_uplift >= PLAY_MODEL_TOTAL_GOALS_MIN_HOLDOUT_UPLIFT
+    )
+    total_goals_takeover_allowed = bool(
+        best_total_goals["takeover_enabled"]
+        and int(best_total_goals["covered"]) > 0
+        and current_total_goals_total > 0
+        and total_goals_uplift >= PLAY_MODEL_TOTAL_GOALS_MIN_CALIBRATION_UPLIFT
+        and holdout_total_goals_passed
+    )
+    if not bool(best_total_goals["takeover_enabled"]):
+        total_goals_policy_reason = "candidate_disabled"
+    elif not holdout_total_goals_passed:
+        total_goals_policy_reason = "holdout_regression"
+    elif total_goals_takeover_allowed:
+        total_goals_policy_reason = "calibration_uplift_passed"
+    else:
+        total_goals_policy_reason = "insufficient_calibration_uplift"
+    policy["total_goals"]["takeover_enabled"] = total_goals_takeover_allowed
+    scoreline_holdout_passed = (
+        True
+        if holdout_scoreline_delta is None
+        else holdout_scoreline_delta >= -PLAY_MODEL_SCORELINE_MAX_HOLDOUT_REGRESSION
+    )
+    policy["scoreline"]["takeover_enabled"] = bool(scoreline_holdout_passed)
+    scoreline_policy_reason = "holdout_passed" if scoreline_holdout_passed else "holdout_regression"
 
     sample_dates = [
         normalize_text(item.get("meta", {}).get("match_date", ""))
@@ -7569,6 +7629,8 @@ def calibrate_play_model_policy_now(
         "policy": policy,
         "validation": {
             "sample_count": len(rows),
+            "tuning_sample_count": len(tuning_rows),
+            "holdout_sample_count": len(holdout_rows),
             "date_start": min(sample_dates) if sample_dates else None,
             "date_end": max(sample_dates) if sample_dates else None,
             "ratio": round(len(validation_items) / max(len(STATE_STORE.load_xgb_samples()), 1), 4),
@@ -7587,6 +7649,19 @@ def calibrate_play_model_policy_now(
                     -int(item.get("total_goals_hits", 0)),
                 ),
             )[:5],
+            "scoreline": {
+                "takeover_enabled": bool(policy["scoreline"]["takeover_enabled"]),
+                "reason": scoreline_policy_reason,
+                "holdout_delta": round(holdout_scoreline_delta, 6) if holdout_scoreline_delta is not None else None,
+                "max_allowed_holdout_regression": PLAY_MODEL_SCORELINE_MAX_HOLDOUT_REGRESSION,
+            },
+            "holdout": {
+                "sample_count": len(holdout_rows),
+                "current": current_holdout_metrics,
+                "candidate": candidate_holdout_metrics,
+                "total_goals_uplift": round(holdout_total_goals_uplift, 6) if holdout_total_goals_uplift is not None else None,
+                "scoreline_delta": round(holdout_scoreline_delta, 6) if holdout_scoreline_delta is not None else None,
+            },
             "total_goals": {
                 "current_hits": current_total_goals_hits,
                 "current_total": current_total_goals_total,
@@ -7598,6 +7673,8 @@ def calibrate_play_model_policy_now(
                 "takeover_enabled": bool(policy["total_goals"]["takeover_enabled"]),
                 "uplift": round(total_goals_uplift, 6),
                 "min_required_uplift": PLAY_MODEL_TOTAL_GOALS_MIN_CALIBRATION_UPLIFT,
+                "holdout_uplift": round(holdout_total_goals_uplift, 6) if holdout_total_goals_uplift is not None else None,
+                "min_required_holdout_uplift": PLAY_MODEL_TOTAL_GOALS_MIN_HOLDOUT_UPLIFT,
                 "reason": total_goals_policy_reason,
             },
         },

@@ -304,19 +304,34 @@ def build_play_model_policy_decision_rows(status: Mapping[str, object] | object)
     total_goals_candidate = float(total_goals_best.get("accuracy", 0) or 0)
     total_goals_uplift = float(total_goals_metrics.get("uplift", total_goals_candidate - total_goals_current) or 0)
     total_goals_required = float(total_goals_metrics.get("min_required_uplift", 0) or 0)
+    total_goals_holdout_uplift = total_goals_metrics.get("holdout_uplift")
+    total_goals_holdout_text = (
+        f" | holdout {float(total_goals_holdout_uplift):+.2%}"
+        if total_goals_holdout_uplift is not None
+        else ""
+    )
     total_goals_body = (
         f"current {total_goals_current:.2%} | candidate {total_goals_candidate:.2%} | "
-        f"uplift {total_goals_uplift:+.2%} / required {total_goals_required:+.2%}\n"
+        f"uplift {total_goals_uplift:+.2%} / required {total_goals_required:+.2%}{total_goals_holdout_text}\n"
         f"reason: {total_goals_reason} | min_conf {float(total_goals_policy.get('min_confidence', 0) or 0):.2f} | "
         f"hits {int(total_goals_best.get('hits', 0) or 0)}/{int(total_goals_best.get('covered', 0) or 0)}"
     )
 
     scoreline_enabled = bool(scoreline_policy.get("takeover_enabled"))
+    scoreline_metrics = metrics.get("scoreline", {}) if isinstance(metrics, Mapping) else {}
+    scoreline_reason = _policy_reason_label(scoreline_metrics.get("reason"))
+    scoreline_holdout_delta = scoreline_metrics.get("holdout_delta")
+    scoreline_holdout_text = (
+        f" | holdout {float(scoreline_holdout_delta):+.2%}"
+        if scoreline_holdout_delta is not None
+        else ""
+    )
     score_accuracy = float(scoreline_best.get("score_accuracy", 0) or 0)
     score_hits = int(scoreline_best.get("score_hits", 0) or 0)
     score_covered = int(scoreline_best.get("score_covered", 0) or 0)
     scoreline_body = (
-        f"score {score_hits}/{score_covered} ({score_accuracy:.2%}) | combined {int(scoreline_best.get('combined_hits', 0) or 0)}\n"
+        f"score {score_hits}/{score_covered} ({score_accuracy:.2%}) | combined {int(scoreline_best.get('combined_hits', 0) or 0)}{scoreline_holdout_text}\n"
+        f"reason: {scoreline_reason}\n"
         f"regular same {float(scoreline_policy.get('regular_same_outcome_min_confidence', 0) or 0):.2f} | "
         f"regular cross {scoreline_policy.get('regular_cross_outcome_enabled')}@{float(scoreline_policy.get('regular_cross_outcome_min_confidence', 0) or 0):.2f}\n"
         f"volatile same {float(scoreline_policy.get('volatile_same_outcome_min_confidence', 0) or 0):.2f} | "
