@@ -153,6 +153,7 @@ DEFAULT_PLAY_MODEL_POLICY = {
         "volatile_cross_outcome_min_confidence": 0.17,
     },
 }
+PLAY_MODEL_TOTAL_GOALS_MIN_CALIBRATION_UPLIFT = 0.03
 DEFAULT_BAYES_CALIBRATION = {
     "enabled": True,
     "prior_source": "market",
@@ -7532,7 +7533,21 @@ def calibrate_play_model_policy_now(
         "accuracy": float(best.get("total_goals_accuracy", 0.0)),
         "takeover_enabled": bool(best.get("total_goals_takeover_enabled", False)),
     }
-    policy["total_goals"]["takeover_enabled"] = bool(best.get("total_goals_takeover_enabled", False))
+    current_total_goals_accuracy = current_total_goals_hits / max(current_total_goals_total, 1)
+    total_goals_uplift = float(best_total_goals["accuracy"]) - current_total_goals_accuracy
+    total_goals_takeover_allowed = bool(
+        best_total_goals["takeover_enabled"]
+        and int(best_total_goals["covered"]) > 0
+        and current_total_goals_total > 0
+        and total_goals_uplift >= PLAY_MODEL_TOTAL_GOALS_MIN_CALIBRATION_UPLIFT
+    )
+    if not bool(best_total_goals["takeover_enabled"]):
+        total_goals_policy_reason = "candidate_disabled"
+    elif total_goals_takeover_allowed:
+        total_goals_policy_reason = "calibration_uplift_passed"
+    else:
+        total_goals_policy_reason = "insufficient_calibration_uplift"
+    policy["total_goals"]["takeover_enabled"] = total_goals_takeover_allowed
     policy["total_goals"]["min_confidence"] = float(best.get("total_goals_min_confidence", 0.24))
     policy["scoreline"]["takeover_enabled"] = True
     policy["scoreline"]["regular_same_outcome_min_confidence"] = float(best.get("regular_same_outcome_min_confidence", 0.07))
@@ -7575,13 +7590,15 @@ def calibrate_play_model_policy_now(
             "total_goals": {
                 "current_hits": current_total_goals_hits,
                 "current_total": current_total_goals_total,
-                "current_accuracy": round(current_total_goals_hits / max(current_total_goals_total, 1), 6),
+                "current_accuracy": round(current_total_goals_accuracy, 6),
                 "score_current_hits": current_score_hits,
                 "score_current_total": current_score_total,
                 "score_current_accuracy": round(current_score_hits / max(current_score_total, 1), 6),
                 "best": best_total_goals,
                 "takeover_enabled": bool(policy["total_goals"]["takeover_enabled"]),
-                "reason": "joint_best",
+                "uplift": round(total_goals_uplift, 6),
+                "min_required_uplift": PLAY_MODEL_TOTAL_GOALS_MIN_CALIBRATION_UPLIFT,
+                "reason": total_goals_policy_reason,
             },
         },
     }

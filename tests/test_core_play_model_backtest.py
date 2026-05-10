@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -15,6 +16,10 @@ from v24_app import core
 
 
 class PlayModelBacktestTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        core._PLAY_MODEL_POLICY_CACHE.clear()
+        core._PLAY_MODEL_POLICY_CACHE.update({"mtime": None, "policy": None, "report": {}})
+
     def test_run_play_model_backtest_truncates_large_validation_set(self) -> None:
         validation_items = [
             {
@@ -52,6 +57,51 @@ class PlayModelBacktestTests(unittest.TestCase):
         self.assertEqual(result["validation"]["max_validation_samples"], 5)
         self.assertTrue(result["validation"]["truncated"])
         self.assertAlmostEqual(result["validation"]["ratio"], 5 / 12, places=4)
+
+    def test_total_goals_takeover_requires_material_calibration_uplift(self) -> None:
+        validation_items = []
+        for index in range(100):
+            actual_total = 2 if index < 50 else 3
+            model_total = actual_total if index < 52 else 2
+            validation_items.append(
+                {
+                    "meta": {
+                        "match_date": f"2025-02-{(index % 28) + 1:02d}",
+                        "home_goals": actual_total,
+                        "away_goals": 0,
+                    },
+                    "prediction": {
+                        "recommendation": "涓昏儨",
+                        "pre_play_model_total_goals_value": 2,
+                        "pre_play_model_total_goals_confidence": 0.30,
+                        "pre_play_model_score_recommendation": "2-0",
+                        "pre_play_model_score_confidence": 0.20,
+                        "poisson": {
+                            "score_distribution": [{"score": f"{model_total}-0", "probability": 0.9}],
+                            "top_total_goals": [{"goals": 2, "probability": 0.30}],
+                        },
+                        "total_goals_model": {"model_ready": True, "label": model_total, "confidence": 0.9},
+                        "scoreline_model": {"model_ready": False},
+                        "volatile_scoreline_model": {"model_ready": False},
+                    },
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            policy_file = Path(tmp_dir) / "play_model_policy_v1.json"
+            with patch.object(core, "PLAY_MODEL_POLICY_FILE", policy_file):
+                with patch("v24_app.core._validation_split_samples", return_value=([], validation_items)):
+                    with patch("v24_app.core._sample_item_prediction", side_effect=lambda item: item["prediction"]):
+                        with patch.object(core.STATE_STORE, "load_xgb_samples", return_value=validation_items):
+                            result = core.calibrate_play_model_policy_now(max_validation_samples=None)
+
+        total_goals_metrics = result["metrics"]["total_goals"]
+        self.assertTrue(result["calibrated"])
+        self.assertTrue(total_goals_metrics["best"]["takeover_enabled"])
+        self.assertEqual(total_goals_metrics["current_accuracy"], 0.5)
+        self.assertEqual(total_goals_metrics["best"]["accuracy"], 0.52)
+        self.assertEqual(total_goals_metrics["reason"], "insufficient_calibration_uplift")
+        self.assertFalse(result["policy"]["total_goals"]["takeover_enabled"])
 
 
 if __name__ == "__main__":
