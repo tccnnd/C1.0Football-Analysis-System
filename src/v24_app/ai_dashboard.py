@@ -5087,6 +5087,18 @@ class SmartMatchDashboard:
             for row in fewshot_monitor.get("tag_rows", []) if isinstance(fewshot_monitor.get("tag_rows"), list) else []:
                 if isinstance(row, dict):
                     self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
+        fewshot_quality = evaluation_agent.get("statsbomb_fewshot_quality", {}) if isinstance(evaluation_agent.get("statsbomb_fewshot_quality"), dict) else {}
+        quality_alerts = fewshot_quality.get("alerts", []) if isinstance(fewshot_quality.get("alerts"), list) else []
+        if quality_alerts:
+            self._strategy_section_title(right, "StatsBomb \u8bb0\u5fc6\u8d28\u91cf\u544a\u8b66")
+            self._strategy_row(
+                right,
+                str(fewshot_quality.get("summary_text") or "-"),
+                str(fewshot_monitor.get("leakage_note") or fewshot_quality.get("leakage_note") or "-"),
+            )
+            for row in quality_alerts:
+                if isinstance(row, dict):
+                    self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
 
         allowlist_summary = dashboard.get("allowlist_settlement_summary", {}) if isinstance(dashboard.get("allowlist_settlement_summary"), dict) else {}
         self._strategy_section_title(right, "\u653e\u884c\u590d\u76d8\u7edf\u8ba1")

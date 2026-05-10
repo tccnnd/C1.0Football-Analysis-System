@@ -887,6 +887,114 @@ def build_statsbomb_fewshot_memory_monitor(
     }
 
 
+def build_statsbomb_fewshot_memory_quality_alerts(
+    monitor: Mapping[str, object] | object | None = None,
+    *,
+    min_samples: int = 20,
+    concentration_threshold: float = 0.65,
+) -> dict[str, object]:
+    data = _as_mapping(monitor)
+    sample_count = _safe_int(data.get("sample_count"))
+    current_matched_count = _safe_int(data.get("current_matched_count"))
+    current_query_tags = [str(tag) for tag in _as_list(data.get("current_query_tags"))]
+    missing_tags = [str(tag) for tag in _as_list(data.get("missing_tags"))]
+    tag_rows = [_as_mapping(row) for row in _as_list(data.get("tag_rows"))]
+    root_rows = [_as_mapping(row) for row in _as_list(data.get("root_rows"))]
+    alerts: list[dict[str, str]] = []
+    memory_tags: list[str] = []
+    score_delta = 0
+
+    if sample_count <= 0:
+        alerts.append(
+            {
+                "title": "建立StatsBomb复盘记忆库",
+                "body": "当前没有可用的赛后事件 few-shot 样本，Evaluation Agent 只能依赖规则归因，建议先沉淀已结束比赛的复盘样本。",
+                "tag": "statsbomb_memory_missing",
+            }
+        )
+        memory_tags.append("statsbomb_memory_missing")
+        score_delta -= 4
+    elif sample_count < max(1, int(min_samples)):
+        alerts.append(
+            {
+                "title": "补充StatsBomb复盘样本",
+                "body": f"当前 few-shot 记忆样本 {sample_count} 条，低于 {max(1, int(min_samples))} 条观察线，建议优先补充高置信失误和冷门场次。",
+                "tag": "statsbomb_memory_low_sample",
+            }
+        )
+        memory_tags.append("statsbomb_memory_low_sample")
+        score_delta -= 3
+
+    if sample_count > 0 and missing_tags:
+        alerts.append(
+            {
+                "title": "补齐复盘标签缺口",
+                "body": f"缺少 {', '.join(missing_tags[:5])} 等标签样本，后续复盘需要覆盖这些根因，避免 few-shot 记忆偏科。",
+                "tag": "statsbomb_memory_tag_gap",
+            }
+        )
+        memory_tags.append("statsbomb_memory_tag_gap")
+        score_delta -= 2
+
+    if sample_count > 0 and current_query_tags and current_matched_count <= 0:
+        alerts.append(
+            {
+                "title": "补充当前错因相似样本",
+                "body": f"当前复盘查询标签为 {', '.join(current_query_tags[:5])}，但历史记忆没有命中相似案例，建议赛后优先导出这一类 few-shot 样本。",
+                "tag": "statsbomb_memory_no_current_match",
+            }
+        )
+        memory_tags.append("statsbomb_memory_no_current_match")
+        score_delta -= 3
+
+    root_total = sum(_safe_int(row.get("count")) for row in root_rows)
+    if sample_count >= 5 and root_total > 0 and root_rows:
+        top_root = root_rows[0]
+        top_root_count = _safe_int(top_root.get("count"))
+        root_share = top_root_count / root_total if root_total else 0.0
+        if root_share >= max(0.0, min(1.0, float(concentration_threshold))):
+            alerts.append(
+                {
+                    "title": "降低复盘根因集中度",
+                    "body": f"根因 {top_root.get('root_cause') or '-'} 占 few-shot 记忆 {root_share:.1%}，建议补充其他错因类型，避免 Evaluation Agent 过度套用单一解释。",
+                    "tag": "statsbomb_memory_concentrated",
+                }
+            )
+            memory_tags.append("statsbomb_memory_concentrated")
+            score_delta -= 2
+
+    diagnostic_tag_rows = [
+        row
+        for row in tag_rows
+        if str(row.get("tag") or "") not in {"statsbomb_post_match_review", "strategy_miss", "strategy_hit"}
+    ]
+    tag_total = sum(_safe_int(row.get("count")) for row in diagnostic_tag_rows)
+    if sample_count >= 5 and tag_total > 0 and diagnostic_tag_rows:
+        top_tag = diagnostic_tag_rows[0]
+        top_tag_count = _safe_int(top_tag.get("count"))
+        tag_share = top_tag_count / tag_total if tag_total else 0.0
+        if tag_share >= max(0.0, min(1.0, float(concentration_threshold))):
+            alerts.append(
+                {
+                    "title": "降低复盘标签集中度",
+                    "body": f"诊断标签 {top_tag.get('tag') or '-'} 占 few-shot 记忆 {tag_share:.1%}，建议补充场面劣势、xG 背离、命中案例等不同标签。",
+                    "tag": "statsbomb_memory_tag_concentrated",
+                }
+            )
+            memory_tags.append("statsbomb_memory_tag_concentrated")
+            score_delta -= 2
+
+    status = "watch" if alerts else "healthy"
+    return {
+        "status": status,
+        "alert_count": len(alerts),
+        "alerts": alerts[:5],
+        "memory_tags": memory_tags,
+        "score_delta": score_delta,
+        "summary_text": f"记忆告警 {len(alerts)} | 样本 {sample_count} | 当前命中 {current_matched_count}",
+    }
+
+
 def _statsbomb_sandbox_row(row: Mapping[str, object], baseline: Mapping[str, object] | object | None = None) -> dict[str, object]:
     xg_margin = _safe_float(row.get("xg_margin"))
     goal_margin = _safe_int(row.get("goal_margin"))
@@ -2133,6 +2241,8 @@ def build_strategy_evaluation_agent_summary(
     jc_feedback = build_jc_bucket_feedback_summary(status, settlement_items)
     event_review = build_statsbomb_event_review_summary(settlement_items, statsbomb_event_baseline or {})
     fewshot_memory = build_statsbomb_fewshot_memory_summary(error_attribution, event_review, statsbomb_fewshot_memory or {})
+    fewshot_monitor = build_statsbomb_fewshot_memory_monitor(statsbomb_fewshot_memory or {}, fewshot_memory)
+    fewshot_quality = build_statsbomb_fewshot_memory_quality_alerts(fewshot_monitor)
     known_count = _safe_int(settlement_summary.get("known_count"))
     hit_rate = settlement_summary.get("hit_rate")
     hit_rate_value = _safe_float(hit_rate, -1.0) if hit_rate is not None else -1.0
@@ -2261,6 +2371,26 @@ def build_strategy_evaluation_agent_summary(
                 ),
             }
         )
+    if _safe_int(fewshot_quality.get("alert_count")):
+        status_text = "watch" if status_text == "healthy" else status_text
+        score += _safe_int(fewshot_quality.get("score_delta"))
+        for tag in _as_list(fewshot_quality.get("memory_tags")):
+            tag_text = str(tag)
+            if tag_text and tag_text not in memory_tags:
+                memory_tags.append(tag_text)
+        alert_priority = {"statsbomb_memory_no_current_match": 0, "statsbomb_memory_tag_gap": 1}
+        quality_alerts = sorted(
+            [_as_mapping(alert) for alert in _as_list(fewshot_quality.get("alerts"))],
+            key=lambda alert: alert_priority.get(str(alert.get("tag") or ""), 5),
+        )
+        for alert_map in quality_alerts:
+            if alert_map:
+                recommendations.append(
+                    {
+                        "title": str(alert_map.get("title") or "StatsBomb记忆质量告警"),
+                        "body": str(alert_map.get("body") or "-"),
+                    }
+                )
     if data_missing_count:
         score -= min(12, data_missing_count * 4)
         recommendations.append(
@@ -2295,6 +2425,8 @@ def build_strategy_evaluation_agent_summary(
         "jc_bucket_feedback": jc_feedback,
         "statsbomb_event_review": event_review,
         "statsbomb_fewshot_memory": fewshot_memory,
+        "statsbomb_fewshot_monitor": fewshot_monitor,
+        "statsbomb_fewshot_quality": fewshot_quality,
         "recommendations": recommendations[:8],
         "memory_tags": memory_tags,
     }

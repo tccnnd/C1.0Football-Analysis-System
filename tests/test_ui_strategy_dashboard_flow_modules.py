@@ -30,6 +30,7 @@ from v24_app.ui_modules import (
     build_strategy_error_attribution_summary,
     build_statsbomb_fewshot_memory_summary,
     build_statsbomb_fewshot_memory_monitor,
+    build_statsbomb_fewshot_memory_quality_alerts,
     build_statsbomb_event_replay_case,
     build_statsbomb_event_review_summary,
     build_statsbomb_event_sandbox_report_filename,
@@ -1203,6 +1204,73 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("statsbomb_finishing_variance", monitor["covered_tags"])
         self.assertIn("xg_direction_failed", monitor["missing_tags"])
         self.assertEqual(monitor["leakage_note"], "post-match memory only")
+
+    def test_statsbomb_fewshot_memory_quality_alerts_flag_gaps_and_current_miss(self) -> None:
+        monitor = {
+            "sample_count": 6,
+            "current_matched_count": 0,
+            "current_query_tags": ["statsbomb_finishing_variance", "strategy_miss"],
+            "missing_tags": ["xg_direction_failed"],
+            "tag_rows": [
+                {"tag": "statsbomb_finishing_variance", "count": 5},
+                {"tag": "event_control_gap", "count": 1},
+            ],
+            "root_rows": [
+                {"root_cause": "statsbomb_finishing_variance", "count": 5},
+                {"root_cause": "event_control_gap", "count": 1},
+            ],
+        }
+
+        quality = build_statsbomb_fewshot_memory_quality_alerts(monitor, min_samples=5)
+
+        self.assertEqual(quality["status"], "watch")
+        self.assertGreaterEqual(quality["alert_count"], 3)
+        self.assertIn("statsbomb_memory_no_current_match", quality["memory_tags"])
+        self.assertIn("statsbomb_memory_tag_gap", quality["memory_tags"])
+
+    def test_evaluation_agent_surfaces_statsbomb_memory_quality_alerts(self) -> None:
+        settlements = [
+            {
+                "league": "UEFA Euro",
+                "home_team": "Spain",
+                "away_team": "Croatia",
+                "statsbomb_event_summary": {
+                    "team_stats": {
+                        "Spain": {"xg": 1.12, "shots": 11, "goals": 3},
+                        "Croatia": {"xg": 2.35, "shots": 16, "goals": 0},
+                    },
+                },
+                "high_accuracy_strategy_items": [
+                    {
+                        "play_type": "market_1x2",
+                        "pick": "AWAY",
+                        "actual": "HOME",
+                        "confidence": 0.70,
+                        "min_confidence": 0.65,
+                        "backtest_accuracy": 0.72,
+                        "backtest_samples": 180,
+                        "is_hit": False,
+                    }
+                ],
+            }
+        ]
+        memory = {
+            "items": [
+                {
+                    "labels": {
+                        "is_hit": True,
+                        "root_cause": "event_evidence_aligned",
+                        "tags": ["strategy_hit"],
+                    }
+                }
+            ],
+        }
+
+        evaluation = build_strategy_evaluation_agent_summary({"enabled": True}, settlements, {}, memory)
+
+        self.assertEqual(evaluation["statsbomb_fewshot_monitor"]["current_matched_count"], 0)
+        self.assertIn("statsbomb_memory_no_current_match", evaluation["memory_tags"])
+        self.assertTrue(any("相似样本" in item["title"] for item in evaluation["recommendations"]))
 
     def test_high_accuracy_dashboard_exposes_statsbomb_fewshot_monitor(self) -> None:
         memory = {
