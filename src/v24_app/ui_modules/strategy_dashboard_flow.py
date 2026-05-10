@@ -1056,6 +1056,186 @@ def _policy_effect_negative_diagnostics(
     }
 
 
+def _policy_effect_stability_tone(status: str) -> str:
+    if status in {"improving", "stable"}:
+        return "good"
+    if status in {"regression", "volatile"}:
+        return "bad"
+    if status == "watch":
+        return "warning"
+    return "neutral"
+
+
+def _policy_effect_stability_label(status: str) -> str:
+    labels = {
+        "improving": "\u8d8b\u52bf\u6539\u5584",
+        "stable": "\u7a33\u5b9a\u751f\u6548",
+        "watch": "\u9700\u89c2\u5bdf",
+        "regression": "\u51fa\u73b0\u56de\u9000",
+        "volatile": "\u6ce2\u52a8\u8fc7\u5927",
+        "collecting": "\u6837\u672c\u79ef\u7d2f\u4e2d",
+        "none": "\u6682\u65e0\u7248\u672c",
+    }
+    return labels.get(status, "\u9700\u89c2\u5bdf")
+
+
+def _policy_effect_stability_recommendation(status: str) -> str:
+    if status == "improving":
+        return "\u6700\u8fd1\u7248\u672c\u5448\u6b63\u5411\u6539\u5584\uff0c\u7ee7\u7eed\u6309\u5f53\u524d\u95e8\u69db\u6536\u96c6\u8d5b\u679c\u3002"
+    if status == "stable":
+        return "\u7b56\u7565\u53c2\u6570\u5df2\u8fdb\u5165\u7a33\u5b9a\u89c2\u5bdf\uff0c\u4e0d\u5efa\u8bae\u9891\u7e41\u518d\u8c03\u53c2\u3002"
+    if status == "regression":
+        return "\u6700\u65b0\u7248\u672c\u51fa\u73b0\u56de\u9000\uff0c\u4f18\u5148\u590d\u6838\u8d1f\u5411\u6837\u672c\uff0c\u5fc5\u8981\u65f6\u56de\u6eda\u4e0a\u4e00\u7248\u3002"
+    if status == "volatile":
+        return "\u7248\u672c\u95f4\u547d\u4e2d\u6ce2\u52a8\u504f\u5927\uff0c\u5efa\u8bae\u5ef6\u957f\u89c2\u5bdf\u7a97\u53e3\uff0c\u907f\u514d\u8fde\u7eed\u81ea\u52a8\u6536\u7d27\u6216\u653e\u5bbd\u3002"
+    if status == "watch":
+        return "\u5df2\u6709\u8d1f\u5411\u4fe1\u53f7\uff0c\u5148\u4fdd\u6301\u89c2\u5bdf\uff0c\u7b49\u5f85\u66f4\u591a\u53ef\u56de\u6536\u6837\u672c\u786e\u8ba4\u3002"
+    return "\u5f53\u524d\u6837\u672c\u4e0d\u8db3\uff0c\u6682\u4e0d\u5efa\u8bae\u6839\u636e\u8be5\u76d1\u63a7\u7ed3\u679c\u8c03\u53c2\u3002"
+
+
+def build_strategy_policy_stability_monitor(policy_effect_review: Mapping[str, object] | object) -> dict[str, object]:
+    review = _as_mapping(policy_effect_review)
+    rows = [dict(row) for row in _as_list(review.get("rows")) if isinstance(row, Mapping)]
+    rows.sort(key=lambda row: _parse_policy_review_time(row.get("updated_at")) or datetime.min)
+    evaluated = [
+        row
+        for row in rows
+        if str(row.get("effect_status") or "") != "collecting"
+        and row.get("allow_hit_rate") is not None
+        and _safe_int(row.get("known_allow_count")) > 0
+    ]
+    status_counts: dict[str, int] = {}
+    for row in rows:
+        key = str(row.get("effect_status") or "unknown")
+        status_counts[key] = status_counts.get(key, 0) + 1
+
+    rates = [_safe_float(row.get("allow_hit_rate")) for row in evaluated]
+    deltas = [rates[index] - rates[index - 1] for index in range(1, len(rates))]
+    latest = rows[-1] if rows else {}
+    latest_status = str(latest.get("effect_status") or "none")
+    latest_delta = deltas[-1] if deltas else None
+    avg_abs_delta = sum(abs(item) for item in deltas) / len(deltas) if deltas else 0.0
+    cumulative_replay_net = sum(_safe_int(row.get("replay_guard_net")) for row in rows)
+
+    negative_streak = 0
+    effective_streak = 0
+    for row in reversed(rows):
+        status = str(row.get("effect_status") or "")
+        if status == "negative" and effective_streak == 0:
+            negative_streak += 1
+            continue
+        if status == "effective" and negative_streak == 0:
+            effective_streak += 1
+            continue
+        break
+
+    if not rows:
+        stability_status = "none"
+    elif len(evaluated) < 2:
+        stability_status = "collecting"
+    elif negative_streak >= 2 or (latest_status == "negative" and latest_delta is not None and latest_delta <= -0.05):
+        stability_status = "regression"
+    elif avg_abs_delta >= 0.12 and status_counts.get("negative", 0) and status_counts.get("effective", 0):
+        stability_status = "volatile"
+    elif effective_streak >= 2 or (latest_status == "effective" and latest_delta is not None and latest_delta >= 0):
+        stability_status = "improving"
+    elif latest_status == "effective":
+        stability_status = "stable"
+    elif latest_status == "negative":
+        stability_status = "watch"
+    else:
+        stability_status = "collecting"
+
+    week_groups: dict[str, dict[str, object]] = {}
+    for row in rows:
+        updated_at = _parse_policy_review_time(row.get("updated_at"))
+        if updated_at is None:
+            week_label = "\u672a\u77e5\u5468\u671f"
+        else:
+            iso = updated_at.isocalendar()
+            week_label = f"{iso.year}-W{iso.week:02d}"
+        bucket = week_groups.setdefault(
+            week_label,
+            {
+                "week": week_label,
+                "version_count": 0,
+                "sample_count": 0,
+                "known_allow_count": 0,
+                "allow_hits": 0,
+                "replay_guard_net": 0,
+                "effective_count": 0,
+                "negative_count": 0,
+                "collecting_count": 0,
+            },
+        )
+        bucket["version_count"] = _safe_int(bucket.get("version_count")) + 1
+        bucket["sample_count"] = _safe_int(bucket.get("sample_count")) + _safe_int(row.get("sample_count"))
+        known_allow_count = _safe_int(row.get("known_allow_count"))
+        bucket["known_allow_count"] = _safe_int(bucket.get("known_allow_count")) + known_allow_count
+        if row.get("allow_hit_rate") is not None and known_allow_count:
+            bucket["allow_hits"] = _safe_int(bucket.get("allow_hits")) + round(_safe_float(row.get("allow_hit_rate")) * known_allow_count)
+        bucket["replay_guard_net"] = _safe_int(bucket.get("replay_guard_net")) + _safe_int(row.get("replay_guard_net"))
+        status = str(row.get("effect_status") or "collecting")
+        if status == "effective":
+            bucket["effective_count"] = _safe_int(bucket.get("effective_count")) + 1
+        elif status == "negative":
+            bucket["negative_count"] = _safe_int(bucket.get("negative_count")) + 1
+        elif status == "collecting":
+            bucket["collecting_count"] = _safe_int(bucket.get("collecting_count")) + 1
+
+    weekly_rows: list[dict[str, object]] = []
+    for bucket in week_groups.values():
+        known_allow_count = _safe_int(bucket.get("known_allow_count"))
+        allow_hits = _safe_int(bucket.get("allow_hits"))
+        hit_rate = allow_hits / known_allow_count if known_allow_count else None
+        weekly_rows.append(
+            {
+                **bucket,
+                "allow_hit_rate": hit_rate,
+                "allow_hit_rate_text": _pct(hit_rate) if hit_rate is not None else "-",
+                "title": (
+                    f"{bucket.get('week')} | \u7248\u672c {bucket.get('version_count')} | "
+                    f"\u547d\u4e2d {allow_hits}/{known_allow_count if known_allow_count else 0}"
+                ),
+                "body": (
+                    f"\u6837\u672c {_safe_int(bucket.get('sample_count'))} | "
+                    f"Replay\u51c0\u503c {_safe_int(bucket.get('replay_guard_net')):+d} | "
+                    f"\u6b63\u5411 {_safe_int(bucket.get('effective_count'))} / "
+                    f"\u8d1f\u5411 {_safe_int(bucket.get('negative_count'))} / "
+                    f"\u79ef\u7d2f {_safe_int(bucket.get('collecting_count'))}"
+                ),
+            }
+        )
+    weekly_rows.sort(key=lambda row: str(row.get("week") or ""), reverse=True)
+
+    latest_rate_text = _pct(rates[-1]) if rates else "-"
+    delta_text = f"{latest_delta:+.1%}" if latest_delta is not None else "-"
+    label = _policy_effect_stability_label(stability_status)
+    return {
+        "status": stability_status,
+        "label": label,
+        "tone": _policy_effect_stability_tone(stability_status),
+        "version_count": len(rows),
+        "evaluated_count": len(evaluated),
+        "latest_status": latest_status,
+        "latest_delta": latest_delta,
+        "latest_delta_text": delta_text,
+        "avg_abs_delta": avg_abs_delta,
+        "avg_abs_delta_text": f"{avg_abs_delta:.1%}" if deltas else "-",
+        "latest_allow_hit_rate_text": latest_rate_text,
+        "cumulative_replay_net": cumulative_replay_net,
+        "negative_streak": negative_streak,
+        "effective_streak": effective_streak,
+        "status_counts": status_counts,
+        "weekly_rows": weekly_rows[:8],
+        "recommendation_text": _policy_effect_stability_recommendation(stability_status),
+        "summary_text": (
+            f"{label} | \u6700\u65b0\u547d\u4e2d {latest_rate_text} | "
+            f"\u73af\u6bd4 {delta_text} | \u7248\u672c {len(rows)} | Replay\u7d2f\u8ba1 {cumulative_replay_net:+d}"
+        ),
+    }
+
+
 def build_strategy_policy_effect_review(
     policy_history: Sequence[Mapping[str, object]] | object,
     settlements: Sequence[Mapping[str, object]] | object,
@@ -1160,12 +1340,15 @@ def build_strategy_policy_effect_review(
     for row in rows:
         key = str(row.get("effect_status") or "unknown")
         status_counts[key] = status_counts.get(key, 0) + 1
+    full_rows = list(rows)
+    stability_monitor = build_strategy_policy_stability_monitor({"rows": full_rows, "history_count": len(parsed_history)})
     return {
         "history_count": len(parsed_history),
         "rows": rows[: max(0, int(limit))],
         "latest_status": latest.get("effect_status", "none") if latest else "none",
         "latest_label": latest.get("effect_label", "\u6682\u65e0\u7248\u672c") if latest else "\u6682\u65e0\u7248\u672c",
         "status_counts": status_counts,
+        "stability_monitor": stability_monitor,
         "summary_text": (
             f"\u7248\u672c {len(parsed_history)} | \u6700\u65b0 {latest.get('effect_label', '-') if latest else '-'} | "
             f"\u6b63\u5411 {status_counts.get('effective', 0)} / \u590d\u6838 {status_counts.get('negative', 0)}"
@@ -2181,19 +2364,61 @@ def build_strategy_policy_audit_report_lines(
     review = _as_mapping(policy_effect_review)
     current = generated_at or datetime.now()
     rows = [row for row in _as_list(review.get("rows")) if isinstance(row, Mapping)]
+    stability = _as_mapping(review.get("stability_monitor"))
     lines = [
         "# \u7b56\u7565\u8c03\u53c2\u5ba1\u8ba1\u62a5\u544a",
         "",
         f"- \u751f\u6210\u65f6\u95f4: {current.strftime('%Y-%m-%d %H:%M:%S')}",
         f"- \u7248\u672c\u6570: {review.get('history_count', 0)}",
         f"- \u6700\u65b0\u72b6\u6001: {review.get('latest_label', '-')}",
+        f"- \u7248\u672c\u7a33\u5b9a: {stability.get('summary_text', '-')}",
         f"- \u6458\u8981: {review.get('summary_text', '-')}",
         "",
+        "## \u7248\u672c\u7a33\u5b9a\u76d1\u63a7",
+        "",
+        f"- \u72b6\u6001: {stability.get('label', '-')}",
+        f"- \u8bc4\u4f30\u7248\u672c: {stability.get('evaluated_count', 0)} / {stability.get('version_count', 0)}",
+        f"- \u6700\u65b0\u547d\u4e2d: {stability.get('latest_allow_hit_rate_text', '-')}",
+        f"- \u6700\u65b0\u73af\u6bd4: {stability.get('latest_delta_text', '-')}",
+        f"- \u5e73\u5747\u6ce2\u52a8: {stability.get('avg_abs_delta_text', '-')}",
+        f"- Replay\u7d2f\u8ba1\u51c0\u503c: {stability.get('cumulative_replay_net', 0):+d}"
+        if isinstance(stability.get("cumulative_replay_net"), int)
+        else f"- Replay\u7d2f\u8ba1\u51c0\u503c: {stability.get('cumulative_replay_net', 0)}",
+        f"- \u5efa\u8bae: {stability.get('recommendation_text', '-')}",
+        "",
+        "| \u5468\u671f | \u7248\u672c | \u6837\u672c | \u653e\u884c\u547d\u4e2d | Replay\u51c0\u503c | \u6b63\u5411 | \u8d1f\u5411 | \u79ef\u7d2f |",
+        "| --- | ---: | ---: | --- | ---: | ---: | ---: | ---: |",
+    ]
+    weekly_rows = [row for row in _as_list(stability.get("weekly_rows")) if isinstance(row, Mapping)]
+    if weekly_rows:
+        for row in weekly_rows:
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        _text(row.get("week"), "-"),
+                        str(_safe_int(row.get("version_count"))),
+                        str(_safe_int(row.get("sample_count"))),
+                        _text(row.get("allow_hit_rate_text"), "-"),
+                        f"{_safe_int(row.get('replay_guard_net')):+d}",
+                        str(_safe_int(row.get("effective_count"))),
+                        str(_safe_int(row.get("negative_count"))),
+                        str(_safe_int(row.get("collecting_count"))),
+                    ]
+                )
+                + " |"
+            )
+    else:
+        lines.append("| - | 0 | 0 | - | 0 | 0 | 0 | 0 |")
+    lines.extend(
+        [
+            "",
         "## \u7248\u672c\u6548\u679c\u603b\u89c8",
         "",
         "| \u7248\u672c | \u65f6\u95f4 | \u6765\u6e90 | \u6548\u679c | \u6837\u672c | \u653e\u884c\u547d\u4e2d | Replay\u51c0\u503c | \u56de\u6eda\u5efa\u8bae |",
         "| --- | --- | --- | --- | ---: | --- | ---: | --- |",
-    ]
+        ]
+    )
     if not rows:
         lines.extend(["| - | - | - | \u6682\u65e0\u7248\u672c | 0 | - | 0 | - |", ""])
         return lines
@@ -2459,6 +2684,7 @@ def build_high_accuracy_strategy_dashboard(
     allowlist_summary = build_strategy_allowlist_settlement_summary(settlement_items)
     allowlist_tuning = build_strategy_allowlist_tuning_recommendation(settlement_items)
     policy_effect_review = build_strategy_policy_effect_review(policy_history or [], settlement_items)
+    policy_stability_monitor = _as_mapping(policy_effect_review.get("stability_monitor"))
     market_entropy_backtest = build_market_entropy_backtest_summary(settlement_items)
     handicap_margin_backtest = build_handicap_margin_backtest_summary(settlement_items)
     jc_bucket_feedback = build_jc_bucket_feedback_summary(resolved, settlement_items)
@@ -2515,6 +2741,11 @@ def build_high_accuracy_strategy_dashboard(
             else "bad"
             if str(policy_effect_review.get("latest_status") or "") == "negative"
             else "neutral",
+        },
+        {
+            "label": "\u7248\u672c\u7a33\u5b9a",
+            "value": str(policy_stability_monitor.get("label") or "-"),
+            "tone": str(policy_stability_monitor.get("tone") or "neutral"),
         },
         {
             "label": "Evaluation",
@@ -2621,6 +2852,7 @@ def build_high_accuracy_strategy_dashboard(
         "allowlist_settlement_summary": allowlist_summary,
         "allowlist_tuning": allowlist_tuning,
         "policy_effect_review": policy_effect_review,
+        "policy_stability_monitor": policy_stability_monitor,
         "market_entropy_backtest": market_entropy_backtest,
         "handicap_margin_backtest": handicap_margin_backtest,
     }

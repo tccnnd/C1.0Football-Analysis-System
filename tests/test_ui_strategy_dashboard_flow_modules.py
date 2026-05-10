@@ -22,6 +22,7 @@ from v24_app.ui_modules import (
     build_agent_replay_downgrade_backtest_summary,
     build_agent_replay_guard_tuning_recommendation,
     build_strategy_policy_effect_review,
+    build_strategy_policy_stability_monitor,
     build_handicap_margin_backtest_summary,
     build_market_entropy_backtest_summary,
     build_strategy_evaluation_agent_summary,
@@ -382,6 +383,34 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertGreaterEqual(row["top_negative_rows"][0]["drag_score"], 2)
         self.assertIn("Bad1", row["top_negative_rows"][0]["title"])
 
+    def test_strategy_policy_stability_monitor_flags_regression(self) -> None:
+        history = [
+            {"version_id": "v1", "updated_at": "2026-05-01 10:00:00", "source": "strategy_allowlist_tuning"},
+            {"version_id": "v2", "updated_at": "2026-05-08 10:00:00", "source": "agent_replay_guard_tuning"},
+            {"version_id": "v3", "updated_at": "2026-05-09 10:00:00", "source": "agent_replay_guard_tuning"},
+        ]
+        settlements = [
+            {"timestamp": "2026-05-01 11:00:00", "strategy_admission_decision": "allow", "is_correct": True},
+            {"timestamp": "2026-05-01 12:00:00", "strategy_admission_decision": "allow", "is_correct": True},
+            {"timestamp": "2026-05-01 13:00:00", "strategy_admission_decision": "allow", "is_correct": True},
+            {"timestamp": "2026-05-08 11:00:00", "strategy_admission_decision": "allow", "is_correct": False},
+            {"timestamp": "2026-05-08 12:00:00", "strategy_admission_decision": "allow", "is_correct": False},
+            {"timestamp": "2026-05-08 13:00:00", "strategy_admission_decision": "allow", "is_correct": True},
+            {"timestamp": "2026-05-09 11:00:00", "strategy_admission_decision": "allow", "is_correct": False},
+            {"timestamp": "2026-05-09 12:00:00", "strategy_admission_decision": "allow", "is_correct": False},
+            {"timestamp": "2026-05-09 13:00:00", "strategy_admission_decision": "allow", "is_correct": False},
+        ]
+
+        review = build_strategy_policy_effect_review(history, settlements, limit=10)
+        monitor = build_strategy_policy_stability_monitor(review)
+
+        self.assertEqual(review["stability_monitor"]["status"], "regression")
+        self.assertEqual(monitor["status"], "regression")
+        self.assertEqual(monitor["negative_streak"], 2)
+        self.assertIn("\u56de\u9000", monitor["label"])
+        self.assertTrue(monitor["weekly_rows"])
+        self.assertIn("Replay", monitor["summary_text"])
+
     def test_strategy_policy_audit_report_exports_review_and_samples(self) -> None:
         history = [
             {"version_id": "v1", "updated_at": "2026-05-01 10:00:00", "source": "strategy_allowlist_tuning"},
@@ -406,6 +435,7 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
 
         report = "\n".join(lines)
         self.assertIn("# \u7b56\u7565\u8c03\u53c2\u5ba1\u8ba1\u62a5\u544a", report)
+        self.assertIn("\u7248\u672c\u7a33\u5b9a\u76d1\u63a7", report)
         self.assertIn("\u7248\u672c\u6548\u679c\u603b\u89c8", report)
         self.assertIn("v1", report)
         self.assertIn("Bad1", report)
@@ -537,8 +567,10 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("Replay Guard", metrics)
         self.assertIn("Replay Tuning", metrics)
         self.assertIn("\u8c03\u53c2\u751f\u6548", metrics)
+        self.assertIn("\u7248\u672c\u7a33\u5b9a", metrics)
         self.assertIn("agent_replay_guard_tuning", dashboard)
         self.assertIn("policy_effect_review", dashboard)
+        self.assertIn("policy_stability_monitor", dashboard)
         self.assertIn("APP 40", dashboard["validation_rows"][0][1])
         self.assertEqual(len(dashboard["pool_rows"]), 2)
         self.assertIn("\u89c2\u5bdf(\u539f\u4e3b\u7b56\u7565)", dashboard["pool_rows"][0]["title"])

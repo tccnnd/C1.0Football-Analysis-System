@@ -4192,6 +4192,23 @@ class SmartMatchDashboard:
                     command=lambda review=policy_effect: self.open_policy_effect_detail_window(review),
                 )
 
+        stability_monitor = dashboard.get("policy_stability_monitor", {}) if isinstance(dashboard.get("policy_stability_monitor"), dict) else {}
+        self._strategy_section_title(right, "\u7248\u672c\u7a33\u5b9a\u76d1\u63a7")
+        self._strategy_row(
+            right,
+            str(stability_monitor.get("summary_text") or "-"),
+            str(stability_monitor.get("recommendation_text") or "-"),
+            command=lambda review=policy_effect: self.open_policy_effect_detail_window(review),
+        )
+        for row in stability_monitor.get("weekly_rows", []) if isinstance(stability_monitor.get("weekly_rows"), list) else []:
+            if isinstance(row, dict):
+                self._strategy_row(
+                    right,
+                    str(row.get("title") or "-"),
+                    str(row.get("body") or "-"),
+                    command=lambda review=policy_effect: self.open_policy_effect_detail_window(review),
+                )
+
         entropy_backtest = dashboard.get("market_entropy_backtest", {}) if isinstance(dashboard.get("market_entropy_backtest"), dict) else {}
         self._strategy_section_title(right, "MarketEntropy 避险回测")
         self._strategy_row(
