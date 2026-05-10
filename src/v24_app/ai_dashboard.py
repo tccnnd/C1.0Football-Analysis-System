@@ -31,6 +31,7 @@ from .core import (
     get_statsbomb_sandbox_fewshot_memory,
     get_strategy_admission_policy_status,
     get_strategy_admission_policy_history,
+    invalidate_statsbomb_state_cache,
     mark_strategy_allowlist_snapshots,
     persist_prediction_snapshot,
     predict_match,
@@ -4265,6 +4266,7 @@ class SmartMatchDashboard:
         tmp_path = STATSBOMB_SANDBOX_FEWSHOT_FILE.with_suffix(".json.tmp")
         tmp_path.write_text(json.dumps(updated_memory, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp_path.replace(STATSBOMB_SANDBOX_FEWSHOT_FILE)
+        invalidate_statsbomb_state_cache(STATSBOMB_SANDBOX_FEWSHOT_FILE)
         self.status_var.set(f"StatsBomb few-shot applied: +{applied_count} | total {final_count}")
         self._refresh_current_view_after_release_state_change()
         messagebox.showinfo(
@@ -4336,6 +4338,7 @@ class SmartMatchDashboard:
         tmp_path = STATSBOMB_SANDBOX_FEWSHOT_FILE.with_suffix(".json.tmp")
         tmp_path.write_text(json.dumps(backup_payload, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp_path.replace(STATSBOMB_SANDBOX_FEWSHOT_FILE)
+        invalidate_statsbomb_state_cache(STATSBOMB_SANDBOX_FEWSHOT_FILE)
         self.status_var.set(f"StatsBomb few-shot rolled back: {summary.get('backup_count', 0)} samples")
         self._refresh_current_view_after_release_state_change()
         messagebox.showinfo(

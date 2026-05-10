@@ -54,6 +54,7 @@ VIDEO_REVIEW_FILE = PROJECT_DIR / "data" / "state" / "video_reviews.json"
 STATSBOMB_EVENT_SUMMARIES_FILE = PROJECT_DIR / "data" / "state" / "statsbomb_event_summaries.json"
 STATSBOMB_EVENT_BASELINE_FILE = PROJECT_DIR / "data" / "state" / "statsbomb_event_baseline.json"
 STATSBOMB_SANDBOX_FEWSHOT_FILE = PROJECT_DIR / "data" / "state" / "statsbomb_sandbox_fewshot_samples.json"
+_STATSBOMB_STATE_JSON_CACHE: dict[Path, tuple[tuple[int, int], dict]] = {}
 ENSEMBLE_WEIGHTS_FILE = PROJECT_DIR / "data" / "models" / "ensemble_weights_v1.json"
 PLAY_THRESHOLDS_FILE = PROJECT_DIR / "data" / "models" / "play_thresholds_v1.json"
 PLAY_MODEL_POLICY_FILE = PROJECT_DIR / "data" / "models" / "play_model_policy_v1.json"
@@ -5798,24 +5799,41 @@ def get_high_accuracy_strategy_status() -> dict:
     return _apply_high_accuracy_strategy_breakers(status, settlements)
 
 
-def get_statsbomb_event_baseline() -> dict:
-    if not STATSBOMB_EVENT_BASELINE_FILE.exists():
-        return {}
+def _load_cached_statsbomb_state_json(path: Path) -> dict:
     try:
-        payload = json.loads(STATSBOMB_EVENT_BASELINE_FILE.read_text(encoding="utf-8"))
-    except Exception:
+        stat = path.stat()
+    except OSError:
+        _STATSBOMB_STATE_JSON_CACHE.pop(path, None)
         return {}
-    return payload if isinstance(payload, dict) else {}
+    signature = (int(stat.st_mtime_ns), int(stat.st_size))
+    cached = _STATSBOMB_STATE_JSON_CACHE.get(path)
+    if cached and cached[0] == signature:
+        return cached[1]
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        _STATSBOMB_STATE_JSON_CACHE.pop(path, None)
+        return {}
+    if not isinstance(payload, dict):
+        _STATSBOMB_STATE_JSON_CACHE.pop(path, None)
+        return {}
+    _STATSBOMB_STATE_JSON_CACHE[path] = (signature, payload)
+    return payload
+
+
+def invalidate_statsbomb_state_cache(path: Path | None = None) -> None:
+    if path is None:
+        _STATSBOMB_STATE_JSON_CACHE.clear()
+        return
+    _STATSBOMB_STATE_JSON_CACHE.pop(path, None)
+
+
+def get_statsbomb_event_baseline() -> dict:
+    return _load_cached_statsbomb_state_json(STATSBOMB_EVENT_BASELINE_FILE)
 
 
 def get_statsbomb_sandbox_fewshot_memory() -> dict:
-    if not STATSBOMB_SANDBOX_FEWSHOT_FILE.exists():
-        return {}
-    try:
-        payload = json.loads(STATSBOMB_SANDBOX_FEWSHOT_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    return payload if isinstance(payload, dict) else {}
+    return _load_cached_statsbomb_state_json(STATSBOMB_SANDBOX_FEWSHOT_FILE)
 
 
 def _build_high_accuracy_strategy_pool(candidates: list[dict]) -> list[dict]:
