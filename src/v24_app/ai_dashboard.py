@@ -70,6 +70,8 @@ from .ui_modules import (
     build_statsbomb_event_sandbox_report_filename,
     build_statsbomb_event_sandbox_report_lines,
     build_statsbomb_event_sandbox_summary,
+    build_statsbomb_fewshot_backfill_report_filename,
+    build_statsbomb_fewshot_backfill_report_lines,
     build_strategy_allowlist_filename,
     build_strategy_allowlist_report_lines,
     build_strategy_policy_audit_csv_filename,
@@ -4069,6 +4071,27 @@ class SmartMatchDashboard:
         )
         return md_path, csv_path
 
+    def export_statsbomb_fewshot_backfill_report(self) -> Path | None:
+        settlements = list(reversed(get_recent_settlements(limit=300)))
+        dashboard = build_high_accuracy_strategy_dashboard(
+            get_high_accuracy_strategy_status(),
+            settlements,
+            get_strategy_admission_policy_history(limit=20),
+            get_statsbomb_event_baseline(),
+            get_statsbomb_sandbox_fewshot_memory(),
+        )
+        queue = dashboard.get("statsbomb_backfill_queue", {}) if isinstance(dashboard.get("statsbomb_backfill_queue"), dict) else {}
+        now = datetime.now()
+        REPORT_DIR.mkdir(parents=True, exist_ok=True)
+        path = REPORT_DIR / build_statsbomb_fewshot_backfill_report_filename(now)
+        path.write_text(
+            "\n".join(build_statsbomb_fewshot_backfill_report_lines(queue, generated_at=now)),
+            encoding="utf-8",
+        )
+        self.status_var.set(f"StatsBomb\u8865\u6837\u961f\u5217\u5df2\u5bfc\u51fa: {path.name}")
+        messagebox.showinfo("StatsBomb\u8865\u6837\u961f\u5217", f"\u5df2\u751f\u6210\u8865\u6837\u961f\u5217\u62a5\u544a:\n{path}")
+        return path
+
     def open_strategy_policy_audit_history(self) -> None:
         self.current_nav_index = 4
         self.current_view = "strategy_audit_history"
@@ -4076,7 +4099,8 @@ class SmartMatchDashboard:
         REPORT_DIR.mkdir(parents=True, exist_ok=True)
         files = sorted(
             list(REPORT_DIR.glob("strategy_policy_audit_*.md"))
-            + list(REPORT_DIR.glob("strategy_policy_audit_samples_*.csv")),
+            + list(REPORT_DIR.glob("strategy_policy_audit_samples_*.csv"))
+            + list(REPORT_DIR.glob("statsbomb_fewshot_backfill_*.md")),
             key=lambda path: path.stat().st_mtime,
             reverse=True,
         )
@@ -4822,6 +4846,7 @@ class SmartMatchDashboard:
         audit_tools.pack(fill=tk.X, pady=(0, 12))
         self._strategy_toolbar_button(audit_tools, "\u5ba1\u8ba1\u5386\u53f2", self.open_strategy_policy_audit_history)
         self._strategy_toolbar_button(audit_tools, "\u5bfc\u51fa\u8c03\u53c2\u5ba1\u8ba1", self.export_strategy_policy_audit_report)
+        self._strategy_toolbar_button(audit_tools, "StatsBomb\u8865\u6837", self.export_statsbomb_fewshot_backfill_report)
         self._strategy_toolbar_button(
             audit_tools,
             "\u751f\u6548\u8be6\u60c5",

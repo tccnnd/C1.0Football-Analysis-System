@@ -1197,6 +1197,92 @@ def build_statsbomb_fewshot_backfill_queue(
     }
 
 
+def build_statsbomb_fewshot_backfill_report_filename(now: datetime | None = None) -> str:
+    current = now or datetime.now()
+    return f"statsbomb_fewshot_backfill_{current.strftime('%Y%m%d_%H%M%S')}.md"
+
+
+def build_statsbomb_fewshot_backfill_report_lines(
+    queue: Mapping[str, object] | object,
+    *,
+    generated_at: datetime | None = None,
+) -> list[str]:
+    current = generated_at or datetime.now()
+    resolved = _as_mapping(queue)
+    tasks = [row for row in _as_list(resolved.get("tasks")) if isinstance(row, Mapping)]
+    candidates = [row for row in _as_list(resolved.get("candidate_rows")) if isinstance(row, Mapping)]
+    lines = [
+        "# StatsBomb Few-shot 补样队列",
+        "",
+        f"- 生成时间: {current.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- 摘要: {resolved.get('summary_text') or '-'}",
+        f"- 状态: {resolved.get('status') or '-'}",
+        f"- 防泄漏边界: {resolved.get('leakage_note') or '-'}",
+        "",
+        "## 补样任务",
+        "",
+        "| 优先级 | 任务 | 目标标签 | 说明 |",
+        "| ---: | --- | --- | --- |",
+    ]
+    if not tasks:
+        lines.append("| 0 | 暂无补样任务 | - | 当前 StatsBomb few-shot 记忆覆盖健康。 |")
+    for task in tasks:
+        target_tags = ", ".join(str(tag) for tag in _as_list(task.get("target_tags"))) or "-"
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    str(_safe_int(task.get("priority"))),
+                    _md_cell(task.get("title")),
+                    _md_cell(target_tags),
+                    _md_cell(task.get("body")),
+                ]
+            )
+            + " |"
+        )
+    lines.extend(
+        [
+            "",
+            "## 候选比赛",
+            "",
+            "| 优先级 | 来源 | 日期 | 赛事 | 比赛 | 命中目标 | 标签 |",
+            "| ---: | --- | --- | --- | --- | --- | --- |",
+        ]
+    )
+    if not candidates:
+        lines.append("| 0 | - | - | - | 暂无候选 | - | - |")
+    for row in candidates:
+        matched_tags = ", ".join(str(tag) for tag in _as_list(row.get("matched_tags"))) or "-"
+        tags = ", ".join(str(tag) for tag in _as_list(row.get("tags"))) or "-"
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    str(_safe_int(row.get("priority_score"))),
+                    _md_cell(row.get("source")),
+                    _md_cell(row.get("match_date")),
+                    _md_cell(row.get("league")),
+                    _md_cell(row.get("title")),
+                    _md_cell(matched_tags),
+                    _md_cell(tags),
+                ]
+            )
+            + " |"
+        )
+    lines.extend(
+        [
+            "",
+            "## 复盘执行原则",
+            "",
+            "- 只从已经完场且具备 StatsBomb 事件证据的比赛生成 few-shot 样本。",
+            "- 样本用于 Evaluation Agent 赛后归因和报告增强，不得作为赛前预测特征。",
+            "- 每次补样后重新检查标签覆盖率、当前错因命中数和根因集中度。",
+            "",
+        ]
+    )
+    return lines
+
+
 def _statsbomb_sandbox_row(row: Mapping[str, object], baseline: Mapping[str, object] | object | None = None) -> dict[str, object]:
     xg_margin = _safe_float(row.get("xg_margin"))
     goal_margin = _safe_int(row.get("goal_margin"))

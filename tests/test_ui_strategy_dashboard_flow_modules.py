@@ -29,6 +29,8 @@ from v24_app.ui_modules import (
     build_strategy_evaluation_agent_summary,
     build_strategy_error_attribution_summary,
     build_statsbomb_fewshot_backfill_queue,
+    build_statsbomb_fewshot_backfill_report_filename,
+    build_statsbomb_fewshot_backfill_report_lines,
     build_statsbomb_fewshot_memory_summary,
     build_statsbomb_fewshot_memory_monitor,
     build_statsbomb_fewshot_memory_quality_alerts,
@@ -1317,6 +1319,44 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertGreaterEqual(queue["candidate_count"], 1)
         self.assertTrue(any("xg_direction_failed" in row["matched_tags"] for row in queue["candidate_rows"]))
         self.assertIn("post-match", queue["leakage_note"])
+
+    def test_statsbomb_fewshot_backfill_report_exports_queue(self) -> None:
+        queue = {
+            "status": "ready",
+            "summary_text": "补样任务 1 | 候选 1 | 目标标签 1",
+            "leakage_note": "post-match only",
+            "tasks": [
+                {
+                    "priority": 95,
+                    "title": "补充当前错因相似样本",
+                    "target_tags": ["xg_direction_failed"],
+                    "body": "当前错因没有命中历史记忆。",
+                }
+            ],
+            "candidate_rows": [
+                {
+                    "priority_score": 41,
+                    "source": "statsbomb_baseline",
+                    "match_date": "2024-06-15",
+                    "league": "UEFA Euro",
+                    "title": "2024-06-15 | UEFA Euro | Spain vs Croatia",
+                    "matched_tags": ["xg_direction_failed"],
+                    "tags": ["statsbomb_post_match_review", "xg_direction_failed"],
+                }
+            ],
+        }
+
+        lines = build_statsbomb_fewshot_backfill_report_lines(queue, generated_at=datetime(2026, 5, 10, 22, 15, 30))
+        payload = "\n".join(lines)
+
+        self.assertEqual(
+            build_statsbomb_fewshot_backfill_report_filename(datetime(2026, 5, 10, 22, 15, 30)),
+            "statsbomb_fewshot_backfill_20260510_221530.md",
+        )
+        self.assertIn("StatsBomb Few-shot 补样队列", payload)
+        self.assertIn("补充当前错因相似样本", payload)
+        self.assertIn("Spain vs Croatia", payload)
+        self.assertIn("post-match only", payload)
 
     def test_high_accuracy_dashboard_exposes_statsbomb_backfill_queue(self) -> None:
         memory = {
