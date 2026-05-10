@@ -4115,10 +4115,12 @@ class SmartMatchDashboard:
         json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         md_path.write_text("\n".join(build_statsbomb_fewshot_draft_review_lines(payload)), encoding="utf-8")
         draft_count = int((payload.get("summary") or {}).get("draft_count", 0) or 0) if isinstance(payload.get("summary"), dict) else 0
-        self.status_var.set(f"StatsBomb few-shot\u8349\u7a3f\u5df2\u5bfc\u51fa: {draft_count} \u6761")
+        validation = payload.get("validation", {}) if isinstance(payload.get("validation"), dict) else {}
+        validation_text = str(validation.get("summary_text") or "-")
+        self.status_var.set(f"StatsBomb few-shot\u8349\u7a3f\u5df2\u5bfc\u51fa: {draft_count} \u6761 | {validation_text}")
         messagebox.showinfo(
             "StatsBomb few-shot\u8349\u7a3f",
-            f"\u5df2\u751f\u6210\u8349\u7a3fJSON:\n{json_path}\n\n\u5ba1\u67e5\u62a5\u544a:\n{md_path}",
+            f"\u5df2\u751f\u6210\u8349\u7a3fJSON:\n{json_path}\n\n\u5ba1\u67e5\u62a5\u544a:\n{md_path}\n\n\u6821\u9a8c: {validation_text}",
         )
         return json_path, md_path
 

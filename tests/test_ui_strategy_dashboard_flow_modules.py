@@ -38,6 +38,7 @@ from v24_app.ui_modules import (
     build_statsbomb_fewshot_memory_summary,
     build_statsbomb_fewshot_memory_monitor,
     build_statsbomb_fewshot_memory_quality_alerts,
+    validate_statsbomb_fewshot_draft_payload,
     build_statsbomb_event_replay_case,
     build_statsbomb_event_review_summary,
     build_statsbomb_event_sandbox_report_filename,
@@ -1420,8 +1421,40 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["draft_count"], 1)
         self.assertEqual(payload["items"][0]["review_status"], "draft")
         self.assertIn("xg_direction_failed", payload["items"][0]["labels"]["tags"])
+        self.assertIn("validation", payload)
         self.assertIn("StatsBomb Few-shot 草稿审查", review_text)
         self.assertIn("赛前预测特征", review_text)
+
+    def test_statsbomb_fewshot_draft_validation_blocks_invalid_samples(self) -> None:
+        payload = {
+            "items": [
+                {
+                    "id": "draft:1",
+                    "review_status": "draft",
+                    "prompt": "review",
+                    "completion": "done",
+                    "labels": {"simulated_pick": "HOME", "actual": "AWAY", "is_hit": False, "root_cause": "event_result_divergence", "tags": ["strategy_miss"]},
+                    "features": {"home_xg": 1.0},
+                    "meta": {"match_date": "2024-06-15", "league": "UEFA Euro", "home_team": "Spain", "away_team": "Croatia", "score": "3-0"},
+                },
+                {
+                    "id": "draft:1",
+                    "review_status": "final",
+                    "prompt": "review",
+                    "completion": "done",
+                    "labels": {"simulated_pick": "HOME", "actual": "HOME", "is_hit": True, "root_cause": "event_evidence_aligned", "tags": ["statsbomb_post_match_review", "strategy_hit"]},
+                    "features": {"home_xg": 1.0, "away_xg": 0.5, "xg_margin": 0.5, "home_shots": 10, "away_shots": 5, "shot_margin": 5, "event_count": 3000},
+                    "meta": {"match_date": "2024-06-16", "league": "UEFA Euro", "home_team": "A", "away_team": "B", "score": "1-0"},
+                },
+            ]
+        }
+
+        validation = validate_statsbomb_fewshot_draft_payload(payload)
+
+        self.assertEqual(validation["status"], "blocked")
+        self.assertGreater(validation["high_count"], 0)
+        self.assertTrue(any(issue["code"] == "duplicate_id" for issue in validation["issues"]))
+        self.assertTrue(any(issue["code"] == "missing_post_match_tag" for issue in validation["issues"]))
 
     def test_high_accuracy_dashboard_exposes_statsbomb_backfill_queue(self) -> None:
         memory = {

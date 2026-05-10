@@ -1416,7 +1416,7 @@ def build_statsbomb_fewshot_draft_payload(
             tag_text = str(tag)
             tag_counts[tag_text] = tag_counts.get(tag_text, 0) + 1
     leakage_note = "Draft samples use post-match StatsBomb event data for Evaluation Agent review only; do not use as pre-match prediction features."
-    return {
+    payload = {
         "updated_at": current.strftime("%Y-%m-%d %H:%M:%S"),
         "source": "StatsBomb few-shot backfill queue",
         "purpose": "draft_only_manual_review_required",
@@ -1432,11 +1432,96 @@ def build_statsbomb_fewshot_draft_payload(
         "items": items,
         "skipped": skipped,
     }
+    payload["validation"] = validate_statsbomb_fewshot_draft_payload(payload)
+    return payload
+
+
+def validate_statsbomb_fewshot_draft_payload(payload: Mapping[str, object] | object) -> dict[str, object]:
+    resolved = _as_mapping(payload)
+    items = [item for item in _as_list(resolved.get("items")) if isinstance(item, Mapping)]
+    issues: list[dict[str, object]] = []
+    seen_ids: set[str] = set()
+    duplicate_ids: set[str] = set()
+    required_top_fields = ("id", "prompt", "completion", "labels", "features", "meta", "review_status")
+    required_labels = ("simulated_pick", "actual", "is_hit", "root_cause", "tags")
+    required_features = ("home_xg", "away_xg", "xg_margin", "home_shots", "away_shots", "shot_margin", "event_count")
+    required_meta = ("match_date", "league", "home_team", "away_team", "score")
+    leakage_terms = (
+        "pre-match prediction feature",
+        "赛前预测特征",
+        "用于赛前预测",
+        "feed into pre-match",
+    )
+    tag_counts: dict[str, int] = {}
+
+    for index, item in enumerate(items):
+        item_id = str(item.get("id") or f"index:{index}")
+        if item_id in seen_ids:
+            duplicate_ids.add(item_id)
+        seen_ids.add(item_id)
+        for field in required_top_fields:
+            value = item.get(field)
+            if field not in item or value is None or value == "":
+                issues.append({"severity": "high", "item_id": item_id, "code": "missing_field", "field": field})
+        if str(item.get("review_status") or "") != "draft":
+            issues.append({"severity": "medium", "item_id": item_id, "code": "unexpected_review_status", "field": "review_status"})
+        labels = _as_mapping(item.get("labels"))
+        for field in required_labels:
+            value = labels.get(field)
+            if field not in labels or value is None or value == "":
+                issues.append({"severity": "high", "item_id": item_id, "code": "missing_label", "field": field})
+        tags = [str(tag) for tag in _as_list(labels.get("tags")) if str(tag)]
+        if not tags:
+            issues.append({"severity": "high", "item_id": item_id, "code": "missing_tags", "field": "labels.tags"})
+        if "statsbomb_post_match_review" not in tags:
+            issues.append({"severity": "high", "item_id": item_id, "code": "missing_post_match_tag", "field": "labels.tags"})
+        if "strategy_hit" not in tags and "strategy_miss" not in tags:
+            issues.append({"severity": "medium", "item_id": item_id, "code": "missing_hit_miss_tag", "field": "labels.tags"})
+        for tag in tags:
+            tag_counts[tag] = tag_counts.get(tag, 0) + 1
+        features = _as_mapping(item.get("features"))
+        for field in required_features:
+            if field not in features:
+                issues.append({"severity": "medium", "item_id": item_id, "code": "missing_feature", "field": field})
+        meta = _as_mapping(item.get("meta"))
+        for field in required_meta:
+            if field not in meta or meta.get(field) in {None, ""}:
+                issues.append({"severity": "medium", "item_id": item_id, "code": "missing_meta", "field": field})
+        combined_text = "\n".join(
+            [
+                str(item.get("prompt") or ""),
+                str(item.get("completion") or ""),
+                str(item.get("draft_note") or ""),
+            ]
+        ).lower()
+        for term in leakage_terms:
+            if term.lower() in combined_text:
+                issues.append({"severity": "medium", "item_id": item_id, "code": "leakage_boundary_mention", "field": "prompt/completion"})
+                break
+
+    for item_id in sorted(duplicate_ids):
+        issues.append({"severity": "high", "item_id": item_id, "code": "duplicate_id", "field": "id"})
+    if not items:
+        issues.append({"severity": "medium", "item_id": "-", "code": "empty_draft", "field": "items"})
+
+    high_count = sum(1 for issue in issues if issue.get("severity") == "high")
+    medium_count = sum(1 for issue in issues if issue.get("severity") == "medium")
+    status = "blocked" if high_count else "review" if medium_count else "ready"
+    return {
+        "status": status,
+        "issue_count": len(issues),
+        "high_count": high_count,
+        "medium_count": medium_count,
+        "tag_counts": dict(sorted(tag_counts.items())),
+        "issues": issues[:50],
+        "summary_text": f"草稿校验 {status} | 问题 {len(issues)} | high {high_count} | medium {medium_count}",
+    }
 
 
 def build_statsbomb_fewshot_draft_review_lines(payload: Mapping[str, object] | object) -> list[str]:
     resolved = _as_mapping(payload)
     summary = _as_mapping(resolved.get("summary"))
+    validation = _as_mapping(resolved.get("validation")) or validate_statsbomb_fewshot_draft_payload(resolved)
     items = [item for item in _as_list(resolved.get("items")) if isinstance(item, Mapping)]
     skipped = [item for item in _as_list(resolved.get("skipped")) if isinstance(item, Mapping)]
     lines = [
@@ -1447,10 +1532,40 @@ def build_statsbomb_fewshot_draft_review_lines(payload: Mapping[str, object] | o
         f"- 候选数量: {_safe_int(summary.get('candidate_count'))}",
         f"- 跳过数量: {_safe_int(summary.get('skipped_count'))}",
         f"- 防泄漏边界: {resolved.get('leakage_note') or '-'}",
+        f"- 校验摘要: {validation.get('summary_text') or '-'}",
         "",
-        "## 草稿样本",
+        "## 质量校验",
+        "",
+        f"- 状态: {validation.get('status') or '-'}",
+        f"- High: {_safe_int(validation.get('high_count'))}",
+        f"- Medium: {_safe_int(validation.get('medium_count'))}",
         "",
     ]
+    validation_issues = [item for item in _as_list(validation.get("issues")) if isinstance(item, Mapping)]
+    if validation_issues:
+        lines.extend(["| 严重度 | 样本 | 代码 | 字段 |", "| --- | --- | --- | --- |"])
+        for issue in validation_issues[:12]:
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        _md_cell(issue.get("severity")),
+                        _md_cell(issue.get("item_id")),
+                        _md_cell(issue.get("code")),
+                        _md_cell(issue.get("field")),
+                    ]
+                )
+                + " |"
+            )
+        lines.append("")
+    else:
+        lines.extend(["未发现结构性问题。", ""])
+    lines.extend(
+        [
+            "## 草稿样本",
+            "",
+        ]
+    )
     if not items:
         lines.extend(["暂无可审查草稿。", ""])
     for item in items:
