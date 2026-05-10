@@ -66,6 +66,7 @@ from .ui_modules import (
     build_high_accuracy_strategy_dashboard,
     build_strategy_allowlist_settlement_summary,
     build_strategy_allowlist_tuning_recommendation,
+    build_statsbomb_event_sandbox_summary,
     build_strategy_allowlist_filename,
     build_strategy_allowlist_report_lines,
     build_strategy_policy_audit_csv_filename,
@@ -4556,6 +4557,147 @@ class SmartMatchDashboard:
             version_tree.selection_set(children[0])
             show_samples(row_by_iid.get(children[0]))
 
+    def open_statsbomb_event_sandbox_window(self) -> None:
+        sandbox = build_statsbomb_event_sandbox_summary(get_statsbomb_event_baseline(), limit=60)
+        window = tk.Toplevel(self.root)
+        window.title("StatsBomb \u5386\u53f2\u4e8b\u4ef6\u590d\u76d8\u6c99\u76d2")
+        window.geometry("1180x760")
+        window.configure(bg=BG)
+
+        header = tk.Frame(window, bg=BG)
+        header.pack(fill=tk.X, padx=18, pady=(16, 10))
+        tk.Label(
+            header,
+            text="StatsBomb \u5386\u53f2\u4e8b\u4ef6\u590d\u76d8\u6c99\u76d2",
+            bg=BG,
+            fg=TEXT,
+            font=("Microsoft YaHei UI", 15, "bold"),
+        ).pack(anchor=tk.W)
+        tk.Label(
+            header,
+            text=f"{sandbox.get('summary_text', '-')}  |  {sandbox.get('leakage_note', '-')}",
+            bg=BG,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 10),
+            wraplength=1080,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(5, 0))
+
+        body = tk.Frame(window, bg=BG)
+        body.pack(fill=tk.BOTH, expand=True, padx=18, pady=(0, 16))
+        top = tk.Frame(body, bg=BG)
+        top.pack(fill=tk.X, pady=(0, 12))
+        left = self._card(top, PANEL)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 12))
+        right = self._card(top, PANEL)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        tk.Label(left, text="\u8d5b\u4e8b\u57fa\u7ebf", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 11, "bold")).pack(anchor=tk.W, padx=12, pady=(10, 4))
+        for row in sandbox.get("competition_rows", []) if isinstance(sandbox.get("competition_rows"), list) else []:
+            if isinstance(row, dict):
+                tk.Label(
+                    left,
+                    text=f"{row.get('label', '-')}\n{row.get('body', '-')}",
+                    bg=PANEL,
+                    fg=MUTED,
+                    font=("Microsoft YaHei UI", 9),
+                    justify=tk.LEFT,
+                    wraplength=510,
+                ).pack(anchor=tk.W, padx=12, pady=(2, 8))
+
+        tk.Label(right, text="xG\u5dee\u503c\u5206\u6876", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 11, "bold")).pack(anchor=tk.W, padx=12, pady=(10, 4))
+        for row in sandbox.get("bucket_rows", []) if isinstance(sandbox.get("bucket_rows"), list) else []:
+            if isinstance(row, dict):
+                tk.Label(
+                    right,
+                    text=f"{row.get('label', '-')}: {row.get('body', '-')}",
+                    bg=PANEL,
+                    fg=MUTED,
+                    font=("Microsoft YaHei UI", 9),
+                    justify=tk.LEFT,
+                    wraplength=510,
+                ).pack(anchor=tk.W, padx=12, pady=(2, 8))
+
+        table_frame = self._card(body, PANEL)
+        table_frame.pack(fill=tk.BOTH, expand=True)
+        self._configure_dark_tree_style("StatsBombSandbox.Treeview", master=window, rowheight=28)
+        columns = ("date", "league", "match", "score", "xg", "shots", "diagnosis", "events")
+        tree = ttk.Treeview(table_frame, columns=columns, show="headings", style="StatsBombSandbox.Treeview", height=15)
+        headings = {
+            "date": "\u65e5\u671f",
+            "league": "\u8d5b\u4e8b",
+            "match": "\u5bf9\u9635",
+            "score": "\u6bd4\u5206",
+            "xg": "xG",
+            "shots": "\u5c04\u95e8",
+            "diagnosis": "\u590d\u76d8\u8bca\u65ad",
+            "events": "\u4e8b\u4ef6",
+        }
+        widths = {"date": 96, "league": 120, "match": 210, "score": 70, "xg": 90, "shots": 80, "diagnosis": 240, "events": 70}
+        for column in columns:
+            tree.heading(column, text=headings[column])
+            tree.column(column, width=widths[column], anchor=tk.W, stretch=column in {"match", "diagnosis"})
+        tree_scroll = tk.Scrollbar(table_frame, orient=tk.VERTICAL, command=tree.yview)
+        tree.configure(yscrollcommand=tree_scroll.set)
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(10, 0), pady=10)
+        tree_scroll.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 10), pady=10)
+
+        detail = tk.Text(
+            body,
+            wrap=tk.WORD,
+            bg=PANEL,
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief=tk.FLAT,
+            height=4,
+            font=("Microsoft YaHei UI", 10),
+            padx=12,
+            pady=10,
+        )
+        detail.pack(fill=tk.X, pady=(12, 0))
+
+        rows = sandbox.get("variance_rows", []) if isinstance(sandbox.get("variance_rows"), list) else []
+        if not rows:
+            rows = sandbox.get("rows", []) if isinstance(sandbox.get("rows"), list) else []
+        row_by_iid: dict[str, dict] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            iid = tree.insert(
+                "",
+                tk.END,
+                values=(
+                    row.get("match_date", "-"),
+                    row.get("league", "-"),
+                    row.get("title", "-"),
+                    row.get("score", "-"),
+                    row.get("xg", "-"),
+                    row.get("shots", "-"),
+                    row.get("diagnosis", "-"),
+                    row.get("event_count", 0),
+                ),
+            )
+            row_by_iid[iid] = row
+
+        def show_detail(row: dict | None) -> None:
+            detail.configure(state=tk.NORMAL)
+            detail.delete("1.0", tk.END)
+            detail.insert("1.0", str((row or {}).get("body") or "\u8bf7\u9009\u62e9\u4e00\u573a\u5386\u53f2\u6837\u672c\u67e5\u770b\u590d\u76d8\u8bca\u65ad\u3002"))
+            detail.configure(state=tk.DISABLED)
+
+        def on_select(_event=None) -> None:
+            selected = tree.selection()
+            show_detail(row_by_iid.get(selected[0]) if selected else None)
+
+        tree.bind("<<TreeviewSelect>>", on_select)
+        children = tree.get_children()
+        if children:
+            tree.selection_set(children[0])
+            show_detail(row_by_iid.get(children[0]))
+        else:
+            show_detail(None)
+        self.status_var.set(f"StatsBomb\u6c99\u76d2: {sandbox.get('summary_text', '-')}")
+
     def open_strategy_library(self) -> None:
         self.current_nav_index = 4
         self.current_view = "strategy"
@@ -4615,6 +4757,7 @@ class SmartMatchDashboard:
             "\u751f\u6548\u8be6\u60c5",
             lambda review=dashboard.get("policy_effect_review", {}): self.open_policy_effect_detail_window(review),
         )
+        self._strategy_toolbar_button(audit_tools, "StatsBomb\u6837\u672c", self.open_statsbomb_event_sandbox_window)
         self._strategy_toolbar_button(audit_tools, "\u56de\u6eda\u4e0a\u4e00\u7248", self.rollback_latest_strategy_policy, danger=True)
         tk.Label(
             audit_tools,

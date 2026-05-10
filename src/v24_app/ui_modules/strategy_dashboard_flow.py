@@ -706,6 +706,102 @@ def build_statsbomb_event_review_summary(
     }
 
 
+def _statsbomb_sandbox_row(row: Mapping[str, object]) -> dict[str, object]:
+    xg_margin = _safe_float(row.get("xg_margin"))
+    goal_margin = _safe_int(row.get("goal_margin"))
+    diagnosis: list[str] = []
+    if bool(row.get("finishing_variance")):
+        diagnosis.append("\u7ec8\u7ed3\u6ce2\u52a8")
+    if not bool(row.get("xg_aligned_with_score")):
+        diagnosis.append("xG\u4e0e\u8d5b\u679c\u80cc\u79bb")
+    if not bool(row.get("shot_aligned_with_score")):
+        diagnosis.append("\u5c04\u95e8\u4e0e\u8d5b\u679c\u80cc\u79bb")
+    if not diagnosis:
+        diagnosis.append("\u4e8b\u4ef6\u652f\u6301\u8d5b\u679c")
+    diagnosis_text = "\u3001".join(diagnosis)
+    return {
+        "match_id": row.get("match_id") or "-",
+        "match_date": row.get("match_date") or "-",
+        "league": row.get("league") or "-",
+        "season": row.get("season") or "-",
+        "title": f"{row.get('home_team') or '-'} vs {row.get('away_team') or '-'}",
+        "score": row.get("score") or "-",
+        "xg": f"{_safe_float(row.get('home_xg')):.2f}-{_safe_float(row.get('away_xg')):.2f}",
+        "shots": f"{_safe_int(row.get('home_shots'))}-{_safe_int(row.get('away_shots'))}",
+        "xg_margin": round(xg_margin, 4),
+        "goal_margin": goal_margin,
+        "diagnosis": diagnosis_text,
+        "event_count": _safe_int(row.get("event_count")),
+        "body": (
+            f"{row.get('match_date') or '-'} | {row.get('league') or '-'} | {row.get('home_team') or '-'} vs {row.get('away_team') or '-'}\n"
+            f"\u6bd4\u5206 {row.get('score') or '-'} | xG {_safe_float(row.get('home_xg')):.2f}-{_safe_float(row.get('away_xg')):.2f} | "
+            f"\u5c04\u95e8 {_safe_int(row.get('home_shots'))}-{_safe_int(row.get('away_shots'))} | \u8bca\u65ad {diagnosis_text}"
+        ),
+    }
+
+
+def build_statsbomb_event_sandbox_summary(
+    baseline: Mapping[str, object] | object,
+    *,
+    limit: int = 20,
+) -> dict[str, object]:
+    resolved = _as_mapping(baseline)
+    summary = _as_mapping(resolved.get("summary"))
+    item_rows = [item for item in _as_list(resolved.get("items")) if isinstance(item, Mapping)]
+    variance_rows = [item for item in _as_list(resolved.get("variance_rows")) if isinstance(item, Mapping)]
+    competition_profiles = _as_mapping(resolved.get("competition_profiles"))
+    bucket_profiles = _as_mapping(resolved.get("xg_margin_buckets"))
+    sandbox_rows = [_statsbomb_sandbox_row(item) for item in item_rows]
+    sandbox_rows.sort(
+        key=lambda row: (
+            "终结波动" not in str(row.get("diagnosis") or ""),
+            -abs(_safe_float(row.get("xg_margin"))),
+            str(row.get("match_date") or ""),
+        )
+    )
+    competition_rows = [
+        {
+            "label": str(key),
+            "body": (
+                f"\u6837\u672c {_safe_int(_as_mapping(value).get('match_count'))} | "
+                f"xG\u5bf9\u9f50 {_as_mapping(value).get('xg_alignment_rate') or '-'} | "
+                f"\u7ec8\u7ed3\u6ce2\u52a8 {_as_mapping(value).get('finishing_variance_rate') or '-'} | "
+                f"\u573a\u5747xG {_safe_float(_as_mapping(value).get('avg_xg_total')):.2f}"
+            ),
+        }
+        for key, value in sorted(competition_profiles.items())
+    ]
+    bucket_rows = [
+        {
+            "label": str(key),
+            "body": (
+                f"\u6837\u672c {_safe_int(_as_mapping(value).get('match_count'))} | "
+                f"xG\u5bf9\u9f50 {_as_mapping(value).get('xg_alignment_rate') or '-'} | "
+                f"\u5c04\u95e8\u5bf9\u9f50 {_as_mapping(value).get('shot_alignment_rate') or '-'} | "
+                f"\u7ec8\u7ed3\u6ce2\u52a8 {_as_mapping(value).get('finishing_variance_rate') or '-'}"
+            ),
+        }
+        for key, value in sorted(bucket_profiles.items())
+    ]
+    sample_count = _safe_int(summary.get("match_count"), len(item_rows))
+    return {
+        "status": "ready" if item_rows else "empty",
+        "sample_count": sample_count,
+        "source": resolved.get("source") or "-",
+        "updated_at": resolved.get("updated_at") or "-",
+        "summary_text": (
+            f"\u6837\u672c {sample_count} | xG\u5bf9\u9f50 {summary.get('xg_alignment_rate') or '-'} | "
+            f"\u5c04\u95e8\u5bf9\u9f50 {summary.get('shot_alignment_rate') or '-'} | "
+            f"\u7ec8\u7ed3\u6ce2\u52a8 {summary.get('finishing_variance_rate') or '-'}"
+        ),
+        "leakage_note": resolved.get("leakage_note") or "\u8be5\u6a21\u5757\u4ec5\u7528\u4e8e\u8d5b\u540e\u590d\u76d8\uff0c\u4e0d\u53c2\u4e0e\u8d5b\u524d\u9884\u6d4b\u8f93\u5165\u3002",
+        "competition_rows": competition_rows,
+        "bucket_rows": bucket_rows,
+        "rows": sandbox_rows[: max(0, int(limit))],
+        "variance_rows": [_statsbomb_sandbox_row(item) for item in variance_rows][: max(0, int(limit))],
+    }
+
+
 def _strategy_error_codes(settlement: Mapping[str, object], item: Mapping[str, object]) -> list[str]:
     if item.get("is_hit") is None:
         return ["data_missing"]

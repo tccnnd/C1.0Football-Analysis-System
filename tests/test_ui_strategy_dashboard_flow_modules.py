@@ -29,6 +29,7 @@ from v24_app.ui_modules import (
     build_strategy_evaluation_agent_summary,
     build_strategy_error_attribution_summary,
     build_statsbomb_event_review_summary,
+    build_statsbomb_event_sandbox_summary,
     build_strategy_allowlist_filename,
     build_strategy_allowlist_report_lines,
     build_strategy_allowlist_settlement_rows,
@@ -915,6 +916,86 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("\u8d5b\u540e\u590d\u76d8", review["leakage_note"])
         dashboard = build_high_accuracy_strategy_dashboard({}, settlements, [], baseline)
         self.assertTrue(any(item["label"] == "StatsBomb" for item in dashboard["metrics"]))
+
+    def test_statsbomb_event_sandbox_summarizes_baseline_items(self) -> None:
+        baseline = {
+            "source": "StatsBomb Open Data",
+            "updated_at": "2026-05-10 21:08:21",
+            "leakage_note": "post match only",
+            "summary": {
+                "match_count": 2,
+                "xg_alignment_rate": "50.0%",
+                "shot_alignment_rate": "50.0%",
+                "finishing_variance_rate": "50.0%",
+            },
+            "competition_profiles": {
+                "UEFA Euro | 2024": {
+                    "match_count": 2,
+                    "xg_alignment_rate": "50.0%",
+                    "finishing_variance_rate": "50.0%",
+                    "avg_xg_total": 2.9,
+                }
+            },
+            "xg_margin_buckets": {
+                "clear_edge": {
+                    "match_count": 2,
+                    "xg_alignment_rate": "50.0%",
+                    "shot_alignment_rate": "50.0%",
+                    "finishing_variance_rate": "50.0%",
+                }
+            },
+            "items": [
+                {
+                    "match_id": "statsbomb:1",
+                    "match_date": "2024-06-15",
+                    "league": "UEFA Euro",
+                    "season": "2024",
+                    "home_team": "Spain",
+                    "away_team": "Croatia",
+                    "score": "3-0",
+                    "home_xg": 1.12,
+                    "away_xg": 2.35,
+                    "home_shots": 11,
+                    "away_shots": 16,
+                    "xg_margin": -1.23,
+                    "goal_margin": 3,
+                    "xg_aligned_with_score": False,
+                    "shot_aligned_with_score": False,
+                    "finishing_variance": True,
+                    "event_count": 3500,
+                }
+            ],
+            "variance_rows": [
+                {
+                    "match_id": "statsbomb:1",
+                    "match_date": "2024-06-15",
+                    "league": "UEFA Euro",
+                    "season": "2024",
+                    "home_team": "Spain",
+                    "away_team": "Croatia",
+                    "score": "3-0",
+                    "home_xg": 1.12,
+                    "away_xg": 2.35,
+                    "home_shots": 11,
+                    "away_shots": 16,
+                    "xg_margin": -1.23,
+                    "goal_margin": 3,
+                    "xg_aligned_with_score": False,
+                    "shot_aligned_with_score": False,
+                    "finishing_variance": True,
+                    "event_count": 3500,
+                }
+            ],
+        }
+
+        sandbox = build_statsbomb_event_sandbox_summary(baseline)
+
+        self.assertEqual(sandbox["status"], "ready")
+        self.assertEqual(sandbox["sample_count"], 2)
+        self.assertEqual(len(sandbox["competition_rows"]), 1)
+        self.assertEqual(len(sandbox["bucket_rows"]), 1)
+        self.assertIn("终结波动", sandbox["variance_rows"][0]["diagnosis"])
+        self.assertIn("Spain vs Croatia", sandbox["variance_rows"][0]["title"])
 
     def test_evaluation_agent_embeds_statsbomb_event_review(self) -> None:
         settlements = [
