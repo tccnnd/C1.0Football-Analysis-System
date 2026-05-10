@@ -15,6 +15,7 @@ if str(SRC_ROOT) not in sys.path:
 from v24_app.ui_modules import (
     build_c1_availability_provider_status_lines,
     build_c1_release_review_availability_guard,
+    build_c1_release_review_guard_status_text,
     build_c1_snapshot_import_message_text,
     build_c1_snapshot_import_status_text,
     build_c1_sync_message_text,
@@ -73,6 +74,8 @@ class UIC1AvailabilityFlowModuleTests(unittest.TestCase):
         self.assertIn("provider quality_gate failed", guard["issues"])
         self.assertIn("api-football: suspended", guard["message"])
         self.assertIn("已跳过", guard["message"])
+        self.assertIn("阻止", build_c1_release_review_guard_status_text(guard))
+        self.assertIn("fail/warn=1/2", build_c1_release_review_guard_status_text(guard))
 
     def test_release_review_guard_allows_warn_or_missing_status(self) -> None:
         warn_guard = build_c1_release_review_availability_guard(
@@ -88,10 +91,16 @@ class UIC1AvailabilityFlowModuleTests(unittest.TestCase):
         )
         self.assertTrue(warn_guard["allowed"])
         self.assertEqual(warn_guard["status"], "warn")
+        self.assertIn("可运行", build_c1_release_review_guard_status_text(warn_guard))
 
         missing_guard = build_c1_release_review_availability_guard({})
         self.assertTrue(missing_guard["allowed"])
         self.assertEqual(missing_guard["status"], "missing")
+
+        pass_guard = build_c1_release_review_availability_guard(
+            {"smoke_check": {"status": "pass", "release_review_allowed": True}}
+        )
+        self.assertEqual(build_c1_release_review_guard_status_text(pass_guard), "放行门控: 通过")
 
     def test_provider_status_lines(self) -> None:
         lines = build_c1_availability_provider_status_lines(

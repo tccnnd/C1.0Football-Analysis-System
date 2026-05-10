@@ -121,6 +121,20 @@ def build_c1_release_review_availability_guard(sync_summary: Mapping[str, object
     }
 
 
+def build_c1_release_review_guard_status_text(guard: Mapping[str, object] | None) -> str:
+    item = guard if isinstance(guard, Mapping) else {}
+    status = str(item.get("status") or "-").strip().lower()
+    fail = _safe_int(item.get("quality_failures", 0))
+    warn = _safe_int(item.get("quality_warnings", 0))
+    if not bool(item.get("allowed", True)):
+        return f"放行门控: 阻止 | smoke={status} | fail/warn={fail}/{warn}"
+    if status == "pass":
+        return "放行门控: 通过"
+    if status in {"warn", "missing"}:
+        return f"放行门控: 可运行 | smoke={status}"
+    return f"放行门控: 可运行 | smoke={status or '-'}"
+
+
 def get_c1_release_review_availability_guard(project_root: Path) -> dict:
     store = C1AvailabilityStore(project_root)
     return build_c1_release_review_availability_guard(store.load_sync_status())

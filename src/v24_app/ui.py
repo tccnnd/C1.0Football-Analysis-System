@@ -35,6 +35,8 @@ from .ui_modules import (
     build_c1_apply_dialog_text,
     build_c1_apply_status_text,
     build_c1_availability_provider_status_lines,
+    build_c1_release_review_availability_guard,
+    build_c1_release_review_guard_status_text,
     build_c1_snapshot_import_message_text,
     build_c1_snapshot_import_status_text,
     build_c1_sync_message_text,
@@ -199,6 +201,7 @@ class FootballPredictionApp:
         self.c1_stats_var = tk.StringVar(value="显示 0/0")
         self.c1_filter_status_var = tk.StringVar(value="当前筛选: 全部")
         self.c1_mode_status_var = tk.StringVar(value=f"C1模式: {self.c1_runtime_mode}")
+        self.c1_release_guard_var = tk.StringVar(value="放行门控: 未检查")
         self.formal_toolbar_var = tk.StringVar(value="只看正式建议(0)")
         self.pending_toolbar_var = tk.StringVar(value="只看待处理(0)")
         self.near_block_toolbar_var = tk.StringVar(value="只看接近阻断(0)")
@@ -225,6 +228,7 @@ class FootballPredictionApp:
 
         self._configure_style()
         self._build_layout()
+        self._refresh_c1_release_guard_status()
         self.refresh_matches()
         self._schedule_auto_settle()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -304,6 +308,11 @@ class FootballPredictionApp:
         ).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Label(toolbar, textvariable=self.c1_filter_status_var, style="Sub.TLabel").pack(side=tk.LEFT, padx=(0, 8))
         ttk.Label(toolbar, textvariable=self.c1_mode_status_var, style="Sub.TLabel").pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(
+            toolbar,
+            textvariable=self.c1_release_guard_var,
+            command=self.show_c1_availability_provider_status,
+        ).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Label(toolbar, text="C1筛选", style="Sub.TLabel").pack(side=tk.RIGHT, padx=(8, 4))
         c1_filter = ttk.Combobox(
             toolbar,
@@ -491,6 +500,7 @@ class FootballPredictionApp:
         self.predictions = {}
         self.c1_release_rows = []
         self.c1_release_summary = {}
+        self._refresh_c1_release_guard_status()
         self.snapshot_migration_report = payload.get("migration_report", {}) or {}
         snapshot_sync = payload.get("snapshot_sync", {}) or {}
 
@@ -897,6 +907,12 @@ class FootballPredictionApp:
                 release_allowed_count=len(release_allowed_ids),
             )
         )
+
+    def _refresh_c1_release_guard_status(self, guard: dict | None = None) -> dict:
+        current_guard = guard if isinstance(guard, dict) else get_c1_release_review_availability_guard(PROJECT_ROOT)
+        if hasattr(self, "c1_release_guard_var"):
+            self.c1_release_guard_var.set(build_c1_release_review_guard_status_text(current_guard))
+        return current_guard
 
     def _restore_c1_marks_for_visible_matches(self) -> int:
         if not hasattr(self, "c1_comparison_marks"):
@@ -1733,6 +1749,7 @@ def _app_apply_sync_c1_availability_sources_result(self, result: dict) -> None:
     total_rows = int(result.get("total_rows", 0))
     total_keys = int(result.get("total_keys", 0))
     failed_providers = int(result.get("failed_providers", 0) or 0)
+    self._refresh_c1_release_guard_status(build_c1_release_review_availability_guard(result))
     self.status_var.set(build_c1_sync_status_text(total_rows, total_keys, failed_providers=failed_providers))
     messagebox.showinfo("C1 阵容源同步", build_c1_sync_message_text(result))
     if should_auto_rerun_shadow_after_sync(has_matches=bool(getattr(self, "matches", []))) and total_rows > 0:
@@ -1746,6 +1763,7 @@ def _app_apply_sync_c1_availability_sources_result(self, result: dict) -> None:
 
 
 def _app_show_c1_availability_provider_status(self) -> None:
+    self._refresh_c1_release_guard_status()
     statuses = get_c1_availability_provider_statuses(PROJECT_ROOT)
     lines = build_c1_availability_provider_status_lines(statuses)
     messagebox.showinfo("阵容源状态", "\n".join(lines))
@@ -1754,6 +1772,7 @@ def _app_show_c1_availability_provider_status(self) -> None:
 def _app_apply_import_c1_availability_snapshots_result(self, result: dict) -> None:
     imported_rows = int(result.get("imported_rows", 0))
     written_keys = int(result.get("written_keys", 0))
+    self._refresh_c1_release_guard_status()
     self.status_var.set(build_c1_snapshot_import_status_text(imported_rows, written_keys))
     messagebox.showinfo("C1 阵容快照", build_c1_snapshot_import_message_text(result))
     if should_auto_rerun_shadow_after_import(
@@ -1840,6 +1859,7 @@ def _app_run_c1_release_review(self) -> None:
         messagebox.showinfo("C1 放行评估", "当前没有可用于放行评估的赛事。")
         return
     guard = get_c1_release_review_availability_guard(PROJECT_ROOT)
+    self._refresh_c1_release_guard_status(guard)
     if not bool(guard.get("allowed", True)):
         self.c1_release_rows = []
         self.c1_release_summary = {"availability_guard": guard}
@@ -1920,6 +1940,7 @@ def _app_refresh_release_gate_after_analysis(self, matches: list[AppMatch]) -> N
     self.c1_release_rows = list(result.get("rows", []))
     if bool(result.get("blocked_by_availability_guard")):
         guard = self.c1_release_summary.get("availability_guard", {})
+        self._refresh_c1_release_guard_status(guard if isinstance(guard, dict) else None)
         if hasattr(self, "status_var"):
             self.status_var.set(str(guard.get("status_text") or "C1 放行评估已阻止"))
         self._apply_runtime_mode_default_filter()
@@ -1955,6 +1976,8 @@ def _app_apply_c1_release_review_result(self, result: dict) -> None:
     summary = result.get("summary", {}) if isinstance(result, dict) else {}
     self.c1_release_summary = dict(summary) if isinstance(summary, dict) else {}
     self.c1_release_rows = list(result.get("rows", [])) if isinstance(result, dict) else []
+    guard = self.c1_release_summary.get("availability_guard", {})
+    self._refresh_c1_release_guard_status(guard if isinstance(guard, dict) and guard else None)
     self._apply_runtime_mode_default_filter()
     if isinstance(result, dict) and bool(result.get("blocked_by_availability_guard")):
         guard = self.c1_release_summary.get("availability_guard", {})
