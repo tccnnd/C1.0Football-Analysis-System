@@ -29,6 +29,7 @@ from v24_app.ui_modules import (
     build_strategy_evaluation_agent_summary,
     build_strategy_error_attribution_summary,
     build_statsbomb_fewshot_memory_summary,
+    build_statsbomb_fewshot_memory_monitor,
     build_statsbomb_event_replay_case,
     build_statsbomb_event_review_summary,
     build_statsbomb_event_sandbox_report_filename,
@@ -1160,6 +1161,68 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertEqual(evaluation["statsbomb_fewshot_memory"]["matched_count"], 1)
         self.assertIn("statsbomb_fewshot_memory", evaluation["memory_tags"])
         self.assertTrue(any("历史复盘记忆" in item["title"] for item in evaluation["recommendations"]))
+
+    def test_statsbomb_fewshot_memory_monitor_tracks_coverage_and_gaps(self) -> None:
+        memory = {
+            "leakage_note": "post-match memory only",
+            "items": [
+                {
+                    "labels": {
+                        "is_hit": False,
+                        "root_cause": "statsbomb_finishing_variance",
+                        "tags": [
+                            "statsbomb_post_match_review",
+                            "strategy_miss",
+                            "statsbomb_finishing_variance",
+                            "xg_result_divergence",
+                        ],
+                    }
+                },
+                {
+                    "labels": {
+                        "is_hit": True,
+                        "root_cause": "event_evidence_aligned",
+                        "tags": [
+                            "statsbomb_post_match_review",
+                            "strategy_hit",
+                            "event_control_gap",
+                        ],
+                    }
+                },
+            ],
+        }
+        current = {"matched_count": 1, "query_tags": ["statsbomb_finishing_variance", "strategy_miss"]}
+
+        monitor = build_statsbomb_fewshot_memory_monitor(memory, current)
+
+        self.assertEqual(monitor["sample_count"], 2)
+        self.assertEqual(monitor["hit_count"], 1)
+        self.assertEqual(monitor["miss_count"], 1)
+        self.assertEqual(monitor["current_matched_count"], 1)
+        self.assertEqual(monitor["status"], "active_match")
+        self.assertIn("statsbomb_finishing_variance", monitor["covered_tags"])
+        self.assertIn("xg_direction_failed", monitor["missing_tags"])
+        self.assertEqual(monitor["leakage_note"], "post-match memory only")
+
+    def test_high_accuracy_dashboard_exposes_statsbomb_fewshot_monitor(self) -> None:
+        memory = {
+            "items": [
+                {
+                    "labels": {
+                        "is_hit": False,
+                        "root_cause": "statsbomb_finishing_variance",
+                        "tags": ["strategy_miss", "statsbomb_finishing_variance"],
+                    }
+                }
+            ],
+        }
+
+        dashboard = build_high_accuracy_strategy_dashboard({"enabled": True}, [], [], {}, memory)
+
+        monitor = dashboard["statsbomb_fewshot_monitor"]
+        self.assertEqual(monitor["sample_count"], 1)
+        self.assertEqual(monitor["miss_count"], 1)
+        self.assertIn("statsbomb_finishing_variance", monitor["covered_tags"])
 
     def test_evaluation_agent_recommends_tightening_on_weak_settlements(self) -> None:
         settlements = [

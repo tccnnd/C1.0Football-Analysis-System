@@ -5068,6 +5068,25 @@ class SmartMatchDashboard:
             for row in memory_rows:
                 if isinstance(row, dict):
                     self._strategy_row(right, str(row.get("title") or "-"), f"{row.get('body', '-')}\n{row.get('completion', '-')}")
+        fewshot_monitor = dashboard.get("statsbomb_fewshot_monitor", {}) if isinstance(dashboard.get("statsbomb_fewshot_monitor"), dict) else {}
+        try:
+            fewshot_monitor_sample_count = int(fewshot_monitor.get("sample_count") or 0)
+        except (TypeError, ValueError):
+            fewshot_monitor_sample_count = 0
+        if fewshot_monitor_sample_count:
+            self._strategy_section_title(right, "StatsBomb \u8bb0\u5fc6\u76d1\u63a7")
+            self._strategy_row(
+                right,
+                str(fewshot_monitor.get("summary_text") or "-"),
+                (
+                    f"\u547d\u4e2d/\u672a\u547d\u4e2d: {fewshot_monitor.get('hit_count', 0)} / {fewshot_monitor.get('miss_count', 0)}\n"
+                    f"\u5f53\u524d\u67e5\u8be2\u6807\u7b7e: {', '.join(fewshot_monitor.get('current_query_tags', [])) if isinstance(fewshot_monitor.get('current_query_tags'), list) else '-'}\n"
+                    f"\u7f3a\u53e3\u6807\u7b7e: {', '.join(fewshot_monitor.get('missing_tags', [])) if isinstance(fewshot_monitor.get('missing_tags'), list) else '-'}"
+                ),
+            )
+            for row in fewshot_monitor.get("tag_rows", []) if isinstance(fewshot_monitor.get("tag_rows"), list) else []:
+                if isinstance(row, dict):
+                    self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
 
         allowlist_summary = dashboard.get("allowlist_settlement_summary", {}) if isinstance(dashboard.get("allowlist_settlement_summary"), dict) else {}
         self._strategy_section_title(right, "\u653e\u884c\u590d\u76d8\u7edf\u8ba1")

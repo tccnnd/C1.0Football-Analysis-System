@@ -799,6 +799,94 @@ def build_statsbomb_fewshot_memory_summary(
     }
 
 
+def build_statsbomb_fewshot_memory_monitor(
+    memory: Mapping[str, object] | object | None = None,
+    current_memory_summary: Mapping[str, object] | object | None = None,
+    *,
+    required_tags: Sequence[str] | None = None,
+    limit: int = 8,
+) -> dict[str, object]:
+    items = _statsbomb_memory_items(memory or {})
+    current = _as_mapping(current_memory_summary)
+    required = list(
+        required_tags
+        or (
+            "statsbomb_finishing_variance",
+            "event_control_gap",
+            "xg_result_divergence",
+            "shot_result_divergence",
+            "xg_direction_failed",
+            "strategy_miss",
+            "strategy_hit",
+        )
+    )
+    tag_counts: dict[str, int] = {}
+    root_counts: dict[str, int] = {}
+    miss_count = 0
+    hit_count = 0
+    for item in items:
+        labels = _as_mapping(item.get("labels"))
+        if labels.get("is_hit") is False:
+            miss_count += 1
+        elif labels.get("is_hit") is True:
+            hit_count += 1
+        root = str(labels.get("root_cause") or "").strip()
+        if root:
+            root_counts[root] = root_counts.get(root, 0) + 1
+        for tag in [str(tag) for tag in _as_list(labels.get("tags"))]:
+            tag_counts[tag] = tag_counts.get(tag, 0) + 1
+    covered_tags = [tag for tag in required if _safe_int(tag_counts.get(tag)) > 0]
+    missing_tags = [tag for tag in required if _safe_int(tag_counts.get(tag)) <= 0]
+    coverage_rate = len(covered_tags) / len(required) if required else None
+    tag_rows = [
+        {
+            "title": f"{tag} | {_safe_int(count)}",
+            "body": f"标签 {tag} 覆盖 {_safe_int(count)} 个历史复盘样本。",
+            "tag": tag,
+            "count": _safe_int(count),
+        }
+        for tag, count in sorted(tag_counts.items(), key=lambda item: (-_safe_int(item[1]), str(item[0])))
+    ]
+    root_rows = [
+        {
+            "title": f"{root} | {_safe_int(count)}",
+            "body": f"根因 {root} 覆盖 {_safe_int(count)} 个历史复盘样本。",
+            "root_cause": root,
+            "count": _safe_int(count),
+        }
+        for root, count in sorted(root_counts.items(), key=lambda item: (-_safe_int(item[1]), str(item[0])))
+    ]
+    matched_count = _safe_int(current.get("matched_count"))
+    query_tags = [str(tag) for tag in _as_list(current.get("query_tags"))]
+    status = "missing"
+    if items:
+        status = "active_match" if matched_count else "ready"
+        if not query_tags:
+            status = "standby"
+    return {
+        "status": status,
+        "sample_count": len(items),
+        "hit_count": hit_count,
+        "miss_count": miss_count,
+        "tag_count": len(tag_counts),
+        "root_cause_count": len(root_counts),
+        "covered_tags": covered_tags,
+        "missing_tags": missing_tags,
+        "coverage_rate": coverage_rate,
+        "coverage_rate_text": _pct(coverage_rate) if coverage_rate is not None else "-",
+        "current_matched_count": matched_count,
+        "current_query_tags": query_tags,
+        "tag_rows": tag_rows[: max(0, int(limit))],
+        "root_rows": root_rows[: max(0, int(limit))],
+        "summary_text": (
+            f"样本 {len(items)} | 标签覆盖 {(_pct(coverage_rate) if coverage_rate is not None else '-')} | "
+            f"当前命中 {matched_count} | 缺口 {len(missing_tags)}"
+        ),
+        "leakage_note": _as_mapping(memory or {}).get("leakage_note")
+        or "These few-shot samples use post-match event data and must not be used as pre-match prediction features.",
+    }
+
+
 def _statsbomb_sandbox_row(row: Mapping[str, object], baseline: Mapping[str, object] | object | None = None) -> dict[str, object]:
     xg_margin = _safe_float(row.get("xg_margin"))
     goal_margin = _safe_int(row.get("goal_margin"))
@@ -3450,6 +3538,10 @@ def build_high_accuracy_strategy_dashboard(
         statsbomb_event_baseline or {},
         statsbomb_fewshot_memory or {},
     )
+    statsbomb_fewshot_monitor = build_statsbomb_fewshot_memory_monitor(
+        statsbomb_fewshot_memory or {},
+        _as_mapping(evaluation_agent.get("statsbomb_fewshot_memory")),
+    )
     stable_count = sum(1 for item in pool if bool(_strategy_stability(item).get("stable")))
     primary_count = sum(1 for item in pool if str(item.get("role") or "") == "primary")
     backup_count = sum(1 for item in pool if str(item.get("role") or "") == "backup")
@@ -3529,6 +3621,15 @@ def build_high_accuracy_strategy_dashboard(
             if str(statsbomb_event_review.get("status") or "") in {"variance_watch", "control_gap_watch"}
             else "good"
             if _safe_int(statsbomb_event_review.get("sample_count"))
+            else "neutral",
+        },
+        {
+            "label": "SB Memory",
+            "value": str(statsbomb_fewshot_monitor.get("summary_text") or "-"),
+            "tone": "good"
+            if _safe_int(statsbomb_fewshot_monitor.get("current_matched_count"))
+            else "warning"
+            if str(statsbomb_fewshot_monitor.get("status") or "") == "standby"
             else "neutral",
         },
         {
@@ -3620,6 +3721,7 @@ def build_high_accuracy_strategy_dashboard(
         "agent_replay_guard_tuning": agent_replay_guard_tuning,
         "evaluation_agent": evaluation_agent,
         "statsbomb_event_review": statsbomb_event_review,
+        "statsbomb_fewshot_monitor": statsbomb_fewshot_monitor,
         "jc_bucket_feedback": jc_bucket_feedback,
         "allowlist_settlement_rows": build_strategy_allowlist_settlement_rows(settlement_items),
         "validation_rows": validation_rows,
