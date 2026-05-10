@@ -1518,6 +1518,171 @@ def validate_statsbomb_fewshot_draft_payload(payload: Mapping[str, object] | obj
     }
 
 
+def _statsbomb_fewshot_item_keys(item: Mapping[str, object]) -> list[str]:
+    keys: list[str] = []
+    item_id = str(item.get("id") or "").strip()
+    if item_id:
+        keys.append(f"id:{item_id}")
+    meta = _as_mapping(item.get("meta"))
+    for field in ("match_id", "source_match_id"):
+        value = str(meta.get(field) or "").strip()
+        if value:
+            keys.append(f"{field}:{value}")
+    title = f"{meta.get('match_date') or '-'} | {meta.get('league') or '-'} | {meta.get('home_team') or '-'} vs {meta.get('away_team') or '-'}"
+    if title.strip():
+        keys.append(f"title:{title}")
+    deduped: list[str] = []
+    for key in keys:
+        if key not in deduped:
+            deduped.append(key)
+    return deduped
+
+
+def build_statsbomb_fewshot_merge_plan(
+    draft_payload: Mapping[str, object] | object,
+    existing_memory: Mapping[str, object] | object | None = None,
+) -> dict[str, object]:
+    draft = _as_mapping(draft_payload)
+    validation = _as_mapping(draft.get("validation")) or validate_statsbomb_fewshot_draft_payload(draft)
+    existing_items = [item for item in _statsbomb_memory_items(existing_memory or {}) if isinstance(item, Mapping)]
+    existing_keys: set[str] = set()
+    for item in existing_items:
+        existing_keys.update(_statsbomb_fewshot_item_keys(item))
+    mergeable: list[dict[str, object]] = []
+    skipped: list[dict[str, object]] = []
+    seen_draft_keys: set[str] = set()
+    if _safe_int(validation.get("high_count")) > 0:
+        return {
+            "status": "blocked",
+            "mergeable_count": 0,
+            "skipped_count": len(_as_list(draft.get("items"))),
+            "existing_count": len(existing_items),
+            "mergeable_items": [],
+            "skipped_rows": [
+                {
+                    "id": _as_mapping(item).get("id") or "-",
+                    "title": (
+                        f"{_as_mapping(_as_mapping(item).get('meta')).get('match_date') or '-'} | "
+                        f"{_as_mapping(_as_mapping(item).get('meta')).get('league') or '-'} | "
+                        f"{_as_mapping(_as_mapping(item).get('meta')).get('home_team') or '-'} vs "
+                        f"{_as_mapping(_as_mapping(item).get('meta')).get('away_team') or '-'}"
+                    ),
+                    "reason": "validation_high_issues",
+                }
+                for item in _as_list(draft.get("items"))
+                if isinstance(item, Mapping)
+            ],
+            "validation": validation,
+            "summary_text": f"合并计划 blocked | 可合并 0 | 跳过 {len(_as_list(draft.get('items')))} | high {_safe_int(validation.get('high_count'))}",
+            "leakage_note": "Merge plan is read-only and does not write to official few-shot memory.",
+        }
+    for item in [row for row in _as_list(draft.get("items")) if isinstance(row, Mapping)]:
+        item_id = str(item.get("id") or "-")
+        item_keys = _statsbomb_fewshot_item_keys(item)
+        meta = _as_mapping(item.get("meta"))
+        title = f"{meta.get('match_date') or '-'} | {meta.get('league') or '-'} | {meta.get('home_team') or '-'} vs {meta.get('away_team') or '-'}"
+        overlap_existing = sorted(set(item_keys) & existing_keys)
+        overlap_draft = sorted(set(item_keys) & seen_draft_keys)
+        if overlap_existing:
+            skipped.append({"id": item_id, "title": title, "reason": "already_in_memory", "matched_keys": overlap_existing[:3]})
+            continue
+        if overlap_draft:
+            skipped.append({"id": item_id, "title": title, "reason": "duplicate_in_draft", "matched_keys": overlap_draft[:3]})
+            continue
+        seen_draft_keys.update(item_keys)
+        labels = _as_mapping(item.get("labels"))
+        mergeable.append(
+            {
+                "id": item_id,
+                "title": title,
+                "root_cause": labels.get("root_cause") or "-",
+                "tags": [str(tag) for tag in _as_list(labels.get("tags"))],
+                "item": item,
+            }
+        )
+    status = "ready" if mergeable and _safe_int(validation.get("medium_count")) == 0 else "review" if mergeable else "empty"
+    return {
+        "status": status,
+        "mergeable_count": len(mergeable),
+        "skipped_count": len(skipped),
+        "existing_count": len(existing_items),
+        "mergeable_items": mergeable,
+        "skipped_rows": skipped,
+        "validation": validation,
+        "summary_text": f"合并计划 {status} | 可合并 {len(mergeable)} | 跳过 {len(skipped)} | 现有 {len(existing_items)}",
+        "leakage_note": "Merge plan is read-only and does not write to official few-shot memory.",
+    }
+
+
+def build_statsbomb_fewshot_merge_plan_filename(now: datetime | None = None) -> str:
+    current = now or datetime.now()
+    return f"statsbomb_fewshot_merge_plan_{current.strftime('%Y%m%d_%H%M%S')}.md"
+
+
+def build_statsbomb_fewshot_merge_plan_lines(plan: Mapping[str, object] | object) -> list[str]:
+    resolved = _as_mapping(plan)
+    validation = _as_mapping(resolved.get("validation"))
+    mergeable = [item for item in _as_list(resolved.get("mergeable_items")) if isinstance(item, Mapping)]
+    skipped = [item for item in _as_list(resolved.get("skipped_rows")) if isinstance(item, Mapping)]
+    lines = [
+        "# StatsBomb Few-shot 合并计划",
+        "",
+        f"- 摘要: {resolved.get('summary_text') or '-'}",
+        f"- 状态: {resolved.get('status') or '-'}",
+        f"- 校验: {validation.get('summary_text') or '-'}",
+        f"- 防泄漏边界: {resolved.get('leakage_note') or '-'}",
+        "",
+        "## 可合并样本",
+        "",
+        "| ID | 比赛 | 根因 | 标签 |",
+        "| --- | --- | --- | --- |",
+    ]
+    if not mergeable:
+        lines.append("| - | 暂无可合并样本 | - | - |")
+    for row in mergeable:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    _md_cell(row.get("id")),
+                    _md_cell(row.get("title")),
+                    _md_cell(row.get("root_cause")),
+                    _md_cell(", ".join(str(tag) for tag in _as_list(row.get("tags")))),
+                ]
+            )
+            + " |"
+        )
+    lines.extend(["", "## 跳过样本", "", "| ID | 比赛 | 原因 | 匹配键 |", "| --- | --- | --- | --- |"])
+    if not skipped:
+        lines.append("| - | 暂无跳过样本 | - | - |")
+    for row in skipped:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    _md_cell(row.get("id")),
+                    _md_cell(row.get("title")),
+                    _md_cell(row.get("reason")),
+                    _md_cell(", ".join(str(key) for key in _as_list(row.get("matched_keys")))),
+                ]
+            )
+            + " |"
+        )
+    lines.extend(
+        [
+            "",
+            "## 后续原则",
+            "",
+            "- 该计划只读，不会写入正式 few-shot 记忆库。",
+            "- blocked 状态必须先修复草稿 high 问题。",
+            "- review 状态需要人工确认 medium 问题后再合并。",
+            "- 合并后必须重新运行记忆覆盖监控和补样队列。",
+            "",
+        ]
+    )
+    return lines
+
+
 def build_statsbomb_fewshot_draft_review_lines(payload: Mapping[str, object] | object) -> list[str]:
     resolved = _as_mapping(payload)
     summary = _as_mapping(resolved.get("summary"))

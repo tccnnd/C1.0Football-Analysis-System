@@ -76,6 +76,9 @@ from .ui_modules import (
     build_statsbomb_fewshot_draft_payload,
     build_statsbomb_fewshot_draft_review_filename,
     build_statsbomb_fewshot_draft_review_lines,
+    build_statsbomb_fewshot_merge_plan,
+    build_statsbomb_fewshot_merge_plan_filename,
+    build_statsbomb_fewshot_merge_plan_lines,
     build_strategy_allowlist_filename,
     build_strategy_allowlist_report_lines,
     build_strategy_policy_audit_csv_filename,
@@ -4096,33 +4099,37 @@ class SmartMatchDashboard:
         messagebox.showinfo("StatsBomb\u8865\u6837\u961f\u5217", f"\u5df2\u751f\u6210\u8865\u6837\u961f\u5217\u62a5\u544a:\n{path}")
         return path
 
-    def export_statsbomb_fewshot_draft(self) -> tuple[Path, Path] | None:
+    def export_statsbomb_fewshot_draft(self) -> tuple[Path, Path, Path] | None:
         settlements = list(reversed(get_recent_settlements(limit=300)))
         baseline = get_statsbomb_event_baseline()
+        memory = get_statsbomb_sandbox_fewshot_memory()
         dashboard = build_high_accuracy_strategy_dashboard(
             get_high_accuracy_strategy_status(),
             settlements,
             get_strategy_admission_policy_history(limit=20),
             baseline,
-            get_statsbomb_sandbox_fewshot_memory(),
+            memory,
         )
         queue = dashboard.get("statsbomb_backfill_queue", {}) if isinstance(dashboard.get("statsbomb_backfill_queue"), dict) else {}
         now = datetime.now()
         payload = build_statsbomb_fewshot_draft_payload(queue, baseline, generated_at=now, limit=30)
+        merge_plan = build_statsbomb_fewshot_merge_plan(payload, memory)
         REPORT_DIR.mkdir(parents=True, exist_ok=True)
         json_path = REPORT_DIR / build_statsbomb_fewshot_draft_filename(now)
         md_path = REPORT_DIR / build_statsbomb_fewshot_draft_review_filename(now)
+        plan_path = REPORT_DIR / build_statsbomb_fewshot_merge_plan_filename(now)
         json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         md_path.write_text("\n".join(build_statsbomb_fewshot_draft_review_lines(payload)), encoding="utf-8")
+        plan_path.write_text("\n".join(build_statsbomb_fewshot_merge_plan_lines(merge_plan)), encoding="utf-8")
         draft_count = int((payload.get("summary") or {}).get("draft_count", 0) or 0) if isinstance(payload.get("summary"), dict) else 0
         validation = payload.get("validation", {}) if isinstance(payload.get("validation"), dict) else {}
         validation_text = str(validation.get("summary_text") or "-")
-        self.status_var.set(f"StatsBomb few-shot\u8349\u7a3f\u5df2\u5bfc\u51fa: {draft_count} \u6761 | {validation_text}")
+        self.status_var.set(f"StatsBomb few-shot\u8349\u7a3f\u5df2\u5bfc\u51fa: {draft_count} \u6761 | {validation_text} | {merge_plan.get('summary_text', '-')}")
         messagebox.showinfo(
             "StatsBomb few-shot\u8349\u7a3f",
-            f"\u5df2\u751f\u6210\u8349\u7a3fJSON:\n{json_path}\n\n\u5ba1\u67e5\u62a5\u544a:\n{md_path}\n\n\u6821\u9a8c: {validation_text}",
+            f"\u5df2\u751f\u6210\u8349\u7a3fJSON:\n{json_path}\n\n\u5ba1\u67e5\u62a5\u544a:\n{md_path}\n\n\u5408\u5e76\u8ba1\u5212:\n{plan_path}\n\n\u6821\u9a8c: {validation_text}",
         )
-        return json_path, md_path
+        return json_path, md_path, plan_path
 
     def open_strategy_policy_audit_history(self) -> None:
         self.current_nav_index = 4
@@ -4134,7 +4141,8 @@ class SmartMatchDashboard:
             + list(REPORT_DIR.glob("strategy_policy_audit_samples_*.csv"))
             + list(REPORT_DIR.glob("statsbomb_fewshot_backfill_*.md"))
             + list(REPORT_DIR.glob("statsbomb_fewshot_draft_*.json"))
-            + list(REPORT_DIR.glob("statsbomb_fewshot_draft_review_*.md")),
+            + list(REPORT_DIR.glob("statsbomb_fewshot_draft_review_*.md"))
+            + list(REPORT_DIR.glob("statsbomb_fewshot_merge_plan_*.md")),
             key=lambda path: path.stat().st_mtime,
             reverse=True,
         )

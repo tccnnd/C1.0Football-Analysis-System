@@ -35,6 +35,9 @@ from v24_app.ui_modules import (
     build_statsbomb_fewshot_draft_payload,
     build_statsbomb_fewshot_draft_review_filename,
     build_statsbomb_fewshot_draft_review_lines,
+    build_statsbomb_fewshot_merge_plan,
+    build_statsbomb_fewshot_merge_plan_filename,
+    build_statsbomb_fewshot_merge_plan_lines,
     build_statsbomb_fewshot_memory_summary,
     build_statsbomb_fewshot_memory_monitor,
     build_statsbomb_fewshot_memory_quality_alerts,
@@ -1455,6 +1458,58 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertGreater(validation["high_count"], 0)
         self.assertTrue(any(issue["code"] == "duplicate_id" for issue in validation["issues"]))
         self.assertTrue(any(issue["code"] == "missing_post_match_tag" for issue in validation["issues"]))
+
+    def test_statsbomb_fewshot_merge_plan_skips_existing_memory(self) -> None:
+        draft_payload = {
+            "validation": {"high_count": 0, "medium_count": 1, "summary_text": "草稿校验 review"},
+            "items": [
+                {
+                    "id": "draft:old",
+                    "review_status": "draft",
+                    "prompt": "review",
+                    "completion": "done",
+                    "labels": {"simulated_pick": "HOME", "actual": "HOME", "is_hit": True, "root_cause": "event_evidence_aligned", "tags": ["statsbomb_post_match_review", "strategy_hit"]},
+                    "features": {"home_xg": 1.0, "away_xg": 0.5, "xg_margin": 0.5, "home_shots": 10, "away_shots": 5, "shot_margin": 5, "event_count": 3000},
+                    "meta": {"match_id": "m1", "match_date": "2024-06-15", "league": "UEFA Euro", "home_team": "Spain", "away_team": "Croatia", "score": "3-0"},
+                },
+                {
+                    "id": "draft:new",
+                    "review_status": "draft",
+                    "prompt": "review",
+                    "completion": "done",
+                    "labels": {"simulated_pick": "AWAY", "actual": "HOME", "is_hit": False, "root_cause": "statsbomb_finishing_variance", "tags": ["statsbomb_post_match_review", "strategy_miss", "xg_direction_failed"]},
+                    "features": {"home_xg": 1.0, "away_xg": 1.5, "xg_margin": -0.5, "home_shots": 10, "away_shots": 15, "shot_margin": -5, "event_count": 3000},
+                    "meta": {"match_id": "m2", "match_date": "2024-06-16", "league": "UEFA Euro", "home_team": "A", "away_team": "B", "score": "1-0"},
+                },
+            ],
+        }
+        memory = {"items": [{"id": "official:1", "meta": {"match_id": "m1", "match_date": "2024-06-15", "league": "UEFA Euro", "home_team": "Spain", "away_team": "Croatia"}}]}
+
+        plan = build_statsbomb_fewshot_merge_plan(draft_payload, memory)
+        lines = build_statsbomb_fewshot_merge_plan_lines(plan)
+        payload = "\n".join(lines)
+
+        self.assertEqual(plan["status"], "review")
+        self.assertEqual(plan["mergeable_count"], 1)
+        self.assertEqual(plan["skipped_count"], 1)
+        self.assertTrue(any(row["reason"] == "already_in_memory" for row in plan["skipped_rows"]))
+        self.assertEqual(
+            build_statsbomb_fewshot_merge_plan_filename(datetime(2026, 5, 10, 22, 15, 30)),
+            "statsbomb_fewshot_merge_plan_20260510_221530.md",
+        )
+        self.assertIn("StatsBomb Few-shot 合并计划", payload)
+        self.assertIn("draft:new", payload)
+
+    def test_statsbomb_fewshot_merge_plan_blocks_high_validation(self) -> None:
+        draft_payload = {
+            "validation": {"high_count": 1, "medium_count": 0, "summary_text": "草稿校验 blocked"},
+            "items": [{"id": "draft:bad", "meta": {"home_team": "A"}}],
+        }
+
+        plan = build_statsbomb_fewshot_merge_plan(draft_payload, {})
+
+        self.assertEqual(plan["status"], "blocked")
+        self.assertEqual(plan["mergeable_count"], 0)
 
     def test_high_accuracy_dashboard_exposes_statsbomb_backfill_queue(self) -> None:
         memory = {
