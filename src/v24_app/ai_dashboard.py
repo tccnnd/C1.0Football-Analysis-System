@@ -2382,7 +2382,21 @@ class SmartMatchDashboard:
             bg=BG,
             fg=MUTED,
             font=("Microsoft YaHei UI", 10),
-        ).pack(anchor=tk.W, pady=(4, 0))
+        ).pack(side=tk.LEFT, anchor=tk.W, pady=(4, 0))
+        if str(record.get("status") or "") in {"queued", "running"}:
+            tk.Button(
+                header,
+                text="\u8bf7\u6c42\u53d6\u6d88",
+                command=lambda task_id=resolved_id, window=window: self.cancel_background_task(task_id, window),
+                bg=RED,
+                fg="white",
+                activebackground="#d94743",
+                activeforeground="white",
+                relief=tk.FLAT,
+                font=("Microsoft YaHei UI", 10, "bold"),
+                padx=14,
+                pady=6,
+            ).pack(side=tk.RIGHT, padx=(12, 0))
         frame = tk.Frame(window, bg=PANEL, highlightbackground="#172638", highlightthickness=1)
         frame.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 16))
         text = tk.Text(
@@ -2401,6 +2415,28 @@ class SmartMatchDashboard:
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 12), pady=12)
         text.insert(tk.END, "\n".join(build_background_task_detail_lines(record)))
         text.configure(state=tk.DISABLED)
+
+    def cancel_background_task(self, task_id: str | object, window: tk.Toplevel | None = None) -> None:
+        resolved_id = str(task_id or "")
+        record = self.background_tasks.cancel_task(resolved_id)
+        if record is None:
+            messagebox.showinfo("\u540e\u53f0\u4efb\u52a1", "\u672a\u627e\u5230\u8be5\u540e\u53f0\u4efb\u52a1\u8bb0\u5f55\u3002")
+            return
+        status = str(record.get("status") or "")
+        if status == "cancelled":
+            message = f"\u4efb\u52a1\u5df2\u53d6\u6d88: {record.get('label', '-')}"
+            self._log_event("WARN", f"{message} / {resolved_id}")
+            messagebox.showinfo("\u540e\u53f0\u4efb\u52a1", message)
+        elif bool((record.get("metadata") if isinstance(record.get("metadata"), dict) else {}).get("cancel_requested")):
+            message = "\u4efb\u52a1\u5df2\u5f00\u59cb\u8fd0\u884c\uff0c\u5df2\u8bb0\u5f55\u53d6\u6d88\u8bf7\u6c42\uff0c\u4e0d\u4f1a\u5f3a\u5236\u7ec8\u6b62\u5f53\u524d\u8fdb\u7a0b\u3002"
+            self._log_event("WARN", f"\u540e\u53f0\u4efb\u52a1\u53d6\u6d88\u8bf7\u6c42: {resolved_id}")
+            messagebox.showwarning("\u540e\u53f0\u4efb\u52a1", message)
+        else:
+            messagebox.showinfo("\u540e\u53f0\u4efb\u52a1", "\u8be5\u4efb\u52a1\u5df2\u7ed3\u675f\uff0c\u65e0\u9700\u53d6\u6d88\u3002")
+        if window is not None and window.winfo_exists():
+            window.destroy()
+        if getattr(self, "current_view", "") == "monitor":
+            self.open_monitor_center()
 
     def _release_recovery_alerts(self) -> dict[str, object]:
         return build_strategy_release_recovery_alerts(self._pending_snapshot_rows())

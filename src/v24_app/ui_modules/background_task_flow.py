@@ -48,6 +48,7 @@ def build_background_task_rows(tasks: Sequence[Mapping[str, object]] | object, *
                 "task_id": str(item.get("task_id") or ""),
                 "status": status,
                 "mode": mode,
+                "can_cancel": status in {"queued", "running"},
             }
         )
     return rows
@@ -91,15 +92,28 @@ def build_background_task_detail_lines(task: Mapping[str, object] | object) -> l
         f"开始时间: {item.get('started_at', '-') or '-'}",
         f"结束时间: {item.get('finished_at', '-') or '-'}",
         f"耗时: {elapsed_text}",
-        "",
-        "结果摘要",
-        str(item.get("result_summary") or "-"),
-        "",
-        "错误信息",
-        str(item.get("error") or "-"),
-        "",
-        "Metadata",
     ]
+    if isinstance(metadata, Mapping) and metadata.get("cancel_requested"):
+        lines.extend(
+            [
+                "",
+                "取消请求",
+                f"已请求取消: {metadata.get('cancel_requested_at', '-')}",
+                "说明: 任务已经开始运行时不会被强制终止，系统只记录取消请求并等待任务自然结束。",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "结果摘要",
+            str(item.get("result_summary") or "-"),
+            "",
+            "错误信息",
+            str(item.get("error") or "-"),
+            "",
+            "Metadata",
+        ]
+    )
     if metadata:
         try:
             lines.append(json.dumps(dict(metadata), ensure_ascii=False, indent=2))

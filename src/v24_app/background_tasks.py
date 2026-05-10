@@ -5,7 +5,7 @@ import json
 import threading
 import time
 import traceback
-from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import CancelledError, Future, ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -93,6 +93,7 @@ class BackgroundTaskCenter:
         self._records: dict[str, BackgroundTaskRecord] = {}
         self._order: list[str] = []
         self._active_keys: set[str] = set()
+        self._futures: dict[str, Future] = {}
         self._load_history()
 
     def submit(
@@ -132,6 +133,8 @@ class BackgroundTaskCenter:
         call_kwargs = dict(kwargs or {})
         executor = self._thread_pool if mode == "thread" else self._process_executor()
         future = executor.submit(_run_task_callable, func, args, call_kwargs)
+        with self._lock:
+            self._futures[task_id] = future
         future.add_done_callback(
             lambda completed: self._complete_future(
                 completed,
@@ -141,6 +144,30 @@ class BackgroundTaskCenter:
             )
         )
         return record
+
+    def cancel_task(self, task_id: str | object, *, reason: str = "cancelled_by_user") -> dict[str, Any] | None:
+        resolved_id = str(task_id or "")
+        with self._lock:
+            record = self._records.get(resolved_id)
+            if record is None:
+                return None
+            if record.status not in {"queued", "running"}:
+                return record.as_dict()
+            future = self._futures.get(resolved_id)
+            if future is not None and future.cancel():
+                record.status = "cancelled"
+                record.finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                record.error = reason
+                record.metadata["cancelled_at"] = record.finished_at
+                self._active_keys.discard(record.key)
+                self._futures.pop(resolved_id, None)
+                self._persist_locked()
+                return record.as_dict()
+            record.metadata["cancel_requested"] = True
+            record.metadata["cancel_requested_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            record.error = "cancel_requested_running_task_cannot_be_stopped"
+            self._persist_locked()
+            return record.as_dict()
 
     def snapshot(self, *, limit: int | None = None) -> list[dict[str, Any]]:
         with self._lock:
@@ -171,8 +198,28 @@ class BackgroundTaskCenter:
         on_success: Callable[[Any, BackgroundTaskRecord], None] | None,
         on_error: Callable[[BaseException, BackgroundTaskRecord], None] | None,
     ) -> None:
+        if future.cancelled():
+            with self._lock:
+                record = self._records[task_id]
+                record.status = "cancelled"
+                record.finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                record.error = record.error or "cancelled"
+                self._active_keys.discard(record.key)
+                self._futures.pop(task_id, None)
+                self._persist_locked()
+            return
         try:
             result, elapsed = future.result()
+        except CancelledError:
+            with self._lock:
+                record = self._records[task_id]
+                record.status = "cancelled"
+                record.finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                record.error = record.error or "cancelled"
+                self._active_keys.discard(record.key)
+                self._futures.pop(task_id, None)
+                self._persist_locked()
+            return
         except BaseException as exc:
             with self._lock:
                 record = self._records[task_id]
@@ -181,6 +228,7 @@ class BackgroundTaskCenter:
                 record.error = str(exc)
                 record.metadata["traceback"] = traceback.format_exc(limit=6)
                 self._active_keys.discard(record.key)
+                self._futures.pop(task_id, None)
                 self._persist_locked()
                 callback_record = BackgroundTaskRecord(**record.as_dict())
             if on_error is not None:
@@ -193,7 +241,10 @@ class BackgroundTaskCenter:
             record.finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             record.elapsed_seconds = round(float(elapsed), 4)
             record.result_summary = summarize_task_result(result)
+            if record.metadata.get("cancel_requested"):
+                record.metadata["cancel_request_completed"] = True
             self._active_keys.discard(record.key)
+            self._futures.pop(task_id, None)
             self._persist_locked()
             callback_record = BackgroundTaskRecord(**record.as_dict())
         if on_success is not None:

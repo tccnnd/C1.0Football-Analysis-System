@@ -59,6 +59,48 @@ class BackgroundTaskCenterTests(unittest.TestCase):
         finally:
             center.shutdown()
 
+    def test_cancel_queued_task_marks_cancelled(self) -> None:
+        release = threading.Event()
+        center = BackgroundTaskCenter(dispatcher=lambda callback: callback(), max_thread_workers=1)
+        try:
+            first = center.submit(key="first", label="First", func=lambda: release.wait(5))
+            second = center.submit(key="second", label="Second", func=lambda: True)
+            self.assertIsNotNone(first)
+            self.assertIsNotNone(second)
+
+            cancelled = center.cancel_task(second.task_id)
+
+            self.assertIsNotNone(cancelled)
+            self.assertEqual(cancelled["status"], "cancelled")
+            self.assertEqual(cancelled["error"], "cancelled_by_user")
+            release.set()
+        finally:
+            center.shutdown()
+
+    def test_cancel_running_task_records_request_without_force_stop(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+
+        def worker() -> bool:
+            started.set()
+            return release.wait(5)
+
+        center = BackgroundTaskCenter(dispatcher=lambda callback: callback(), max_thread_workers=1)
+        try:
+            record = center.submit(key="running", label="Running", func=worker)
+            self.assertIsNotNone(record)
+            self.assertTrue(started.wait(5))
+
+            requested = center.cancel_task(record.task_id)
+
+            self.assertIsNotNone(requested)
+            self.assertEqual(requested["status"], "running")
+            self.assertTrue(requested["metadata"]["cancel_requested"])
+            self.assertEqual(requested["error"], "cancel_requested_running_task_cannot_be_stopped")
+            release.set()
+        finally:
+            center.shutdown()
+
     def test_process_task_uses_process_mode(self) -> None:
         completed = threading.Event()
         payloads: list[dict[str, object]] = []
@@ -93,6 +135,7 @@ class BackgroundTaskCenterTests(unittest.TestCase):
         self.assertEqual(summary["failed"], 1)
         self.assertIn("运行中", rows[0]["title"])
         self.assertEqual(rows[0]["task_id"], "t1")
+        self.assertTrue(rows[0]["can_cancel"])
         self.assertIn("进程", rows[1]["body"])
         self.assertIn("boom", rows[1]["body"])
 
