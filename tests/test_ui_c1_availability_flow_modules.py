@@ -98,11 +98,18 @@ class UIC1AvailabilityFlowModuleTests(unittest.TestCase):
                     "fixture_total": 158,
                     "fixture_issue_count": 92,
                     "fixture_limit": 132,
+                    "quality_gate": "warn",
+                    "quality_score": 0.73,
+                    "keyable_rate": 1.0,
+                    "availability_known_rate": 0.2,
+                    "quality_issues": ["availability_known_low"],
                     "last_sync_at": "2026-04-07 14:30:00",
                 },
             ]
         )
         joined = "\n".join(lines)
+        self.assertIn("gate=warn", joined)
+        self.assertIn("availability_known_low", joined)
         self.assertIn("最近同步: 2026-04-07 14:30:00", joined)
         self.assertIn("上次同步: status=imported | rows=80 | keys=240", joined)
         self.assertIn("API样本: total=158 | issue=92 | limit=132", joined)

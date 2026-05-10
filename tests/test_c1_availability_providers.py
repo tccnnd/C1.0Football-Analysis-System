@@ -599,6 +599,11 @@ class C1AvailabilityProviderTests(unittest.TestCase):
         self.assertEqual(provider_reports[0].get("status"), "error")
         self.assertEqual(provider_reports[1].get("status"), "imported")
         self.assertEqual(provider_reports[2].get("status"), "sync_skipped")
+        self.assertEqual(provider_reports[0].get("quality_gate"), "fail")
+        self.assertIn(provider_reports[1].get("quality_gate"), {"pass", "warn"})
+        self.assertGreaterEqual(int(report.get("quality_failures", 0)), 1)
+        self.assertIn("smoke_check", report)
+        self.assertFalse(bool(report["smoke_check"]["release_review_allowed"]))
 
     def test_api_football_dynamic_fixture_limit(self) -> None:
         provider = ApiFootballAvailabilityProvider(
@@ -679,6 +684,8 @@ class C1AvailabilityProviderTests(unittest.TestCase):
         self.assertEqual(first.get("reason"), "upstream_error")
         self.assertTrue(bool(first.get("fixtures_upstream_error")))
         self.assertTrue(bool(first.get("fixtures_account_suspended")))
+        self.assertEqual(first.get("quality_gate"), "fail")
+        self.assertIn("upstream_error", first.get("quality_issues", []))
 
     def test_titan_detail_provider_parses_lineup_and_injury(self) -> None:
         provider = TitanDetailAvailabilityProvider(resolve_direct=False, max_matches=5, request_delay_ms=0)

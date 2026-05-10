@@ -37,6 +37,97 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value in (None, ""):
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _safe_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = _text(value).lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
+def _availability_quality_report(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    row_count = len(rows)
+    if row_count <= 0:
+        return {
+            "quality_gate": "fail",
+            "quality_score": 0.0,
+            "row_count": 0,
+            "keyable_rate": 0.0,
+            "availability_known_rate": 0.0,
+            "avg_team_availability_quality": 0.0,
+            "quality_issues": ["no_rows"],
+        }
+    keyable = 0
+    known = 0
+    quality_values: list[float] = []
+    freshness_known = 0
+    provider_kinds: set[str] = set()
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        match_id = _text(row.get("match_id"))
+        source_id = _text(row.get("source_id"))
+        match_date = _text(row.get("match_date"))
+        league = _text(row.get("league"))
+        home_team = _text(row.get("home_team"))
+        away_team = _text(row.get("away_team"))
+        if match_id or source_id or (match_date and home_team and away_team) or (match_date and league and home_team and away_team):
+            keyable += 1
+        if _safe_bool(row.get("lineup_known")) or _safe_bool(row.get("home_availability_known")) or _safe_bool(row.get("away_availability_known")):
+            known += 1
+        if row.get("team_availability_quality") not in (None, ""):
+            quality_values.append(_safe_float(row.get("team_availability_quality")))
+        if _text(row.get("lineup_updated_at")):
+            freshness_known += 1
+        provider_kind = _text(row.get("provider_kind"))
+        if provider_kind:
+            provider_kinds.add(provider_kind)
+    keyable_rate = keyable / row_count
+    known_rate = known / row_count
+    avg_quality = sum(quality_values) / len(quality_values) if quality_values else 0.0
+    freshness_rate = freshness_known / row_count
+    issues: list[str] = []
+    if keyable_rate < 0.95:
+        issues.append("key_completeness_low")
+    if known_rate < 0.25:
+        issues.append("availability_known_low")
+    if quality_values and avg_quality < 0.35:
+        issues.append("availability_quality_low")
+    if freshness_rate < 0.25:
+        issues.append("freshness_missing")
+    score = round(keyable_rate * 0.45 + known_rate * 0.30 + _clip(avg_quality) * 0.20 + freshness_rate * 0.05, 4)
+    gate = "pass"
+    if keyable_rate < 0.75:
+        gate = "fail"
+    elif issues:
+        gate = "warn"
+    return {
+        "quality_gate": gate,
+        "quality_score": score,
+        "row_count": row_count,
+        "keyable_rows": keyable,
+        "keyable_rate": round(keyable_rate, 4),
+        "availability_known_rows": known,
+        "availability_known_rate": round(known_rate, 4),
+        "avg_team_availability_quality": round(avg_quality, 4),
+        "freshness_known_rate": round(freshness_rate, 4),
+        "provider_kinds": sorted(provider_kinds),
+        "quality_issues": issues,
+    }
+
+
 def _clip(value: float, low: float = 0.0, high: float = 1.0) -> float:
     return max(low, min(high, float(value)))
 
@@ -1166,6 +1257,8 @@ class AvailabilityProviderChain:
                 provider_meta = provider.sync_report() if hasattr(provider, "sync_report") else {}
                 if isinstance(provider_meta, Mapping):
                     row.update(dict(provider_meta))
+                row["quality_gate"] = "fail"
+                row["quality_issues"] = ["load_failed"]
                 provider_reports.append(row)
                 continue
             if not rows:
@@ -1182,8 +1275,11 @@ class AvailabilityProviderChain:
                 }
                 if isinstance(provider_meta, Mapping):
                     row.update(dict(provider_meta))
+                row["quality_gate"] = "fail"
+                row["quality_issues"] = ["upstream_error" if upstream_error else "no_rows"]
                 provider_reports.append(row)
                 continue
+            quality = _availability_quality_report(rows)
             result = store.import_rows(rows, replace=replace and first_write)
             first_write = False
             row = {
@@ -1192,6 +1288,7 @@ class AvailabilityProviderChain:
                 "rows": int(result.get("imported_rows", 0)),
                 "written_keys": int(result.get("written_keys", 0)),
             }
+            row.update(quality)
             provider_meta = provider.sync_report() if hasattr(provider, "sync_report") else {}
             if isinstance(provider_meta, Mapping):
                 row.update(dict(provider_meta))
@@ -1200,12 +1297,48 @@ class AvailabilityProviderChain:
             total_keys += int(result.get("written_keys", 0))
         failed_providers = sum(1 for item in provider_reports if str(item.get("status")) == "error")
         imported_providers = sum(1 for item in provider_reports if str(item.get("status")) == "imported")
+        quality_failures = sum(1 for item in provider_reports if str(item.get("quality_gate")) == "fail")
+        quality_warnings = sum(1 for item in provider_reports if str(item.get("quality_gate")) == "warn")
+        provider_failure_reasons = [
+            {
+                "provider_name": item.get("provider_name"),
+                "status": item.get("status"),
+                "reason": item.get("reason"),
+                "error": item.get("error"),
+                "quality_gate": item.get("quality_gate"),
+                "quality_issues": item.get("quality_issues", []),
+            }
+            for item in provider_reports
+            if str(item.get("status")) == "error" or str(item.get("quality_gate")) in {"fail", "warn"}
+        ]
+        smoke_status = "pass"
+        smoke_issues: list[str] = []
+        if imported_providers <= 0 or total_rows <= 0 or total_keys <= 0:
+            smoke_status = "fail"
+            smoke_issues.append("no_imported_availability_rows")
+        if quality_failures > 0:
+            smoke_status = "fail"
+            smoke_issues.append("provider_quality_gate_failed")
+        elif quality_warnings > 0 and smoke_status == "pass":
+            smoke_status = "warn"
+            smoke_issues.append("provider_quality_gate_warning")
+        if failed_providers > 0 and smoke_status == "pass":
+            smoke_status = "warn"
+            smoke_issues.append("provider_errors_present")
         sync_report = {
             "provider_reports": provider_reports,
             "total_rows": total_rows,
             "total_keys": total_keys,
             "failed_providers": failed_providers,
             "imported_providers": imported_providers,
+            "quality_failures": quality_failures,
+            "quality_warnings": quality_warnings,
+            "provider_failure_reasons": provider_failure_reasons,
+            "smoke_check": {
+                "status": smoke_status,
+                "issues": smoke_issues,
+                "release_review_allowed": smoke_status != "fail",
+            },
             "snapshot_file": str(store.snapshot_file),
             "last_sync_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }

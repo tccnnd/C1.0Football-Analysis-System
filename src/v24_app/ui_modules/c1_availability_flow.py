@@ -88,8 +88,14 @@ def get_c1_availability_provider_statuses(project_root: Path) -> list[dict]:
                 item["fixture_issue_count"] = int(report.get("fixture_issue_count", 0) or 0)
             if "fixture_limit" in report:
                 item["fixture_limit"] = int(report.get("fixture_limit", 0) or 0)
+            item["quality_gate"] = str(report.get("quality_gate") or "-")
+            item["quality_score"] = float(report.get("quality_score", 0) or 0)
+            item["quality_issues"] = report.get("quality_issues") if isinstance(report.get("quality_issues"), list) else []
+            item["keyable_rate"] = float(report.get("keyable_rate", 0) or 0)
+            item["availability_known_rate"] = float(report.get("availability_known_rate", 0) or 0)
         item["last_sync_at"] = str(sync_summary.get("last_sync_at") or sync_summary.get("updated_at") or "-")
 
+    smoke = sync_summary.get("smoke_check") if isinstance(sync_summary.get("smoke_check"), Mapping) else {}
     statuses.append(
         {
             "provider_name": "__sync_summary__",
@@ -100,6 +106,11 @@ def get_c1_availability_provider_statuses(project_root: Path) -> list[dict]:
             "total_keys": int(sync_summary.get("total_keys", 0) or 0),
             "failed_providers": int(sync_summary.get("failed_providers", 0) or 0),
             "imported_providers": int(sync_summary.get("imported_providers", 0) or 0),
+            "quality_failures": int(sync_summary.get("quality_failures", 0) or 0),
+            "quality_warnings": int(sync_summary.get("quality_warnings", 0) or 0),
+            "smoke_status": str(smoke.get("status") or "-"),
+            "smoke_issues": smoke.get("issues") if isinstance(smoke.get("issues"), list) else [],
+            "release_review_allowed": bool(smoke.get("release_review_allowed", True)),
         }
     )
     return statuses
@@ -125,6 +136,16 @@ def build_c1_availability_provider_status_lines(statuses: list[dict]) -> list[st
                 rows=int(summary_item.get("total_rows", 0) or 0),
                 keys=int(summary_item.get("total_keys", 0) or 0),
                 failed=int(summary_item.get("failed_providers", 0) or 0),
+            )
+        )
+
+    if isinstance(summary_item, dict):
+        lines.append(
+            "  Smoke: {status} | quality fail/warn={fail}/{warn} | release_review={allowed}".format(
+                status=str(summary_item.get("smoke_status", "-")),
+                fail=int(summary_item.get("quality_failures", 0) or 0),
+                warn=int(summary_item.get("quality_warnings", 0) or 0),
+                allowed="on" if bool(summary_item.get("release_review_allowed", True)) else "off",
             )
         )
 
@@ -165,6 +186,19 @@ def build_c1_availability_provider_status_lines(statuses: list[dict]) -> list[st
                 )
             )
 
+        quality_gate = str(item.get("quality_gate", "")).strip()
+        if quality_gate:
+            issues = item.get("quality_issues") if isinstance(item.get("quality_issues"), list) else []
+            lines.append(
+                "  璐ㄩ噺闂ㄦ帶: gate={gate} | score={score:.2f} | keyable={keyable:.0%} | known={known:.0%} | issues={issues}".format(
+                    gate=quality_gate,
+                    score=float(item.get("quality_score", 0) or 0),
+                    keyable=float(item.get("keyable_rate", 0) or 0),
+                    known=float(item.get("availability_known_rate", 0) or 0),
+                    issues=", ".join(str(issue) for issue in issues) if issues else "-",
+                )
+            )
+
         hint = _build_provider_error_hint(item)
         if hint:
             lines.append(f"  建议: {hint}")
@@ -202,6 +236,7 @@ def build_c1_sync_status_text(total_rows: int, total_keys: int, *, failed_provid
 
 
 def build_c1_sync_message_text(result: Mapping[str, object]) -> str:
+    smoke = result.get("smoke_check") if isinstance(result.get("smoke_check"), Mapping) else {}
     lines = [
         "同步完成\n"
         + f"导入行数: {int(result.get('total_rows', 0) or 0)}\n"
@@ -210,6 +245,13 @@ def build_c1_sync_message_text(result: Mapping[str, object]) -> str:
         + f"失败源: {int(result.get('failed_providers', 0) or 0)}\n"
         + f"同步时间: {result.get('last_sync_at', '-')}"
     ]
+    lines.append(
+        "Quality gate: fail/warn={fail}/{warn} | smoke={smoke}".format(
+            fail=int(result.get("quality_failures", 0) or 0),
+            warn=int(result.get("quality_warnings", 0) or 0),
+            smoke=smoke.get("status", "-"),
+        )
+    )
     provider_reports = result.get("provider_reports")
     if isinstance(provider_reports, list) and provider_reports:
         lines.append("源明细:")
@@ -226,6 +268,13 @@ def build_c1_sync_message_text(result: Mapping[str, object]) -> str:
                     f" | total={int(item.get('fixture_total', 0) or 0)}"
                     f" issue={int(item.get('fixture_issue_count', 0) or 0)}"
                     f" limit={int(item.get('fixture_limit', 0) or 0)}"
+                )
+            if "quality_gate" in item:
+                issues = item.get("quality_issues") if isinstance(item.get("quality_issues"), list) else []
+                line += (
+                    f" | quality={item.get('quality_gate', '-')}"
+                    f" score={float(item.get('quality_score', 0) or 0):.2f}"
+                    f" issues={','.join(str(issue) for issue in issues) if issues else '-'}"
                 )
             error = str(item.get("error", "")).strip()
             if error:
