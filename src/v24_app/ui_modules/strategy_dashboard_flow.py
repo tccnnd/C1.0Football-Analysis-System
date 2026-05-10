@@ -2253,7 +2253,56 @@ def build_statsbomb_fewshot_memory_audit_report(
     operations = [dict(row) for row in list(operation_rows or []) if isinstance(row, Mapping)]
     alerts = [_as_mapping(row) for row in _as_list(resolved_quality.get("alerts"))]
     last_apply = _as_mapping(payload.get("last_manual_apply"))
-    status = "missing" if not items else "attention" if alerts else "healthy"
+    missing_tags = [str(tag) for tag in _as_list(resolved_monitor.get("missing_tags"))]
+    sample_count = len(items)
+    alert_count = _safe_int(resolved_quality.get("alert_count"))
+    health_issues: list[dict[str, object]] = []
+    if sample_count <= 0:
+        health_issues.append(
+            {
+                "severity": "high",
+                "code": "memory_missing",
+                "title": "No few-shot memory samples",
+                "recommendation": "Generate and review StatsBomb few-shot drafts before relying on memory-assisted evaluation.",
+            }
+        )
+    elif sample_count < 20:
+        health_issues.append(
+            {
+                "severity": "medium",
+                "code": "sample_count_low",
+                "title": "Few-shot sample count is below observation target",
+                "recommendation": "Prioritize high-confidence misses, cold results, and different leagues in the backfill queue.",
+            }
+        )
+    if sample_count > 0 and not backups:
+        health_issues.append(
+            {
+                "severity": "medium",
+                "code": "backup_missing",
+                "title": "No memory backup found",
+                "recommendation": "Create a backup before the next manual apply or rollback operation.",
+            }
+        )
+    if missing_tags:
+        health_issues.append(
+            {
+                "severity": "medium",
+                "code": "required_tag_gap",
+                "title": f"Missing required tags: {', '.join(missing_tags[:5])}",
+                "recommendation": "Use the StatsBomb backfill queue to add cases covering the missing tags.",
+            }
+        )
+    if alert_count:
+        health_issues.append(
+            {
+                "severity": "medium",
+                "code": "quality_alerts_present",
+                "title": f"Quality alerts present: {alert_count}",
+                "recommendation": "Resolve memory quality alerts before changing Evaluation Agent behavior.",
+            }
+        )
+    status = "missing" if sample_count <= 0 else "attention" if health_issues else "healthy"
     return {
         "updated_at": current.strftime("%Y-%m-%d %H:%M:%S"),
         "source": "StatsBomb few-shot memory",
@@ -2263,23 +2312,25 @@ def build_statsbomb_fewshot_memory_audit_report(
         "leakage_note": payload.get("leakage_note")
         or "These few-shot samples use post-match event data and must not be used as pre-match prediction features.",
         "summary": {
-            "sample_count": len(items),
+            "sample_count": sample_count,
             "hit_count": _safe_int(resolved_monitor.get("hit_count")),
             "miss_count": _safe_int(resolved_monitor.get("miss_count")),
             "tag_count": _safe_int(resolved_monitor.get("tag_count")),
             "root_cause_count": _safe_int(resolved_monitor.get("root_cause_count")),
             "coverage_rate_text": resolved_monitor.get("coverage_rate_text") or "-",
-            "missing_tag_count": len(_as_list(resolved_monitor.get("missing_tags"))),
-            "alert_count": _safe_int(resolved_quality.get("alert_count")),
+            "missing_tag_count": len(missing_tags),
+            "alert_count": alert_count,
             "backup_count": len(backups),
             "operation_count": len(operations),
+            "health_issue_count": len(health_issues),
             "last_manual_apply_count": _safe_int(last_apply.get("applied_count")),
             "last_manual_apply_at": last_apply.get("applied_at") or "-",
         },
         "tag_rows": [dict(row) for row in _as_list(resolved_monitor.get("tag_rows")) if isinstance(row, Mapping)],
         "root_rows": [dict(row) for row in _as_list(resolved_monitor.get("root_rows")) if isinstance(row, Mapping)],
-        "missing_tags": [str(tag) for tag in _as_list(resolved_monitor.get("missing_tags"))],
+        "missing_tags": missing_tags,
         "quality_alerts": [dict(row) for row in alerts],
+        "health_issues": health_issues,
         "backup_rows": backups,
         "operation_rows": operations,
     }
@@ -2291,6 +2342,7 @@ def build_statsbomb_fewshot_memory_audit_report_lines(audit: Mapping[str, object
     tag_rows = [row for row in _as_list(resolved.get("tag_rows")) if isinstance(row, Mapping)]
     root_rows = [row for row in _as_list(resolved.get("root_rows")) if isinstance(row, Mapping)]
     alerts = [row for row in _as_list(resolved.get("quality_alerts")) if isinstance(row, Mapping)]
+    health_issues = [row for row in _as_list(resolved.get("health_issues")) if isinstance(row, Mapping)]
     backup_rows = [row for row in _as_list(resolved.get("backup_rows")) if isinstance(row, Mapping)]
     operation_rows = [row for row in _as_list(resolved.get("operation_rows")) if isinstance(row, Mapping)]
     lines = [
@@ -2309,6 +2361,7 @@ def build_statsbomb_fewshot_memory_audit_report_lines(audit: Mapping[str, object
         f"- Required tag coverage: {summary.get('coverage_rate_text') or '-'}",
         f"- Missing required tags: {_safe_int(summary.get('missing_tag_count'))}",
         f"- Quality alerts: {_safe_int(summary.get('alert_count'))}",
+        f"- Health issues: {_safe_int(summary.get('health_issue_count'))}",
         f"- Backups: {_safe_int(summary.get('backup_count'))}",
         f"- Recent apply/rollback reports: {_safe_int(summary.get('operation_count'))}",
         f"- Last manual apply: {summary.get('last_manual_apply_at') or '-'} | {_safe_int(summary.get('last_manual_apply_count'))} samples",
@@ -2330,6 +2383,15 @@ def build_statsbomb_fewshot_memory_audit_report_lines(audit: Mapping[str, object
     missing_tags = [str(tag) for tag in _as_list(resolved.get("missing_tags"))]
     lines.extend(["", "## Missing Required Tags", ""])
     lines.append(", ".join(missing_tags) if missing_tags else "-")
+    lines.extend(["", "## Health Issues", "", "| Severity | Code | Recommendation |", "| --- | --- | --- |"])
+    if not health_issues:
+        lines.append("| - | - | - |")
+    for issue in health_issues:
+        lines.append(
+            "| "
+            + " | ".join([_md_cell(issue.get("severity")), _md_cell(issue.get("code")), _md_cell(issue.get("recommendation"))])
+            + " |"
+        )
     lines.extend(["", "## Quality Alerts", "", "| Title | Tag |", "| --- | --- |"])
     if not alerts:
         lines.append("| - | - |")

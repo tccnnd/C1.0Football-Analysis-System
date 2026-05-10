@@ -1814,13 +1814,45 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertEqual(audit["summary"]["sample_count"], 2)
         self.assertEqual(audit["summary"]["backup_count"], 1)
         self.assertEqual(audit["summary"]["operation_count"], 1)
+        self.assertGreater(audit["summary"]["health_issue_count"], 0)
         self.assertEqual(audit["summary"]["last_manual_apply_count"], 2)
         self.assertEqual(
             build_statsbomb_fewshot_memory_audit_report_filename(datetime(2026, 5, 10, 23, 45, 0)),
             "statsbomb_fewshot_memory_audit_20260510_234500.md",
         )
         self.assertIn("StatsBomb Few-shot Memory Audit", payload)
+        self.assertIn("Health Issues", payload)
         self.assertIn("statsbomb_sandbox_fewshot_samples.backup_20260510_221530.json", payload)
+
+    def test_statsbomb_fewshot_memory_audit_report_flags_missing_backup(self) -> None:
+        memory = {
+            "items": [
+                {
+                    "labels": {
+                        "is_hit": True,
+                        "root_cause": "event_evidence_aligned",
+                        "tags": [
+                            "statsbomb_post_match_review",
+                            "statsbomb_finishing_variance",
+                            "event_control_gap",
+                            "xg_result_divergence",
+                            "shot_result_divergence",
+                            "xg_direction_failed",
+                            "strategy_miss",
+                            "strategy_hit",
+                        ],
+                    }
+                }
+                for _ in range(20)
+            ],
+        }
+        monitor = build_statsbomb_fewshot_memory_monitor(memory, {})
+        quality = build_statsbomb_fewshot_memory_quality_alerts(monitor, min_samples=5)
+
+        audit = build_statsbomb_fewshot_memory_audit_report(memory, monitor, quality)
+
+        self.assertEqual(audit["status"], "attention")
+        self.assertTrue(any(issue["code"] == "backup_missing" for issue in audit["health_issues"]))
 
     def test_high_accuracy_dashboard_exposes_statsbomb_backfill_queue(self) -> None:
         memory = {
