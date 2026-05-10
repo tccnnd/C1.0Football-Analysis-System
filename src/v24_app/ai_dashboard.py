@@ -36,6 +36,7 @@ from .core import (
 )
 from .ui_modules import (
     build_background_task_rows,
+    build_background_task_detail_lines,
     build_background_task_summary,
     build_high_accuracy_strategy_backtest_message,
     build_high_accuracy_strategy_backtest_status_text,
@@ -2353,6 +2354,54 @@ class SmartMatchDashboard:
         status_text = build_play_model_training_status_text(get_play_model_training_status())
         messagebox.showinfo("\u73a9\u6cd5\u6a21\u578b\u8bad\u7ec3", build_train_play_models_apply_message(payload, status_text))
 
+    def open_background_task_detail_window(self, task_id: str | object) -> None:
+        resolved_id = str(task_id or "")
+        record = next(
+            (item for item in self.background_tasks.snapshot() if str(item.get("task_id") or "") == resolved_id),
+            {},
+        )
+        if not record:
+            messagebox.showinfo("\u540e\u53f0\u4efb\u52a1", "\u672a\u627e\u5230\u8be5\u540e\u53f0\u4efb\u52a1\u8bb0\u5f55\u3002")
+            return
+        window = tk.Toplevel(self.root)
+        window.title(f"\u540e\u53f0\u4efb\u52a1\u8be6\u60c5 | {resolved_id}")
+        window.configure(bg=BG)
+        window.geometry("860x620")
+        header = tk.Frame(window, bg=BG)
+        header.pack(fill=tk.X, padx=16, pady=(14, 8))
+        tk.Label(
+            header,
+            text=f"{record.get('label', '-')} | {record.get('status', '-')}",
+            bg=BG,
+            fg=TEXT,
+            font=("Microsoft YaHei UI", 14, "bold"),
+        ).pack(anchor=tk.W)
+        tk.Label(
+            header,
+            text="\u67e5\u770b\u540e\u53f0\u4efb\u52a1\u7684\u6267\u884c\u8017\u65f6\u3001\u7ed3\u679c\u6458\u8981\u3001metadata \u548c traceback\u3002",
+            bg=BG,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 10),
+        ).pack(anchor=tk.W, pady=(4, 0))
+        frame = tk.Frame(window, bg=PANEL, highlightbackground="#172638", highlightthickness=1)
+        frame.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 16))
+        text = tk.Text(
+            frame,
+            bg=PANEL,
+            fg=TEXT,
+            insertbackground=TEXT,
+            selectbackground=BLUE,
+            relief=tk.FLAT,
+            wrap=tk.WORD,
+            font=("Consolas", 10),
+        )
+        scrollbar = tk.Scrollbar(frame, orient=tk.VERTICAL, command=text.yview)
+        text.configure(yscrollcommand=scrollbar.set)
+        text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(12, 0), pady=12)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 12), pady=12)
+        text.insert(tk.END, "\n".join(build_background_task_detail_lines(record)))
+        text.configure(state=tk.DISABLED)
+
     def _release_recovery_alerts(self) -> dict[str, object]:
         return build_strategy_release_recovery_alerts(self._pending_snapshot_rows())
 
@@ -2593,7 +2642,13 @@ class SmartMatchDashboard:
         task_rows = build_background_task_rows(background_task_snapshot, limit=6)
         if task_rows:
             for row in task_rows:
-                self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
+                task_id = str(row.get("task_id") or "")
+                self._strategy_row(
+                    right,
+                    str(row.get("title") or "-"),
+                    f"{row.get('body', '-')}\n\u70b9\u51fb\u67e5\u770b\u4efb\u52a1\u8be6\u60c5",
+                    command=lambda task_id=task_id: self.open_background_task_detail_window(task_id),
+                )
         else:
             self._kv_row(right, "\u4efb\u52a1\u961f\u5217", "\u6682\u65e0\u540e\u53f0\u4efb\u52a1")
 

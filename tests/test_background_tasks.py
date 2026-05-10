@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import os
 import json
+import os
 import sys
 import threading
 import unittest
@@ -17,7 +17,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from v24_app.background_tasks import BackgroundTaskCenter, summarize_task_result
-from v24_app.ui_modules import build_background_task_rows, build_background_task_summary
+from v24_app.ui_modules import build_background_task_detail_lines, build_background_task_rows, build_background_task_summary
 
 
 def _sample_process_task(value: int) -> dict[str, object]:
@@ -92,8 +92,33 @@ class BackgroundTaskCenterTests(unittest.TestCase):
         self.assertEqual(summary["running"], 1)
         self.assertEqual(summary["failed"], 1)
         self.assertIn("运行中", rows[0]["title"])
+        self.assertEqual(rows[0]["task_id"], "t1")
         self.assertIn("进程", rows[1]["body"])
         self.assertIn("boom", rows[1]["body"])
+
+    def test_build_background_task_detail_lines_includes_metadata_and_traceback(self) -> None:
+        lines = build_background_task_detail_lines(
+            {
+                "task_id": "t9",
+                "key": "sample",
+                "label": "Sample",
+                "mode": "process",
+                "status": "failed",
+                "started_at": "2026-05-10 10:00:00",
+                "finished_at": "2026-05-10 10:00:03",
+                "elapsed_seconds": 3.25,
+                "error": "boom",
+                "result_summary": "-",
+                "metadata": {"trigger": "manual", "traceback": "Traceback line"},
+            }
+        )
+        text = "\n".join(lines)
+        self.assertIn("后台任务详情", text)
+        self.assertIn("任务ID: t9", text)
+        self.assertIn("进程", text)
+        self.assertIn("boom", text)
+        self.assertIn("manual", text)
+        self.assertIn("Traceback line", text)
 
     def test_summarize_task_result_prefers_known_fields(self) -> None:
         self.assertEqual(summarize_task_result({"summary_text": "done", "ok": True}), "done")

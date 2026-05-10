@@ -103,7 +103,7 @@ from .auto_settle_flow import (
     build_auto_settle_status_text,
     should_refresh_after_auto_settle,
 )
-from .background_task_flow import build_background_task_rows, build_background_task_summary
+from .background_task_flow import build_background_task_detail_lines, build_background_task_rows, build_background_task_summary
 from .recovery_run_flow import (
     build_result_recovery_quality_alerts,
     build_result_recovery_review_summary,
@@ -286,6 +286,7 @@ __all__ = [
     "parse_settlement_score_inputs",
     "build_auto_settle_popup_message",
     "build_auto_settle_status_text",
+    "build_background_task_detail_lines",
     "build_background_task_rows",
     "build_background_task_summary",
     "should_refresh_after_auto_settle",
