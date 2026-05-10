@@ -18,6 +18,7 @@ from v24_app.ui_modules import (
     build_ensemble_backtest_apply_status_text,
     build_ensemble_backtest_success_message,
     build_ensemble_weight_status_text,
+    build_model_training_overview_text,
     build_play_model_backtest_apply_status_text,
     build_play_model_backtest_success_message,
     build_play_model_policy_apply_status_text,
@@ -34,6 +35,23 @@ from v24_app.ui_modules import (
 
 
 class UIModelStatusFlowModuleTests(unittest.TestCase):
+    def test_model_training_overview_shows_statsbomb_review_samples(self) -> None:
+        text = build_model_training_overview_text(
+            xgb_status={},
+            play_model_status={},
+            ensemble_status={},
+            bayes_status={},
+            threshold_status={},
+            policy_status={},
+            coverage_status={
+                "xgb_samples": {"sample_count": 10, "valid_feature_count": 9, "league_count": 2},
+                "statsbomb_events": {"match_count": 3, "review_sample_count": 2, "review_feature_count": 38},
+            },
+        )
+
+        self.assertIn("StatsBomb事件: 3 场", text)
+        self.assertIn("复盘样本=2", text)
+
     def test_ensemble_status_and_messages(self) -> None:
         status_text = build_ensemble_weight_status_text(
             {

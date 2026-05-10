@@ -39,6 +39,7 @@ def build_model_training_overview_text(
     samples = coverage.get("xgb_samples", {}) if isinstance(coverage, Mapping) else {}
     club_history = coverage.get("club_history", {}) if isinstance(coverage, Mapping) else {}
     world_cup = coverage.get("world_cup_history", {}) if isinstance(coverage, Mapping) else {}
+    statsbomb = coverage.get("statsbomb_events", {}) if isinstance(coverage, Mapping) else {}
     rating_pools = coverage.get("rating_pools", {}) if isinstance(coverage, Mapping) else {}
 
     lines = [
@@ -67,6 +68,10 @@ def build_model_training_overview_text(
         f"- 比分接管: enabled={scoreline_policy.get('takeover_enabled')} | 同向={float(scoreline_policy.get('regular_same_outcome_min_confidence', 0) or 0):.2f} | 跨向={scoreline_policy.get('regular_cross_outcome_enabled')}@{float(scoreline_policy.get('regular_cross_outcome_min_confidence', 0) or 0):.2f}",
         f"- 总进球接管: enabled={total_goals_policy.get('takeover_enabled')} | min_conf={float(total_goals_policy.get('min_confidence', 0) or 0):.2f}",
     ]
+    lines.insert(
+        9,
+        f"- StatsBomb事件: {statsbomb.get('match_count', 0)} 场 | 复盘样本={statsbomb.get('review_sample_count', 0)} | 特征={statsbomb.get('review_feature_count', 0)}",
+    )
     return "\n".join(lines)
 
 

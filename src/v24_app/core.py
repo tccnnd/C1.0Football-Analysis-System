@@ -3950,6 +3950,13 @@ def get_training_data_coverage_status() -> dict:
     league_profiles = league_profile_payload.get("leagues", {})
     league_profile_count = len(league_profiles) if isinstance(league_profiles, dict) else 0
 
+    statsbomb_payload = _load_state_payload("statsbomb_event_summaries.json")
+    statsbomb_items = _state_payload_items(statsbomb_payload)
+    statsbomb_start, statsbomb_end = _history_date_range(statsbomb_items, "match_date")
+    statsbomb_review_payload = _load_state_payload("statsbomb_review_training_samples.json")
+    statsbomb_review_items = _state_payload_items(statsbomb_review_payload)
+    statsbomb_review_summary = statsbomb_review_payload.get("summary", {}) if isinstance(statsbomb_review_payload.get("summary"), dict) else {}
+
     club_ratings = STATE_STORE.load_ratings()
     national_team_ratings = STATE_STORE.load_national_team_ratings()
     return {
@@ -3978,6 +3985,16 @@ def get_training_data_coverage_status() -> dict:
             "year_start": min(world_cup_years) if world_cup_years else None,
             "year_end": max(world_cup_years) if world_cup_years else None,
             "year_count": len(world_cup_years),
+        },
+        "statsbomb_events": {
+            "match_count": len(statsbomb_items),
+            "date_start": statsbomb_start,
+            "date_end": statsbomb_end,
+            "updated_at": statsbomb_payload.get("updated_at"),
+            "source": statsbomb_payload.get("source"),
+            "review_sample_count": len(statsbomb_review_items),
+            "review_updated_at": statsbomb_review_payload.get("updated_at"),
+            "review_feature_count": len(statsbomb_review_summary.get("feature_order", [])) if isinstance(statsbomb_review_summary.get("feature_order"), list) else 0,
         },
         "rating_pools": {
             "club_team_count": len(club_ratings),

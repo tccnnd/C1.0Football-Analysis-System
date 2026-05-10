@@ -78,6 +78,46 @@ RECENT_FORM_FEATURE_ORDER = [
     "home_recent_win_rate",
     "away_recent_win_rate",
 ]
+STATSBOMB_REVIEW_FEATURE_ORDER = [
+    "statsbomb_available",
+    "event_count",
+    "home_xg",
+    "away_xg",
+    "xg_diff",
+    "xg_total",
+    "home_shots",
+    "away_shots",
+    "shot_diff",
+    "shot_total",
+    "home_shots_on_target",
+    "away_shots_on_target",
+    "shots_on_target_diff",
+    "home_passes",
+    "away_passes",
+    "pass_diff",
+    "home_carries",
+    "away_carries",
+    "carry_diff",
+    "home_pressures",
+    "away_pressures",
+    "pressure_diff",
+    "home_fouls_committed",
+    "away_fouls_committed",
+    "foul_diff",
+    "home_yellow_cards",
+    "away_yellow_cards",
+    "card_diff",
+    "home_red_cards",
+    "away_red_cards",
+    "red_card_diff",
+    "first_goal_minute",
+    "last_goal_minute",
+    "prediction_confidence",
+    "market_entropy_score",
+    "handicap_margin_score",
+    "high_strategy_count",
+    "high_strategy_miss_count",
+]
 
 MARKET_COMPANY_PREFIXES = ("威欧", "澳欧", "立欧", "B36欧", "皇欧")
 
@@ -470,6 +510,179 @@ def build_team_histories_from_state(
             item["home_goals"],
         )
     return team_histories
+
+
+def _statsbomb_summary_from_settlement(item: dict[str, Any]) -> dict[str, Any]:
+    summary = item.get("statsbomb_event_summary")
+    return summary if isinstance(summary, dict) else {}
+
+
+def _statsbomb_team_stats(item: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    summary = _statsbomb_summary_from_settlement(item)
+    team_stats = summary.get("team_stats")
+    if not isinstance(team_stats, dict):
+        return {}, {}
+    home_team = _normalize_text(item.get("home_team"))
+    away_team = _normalize_text(item.get("away_team"))
+    home_stats = team_stats.get(home_team) if home_team else None
+    away_stats = team_stats.get(away_team) if away_team else None
+    if not isinstance(home_stats, dict) or not isinstance(away_stats, dict):
+        values = [value for value in team_stats.values() if isinstance(value, dict)]
+        if len(values) >= 2:
+            if not isinstance(home_stats, dict):
+                home_stats = values[0]
+            if not isinstance(away_stats, dict):
+                away_stats = values[1]
+    return (home_stats if isinstance(home_stats, dict) else {}, away_stats if isinstance(away_stats, dict) else {})
+
+
+def _known_bool_label(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return 0 if value else 1
+    return None
+
+
+def _statsbomb_review_feature_map(item: dict[str, Any]) -> dict[str, float]:
+    summary = _statsbomb_summary_from_settlement(item)
+    home_stats, away_stats = _statsbomb_team_stats(item)
+    home_xg = _safe_float(home_stats.get("xg"), default=0.0) or 0.0
+    away_xg = _safe_float(away_stats.get("xg"), default=0.0) or 0.0
+    home_shots = _safe_float(home_stats.get("shots"), default=0.0) or 0.0
+    away_shots = _safe_float(away_stats.get("shots"), default=0.0) or 0.0
+    home_sot = _safe_float(home_stats.get("shots_on_target"), default=0.0) or 0.0
+    away_sot = _safe_float(away_stats.get("shots_on_target"), default=0.0) or 0.0
+    home_passes = _safe_float(home_stats.get("passes"), default=0.0) or 0.0
+    away_passes = _safe_float(away_stats.get("passes"), default=0.0) or 0.0
+    home_carries = _safe_float(home_stats.get("carries"), default=0.0) or 0.0
+    away_carries = _safe_float(away_stats.get("carries"), default=0.0) or 0.0
+    home_pressures = _safe_float(home_stats.get("pressures"), default=0.0) or 0.0
+    away_pressures = _safe_float(away_stats.get("pressures"), default=0.0) or 0.0
+    home_fouls = _safe_float(home_stats.get("fouls_committed"), default=0.0) or 0.0
+    away_fouls = _safe_float(away_stats.get("fouls_committed"), default=0.0) or 0.0
+    home_yellow = _safe_float(home_stats.get("yellow_cards"), default=0.0) or 0.0
+    away_yellow = _safe_float(away_stats.get("yellow_cards"), default=0.0) or 0.0
+    home_red = _safe_float(home_stats.get("red_cards"), default=0.0) or 0.0
+    away_red = _safe_float(away_stats.get("red_cards"), default=0.0) or 0.0
+    high_items = item.get("high_accuracy_strategy_items")
+    strategy_items = [row for row in high_items if isinstance(row, dict)] if isinstance(high_items, list) else []
+    strategy_misses = sum(1 for row in strategy_items if row.get("is_hit") is False)
+    return {
+        "statsbomb_available": 1.0,
+        "event_count": _safe_float(summary.get("event_count"), default=0.0) or 0.0,
+        "home_xg": round(home_xg, 4),
+        "away_xg": round(away_xg, 4),
+        "xg_diff": round(home_xg - away_xg, 4),
+        "xg_total": round(home_xg + away_xg, 4),
+        "home_shots": home_shots,
+        "away_shots": away_shots,
+        "shot_diff": home_shots - away_shots,
+        "shot_total": home_shots + away_shots,
+        "home_shots_on_target": home_sot,
+        "away_shots_on_target": away_sot,
+        "shots_on_target_diff": home_sot - away_sot,
+        "home_passes": home_passes,
+        "away_passes": away_passes,
+        "pass_diff": home_passes - away_passes,
+        "home_carries": home_carries,
+        "away_carries": away_carries,
+        "carry_diff": home_carries - away_carries,
+        "home_pressures": home_pressures,
+        "away_pressures": away_pressures,
+        "pressure_diff": home_pressures - away_pressures,
+        "home_fouls_committed": home_fouls,
+        "away_fouls_committed": away_fouls,
+        "foul_diff": home_fouls - away_fouls,
+        "home_yellow_cards": home_yellow,
+        "away_yellow_cards": away_yellow,
+        "card_diff": (home_yellow + home_red) - (away_yellow + away_red),
+        "home_red_cards": home_red,
+        "away_red_cards": away_red,
+        "red_card_diff": home_red - away_red,
+        "first_goal_minute": _safe_float(summary.get("first_goal_minute"), default=-1.0) or -1.0,
+        "last_goal_minute": _safe_float(summary.get("last_goal_minute"), default=-1.0) or -1.0,
+        "prediction_confidence": _safe_float(item.get("prediction_confidence") or item.get("confidence"), default=0.0) or 0.0,
+        "market_entropy_score": _safe_float(item.get("market_entropy_score"), default=0.0) or 0.0,
+        "handicap_margin_score": _safe_float(item.get("handicap_margin_score"), default=0.0) or 0.0,
+        "high_strategy_count": float(len(strategy_items)),
+        "high_strategy_miss_count": float(strategy_misses),
+    }
+
+
+def build_statsbomb_review_training_samples(
+    settlements: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    samples: list[dict[str, Any]] = []
+    skipped_missing_statsbomb = 0
+    skipped_unknown_label = 0
+    label_counts = {"prediction_miss": {0: 0, 1: 0}, "handicap_miss": {0: 0, 1: 0}, "ou_miss": {0: 0, 1: 0}}
+    for item in settlements:
+        if not isinstance(item, dict):
+            continue
+        if not _statsbomb_summary_from_settlement(item):
+            skipped_missing_statsbomb += 1
+            continue
+        prediction_miss = _known_bool_label(item.get("is_correct"))
+        handicap_miss = _known_bool_label(item.get("handicap_is_correct"))
+        ou_miss = _known_bool_label(item.get("ou_is_correct"))
+        if prediction_miss is None and handicap_miss is None and ou_miss is None:
+            skipped_unknown_label += 1
+            continue
+        labels = {
+            "prediction_miss": prediction_miss,
+            "handicap_miss": handicap_miss,
+            "ou_miss": ou_miss,
+        }
+        for key, value in labels.items():
+            if value in (0, 1):
+                label_counts[key][int(value)] += 1
+        features = _statsbomb_review_feature_map(item)
+        samples.append(
+            {
+                "timestamp": _normalize_text(item.get("timestamp")) or f"{_normalize_text(item.get('match_date'))} {_normalize_text(item.get('match_time'))}",
+                "match_id": _normalize_text(item.get("match_id")),
+                "features": {key: float(features.get(key, 0.0)) for key in STATSBOMB_REVIEW_FEATURE_ORDER},
+                "labels": labels,
+                "meta": {
+                    "source": "statsbomb_review_training",
+                    "match_date": _normalize_text(item.get("match_date")),
+                    "match_time": _normalize_text(item.get("match_time")),
+                    "league": _normalize_text(item.get("league")),
+                    "home_team": _normalize_text(item.get("home_team")),
+                    "away_team": _normalize_text(item.get("away_team")),
+                    "home_goals": _safe_int(item.get("home_goals")),
+                    "away_goals": _safe_int(item.get("away_goals")),
+                    "statsbomb_source_match_id": item.get("statsbomb_source_match_id"),
+                },
+            }
+        )
+    summary = {
+        "sample_count": len(samples),
+        "skipped_missing_statsbomb": skipped_missing_statsbomb,
+        "skipped_unknown_label": skipped_unknown_label,
+        "feature_order": list(STATSBOMB_REVIEW_FEATURE_ORDER),
+        "label_counts": label_counts,
+    }
+    return samples, summary
+
+
+def export_statsbomb_review_training_samples(
+    project_dir: Path,
+    settlements: list[dict[str, Any]],
+    output_path: Path | None = None,
+) -> dict[str, Any]:
+    samples, summary = build_statsbomb_review_training_samples(settlements)
+    resolved_output = output_path or project_dir / "data" / "state" / "statsbomb_review_training_samples.json"
+    resolved_output.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "source": "StatsBomb Open Data + app settlements",
+        "purpose": "post_match_review_error_attribution",
+        "leakage_note": "These samples use post-match event data and must not be used as pre-match prediction features.",
+        "summary": summary,
+        "items": samples,
+    }
+    resolved_output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {**summary, "output_path": str(resolved_output)}
 
 
 def _read_input_records(input_path: Path) -> list[dict[str, Any]]:
