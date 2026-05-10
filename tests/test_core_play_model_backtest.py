@@ -89,11 +89,13 @@ class PlayModelBacktestTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             policy_file = Path(tmp_dir) / "play_model_policy_v1.json"
+            history_file = Path(tmp_dir) / "play_model_policy_history_v1.json"
             with patch.object(core, "PLAY_MODEL_POLICY_FILE", policy_file):
-                with patch("v24_app.core._validation_split_samples", return_value=([], validation_items)):
-                    with patch("v24_app.core._sample_item_prediction", side_effect=lambda item: item["prediction"]):
-                        with patch.object(core.STATE_STORE, "load_xgb_samples", return_value=validation_items):
-                            result = core.calibrate_play_model_policy_now(max_validation_samples=None)
+                with patch.object(core, "PLAY_MODEL_POLICY_HISTORY_FILE", history_file):
+                    with patch("v24_app.core._validation_split_samples", return_value=([], validation_items)):
+                        with patch("v24_app.core._sample_item_prediction", side_effect=lambda item: item["prediction"]):
+                            with patch.object(core.STATE_STORE, "load_xgb_samples", return_value=validation_items):
+                                result = core.calibrate_play_model_policy_now(max_validation_samples=None)
 
         total_goals_metrics = result["metrics"]["total_goals"]
         self.assertTrue(result["calibrated"])
@@ -137,11 +139,13 @@ class PlayModelBacktestTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             policy_file = Path(tmp_dir) / "play_model_policy_v1.json"
+            history_file = Path(tmp_dir) / "play_model_policy_history_v1.json"
             with patch.object(core, "PLAY_MODEL_POLICY_FILE", policy_file):
-                with patch("v24_app.core._validation_split_samples", return_value=([], validation_items)):
-                    with patch("v24_app.core._sample_item_prediction", side_effect=lambda item: item["prediction"]):
-                        with patch.object(core.STATE_STORE, "load_xgb_samples", return_value=validation_items):
-                            result = core.calibrate_play_model_policy_now(max_validation_samples=None)
+                with patch.object(core, "PLAY_MODEL_POLICY_HISTORY_FILE", history_file):
+                    with patch("v24_app.core._validation_split_samples", return_value=([], validation_items)):
+                        with patch("v24_app.core._sample_item_prediction", side_effect=lambda item: item["prediction"]):
+                            with patch.object(core.STATE_STORE, "load_xgb_samples", return_value=validation_items):
+                                result = core.calibrate_play_model_policy_now(max_validation_samples=None)
 
         total_goals_metrics = result["metrics"]["total_goals"]
         holdout_metrics = result["metrics"]["holdout"]
@@ -153,6 +157,57 @@ class PlayModelBacktestTests(unittest.TestCase):
         self.assertEqual(total_goals_metrics["reason"], "holdout_regression")
         self.assertLess(holdout_metrics["total_goals_uplift"], 0)
         self.assertFalse(result["policy"]["total_goals"]["takeover_enabled"])
+
+    def test_calibrate_play_model_policy_records_version_history(self) -> None:
+        validation_items = []
+        for index in range(40):
+            validation_items.append(
+                {
+                    "meta": {
+                        "match_date": f"2025-04-{(index % 28) + 1:02d}",
+                        "home_goals": 2,
+                        "away_goals": 0,
+                    },
+                    "prediction": {
+                        "pre_play_model_total_goals_value": 2,
+                        "pre_play_model_total_goals_confidence": 0.30,
+                        "pre_play_model_score_recommendation": "2-0",
+                        "pre_play_model_score_confidence": 0.20,
+                        "poisson": {
+                            "score_distribution": [{"score": "2-0", "probability": 0.9}],
+                            "top_total_goals": [{"goals": 2, "probability": 0.30}],
+                        },
+                        "total_goals_model": {"model_ready": True, "label": 2, "confidence": 0.9},
+                        "scoreline_model": {"model_ready": True, "label": "2-0", "confidence": 0.9},
+                        "volatile_scoreline_model": {"model_ready": False},
+                    },
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            policy_file = Path(tmp_dir) / "play_model_policy_v1.json"
+            history_file = Path(tmp_dir) / "play_model_policy_history_v1.json"
+            policy_file.write_text(
+                '{"updated_at":"2026-01-01 00:00:00","policy":{"total_goals":{"takeover_enabled":false,"min_confidence":0.24},"scoreline":{"takeover_enabled":true}}}',
+                encoding="utf-8",
+            )
+            with patch.object(core, "PLAY_MODEL_POLICY_FILE", policy_file):
+                with patch.object(core, "PLAY_MODEL_POLICY_HISTORY_FILE", history_file):
+                    with patch("v24_app.core._validation_split_samples", return_value=([], validation_items)):
+                        with patch("v24_app.core._sample_item_prediction", side_effect=lambda item: item["prediction"]):
+                            with patch.object(core.STATE_STORE, "load_xgb_samples", return_value=validation_items):
+                                result = core.calibrate_play_model_policy_now(max_validation_samples=None)
+                    history = core.get_play_model_policy_history(limit=5)
+                    status = core.get_play_model_policy_status()
+
+        self.assertTrue(result["calibrated"])
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["version_id"], result["version_id"])
+        self.assertEqual(history[0]["source"], "calibration")
+        self.assertEqual(history[0]["previous_updated_at"], "2026-01-01 00:00:00")
+        self.assertIn("total_goals_reason", history[0]["summary"])
+        self.assertEqual(status["version_id"], result["version_id"])
+        self.assertTrue(str(status["history_source"]).endswith("play_model_policy_history_v1.json"))
 
 
 if __name__ == "__main__":

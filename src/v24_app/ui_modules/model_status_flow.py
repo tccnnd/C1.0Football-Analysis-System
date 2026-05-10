@@ -473,6 +473,7 @@ def build_play_model_policy_status_text(status: Mapping[str, object] | object) -
     return (
         "玩法接管策略\n"
         + f"- 更新时间: {resolved.get('updated_at') or '-'}\n"
+        + f"- 版本: {resolved.get('version_id') or '-'}\n"
         + f"- 比分接管: enabled={scoreline.get('takeover_enabled')} | 常规同向={float(scoreline.get('regular_same_outcome_min_confidence', 0) or 0):.2f} | 常规跨向={scoreline.get('regular_cross_outcome_enabled')}@{float(scoreline.get('regular_cross_outcome_min_confidence', 0) or 0):.2f}\n"
         + f"- 高波动确认: 同向={float(scoreline.get('volatile_same_outcome_min_confidence', 0) or 0):.2f} | 跨向={scoreline.get('volatile_cross_outcome_enabled')}@{float(scoreline.get('volatile_cross_outcome_min_confidence', 0) or 0):.2f}\n"
         + f"- 总进球接管: enabled={total_goals.get('takeover_enabled')} | min_conf={float(total_goals.get('min_confidence', 0) or 0):.2f}\n"

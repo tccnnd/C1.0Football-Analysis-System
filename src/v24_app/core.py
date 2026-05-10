@@ -49,6 +49,7 @@ REPORT_DIR = PROJECT_DIR / "reports"
 ENSEMBLE_WEIGHTS_FILE = PROJECT_DIR / "data" / "models" / "ensemble_weights_v1.json"
 PLAY_THRESHOLDS_FILE = PROJECT_DIR / "data" / "models" / "play_thresholds_v1.json"
 PLAY_MODEL_POLICY_FILE = PROJECT_DIR / "data" / "models" / "play_model_policy_v1.json"
+PLAY_MODEL_POLICY_HISTORY_FILE = PROJECT_DIR / "data" / "models" / "play_model_policy_history_v1.json"
 BAYES_CALIBRATION_FILE = PROJECT_DIR / "data" / "models" / "bayes_calibration_v1.json"
 HIGH_ACCURACY_STRATEGY_FILE = PROJECT_DIR / "data" / "models" / "high_accuracy_strategy_v1.json"
 JC_STRATIFIED_STRATEGY_FILE = PROJECT_DIR / "data" / "models" / "jc_stratified_strategy_backtest_v1.json"
@@ -3812,6 +3813,70 @@ def _save_play_model_policy_report(report: dict) -> None:
     _PLAY_MODEL_POLICY_CACHE["report"] = report
 
 
+def _load_play_model_policy_history_entries() -> list[dict]:
+    if not PLAY_MODEL_POLICY_HISTORY_FILE.exists():
+        return []
+    try:
+        data = json.loads(PLAY_MODEL_POLICY_HISTORY_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    items = data.get("items") if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        return []
+    return [dict(item) for item in items if isinstance(item, dict)]
+
+
+def _write_play_model_policy_history_entries(items: list[dict]) -> None:
+    PLAY_MODEL_POLICY_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "items": items[-200:],
+    }
+    PLAY_MODEL_POLICY_HISTORY_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def get_play_model_policy_history(*, limit: int = 20) -> list[dict]:
+    items = _load_play_model_policy_history_entries()
+    items.sort(key=lambda item: (str(item.get("updated_at") or ""), str(item.get("version_id") or "")), reverse=True)
+    if limit <= 0:
+        return items
+    return items[: max(0, int(limit))]
+
+
+def _append_play_model_policy_history_entry(report: dict, previous_report: dict | None, *, source: str = "calibration") -> None:
+    if not isinstance(report, dict):
+        return
+    previous = previous_report if isinstance(previous_report, dict) else {}
+    history_items = _load_play_model_policy_history_entries()
+    version_id = str(report.get("version_id") or f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{len(history_items) + 1:04d}")
+    updated_at = str(report.get("updated_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    metrics = report.get("metrics", {}) if isinstance(report.get("metrics"), dict) else {}
+    total_goals = metrics.get("total_goals", {}) if isinstance(metrics.get("total_goals"), dict) else {}
+    scoreline = metrics.get("scoreline", {}) if isinstance(metrics.get("scoreline"), dict) else {}
+    history_items.append(
+        {
+            "version_id": version_id,
+            "updated_at": updated_at,
+            "source": str(source or "calibration"),
+            "mode": report.get("mode", "calibrated"),
+            "policy": json.loads(json.dumps(report.get("policy", DEFAULT_PLAY_MODEL_POLICY))),
+            "previous_policy": json.loads(json.dumps(previous.get("policy", DEFAULT_PLAY_MODEL_POLICY))),
+            "previous_updated_at": previous.get("updated_at"),
+            "validation": json.loads(json.dumps(report.get("validation", {}))),
+            "summary": {
+                "total_goals_takeover_enabled": bool(total_goals.get("takeover_enabled")),
+                "total_goals_reason": str(total_goals.get("reason") or "-"),
+                "total_goals_uplift": total_goals.get("uplift"),
+                "total_goals_holdout_uplift": total_goals.get("holdout_uplift"),
+                "scoreline_takeover_enabled": bool(scoreline.get("takeover_enabled")),
+                "scoreline_reason": str(scoreline.get("reason") or "-"),
+                "scoreline_holdout_delta": scoreline.get("holdout_delta"),
+            },
+        }
+    )
+    _write_play_model_policy_history_entries(history_items)
+
+
 def get_play_model_policy_status() -> dict:
     report = _load_play_model_policy_report()
     policy = report.get("policy", {})
@@ -3822,10 +3887,13 @@ def get_play_model_policy_status() -> dict:
                 normalized[key].update(value)
     return {
         "updated_at": report.get("updated_at"),
+        "version_id": report.get("version_id", "-"),
         "mode": report.get("mode", "default"),
         "policy": normalized,
         "validation": report.get("validation", {}),
         "metrics": report.get("metrics", {}),
+        "source": str(PLAY_MODEL_POLICY_FILE),
+        "history_source": str(PLAY_MODEL_POLICY_HISTORY_FILE),
     }
 
 
@@ -7427,6 +7495,7 @@ def calibrate_play_model_policy_now(
     max_validation_samples: int | None = 800,
     search_profile: str = "fast",
 ) -> dict:
+    previous_policy_report = _load_play_model_policy_report()
     _, validation_items = _validation_split_samples(
         validation_ratio=validation_ratio,
         min_validation_samples=min_validation_samples,
@@ -7623,10 +7692,15 @@ def calibrate_play_model_policy_now(
         if isinstance(item.get("meta"), dict)
     ]
     sample_dates = [item for item in sample_dates if item]
+    updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    history_items = _load_play_model_policy_history_entries()
+    version_id = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{len(history_items) + 1:04d}"
     report = {
-        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "updated_at": updated_at,
+        "version_id": version_id,
         "mode": "calibrated",
         "policy": policy,
+        "previous_policy": previous_policy_report.get("policy", json.loads(json.dumps(DEFAULT_PLAY_MODEL_POLICY))),
         "validation": {
             "sample_count": len(rows),
             "tuning_sample_count": len(tuning_rows),
@@ -7680,9 +7754,11 @@ def calibrate_play_model_policy_now(
         },
     }
     _save_play_model_policy_report(report)
+    _append_play_model_policy_history_entry(report, previous_policy_report, source="calibration")
     return {
         "calibrated": True,
         "reason": "ok",
+        "version_id": version_id,
         "policy": policy,
         "validation": report["validation"],
         "metrics": report["metrics"],
