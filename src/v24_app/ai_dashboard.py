@@ -83,6 +83,9 @@ from .ui_modules import (
     build_statsbomb_fewshot_merge_bundle_filename,
     build_statsbomb_fewshot_merge_bundle_report_filename,
     build_statsbomb_fewshot_merge_bundle_report_lines,
+    build_statsbomb_fewshot_merge_apply_preview,
+    build_statsbomb_fewshot_merge_apply_preview_filename,
+    build_statsbomb_fewshot_merge_apply_preview_lines,
     build_strategy_allowlist_filename,
     build_strategy_allowlist_report_lines,
     build_strategy_policy_audit_csv_filename,
@@ -4140,6 +4143,46 @@ class SmartMatchDashboard:
         )
         return json_path, md_path, plan_path, bundle_path, bundle_review_path
 
+    def preview_statsbomb_fewshot_merge_bundle(self) -> Path | None:
+        REPORT_DIR.mkdir(parents=True, exist_ok=True)
+        selected = filedialog.askopenfilename(
+            title="Select StatsBomb few-shot merge bundle",
+            initialdir=str(REPORT_DIR),
+            filetypes=[
+                ("StatsBomb merge bundle", "statsbomb_fewshot_merge_bundle_*.json"),
+                ("JSON", "*.json"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not selected:
+            return None
+        source_path = Path(selected)
+        try:
+            bundle = json.loads(source_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            messagebox.showerror("StatsBomb few-shot preview", f"Failed to read bundle:\n{source_path}\n\n{exc}")
+            return None
+        now = datetime.now()
+        preview = build_statsbomb_fewshot_merge_apply_preview(
+            bundle,
+            get_statsbomb_sandbox_fewshot_memory(),
+            generated_at=now,
+        )
+        preview_path = REPORT_DIR / build_statsbomb_fewshot_merge_apply_preview_filename(now)
+        preview_path.write_text(
+            "\n".join(build_statsbomb_fewshot_merge_apply_preview_lines(preview)),
+            encoding="utf-8",
+        )
+        summary = preview.get("summary", {}) if isinstance(preview.get("summary"), dict) else {}
+        self.status_var.set(
+            f"StatsBomb few-shot preview: {preview.get('status', '-')} | append {summary.get('append_count', 0)} | skipped {summary.get('skipped_count', 0)}"
+        )
+        messagebox.showinfo(
+            "StatsBomb few-shot preview",
+            f"Dry-run preview generated:\n{preview_path}\n\nStatus: {preview.get('status', '-')}\nWould append: {summary.get('append_count', 0)}\nSkipped: {summary.get('skipped_count', 0)}",
+        )
+        return preview_path
+
     def open_strategy_policy_audit_history(self) -> None:
         self.current_nav_index = 4
         self.current_view = "strategy_audit_history"
@@ -4153,7 +4196,8 @@ class SmartMatchDashboard:
             + list(REPORT_DIR.glob("statsbomb_fewshot_draft_review_*.md"))
             + list(REPORT_DIR.glob("statsbomb_fewshot_merge_plan_*.md"))
             + list(REPORT_DIR.glob("statsbomb_fewshot_merge_bundle_*.json"))
-            + list(REPORT_DIR.glob("statsbomb_fewshot_merge_bundle_review_*.md")),
+            + list(REPORT_DIR.glob("statsbomb_fewshot_merge_bundle_review_*.md"))
+            + list(REPORT_DIR.glob("statsbomb_fewshot_merge_apply_preview_*.md")),
             key=lambda path: path.stat().st_mtime,
             reverse=True,
         )
@@ -4901,6 +4945,7 @@ class SmartMatchDashboard:
         self._strategy_toolbar_button(audit_tools, "\u5bfc\u51fa\u8c03\u53c2\u5ba1\u8ba1", self.export_strategy_policy_audit_report)
         self._strategy_toolbar_button(audit_tools, "StatsBomb\u8865\u6837", self.export_statsbomb_fewshot_backfill_report)
         self._strategy_toolbar_button(audit_tools, "StatsBomb\u8349\u7a3f", self.export_statsbomb_fewshot_draft)
+        self._strategy_toolbar_button(audit_tools, "StatsBomb\u9884\u89c8", self.preview_statsbomb_fewshot_merge_bundle)
         self._strategy_toolbar_button(
             audit_tools,
             "\u751f\u6548\u8be6\u60c5",

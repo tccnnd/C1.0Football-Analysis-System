@@ -1798,6 +1798,179 @@ def build_statsbomb_fewshot_merge_bundle_report_lines(bundle: Mapping[str, objec
     return lines
 
 
+def build_statsbomb_fewshot_merge_apply_preview_filename(now: datetime | None = None) -> str:
+    current = now or datetime.now()
+    return f"statsbomb_fewshot_merge_apply_preview_{current.strftime('%Y%m%d_%H%M%S')}.md"
+
+
+def build_statsbomb_fewshot_merge_apply_preview(
+    bundle: Mapping[str, object] | object,
+    existing_memory: Mapping[str, object] | object | None = None,
+    *,
+    generated_at: datetime | None = None,
+) -> dict[str, object]:
+    current = generated_at or datetime.now()
+    resolved = _as_mapping(bundle)
+    items = [item for item in _as_list(resolved.get("items")) if isinstance(item, Mapping)]
+    validation = validate_statsbomb_fewshot_draft_payload({"items": items})
+    existing_items = [item for item in _statsbomb_memory_items(existing_memory or {}) if isinstance(item, Mapping)]
+    existing_keys: set[str] = set()
+    for item in existing_items:
+        existing_keys.update(_statsbomb_fewshot_item_keys(item))
+    append_items: list[Mapping[str, object]] = []
+    skipped_rows: list[dict[str, object]] = []
+    seen_bundle_keys: set[str] = set()
+    for item in items:
+        item_id = str(item.get("id") or "-")
+        meta = _as_mapping(item.get("meta"))
+        title = f"{meta.get('match_date') or '-'} | {meta.get('league') or '-'} | {meta.get('home_team') or '-'} vs {meta.get('away_team') or '-'}"
+        item_keys = _statsbomb_fewshot_item_keys(item)
+        overlap_existing = sorted(set(item_keys) & existing_keys)
+        overlap_bundle = sorted(set(item_keys) & seen_bundle_keys)
+        if overlap_existing:
+            skipped_rows.append({"id": item_id, "title": title, "reason": "already_in_memory", "matched_keys": overlap_existing[:3]})
+            continue
+        if overlap_bundle:
+            skipped_rows.append({"id": item_id, "title": title, "reason": "duplicate_in_bundle", "matched_keys": overlap_bundle[:3]})
+            continue
+        seen_bundle_keys.update(item_keys)
+        append_items.append(item)
+
+    bundle_status = str(resolved.get("status") or "")
+    bundle_purpose = str(resolved.get("purpose") or "")
+    structural_issues: list[dict[str, object]] = []
+    if bundle_purpose != "manual_apply_bundle":
+        structural_issues.append({"severity": "high", "code": "unexpected_purpose", "field": "purpose"})
+    if bundle_status not in {"pending_manual_apply", "empty"}:
+        structural_issues.append({"severity": "high", "code": "unexpected_bundle_status", "field": "status"})
+    if resolved.get("approval_required") is not True:
+        structural_issues.append({"severity": "high", "code": "approval_not_required", "field": "approval_required"})
+    if _safe_int(validation.get("high_count")):
+        structural_issues.append({"severity": "high", "code": "sample_validation_high", "field": "items"})
+
+    high_count = _safe_int(validation.get("high_count")) + sum(1 for issue in structural_issues if issue.get("severity") == "high")
+    medium_count = _safe_int(validation.get("medium_count")) + sum(1 for issue in structural_issues if issue.get("severity") == "medium")
+    if high_count:
+        status = "blocked"
+    elif append_items:
+        status = "ready_for_manual_apply" if medium_count == 0 else "review_required"
+    else:
+        status = "empty"
+    backup_filename = f"statsbomb_sandbox_fewshot_samples.backup_{current.strftime('%Y%m%d_%H%M%S')}.json"
+    return {
+        "updated_at": current.strftime("%Y-%m-%d %H:%M:%S"),
+        "source": "StatsBomb few-shot merge bundle",
+        "purpose": "manual_apply_preview",
+        "status": status,
+        "dry_run": True,
+        "approval_required": True,
+        "no_state_write": True,
+        "leakage_note": resolved.get("leakage_note")
+        or "StatsBomb post-match review samples must stay inside Evaluation Agent memory.",
+        "backup_filename": backup_filename,
+        "summary": {
+            "append_count": len(append_items) if not high_count else 0,
+            "skipped_count": len(skipped_rows),
+            "existing_count": len(existing_items),
+            "bundle_count": len(items),
+            "high_count": high_count,
+            "medium_count": medium_count,
+        },
+        "validation": validation,
+        "structural_issues": structural_issues,
+        "append_items": [] if high_count else [dict(item) for item in append_items],
+        "skipped_rows": skipped_rows,
+    }
+
+
+def build_statsbomb_fewshot_merge_apply_preview_lines(preview: Mapping[str, object] | object) -> list[str]:
+    resolved = _as_mapping(preview)
+    summary = _as_mapping(resolved.get("summary"))
+    validation = _as_mapping(resolved.get("validation"))
+    append_items = [item for item in _as_list(resolved.get("append_items")) if isinstance(item, Mapping)]
+    skipped_rows = [item for item in _as_list(resolved.get("skipped_rows")) if isinstance(item, Mapping)]
+    structural_issues = [item for item in _as_list(resolved.get("structural_issues")) if isinstance(item, Mapping)]
+    lines = [
+        "# StatsBomb Few-shot Merge Apply Preview",
+        "",
+        f"- Generated at: {resolved.get('updated_at') or '-'}",
+        f"- Status: {resolved.get('status') or '-'}",
+        f"- Dry run: {'YES' if resolved.get('dry_run') else 'NO'}",
+        f"- Approval required: {'YES' if resolved.get('approval_required') else 'NO'}",
+        f"- No state write: {'YES' if resolved.get('no_state_write') else 'NO'}",
+        f"- Backup filename before real apply: {resolved.get('backup_filename') or '-'}",
+        f"- Leakage boundary: {resolved.get('leakage_note') or '-'}",
+        "",
+        "## Summary",
+        "",
+        f"- Would append: {_safe_int(summary.get('append_count'))}",
+        f"- Skipped: {_safe_int(summary.get('skipped_count'))}",
+        f"- Existing memory samples: {_safe_int(summary.get('existing_count'))}",
+        f"- Bundle samples: {_safe_int(summary.get('bundle_count'))}",
+        f"- Validation high/medium: {_safe_int(summary.get('high_count'))} / {_safe_int(summary.get('medium_count'))}",
+        f"- Draft validation: {validation.get('summary_text') or '-'}",
+        "",
+        "## Would Append",
+        "",
+        "| ID | Match | Root cause | Tags |",
+        "| --- | --- | --- | --- |",
+    ]
+    if not append_items:
+        lines.append("| - | No appendable sample | - | - |")
+    for item in append_items:
+        labels = _as_mapping(item.get("labels"))
+        meta = _as_mapping(item.get("meta"))
+        title = f"{meta.get('match_date') or '-'} | {meta.get('league') or '-'} | {meta.get('home_team') or '-'} vs {meta.get('away_team') or '-'}"
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    _md_cell(item.get("id")),
+                    _md_cell(title),
+                    _md_cell(labels.get("root_cause")),
+                    _md_cell(", ".join(str(tag) for tag in _as_list(labels.get("tags")))),
+                ]
+            )
+            + " |"
+        )
+    if skipped_rows:
+        lines.extend(["", "## Skipped", "", "| ID | Match | Reason | Matched keys |", "| --- | --- | --- | --- |"])
+        for row in skipped_rows:
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        _md_cell(row.get("id")),
+                        _md_cell(row.get("title")),
+                        _md_cell(row.get("reason")),
+                        _md_cell(", ".join(str(key) for key in _as_list(row.get("matched_keys")))),
+                    ]
+                )
+                + " |"
+            )
+    if structural_issues:
+        lines.extend(["", "## Blocking Issues", "", "| Severity | Code | Field |", "| --- | --- | --- |"])
+        for issue in structural_issues:
+            lines.append(
+                "| "
+                + " | ".join([_md_cell(issue.get("severity")), _md_cell(issue.get("code")), _md_cell(issue.get("field"))])
+                + " |"
+            )
+    lines.extend(
+        [
+            "",
+            "## Next Manual Checks",
+            "",
+            "- Confirm every sample is post-match evidence for Evaluation Agent only.",
+            "- Confirm the preview status is ready_for_manual_apply or review_required.",
+            "- Back up the official few-shot memory before any future real apply operation.",
+            "- Re-run memory monitor and Evaluation Agent tests after any future real apply operation.",
+            "",
+        ]
+    )
+    return lines
+
+
 def build_statsbomb_fewshot_draft_review_lines(payload: Mapping[str, object] | object) -> list[str]:
     resolved = _as_mapping(payload)
     summary = _as_mapping(resolved.get("summary"))

@@ -42,6 +42,9 @@ from v24_app.ui_modules import (
     build_statsbomb_fewshot_merge_bundle_filename,
     build_statsbomb_fewshot_merge_bundle_report_filename,
     build_statsbomb_fewshot_merge_bundle_report_lines,
+    build_statsbomb_fewshot_merge_apply_preview,
+    build_statsbomb_fewshot_merge_apply_preview_filename,
+    build_statsbomb_fewshot_merge_apply_preview_lines,
     build_statsbomb_fewshot_memory_summary,
     build_statsbomb_fewshot_memory_monitor,
     build_statsbomb_fewshot_memory_quality_alerts,
@@ -1556,6 +1559,77 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         )
         self.assertIn("StatsBomb Few-shot 合并可应用包", payload)
         self.assertIn("draft:new", payload)
+
+    def test_statsbomb_fewshot_merge_apply_preview_dry_run_checks_duplicates(self) -> None:
+        item = {
+            "id": "draft:new",
+            "review_status": "draft",
+            "prompt": "review",
+            "completion": "done",
+            "labels": {
+                "simulated_pick": "HOME",
+                "actual": "HOME",
+                "is_hit": True,
+                "root_cause": "event_evidence_aligned",
+                "tags": ["statsbomb_post_match_review", "strategy_hit"],
+            },
+            "features": {
+                "home_xg": 1.0,
+                "away_xg": 0.5,
+                "xg_margin": 0.5,
+                "home_shots": 10,
+                "away_shots": 5,
+                "shot_margin": 5,
+                "event_count": 3000,
+            },
+            "meta": {
+                "match_id": "m2",
+                "match_date": "2024-06-16",
+                "league": "UEFA Euro",
+                "home_team": "A",
+                "away_team": "B",
+                "score": "1-0",
+            },
+        }
+        existing = {"items": [{"id": "official:1", "meta": {"match_id": "m1"}}]}
+        bundle = {
+            "purpose": "manual_apply_bundle",
+            "status": "pending_manual_apply",
+            "approval_required": True,
+            "items": [
+                item,
+                {**item, "id": "draft:old", "meta": {**item["meta"], "match_id": "m1"}},
+                {**item, "id": "draft:dupe"},
+            ],
+        }
+
+        preview = build_statsbomb_fewshot_merge_apply_preview(bundle, existing, generated_at=datetime(2026, 5, 10, 22, 15, 30))
+        lines = build_statsbomb_fewshot_merge_apply_preview_lines(preview)
+        payload = "\n".join(lines)
+
+        self.assertEqual(preview["status"], "ready_for_manual_apply")
+        self.assertTrue(preview["dry_run"])
+        self.assertTrue(preview["no_state_write"])
+        self.assertEqual(preview["summary"]["append_count"], 1)
+        self.assertEqual(preview["summary"]["skipped_count"], 2)
+        self.assertTrue(any(row["reason"] == "already_in_memory" for row in preview["skipped_rows"]))
+        self.assertTrue(any(row["reason"] == "duplicate_in_bundle" for row in preview["skipped_rows"]))
+        self.assertEqual(
+            build_statsbomb_fewshot_merge_apply_preview_filename(datetime(2026, 5, 10, 22, 15, 30)),
+            "statsbomb_fewshot_merge_apply_preview_20260510_221530.md",
+        )
+        self.assertIn("StatsBomb Few-shot Merge Apply Preview", payload)
+        self.assertIn("draft:new", payload)
+
+    def test_statsbomb_fewshot_merge_apply_preview_blocks_invalid_bundle(self) -> None:
+        preview = build_statsbomb_fewshot_merge_apply_preview(
+            {"purpose": "wrong", "status": "ready", "approval_required": False, "items": []},
+            {},
+        )
+
+        self.assertEqual(preview["status"], "blocked")
+        self.assertEqual(preview["summary"]["append_count"], 0)
+        self.assertGreater(preview["summary"]["high_count"], 0)
 
     def test_high_accuracy_dashboard_exposes_statsbomb_backfill_queue(self) -> None:
         memory = {
