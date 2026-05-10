@@ -31,6 +31,10 @@ from v24_app.ui_modules import (
     build_statsbomb_fewshot_backfill_queue,
     build_statsbomb_fewshot_backfill_report_filename,
     build_statsbomb_fewshot_backfill_report_lines,
+    build_statsbomb_fewshot_draft_filename,
+    build_statsbomb_fewshot_draft_payload,
+    build_statsbomb_fewshot_draft_review_filename,
+    build_statsbomb_fewshot_draft_review_lines,
     build_statsbomb_fewshot_memory_summary,
     build_statsbomb_fewshot_memory_monitor,
     build_statsbomb_fewshot_memory_quality_alerts,
@@ -1357,6 +1361,67 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("补充当前错因相似样本", payload)
         self.assertIn("Spain vs Croatia", payload)
         self.assertIn("post-match only", payload)
+
+    def test_statsbomb_fewshot_draft_payload_builds_reviewable_samples(self) -> None:
+        queue = {
+            "summary_text": "补样任务 1 | 候选 1 | 目标标签 1",
+            "candidate_rows": [
+                {
+                    "source": "statsbomb_baseline",
+                    "match_id": "sb1",
+                    "title": "2024-06-15 | UEFA Euro | Spain vs Croatia",
+                    "matched_tags": ["xg_direction_failed"],
+                    "tags": ["statsbomb_post_match_review", "xg_direction_failed"],
+                }
+            ],
+        }
+        baseline = {
+            "items": [
+                {
+                    "match_id": "sb1",
+                    "source_match_id": "sb1",
+                    "match_date": "2024-06-15",
+                    "league": "UEFA Euro",
+                    "season": "2024",
+                    "home_team": "Spain",
+                    "away_team": "Croatia",
+                    "score": "3-0",
+                    "home_xg": 1.12,
+                    "away_xg": 2.35,
+                    "home_shots": 11,
+                    "away_shots": 16,
+                    "goal_margin": 3,
+                    "xg_margin": -1.23,
+                    "shot_margin": -5,
+                    "event_count": 3500,
+                    "finishing_variance": True,
+                    "xg_aligned_with_score": False,
+                    "shot_aligned_with_score": False,
+                }
+            ]
+        }
+
+        payload = build_statsbomb_fewshot_draft_payload(
+            queue,
+            baseline,
+            generated_at=datetime(2026, 5, 10, 22, 15, 30),
+        )
+        lines = build_statsbomb_fewshot_draft_review_lines(payload)
+        review_text = "\n".join(lines)
+
+        self.assertEqual(
+            build_statsbomb_fewshot_draft_filename(datetime(2026, 5, 10, 22, 15, 30)),
+            "statsbomb_fewshot_draft_20260510_221530.json",
+        )
+        self.assertEqual(
+            build_statsbomb_fewshot_draft_review_filename(datetime(2026, 5, 10, 22, 15, 30)),
+            "statsbomb_fewshot_draft_review_20260510_221530.md",
+        )
+        self.assertEqual(payload["summary"]["draft_count"], 1)
+        self.assertEqual(payload["items"][0]["review_status"], "draft")
+        self.assertIn("xg_direction_failed", payload["items"][0]["labels"]["tags"])
+        self.assertIn("StatsBomb Few-shot 草稿审查", review_text)
+        self.assertIn("赛前预测特征", review_text)
 
     def test_high_accuracy_dashboard_exposes_statsbomb_backfill_queue(self) -> None:
         memory = {

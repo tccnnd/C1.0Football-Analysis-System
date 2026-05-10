@@ -1283,6 +1283,217 @@ def build_statsbomb_fewshot_backfill_report_lines(
     return lines
 
 
+def build_statsbomb_fewshot_draft_filename(now: datetime | None = None) -> str:
+    current = now or datetime.now()
+    return f"statsbomb_fewshot_draft_{current.strftime('%Y%m%d_%H%M%S')}.json"
+
+
+def build_statsbomb_fewshot_draft_review_filename(now: datetime | None = None) -> str:
+    current = now or datetime.now()
+    return f"statsbomb_fewshot_draft_review_{current.strftime('%Y%m%d_%H%M%S')}.md"
+
+
+def _statsbomb_baseline_row_key(row: Mapping[str, object]) -> list[str]:
+    keys: list[str] = []
+    for value in (row.get("match_id"), row.get("source_match_id")):
+        text = str(value or "").strip()
+        if text and text not in keys:
+            keys.append(text)
+    title = f"{row.get('match_date') or '-'} | {row.get('league') or '-'} | {row.get('home_team') or '-'} vs {row.get('away_team') or '-'}"
+    if title not in keys:
+        keys.append(title)
+    return keys
+
+
+def _statsbomb_fewshot_draft_from_baseline_row(
+    row: Mapping[str, object],
+    candidate: Mapping[str, object],
+) -> dict[str, object]:
+    score_winner = str(row.get("score_winner") or "").strip().lower()
+    if score_winner not in {"home", "away", "draw"}:
+        score_winner = _side_from_margin(_safe_float(row.get("goal_margin")))
+    xg_winner = str(row.get("xg_winner") or "").strip().lower()
+    if xg_winner not in {"home", "away", "draw"}:
+        xg_winner = _side_from_margin(_safe_float(row.get("xg_margin")), threshold=0.25)
+    simulated_pick = xg_winner if xg_winner in {"home", "away", "draw"} else score_winner
+    actual = score_winner if score_winner in {"home", "away", "draw"} else "draw"
+    is_hit = simulated_pick == actual
+    tags = _statsbomb_baseline_backfill_tags(row)
+    root_cause = "event_evidence_aligned" if is_hit else "statsbomb_finishing_variance" if bool(row.get("finishing_variance")) else "event_result_divergence"
+    home_xg = _safe_float(row.get("home_xg"))
+    away_xg = _safe_float(row.get("away_xg"))
+    home_shots = _safe_int(row.get("home_shots"))
+    away_shots = _safe_int(row.get("away_shots"))
+    shot_margin = _safe_float(row.get("shot_margin"), float(home_shots - away_shots))
+    match_title = f"{row.get('home_team') or '-'} vs {row.get('away_team') or '-'}"
+    prompt = (
+        "请作为 Evaluation Agent 复盘一场使用 StatsBomb 赛后事件的历史案例。\n"
+        f"比赛: {row.get('match_date') or '-'} | {row.get('league') or '-'} | {match_title}\n"
+        f"比分: {row.get('score') or '-'} | 模拟策略: 按 xG 方向选择 {_statsbomb_side_to_pick(simulated_pick)} | 实际: {_statsbomb_side_to_pick(actual)}\n"
+        f"xG: {home_xg:.2f}-{away_xg:.2f} | 射门: {home_shots}-{away_shots} | 草稿目标标签: {', '.join(_as_list(candidate.get('matched_tags'))[:6]) or '-'}"
+    )
+    if is_hit:
+        completion = "结论: 模拟策略命中。StatsBomb 事件方向与赛果一致，可作为 Evaluation Agent 的正向对照复盘样本。"
+    else:
+        completion = (
+            "结论: 模拟策略未命中。StatsBomb 事件显示 xG 或射门质量支持模拟方向但赛果相反，"
+            "应优先归因为终结波动、事件与结果背离或 xG 方向失效，不应回灌为赛前预测特征。"
+        )
+    return {
+        "id": f"statsbomb_backfill_draft:{row.get('source_match_id') or row.get('match_id') or candidate.get('match_id') or '-'}",
+        "review_status": "draft",
+        "draft_note": "Generated from StatsBomb backfill queue. Review manually before merging into official few-shot memory.",
+        "prompt": prompt,
+        "completion": completion,
+        "labels": {
+            "simulated_pick": _statsbomb_side_to_pick(simulated_pick),
+            "actual": _statsbomb_side_to_pick(actual),
+            "is_hit": bool(is_hit),
+            "root_cause": root_cause,
+            "tags": tags,
+        },
+        "features": {
+            "home_xg": home_xg,
+            "away_xg": away_xg,
+            "xg_margin": _safe_float(row.get("xg_margin")),
+            "home_shots": float(home_shots),
+            "away_shots": float(away_shots),
+            "shot_margin": shot_margin,
+            "event_count": float(_safe_float(row.get("event_count"))),
+        },
+        "meta": {
+            "source": "statsbomb_fewshot_backfill_draft",
+            "candidate_source": candidate.get("source") or "-",
+            "match_id": row.get("match_id"),
+            "source_match_id": row.get("source_match_id"),
+            "match_date": row.get("match_date"),
+            "league": row.get("league"),
+            "season": row.get("season"),
+            "home_team": row.get("home_team"),
+            "away_team": row.get("away_team"),
+            "score": row.get("score"),
+            "matched_backfill_tags": [str(tag) for tag in _as_list(candidate.get("matched_tags"))],
+        },
+    }
+
+
+def build_statsbomb_fewshot_draft_payload(
+    queue: Mapping[str, object] | object,
+    statsbomb_event_baseline: Mapping[str, object] | object | None = None,
+    *,
+    generated_at: datetime | None = None,
+    limit: int = 20,
+) -> dict[str, object]:
+    current = generated_at or datetime.now()
+    resolved_queue = _as_mapping(queue)
+    baseline_items = [item for item in _as_list(_as_mapping(statsbomb_event_baseline).get("items")) if isinstance(item, Mapping)]
+    baseline_index: dict[str, Mapping[str, object]] = {}
+    for row in baseline_items:
+        for key in _statsbomb_baseline_row_key(row):
+            baseline_index[key] = row
+    items: list[dict[str, object]] = []
+    skipped: list[dict[str, object]] = []
+    seen_ids: set[str] = set()
+    candidates = [row for row in _as_list(resolved_queue.get("candidate_rows")) if isinstance(row, Mapping)]
+    for candidate in candidates:
+        lookup_keys = [str(candidate.get("match_id") or "").strip(), str(candidate.get("title") or "").strip()]
+        baseline_row = next((baseline_index[key] for key in lookup_keys if key and key in baseline_index), None)
+        if not baseline_row:
+            skipped.append({"match_id": candidate.get("match_id") or "-", "title": candidate.get("title") or "-", "reason": "missing_baseline_row"})
+            continue
+        draft = _statsbomb_fewshot_draft_from_baseline_row(baseline_row, candidate)
+        draft_id = str(draft.get("id") or "")
+        if draft_id in seen_ids:
+            continue
+        seen_ids.add(draft_id)
+        items.append(draft)
+        if len(items) >= max(0, int(limit)):
+            break
+    tag_counts: dict[str, int] = {}
+    for item in items:
+        labels = _as_mapping(item.get("labels"))
+        for tag in _as_list(labels.get("tags")):
+            tag_text = str(tag)
+            tag_counts[tag_text] = tag_counts.get(tag_text, 0) + 1
+    leakage_note = "Draft samples use post-match StatsBomb event data for Evaluation Agent review only; do not use as pre-match prediction features."
+    return {
+        "updated_at": current.strftime("%Y-%m-%d %H:%M:%S"),
+        "source": "StatsBomb few-shot backfill queue",
+        "purpose": "draft_only_manual_review_required",
+        "review_status": "draft",
+        "leakage_note": leakage_note,
+        "summary": {
+            "draft_count": len(items),
+            "candidate_count": len(candidates),
+            "skipped_count": len(skipped),
+            "tag_counts": dict(sorted(tag_counts.items())),
+        },
+        "backfill_summary": resolved_queue.get("summary_text") or "-",
+        "items": items,
+        "skipped": skipped,
+    }
+
+
+def build_statsbomb_fewshot_draft_review_lines(payload: Mapping[str, object] | object) -> list[str]:
+    resolved = _as_mapping(payload)
+    summary = _as_mapping(resolved.get("summary"))
+    items = [item for item in _as_list(resolved.get("items")) if isinstance(item, Mapping)]
+    skipped = [item for item in _as_list(resolved.get("skipped")) if isinstance(item, Mapping)]
+    lines = [
+        "# StatsBomb Few-shot 草稿审查",
+        "",
+        f"- 生成时间: {resolved.get('updated_at') or '-'}",
+        f"- 草稿数量: {_safe_int(summary.get('draft_count'))}",
+        f"- 候选数量: {_safe_int(summary.get('candidate_count'))}",
+        f"- 跳过数量: {_safe_int(summary.get('skipped_count'))}",
+        f"- 防泄漏边界: {resolved.get('leakage_note') or '-'}",
+        "",
+        "## 草稿样本",
+        "",
+    ]
+    if not items:
+        lines.extend(["暂无可审查草稿。", ""])
+    for item in items:
+        labels = _as_mapping(item.get("labels"))
+        meta = _as_mapping(item.get("meta"))
+        lines.extend(
+            [
+                f"### {meta.get('match_date') or '-'} | {meta.get('league') or '-'} | {meta.get('home_team') or '-'} vs {meta.get('away_team') or '-'}",
+                "",
+                f"- ID: {item.get('id') or '-'}",
+                f"- 状态: {item.get('review_status') or '-'}",
+                f"- 模拟/实际: {labels.get('simulated_pick') or '-'} / {labels.get('actual') or '-'}",
+                f"- 命中: {labels.get('is_hit')}",
+                f"- 根因: {labels.get('root_cause') or '-'}",
+                f"- 标签: {', '.join(str(tag) for tag in _as_list(labels.get('tags'))) or '-'}",
+                f"- 补样命中标签: {', '.join(str(tag) for tag in _as_list(meta.get('matched_backfill_tags'))) or '-'}",
+                "",
+                str(item.get("completion") or "-"),
+                "",
+            ]
+        )
+    if skipped:
+        lines.extend(["## 跳过候选", "", "| Match ID | 比赛 | 原因 |", "| --- | --- | --- |"])
+        for item in skipped:
+            lines.append(
+                "| "
+                + " | ".join([_md_cell(item.get("match_id")), _md_cell(item.get("title")), _md_cell(item.get("reason"))])
+                + " |"
+            )
+        lines.append("")
+    lines.extend(
+        [
+            "## 合并前检查",
+            "",
+            "- [ ] 确认样本来自完场后的 StatsBomb 事件证据。",
+            "- [ ] 确认标签、根因和 completion 没有把赛后信息写入赛前预测特征。",
+            "- [ ] 确认样本覆盖的是当前缺口标签或当前错因相似案例。",
+            "",
+        ]
+    )
+    return lines
+
+
 def _statsbomb_sandbox_row(row: Mapping[str, object], baseline: Mapping[str, object] | object | None = None) -> dict[str, object]:
     xg_margin = _safe_float(row.get("xg_margin"))
     goal_margin = _safe_int(row.get("goal_margin"))
