@@ -828,6 +828,7 @@ class SmartMatchDashboard:
             max_thread_workers=4,
             max_process_workers=2,
             dispatcher=lambda callback: self.root.after(0, callback),
+            history_path=PROJECT_ROOT / "data" / "state" / "background_tasks.json",
         )
         self.result_recovery_buttons: list[tk.Button] = []
         self.result_recovery_run_record: dict[str, object] | None = None

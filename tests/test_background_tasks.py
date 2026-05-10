@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
+import json
 import sys
 import threading
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -96,6 +98,60 @@ class BackgroundTaskCenterTests(unittest.TestCase):
     def test_summarize_task_result_prefers_known_fields(self) -> None:
         self.assertEqual(summarize_task_result({"summary_text": "done", "ok": True}), "done")
         self.assertIn("ok=True", summarize_task_result({"ok": True, "record_count": 3}))
+
+    def test_task_history_persists_across_centers(self) -> None:
+        completed = threading.Event()
+        with TemporaryDirectory() as tmp_dir:
+            history_path = Path(tmp_dir) / "background_tasks.json"
+            center = BackgroundTaskCenter(dispatcher=lambda callback: callback(), history_path=history_path)
+            try:
+                center.submit(
+                    key="persisted",
+                    label="Persisted",
+                    func=lambda: {"summary_text": "stored"},
+                    on_success=lambda _result, _record: completed.set(),
+                )
+                self.assertTrue(completed.wait(5))
+            finally:
+                center.shutdown()
+
+            reloaded = BackgroundTaskCenter(dispatcher=lambda callback: callback(), history_path=history_path)
+            try:
+                snapshot = reloaded.snapshot()
+                self.assertEqual(snapshot[0]["key"], "persisted")
+                self.assertEqual(snapshot[0]["status"], "success")
+                self.assertEqual(snapshot[0]["result_summary"], "stored")
+            finally:
+                reloaded.shutdown()
+
+    def test_running_history_is_marked_cancelled_on_restart(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            history_path = Path(tmp_dir) / "background_tasks.json"
+            history_path.write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "task_id": "task-000009",
+                                "key": "stale",
+                                "label": "Stale",
+                                "mode": "process",
+                                "status": "running",
+                                "started_at": "2026-05-10 10:00:00",
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            center = BackgroundTaskCenter(dispatcher=lambda callback: callback(), history_path=history_path)
+            try:
+                snapshot = center.snapshot()
+                self.assertEqual(snapshot[0]["status"], "cancelled")
+                self.assertEqual(snapshot[0]["error"], "interrupted_by_app_restart")
+            finally:
+                center.shutdown()
 
 
 if __name__ == "__main__":

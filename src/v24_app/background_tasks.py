@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import itertools
+import json
 import threading
 import time
 import traceback
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable, Literal
 
 
@@ -78,17 +80,20 @@ class BackgroundTaskCenter:
         max_process_workers: int = 2,
         dispatcher: Callable[[Callable[[], None]], None] | None = None,
         history_limit: int = 80,
+        history_path: Path | str | None = None,
     ) -> None:
         self._thread_pool = ThreadPoolExecutor(max_workers=max(1, int(max_thread_workers)))
         self._process_pool: ProcessPoolExecutor | None = None
         self._max_process_workers = max(1, int(max_process_workers))
         self._dispatcher = dispatcher or (lambda callback: callback())
         self._history_limit = max(10, int(history_limit))
+        self._history_path = Path(history_path) if history_path is not None else None
         self._counter = itertools.count(1)
         self._lock = threading.RLock()
         self._records: dict[str, BackgroundTaskRecord] = {}
         self._order: list[str] = []
         self._active_keys: set[str] = set()
+        self._load_history()
 
     def submit(
         self,
@@ -122,6 +127,7 @@ class BackgroundTaskCenter:
             self._order.insert(0, task_id)
             self._active_keys.add(resolved_key)
             self._trim_locked()
+            self._persist_locked()
 
         call_kwargs = dict(kwargs or {})
         executor = self._thread_pool if mode == "thread" else self._process_executor()
@@ -175,6 +181,7 @@ class BackgroundTaskCenter:
                 record.error = str(exc)
                 record.metadata["traceback"] = traceback.format_exc(limit=6)
                 self._active_keys.discard(record.key)
+                self._persist_locked()
                 callback_record = BackgroundTaskRecord(**record.as_dict())
             if on_error is not None:
                 self._dispatcher(lambda exc=exc, record=callback_record: on_error(exc, record))
@@ -187,6 +194,7 @@ class BackgroundTaskCenter:
             record.elapsed_seconds = round(float(elapsed), 4)
             record.result_summary = summarize_task_result(result)
             self._active_keys.discard(record.key)
+            self._persist_locked()
             callback_record = BackgroundTaskRecord(**record.as_dict())
         if on_success is not None:
             self._dispatcher(lambda result=result, record=callback_record: on_success(result, record))
@@ -200,3 +208,74 @@ class BackgroundTaskCenter:
             record = self._records.get(task_id)
             if record is not None and record.status not in {"queued", "running"}:
                 self._records.pop(task_id, None)
+
+    def _load_history(self) -> None:
+        if self._history_path is None or not self._history_path.exists():
+            return
+        try:
+            payload = json.loads(self._history_path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        items = payload.get("items", []) if isinstance(payload, dict) else []
+        if not isinstance(items, list):
+            return
+        loaded: list[BackgroundTaskRecord] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            try:
+                record = BackgroundTaskRecord(
+                    task_id=str(item.get("task_id") or ""),
+                    key=str(item.get("key") or "task"),
+                    label=str(item.get("label") or item.get("key") or "task"),
+                    mode="process" if str(item.get("mode") or "") == "process" else "thread",
+                    status=str(item.get("status") or "queued"),  # type: ignore[arg-type]
+                    started_at=str(item.get("started_at") or ""),
+                    finished_at=str(item.get("finished_at") or ""),
+                    elapsed_seconds=float(item["elapsed_seconds"]) if item.get("elapsed_seconds") is not None else None,
+                    error=str(item.get("error") or ""),
+                    result_summary=str(item.get("result_summary") or ""),
+                    metadata=item.get("metadata") if isinstance(item.get("metadata"), dict) else {},
+                )
+            except Exception:
+                continue
+            if not record.task_id:
+                continue
+            if record.status in {"queued", "running"}:
+                record.status = "cancelled"
+                record.finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                record.error = "interrupted_by_app_restart"
+            loaded.append(record)
+        with self._lock:
+            for record in loaded[: self._history_limit]:
+                self._records[record.task_id] = record
+                self._order.append(record.task_id)
+            self._sync_counter_from_records_locked()
+            self._persist_locked()
+
+    def _sync_counter_from_records_locked(self) -> None:
+        max_seen = 0
+        for task_id in self._records:
+            if not task_id.startswith("task-"):
+                continue
+            try:
+                max_seen = max(max_seen, int(task_id.split("-", 1)[1]))
+            except Exception:
+                continue
+        self._counter = itertools.count(max_seen + 1)
+
+    def _persist_locked(self) -> None:
+        if self._history_path is None:
+            return
+        try:
+            self._history_path.parent.mkdir(parents=True, exist_ok=True)
+            items = [self._records[task_id].as_dict() for task_id in self._order if task_id in self._records]
+            payload = {
+                "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "items": items[: self._history_limit],
+            }
+            tmp_path = self._history_path.with_suffix(self._history_path.suffix + ".tmp")
+            tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp_path.replace(self._history_path)
+        except Exception:
+            return
