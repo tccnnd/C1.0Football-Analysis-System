@@ -685,6 +685,175 @@ def export_statsbomb_review_training_samples(
     return {**summary, "output_path": str(resolved_output)}
 
 
+def _statsbomb_baseline_items(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    items = payload.get("items")
+    return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+
+
+def _statsbomb_side_from_margin(value: float, *, threshold: float = 0.0) -> str:
+    if value > threshold:
+        return "home"
+    if value < -threshold:
+        return "away"
+    return "draw"
+
+
+def _statsbomb_side_label(value: str) -> str:
+    if value == "home":
+        return "HOME"
+    if value == "away":
+        return "AWAY"
+    if value == "draw":
+        return "DRAW"
+    return "-"
+
+
+def _statsbomb_fewshot_tags(row: dict[str, Any], *, is_hit: bool, simulated_pick: str, actual: str) -> list[str]:
+    tags: list[str] = ["statsbomb_post_match_review"]
+    xg_aligned = bool(row.get("xg_aligned_with_score"))
+    shot_aligned = bool(row.get("shot_aligned_with_score"))
+    finishing_variance = bool(row.get("finishing_variance"))
+    xg_margin = _safe_float(row.get("xg_margin"), 0.0) or 0.0
+    shot_margin = _safe_float(row.get("shot_margin"), 0.0) or 0.0
+    if not is_hit:
+        tags.append("strategy_miss")
+    else:
+        tags.append("strategy_hit")
+    if finishing_variance:
+        tags.append("statsbomb_finishing_variance")
+    if not xg_aligned:
+        tags.append("xg_result_divergence")
+    if not shot_aligned:
+        tags.append("shot_result_divergence")
+    if abs(xg_margin) >= 0.35 and abs(shot_margin) >= 4:
+        tags.append("event_control_gap")
+    if simulated_pick != actual and simulated_pick in {"home", "away"}:
+        tags.append("xg_direction_failed")
+    deduped: list[str] = []
+    for tag in tags:
+        if tag not in deduped:
+            deduped.append(tag)
+    return deduped
+
+
+def build_statsbomb_sandbox_fewshot_samples(
+    baseline_payload: dict[str, Any],
+    *,
+    limit: int = 80,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    rows = _statsbomb_baseline_items(baseline_payload)
+    baseline_summary = baseline_payload.get("summary") if isinstance(baseline_payload.get("summary"), dict) else {}
+    samples: list[dict[str, Any]] = []
+    tag_counts: dict[str, int] = {}
+    for row in rows:
+        score_winner = _normalize_text(row.get("score_winner")).lower()
+        if score_winner not in {"home", "away", "draw"}:
+            score_winner = _statsbomb_side_from_margin(float(_safe_float(row.get("goal_margin"), 0.0) or 0.0))
+        xg_winner = _normalize_text(row.get("xg_winner")).lower()
+        if xg_winner not in {"home", "away", "draw"}:
+            xg_winner = _statsbomb_side_from_margin(float(_safe_float(row.get("xg_margin"), 0.0) or 0.0), threshold=0.25)
+        simulated_pick = xg_winner if xg_winner in {"home", "away", "draw"} else score_winner
+        actual = score_winner
+        is_hit = simulated_pick == actual
+        tags = _statsbomb_fewshot_tags(row, is_hit=is_hit, simulated_pick=simulated_pick, actual=actual)
+        for tag in tags:
+            tag_counts[tag] = tag_counts.get(tag, 0) + 1
+        match_title = f"{_normalize_text(row.get('home_team'))} vs {_normalize_text(row.get('away_team'))}"
+        prompt = (
+            "请作为 Evaluation Agent 复盘一场使用 StatsBomb 赛后事件的历史沙盒案例。\n"
+            f"比赛: {row.get('match_date') or '-'} | {row.get('league') or '-'} | {match_title}\n"
+            f"比分: {row.get('score') or '-'} | 模拟策略: 按 xG 方向选择 {_statsbomb_side_label(simulated_pick)} | 实际: {_statsbomb_side_label(actual)}\n"
+            f"xG: {float(_safe_float(row.get('home_xg'), 0.0) or 0.0):.2f}-{float(_safe_float(row.get('away_xg'), 0.0) or 0.0):.2f} | "
+            f"射门: {_safe_int(row.get('home_shots'), 0)}-{_safe_int(row.get('away_shots'), 0)} | "
+            f"历史基线终结波动率: {baseline_summary.get('finishing_variance_rate') or '-'}"
+        )
+        if is_hit:
+            root_cause = "event_evidence_aligned"
+            recommendation = "保持赛后事件证据归档，作为模型正确样本。"
+            completion = "结论: 模拟策略命中。StatsBomb 事件方向与赛果一致，可作为正向复盘样本。"
+        else:
+            root_cause = "statsbomb_finishing_variance" if bool(row.get("finishing_variance")) else "event_result_divergence"
+            recommendation = "标记为赛后归因样本，不应回灌到赛前预测特征；用于提醒模型区分方向错误与终结波动。"
+            completion = (
+                "结论: 模拟策略未命中。StatsBomb 显示 xG 或射门质量支持模拟方向，但赛果相反，"
+                "应优先归因为终结波动/事件与结果背离，而不是简单扩大赛前预测惩罚。"
+            )
+        samples.append(
+            {
+                "id": f"statsbomb_sandbox:{row.get('source_match_id') or row.get('match_id') or len(samples) + 1}",
+                "prompt": prompt,
+                "completion": completion,
+                "labels": {
+                    "simulated_pick": _statsbomb_side_label(simulated_pick),
+                    "actual": _statsbomb_side_label(actual),
+                    "is_hit": bool(is_hit),
+                    "root_cause": root_cause,
+                    "tags": tags,
+                },
+                "features": {
+                    "home_xg": float(_safe_float(row.get("home_xg"), 0.0) or 0.0),
+                    "away_xg": float(_safe_float(row.get("away_xg"), 0.0) or 0.0),
+                    "xg_margin": float(_safe_float(row.get("xg_margin"), 0.0) or 0.0),
+                    "home_shots": float(_safe_float(row.get("home_shots"), 0.0) or 0.0),
+                    "away_shots": float(_safe_float(row.get("away_shots"), 0.0) or 0.0),
+                    "shot_margin": float(_safe_float(row.get("shot_margin"), 0.0) or 0.0),
+                    "event_count": float(_safe_float(row.get("event_count"), 0.0) or 0.0),
+                },
+                "meta": {
+                    "source": "statsbomb_event_sandbox",
+                    "match_id": row.get("match_id"),
+                    "source_match_id": row.get("source_match_id"),
+                    "match_date": row.get("match_date"),
+                    "league": row.get("league"),
+                    "season": row.get("season"),
+                    "home_team": row.get("home_team"),
+                    "away_team": row.get("away_team"),
+                    "score": row.get("score"),
+                    "recommendation": recommendation,
+                },
+            }
+        )
+    samples.sort(
+        key=lambda item: (
+            not bool(item.get("labels", {}).get("is_hit") is False),
+            "statsbomb_finishing_variance" not in item.get("labels", {}).get("tags", []),
+            -abs(float(item.get("features", {}).get("xg_margin") or 0.0)),
+            str(item.get("meta", {}).get("match_date") or ""),
+        )
+    )
+    limited = samples[: max(0, int(limit))]
+    summary = {
+        "sample_count": len(limited),
+        "source_count": len(rows),
+        "baseline_match_count": _safe_int(baseline_summary.get("match_count"), len(rows)),
+        "tag_counts": dict(sorted(tag_counts.items())),
+        "leakage_note": "These few-shot samples use post-match event data and must not be used as pre-match prediction features.",
+    }
+    return limited, summary
+
+
+def export_statsbomb_sandbox_fewshot_samples(
+    project_dir: Path,
+    baseline_payload: dict[str, Any],
+    output_path: Path | None = None,
+    *,
+    limit: int = 80,
+) -> dict[str, Any]:
+    samples, summary = build_statsbomb_sandbox_fewshot_samples(baseline_payload, limit=limit)
+    resolved_output = output_path or project_dir / "data" / "state" / "statsbomb_sandbox_fewshot_samples.json"
+    resolved_output.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "source": "StatsBomb Open Data event baseline",
+        "purpose": "evaluation_agent_fewshot_post_match_review",
+        "leakage_note": summary["leakage_note"],
+        "summary": summary,
+        "items": samples,
+    }
+    resolved_output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {**summary, "output_path": str(resolved_output)}
+
+
 def _read_input_records(input_path: Path) -> list[dict[str, Any]]:
     suffix = input_path.suffix.lower()
     if suffix == ".csv":
