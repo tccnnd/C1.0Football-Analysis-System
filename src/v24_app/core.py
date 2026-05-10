@@ -7599,6 +7599,7 @@ def calibrate_play_model_policy_now(
 def run_play_model_backtest(
     validation_ratio: float = 0.20,
     min_validation_samples: int = 1000,
+    max_validation_samples: int = 1000,
     write_report: bool = True,
 ) -> dict:
     _, validation_items = _validation_split_samples(
@@ -7607,6 +7608,9 @@ def run_play_model_backtest(
     )
     if not validation_items:
         return {"ok": False, "reason": "insufficient_validation_split"}
+    original_validation_count = len(validation_items)
+    if max_validation_samples > 0 and len(validation_items) > int(max_validation_samples):
+        validation_items = validation_items[-int(max_validation_samples):]
 
     metrics = {
         "handicap_baseline": {"hits": 0, "total": 0},
@@ -7741,6 +7745,9 @@ def run_play_model_backtest(
         "reason": "ok",
         "validation": {
             "sample_count": len(validation_items),
+            "original_sample_count": original_validation_count,
+            "max_validation_samples": int(max_validation_samples),
+            "truncated": len(validation_items) < original_validation_count,
             "date_start": min(dates) if dates else None,
             "date_end": max(dates) if dates else None,
             "ratio": round(len(validation_items) / max(len(STATE_STORE.load_xgb_samples()), 1), 4),
