@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import shutil
+import subprocess
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -46,6 +49,8 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = PACKAGE_DIR.parent.parent
 CACHE_FILE = PROJECT_DIR / "data" / "cache" / "500_matches_today.json"
 REPORT_DIR = PROJECT_DIR / "reports"
+VIDEO_REVIEW_DIR = PROJECT_DIR / "data" / "video_reviews"
+VIDEO_REVIEW_FILE = PROJECT_DIR / "data" / "state" / "video_reviews.json"
 ENSEMBLE_WEIGHTS_FILE = PROJECT_DIR / "data" / "models" / "ensemble_weights_v1.json"
 PLAY_THRESHOLDS_FILE = PROJECT_DIR / "data" / "models" / "play_thresholds_v1.json"
 PLAY_MODEL_POLICY_FILE = PROJECT_DIR / "data" / "models" / "play_model_policy_v1.json"
@@ -9508,6 +9513,238 @@ def get_prediction_snapshot_migration_report() -> dict:
     return STATE_STORE.load_snapshot_migration_report()
 
 
+def _load_video_review_items() -> list[dict]:
+    if not VIDEO_REVIEW_FILE.exists():
+        return []
+    try:
+        payload = json.loads(VIDEO_REVIEW_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    items = payload.get("items") if isinstance(payload, dict) else payload
+    return [dict(item) for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+
+
+def _save_video_review_items(items: list[dict], limit: int = 500) -> None:
+    VIDEO_REVIEW_FILE.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "items": items[-max(1, int(limit)):],
+    }
+    VIDEO_REVIEW_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def get_video_reviews(limit: int = 50) -> list[dict]:
+    items = _load_video_review_items()
+    items.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+    if limit <= 0:
+        return items
+    return items[: max(0, int(limit))]
+
+
+def get_video_review_for_match(match_id: str | object) -> dict:
+    resolved_id = str(match_id or "")
+    for item in get_video_reviews(limit=0):
+        if str(item.get("match_id") or "") == resolved_id:
+            return dict(item)
+    return {}
+
+
+def _video_file_metadata(video_path: Path) -> dict:
+    stat = video_path.stat()
+    payload: dict[str, object] = {
+        "path": str(video_path),
+        "filename": video_path.name,
+        "size_bytes": int(stat.st_size),
+        "modified_at": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        payload["probe_status"] = "ffprobe_unavailable"
+        return payload
+    command = [
+        ffprobe,
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height,duration,avg_frame_rate",
+        "-of",
+        "json",
+        str(video_path),
+    ]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=20, check=False)
+        data = json.loads(result.stdout or "{}")
+        stream = data.get("streams", [{}])[0] if isinstance(data.get("streams"), list) and data.get("streams") else {}
+        payload.update(
+            {
+                "probe_status": "ok" if result.returncode == 0 else "ffprobe_failed",
+                "width": _safe_int(stream.get("width")),
+                "height": _safe_int(stream.get("height")),
+                "duration_seconds": round(_safe_float(stream.get("duration"), default=0.0), 2),
+                "avg_frame_rate": str(stream.get("avg_frame_rate") or ""),
+            }
+        )
+    except Exception as exc:
+        payload["probe_status"] = "probe_error"
+        payload["probe_error"] = str(exc)
+    return payload
+
+
+def _video_review_frame_plan(duration_seconds: float | int | None, *, interval_seconds: int, max_frames: int) -> list[dict]:
+    interval = max(1, int(interval_seconds))
+    limit = max(1, int(max_frames))
+    duration = max(0.0, _safe_float(duration_seconds, default=0.0))
+    if duration <= 0:
+        return [{"index": index + 1, "timestamp_seconds": index * interval} for index in range(min(limit, 6))]
+    timestamps: list[int] = []
+    current = 0
+    while current <= int(duration) and len(timestamps) < limit:
+        timestamps.append(current)
+        current += interval
+    if timestamps and timestamps[-1] < int(duration) and len(timestamps) < limit:
+        timestamps.append(int(duration))
+    return [{"index": index + 1, "timestamp_seconds": stamp} for index, stamp in enumerate(timestamps[:limit])]
+
+
+def _extract_video_review_frames(video_path: Path, review_id: str, *, interval_seconds: int, max_frames: int) -> tuple[list[dict], dict]:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return [], {"status": "skipped", "reason": "ffmpeg_unavailable"}
+    frame_dir = VIDEO_REVIEW_DIR / review_id / "frames"
+    frame_dir.mkdir(parents=True, exist_ok=True)
+    interval = max(1, int(interval_seconds))
+    limit = max(1, int(max_frames))
+    output_pattern = str(frame_dir / "frame_%04d.jpg")
+    command = [
+        ffmpeg,
+        "-y",
+        "-i",
+        str(video_path),
+        "-vf",
+        f"fps=1/{interval}",
+        "-frames:v",
+        str(limit),
+        output_pattern,
+    ]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=120, check=False)
+    except Exception as exc:
+        return [], {"status": "failed", "reason": str(exc)}
+    frames = sorted(frame_dir.glob("frame_*.jpg"))
+    frame_items = [
+        {
+            "index": index + 1,
+            "path": str(path),
+            "timestamp_seconds": index * interval,
+        }
+        for index, path in enumerate(frames)
+    ]
+    return frame_items, {
+        "status": "ok" if result.returncode == 0 and frame_items else "failed",
+        "returncode": result.returncode,
+        "frame_count": len(frame_items),
+        "stderr_tail": (result.stderr or "")[-500:],
+    }
+
+
+def _video_review_ai_summary(settlement: dict, *, frame_count: int, notes: str) -> dict:
+    tags: list[str] = []
+    if settlement.get("is_correct") is False:
+        tags.append("prediction_direction_miss")
+    if settlement.get("ou_is_correct") is False:
+        tags.append("tempo_or_total_goals_miss")
+    if settlement.get("handicap_is_correct") is False:
+        tags.append("handicap_margin_miss")
+    if settlement.get("score_is_correct") is False:
+        tags.append("scoreline_path_miss")
+    if not tags:
+        tags.append("no_obvious_model_error")
+    return {
+        "agent": "VideoReview Agent",
+        "status": "frames_ready" if frame_count else "metadata_ready",
+        "vision_model_status": "pending_manual_or_llm_vision_review",
+        "frame_count": frame_count,
+        "prediction_alignment": "aligned" if settlement.get("is_correct") is True else "needs_review" if settlement.get("is_correct") is False else "unknown",
+        "error_causes": tags,
+        "operator_notes": notes,
+        "next_actions": [
+            "review_key_frames",
+            "mark_tactical_turning_points",
+            "feed_video_findings_into_evaluation_agent",
+        ],
+    }
+
+
+def create_video_review(
+    match_id: str,
+    video_path: str | Path,
+    *,
+    notes: str = "",
+    extract_frames: bool = False,
+    interval_seconds: int = 10,
+    max_frames: int = 36,
+) -> dict:
+    resolved_match_id = str(match_id or "").strip()
+    path = Path(video_path).expanduser()
+    if not resolved_match_id:
+        return {"ok": False, "reason": "missing_match_id"}
+    if not path.exists() or not path.is_file():
+        return {"ok": False, "reason": "video_file_not_found", "path": str(path)}
+    settlement = next(
+        (item for item in STATE_STORE.load_settlements() if isinstance(item, dict) and str(item.get("match_id") or "") == resolved_match_id),
+        {},
+    )
+    if not settlement:
+        return {"ok": False, "reason": "settlement_not_found", "match_id": resolved_match_id}
+
+    created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    review_seed = f"{resolved_match_id}|{path.resolve()}|{created_at}"
+    review_id = hashlib.sha1(review_seed.encode("utf-8")).hexdigest()[:16]
+    metadata = _video_file_metadata(path)
+    frame_plan = _video_review_frame_plan(
+        metadata.get("duration_seconds"),
+        interval_seconds=interval_seconds,
+        max_frames=max_frames,
+    )
+    frames: list[dict] = []
+    extraction = {"status": "not_requested", "reason": "metadata_only"}
+    if extract_frames:
+        frames, extraction = _extract_video_review_frames(
+            path,
+            review_id,
+            interval_seconds=interval_seconds,
+            max_frames=max_frames,
+        )
+    agent_review = _video_review_ai_summary(settlement, frame_count=len(frames), notes=str(notes or ""))
+    item = {
+        "review_id": review_id,
+        "created_at": created_at,
+        "match_id": resolved_match_id,
+        "match": {
+            "match_date": settlement.get("match_date"),
+            "league": settlement.get("league"),
+            "home_team": settlement.get("home_team"),
+            "away_team": settlement.get("away_team"),
+            "score": f"{settlement.get('home_goals', '-')}-{settlement.get('away_goals', '-')}",
+            "result": settlement.get("result"),
+        },
+        "video": metadata,
+        "frame_interval_seconds": max(1, int(interval_seconds)),
+        "max_frames": max(1, int(max_frames)),
+        "frame_plan": frame_plan,
+        "frames": frames,
+        "extraction": extraction,
+        "agent_review": agent_review,
+    }
+    items = _load_video_review_items()
+    items = [existing for existing in items if not (isinstance(existing, dict) and str(existing.get("review_id") or "") == review_id)]
+    items.append(item)
+    _save_video_review_items(items)
+    return {"ok": True, "reason": "ok", "review": item}
+
+
 def load_c1_comparison_marks_cache() -> dict[str, dict]:
     return STATE_STORE.load_c1_comparison_marks()
 
@@ -9816,11 +10053,19 @@ def settle_match_result(
 
 def get_recent_settlements(limit: int = 20) -> list[dict]:
     items = STATE_STORE.load_settlements()
+    video_reviews_by_match: dict[str, dict] = {}
+    try:
+        for review in get_video_reviews(limit=0):
+            match_id = str(review.get("match_id") or "")
+            if match_id and match_id not in video_reviews_by_match:
+                video_reviews_by_match[match_id] = review
+    except Exception:
+        video_reviews_by_match = {}
     try:
         history = STATE_STORE.load_analysis_history()
     except Exception:
         history = {}
-    if isinstance(history, dict):
+    if isinstance(history, dict) or video_reviews_by_match:
         enriched: list[dict] = []
         for item in items:
             if not isinstance(item, dict):
@@ -9845,6 +10090,10 @@ def get_recent_settlements(limit: int = 20) -> list[dict]:
                     for key, value in _agent_trace_settlement_fields(prediction).items():
                         if record.get(key) in (None, "", [], {}):
                             record[key] = value
+            video_review = video_reviews_by_match.get(str(record.get("match_id") or ""))
+            if isinstance(video_review, dict) and video_review:
+                record["video_review"] = video_review
+                record["video_review_status"] = (video_review.get("agent_review") or {}).get("status") if isinstance(video_review.get("agent_review"), dict) else "ready"
             enriched.append(record)
         items = enriched
     if limit <= 0:

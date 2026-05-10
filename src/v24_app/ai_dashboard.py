@@ -10,7 +10,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 from .background_tasks import BackgroundTaskCenter, BackgroundTaskRecord
 from .core import (
@@ -18,6 +18,7 @@ from .core import (
     apply_strategy_admission_policy_update,
     auto_settle_finished_matches,
     build_result_recovery_snapshot_audit,
+    create_video_review,
     fetch_matches_v24,
     get_play_model_policy_status,
     get_play_model_training_status,
@@ -2988,6 +2989,21 @@ class SmartMatchDashboard:
             review_tree.insert("", tk.END, iid=str(index), values=self._settlement_table_values(item))
         if not settlements:
             review_tree.insert("", tk.END, iid="empty", values=("-", "-", "\u6682\u65e0\u590d\u76d8\u7ed3\u7b97\u8bb0\u5f55", "-", "-", "-", "-", "-"))
+        review_actions = tk.Frame(left, bg=PANEL)
+        review_actions.pack(fill=tk.X, padx=18, pady=(0, 12))
+        tk.Button(
+            review_actions,
+            text="\u5bfc\u5165\u6240\u9009\u89c6\u9891\u590d\u76d8",
+            command=lambda: self.import_video_review_for_selection(review_tree, settlements),
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=14,
+            pady=6,
+        ).pack(side=tk.LEFT)
 
         tk.Label(right, text="\u95ed\u73af\u590d\u76d8", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
         detail = tk.Text(
@@ -3027,6 +3043,46 @@ class SmartMatchDashboard:
                     show_settlement_detail(0)
 
         review_tree.bind("<<TreeviewSelect>>", on_settlement_select)
+
+    def import_video_review_for_selection(self, review_tree: ttk.Treeview, settlements: list[dict]) -> None:
+        if not settlements:
+            messagebox.showinfo("\u89c6\u9891\u590d\u76d8", "\u5f53\u524d\u6ca1\u6709\u53ef\u7ed1\u5b9a\u7684\u5df2\u7ed3\u7b97\u8d5b\u4e8b\u3002")
+            return
+        selection = review_tree.selection()
+        if not selection:
+            messagebox.showinfo("\u89c6\u9891\u590d\u76d8", "\u8bf7\u5148\u9009\u62e9\u4e00\u573a\u590d\u76d8\u8d5b\u4e8b\u3002")
+            return
+        try:
+            settlement = settlements[int(selection[0])]
+        except (TypeError, ValueError, IndexError):
+            messagebox.showinfo("\u89c6\u9891\u590d\u76d8", "\u9009\u4e2d\u8d5b\u4e8b\u65e0\u6548\uff0c\u8bf7\u91cd\u65b0\u9009\u62e9\u3002")
+            return
+        path = filedialog.askopenfilename(
+            title="\u9009\u62e9\u672c\u5730\u6bd4\u8d5b\u56de\u653e\u6216\u96c6\u9526",
+            filetypes=[
+                ("\u89c6\u9891\u6587\u4ef6", "*.mp4 *.mkv *.mov *.avi *.webm"),
+                ("\u6240\u6709\u6587\u4ef6", "*.*"),
+            ],
+        )
+        if not path:
+            return
+        result = create_video_review(
+            str(settlement.get("match_id") or ""),
+            path,
+            notes="\u901a\u8fc7 APP \u590d\u76d8\u4e2d\u5fc3\u5bfc\u5165",
+            extract_frames=False,
+        )
+        if not bool(result.get("ok")):
+            messagebox.showerror("\u89c6\u9891\u590d\u76d8", f"\u5bfc\u5165\u5931\u8d25: {result.get('reason', '-')}")
+            return
+        review = result.get("review") if isinstance(result.get("review"), dict) else {}
+        frame_plan = review.get("frame_plan") if isinstance(review.get("frame_plan"), list) else []
+        self.status_var.set(f"\u89c6\u9891\u590d\u76d8\u5df2\u5efa\u7acb: {review.get('review_id', '-')} / \u8ba1\u5212\u62bd\u5e27 {len(frame_plan)}")
+        messagebox.showinfo(
+            "\u89c6\u9891\u590d\u76d8",
+            f"VideoReview Agent \u5df2\u5efa\u7acb\n\nreview_id: {review.get('review_id', '-')}\n\u8ba1\u5212\u62bd\u5e27: {len(frame_plan)}\n\u72b6\u6001: metadata_ready",
+        )
+        self.open_review_center()
 
     def open_recovery_run_center(self) -> None:
         self.current_view = "recovery_runs"
@@ -3620,6 +3676,25 @@ class SmartMatchDashboard:
         tags = self._settlement_bias_tags(item)
         suggestions = self._settlement_review_suggestions(tags)
         actual_score = f"{item.get('home_goals', '-')}-{item.get('away_goals', '-')}"
+        video_review = item.get("video_review") if isinstance(item.get("video_review"), dict) else {}
+        video_agent = video_review.get("agent_review") if isinstance(video_review.get("agent_review"), dict) else {}
+        video_payload = video_review.get("video") if isinstance(video_review.get("video"), dict) else {}
+        if video_review:
+            video_lines = [
+                "",
+                "AI 视频复盘",
+                f"- 状态: {video_agent.get('status') or '-'} / {video_agent.get('vision_model_status') or '-'}",
+                f"- 视频: {video_payload.get('filename') or '-'}",
+                f"- 抽帧: {len(video_review.get('frames') or [])} 已生成 / {len(video_review.get('frame_plan') or [])} 计划",
+                f"- 预测对齐: {video_agent.get('prediction_alignment') or '-'}",
+                f"- 视频归因: {', '.join(video_agent.get('error_causes') or []) if isinstance(video_agent.get('error_causes'), list) else '-'}",
+            ]
+        else:
+            video_lines = [
+                "",
+                "AI 视频复盘",
+                "- 暂无本场视频复盘。可导入本地录像/集锦后，由 VideoReview Agent 生成抽帧计划和复盘归因。",
+            ]
         allowlist_lines: list[str] = []
         if str(item.get("strategy_allowlist_decision") or "") == "allow":
             allowlist_lines = [
@@ -3656,6 +3731,7 @@ class SmartMatchDashboard:
             "",
             "\u6539\u8fdb\u5efa\u8bae",
             *[f"- {suggestion}" for suggestion in suggestions],
+            *video_lines,
         ]
         return "\n".join(lines)
 
