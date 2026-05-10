@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import messagebox, ttk
 
+from .background_tasks import BackgroundTaskCenter, BackgroundTaskRecord
 from .core import (
     AppMatch,
     apply_strategy_admission_policy_update,
@@ -30,6 +31,8 @@ from .core import (
     rollback_strategy_admission_policy,
 )
 from .ui_modules import (
+    build_background_task_rows,
+    build_background_task_summary,
     build_result_recovery_quality_alerts,
     build_result_recovery_review_summary,
     build_result_recovery_run_detail,
@@ -810,6 +813,11 @@ class SmartMatchDashboard:
         self.current_nav_index = 0
         self.current_view = "home"
         self.result_recovery_running = False
+        self.background_tasks = BackgroundTaskCenter(
+            max_thread_workers=4,
+            max_process_workers=2,
+            dispatcher=lambda callback: self.root.after(0, callback),
+        )
         self.result_recovery_buttons: list[tk.Button] = []
         self.result_recovery_run_record: dict[str, object] | None = None
         self.show_all_matches = False
@@ -836,9 +844,17 @@ class SmartMatchDashboard:
 
         self._mark_stale_result_recovery_runs()
         self._build_layout()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.refresh()
         self._schedule_auto_refresh()
         self._schedule_auto_result_recovery()
+
+    def _on_close(self) -> None:
+        try:
+            self.background_tasks.shutdown()
+        except Exception:
+            pass
+        self.root.destroy()
 
     def _build_layout(self) -> None:
         self.shell = tk.Frame(self.root, bg=BG)
@@ -2329,6 +2345,8 @@ class SmartMatchDashboard:
         top.pack(fill=tk.X, pady=(0, 16))
         risk_counts = self._risk_counts()
         load_report = self.last_load_diagnostics if isinstance(self.last_load_diagnostics, dict) else {}
+        background_task_snapshot = self.background_tasks.snapshot(limit=10)
+        background_task_summary = build_background_task_summary(background_task_snapshot)
         load_failure_count = int(load_report.get("failure_count", 0) or 0)
         snapshot_failure_count = int(load_report.get("snapshot_failure_count", 0) or 0)
         fetched_count = int(load_report.get("fetched_count", len(self.rows)) or 0)
@@ -2348,6 +2366,8 @@ class SmartMatchDashboard:
             ("\u6700\u8fd1\u56de\u6536", str(recovery_summary.get("latest_status_label") or "-"), GREEN if recovery_summary.get("latest_status") == "success" else RED if recovery_summary.get("latest_status") == "failed" else YELLOW),
             ("\u56de\u6536\u65b0\u7ed3\u7b97", str(recovery_summary.get("latest_new_settled", 0)), "#7aa2ff"),
             ("\u56de\u6536\u544a\u8b66", str(len(recovery_quality_alerts)), RED if any(item.get("severity") == "high" for item in recovery_quality_alerts) else YELLOW if recovery_quality_alerts else GREEN),
+            ("\u540e\u53f0\u4efb\u52a1", str(background_task_summary.get("running", 0)), YELLOW if int(background_task_summary.get("running", 0) or 0) else GREEN),
+            ("\u591a\u8fdb\u7a0b", str(background_task_summary.get("process_running", 0)), "#7aa2ff"),
         ]
         for label, value, color in metrics:
             self._detail_metric(top, label, value, color)
@@ -2420,6 +2440,14 @@ class SmartMatchDashboard:
             tk.Label(left, text="\u56de\u6536\u8d28\u91cf\u544a\u8b66", bg=PANEL, fg=YELLOW, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
             for alert in recovery_quality_alerts[:3]:
                 self._alert_card(left, str(alert.get("title") or "-"), str(alert.get("body") or "-"), tone=str(alert.get("tone") or "warning"))
+
+        tk.Label(right, text="\u540e\u53f0\u4efb\u52a1", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
+        task_rows = build_background_task_rows(background_task_snapshot, limit=6)
+        if task_rows:
+            for row in task_rows:
+                self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
+        else:
+            self._kv_row(right, "\u4efb\u52a1\u961f\u5217", "\u6682\u65e0\u540e\u53f0\u4efb\u52a1")
 
         tk.Label(right, text="\u8fd0\u884c\u65e5\u5fd7", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
         logbox = tk.Listbox(
@@ -2820,18 +2848,30 @@ class SmartMatchDashboard:
         if getattr(self, "current_view", "") == "recovery_runs":
             self.open_recovery_run_center()
 
-        def worker() -> None:
-            started = time.perf_counter()
-            try:
-                result = auto_settle_finished_matches(prediction_cache=prediction_cache, lookback_days=lookback_days)
-            except Exception as exc:
-                elapsed = time.perf_counter() - started
-                self.root.after(0, lambda exc=exc, elapsed=elapsed: self._finish_result_recovery_error(exc, elapsed, show_popup=show_popup))
-                return
-            elapsed = time.perf_counter() - started
-            self.root.after(0, lambda: self._finish_result_recovery(result, elapsed, show_popup=show_popup))
-
-        threading.Thread(target=worker, daemon=True).start()
+        task = self.background_tasks.submit(
+            key="result_recovery",
+            label="\u8d5b\u679c\u81ea\u52a8\u56de\u6536",
+            func=auto_settle_finished_matches,
+            kwargs={"prediction_cache": prediction_cache, "lookback_days": lookback_days},
+            mode="thread",
+            metadata={"trigger": trigger, "lookback_days": lookback_days},
+            on_success=lambda result, record: self._finish_result_recovery(
+                result if isinstance(result, dict) else {},
+                float(record.elapsed_seconds or 0.0),
+                show_popup=show_popup,
+            ),
+            on_error=lambda exc, record: self._finish_result_recovery_error(
+                exc,
+                float(record.elapsed_seconds or 0.0),
+                show_popup=show_popup,
+            ),
+        )
+        if task is None:
+            self.result_recovery_running = False
+            self._set_result_recovery_controls_state()
+            message = "\u8d5b\u679c\u56de\u6536\u4efb\u52a1\u5df2\u5728\u540e\u53f0\u961f\u5217\u4e2d\u8fd0\u884c\u3002"
+            self.status_var.set(message)
+            self._log_event("INFO", message)
 
     def _finish_result_recovery(self, result: dict, elapsed: float, show_popup: bool = True) -> None:
         new_settled = int(result.get("new_settled", 0) or 0)
