@@ -67,6 +67,7 @@ class CoreVideoReviewTests(unittest.TestCase):
         self.assertEqual(review["agent_review"]["agent"], "VideoReview Agent")
         self.assertEqual(review["agent_review"]["prediction_alignment"], "needs_review")
         self.assertIn("tempo_or_total_goals_miss", review["agent_review"]["error_causes"])
+        self.assertIn("narrative_review", review["agent_review"])
         self.assertEqual(len(reviews), 1)
         self.assertEqual(enriched[0]["video_review"]["review_id"], review["review_id"])
         self.assertEqual(enriched[0]["video_review_status"], "metadata_ready")
@@ -166,6 +167,11 @@ class CoreVideoReviewTests(unittest.TestCase):
         self.assertEqual(review["agent_review"]["status"], "visual_review_ready")
         self.assertEqual(review["agent_review"]["vision_model_status"], "offline_visual_evidence_ready")
         self.assertTrue(set(review["visual_analysis"]["tags"]) & set(review["agent_review"]["error_causes"]))
+        narrative = review["agent_review"]["narrative_review"]
+        self.assertEqual(narrative["status"], "ready")
+        self.assertTrue(narrative["findings"])
+        self.assertIn("Evaluation Agent", narrative["recommendation"])
+        self.assertIn("Alpha vs Bravo", narrative["summary_text"])
 
 
 if __name__ == "__main__":

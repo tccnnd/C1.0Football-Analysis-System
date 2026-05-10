@@ -3760,6 +3760,7 @@ class SmartMatchDashboard:
         video_agent = video_review.get("agent_review") if isinstance(video_review.get("agent_review"), dict) else {}
         video_payload = video_review.get("video") if isinstance(video_review.get("video"), dict) else {}
         visual_analysis = video_review.get("visual_analysis") if isinstance(video_review.get("visual_analysis"), dict) else {}
+        narrative = video_agent.get("narrative_review") if isinstance(video_agent.get("narrative_review"), dict) else {}
         if video_review:
             video_lines = [
                 "",
@@ -3769,6 +3770,8 @@ class SmartMatchDashboard:
                 f"- 抽帧: {len(video_review.get('frames') or [])} 已生成 / {len(video_review.get('frame_plan') or [])} 计划",
                 f"- 视觉证据: {visual_analysis.get('summary_text') or video_agent.get('visual_summary') or '-'}",
                 f"- 关键帧: {len(visual_analysis.get('key_frames') or []) if isinstance(visual_analysis.get('key_frames'), list) else video_agent.get('key_frame_count') or 0}",
+                f"- 复盘结论: {narrative.get('summary_text') or video_agent.get('narrative_summary') or '-'}",
+                f"- 处理建议: {narrative.get('recommendation') or '-'}",
                 f"- 预测对齐: {video_agent.get('prediction_alignment') or '-'}",
                 f"- 视频归因: {', '.join(video_agent.get('error_causes') or []) if isinstance(video_agent.get('error_causes'), list) else '-'}",
             ]

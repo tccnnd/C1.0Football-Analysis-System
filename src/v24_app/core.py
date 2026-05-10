@@ -9847,6 +9847,49 @@ def _video_review_frame_visual_analysis(frames: list[dict]) -> dict:
     }
 
 
+def _video_review_narrative(settlement: dict, visual_analysis: dict, error_causes: list[str]) -> dict:
+    match_title = f"{settlement.get('home_team') or '-'} vs {settlement.get('away_team') or '-'}"
+    score = f"{settlement.get('home_goals', '-')}-{settlement.get('away_goals', '-')}"
+    visual = visual_analysis if isinstance(visual_analysis, dict) else {}
+    tags = [str(tag) for tag in error_causes if str(tag)]
+    key_frames = [row for row in visual.get("key_frames", []) if isinstance(row, dict)] if isinstance(visual.get("key_frames"), list) else []
+    findings: list[str] = []
+    if "prediction_direction_miss" in tags:
+        findings.append("赛果方向与赛前判断不一致，需要复核模型对强弱方向、临场状态和盘口风险的处理。")
+    if "handicap_margin_miss" in tags:
+        findings.append("让球判断未命中，重点检查模型胜差与让球线的一致性。")
+    if "tempo_or_total_goals_miss" in tags:
+        findings.append("大小球判断未命中，重点复核比赛节奏、转换频率和射门质量估计。")
+    if "scoreline_path_miss" in tags:
+        findings.append("比分路径偏差较大，后续应对进球时间段和比分演化做单独归因。")
+    if "high_scene_change" in tags:
+        findings.append("关键帧之间画面变化较高，录像可能包含多段攻防转换或镜头切换，适合优先抽取转折点。")
+    if "low_motion_evidence" in tags:
+        findings.append("关键帧变化较低，当前抽帧更像静态片段，建议补充更密集抽帧或人工标注关键回合。")
+    if "low_detail_frames" in tags:
+        findings.append("部分帧细节不足，视觉证据适合作为辅助线索，不宜单独作为战术结论。")
+    if "low_light_evidence" in tags or "overexposed_evidence" in tags:
+        findings.append("画面曝光存在风险，复盘时需要谨慎解释球员站位和局部对抗。")
+    if not findings:
+        findings.append("当前视频证据未显示明显异常，优先作为赛后复盘补充材料。")
+
+    evidence_lines = [
+        f"视觉摘要: {visual.get('summary_text') or '-'}",
+        f"可读关键帧: {visual.get('usable_frame_count', 0)}/{visual.get('frame_count', 0)}",
+        f"关键帧索引: {', '.join(str(row.get('index')) for row in key_frames[:5]) if key_frames else '-'}",
+    ]
+    recommendation = "进入 Evaluation Agent 复盘记忆"
+    if "low_motion_evidence" in tags or "low_detail_frames" in tags:
+        recommendation = "先补充抽帧或人工标注，再进入 Evaluation Agent 复盘记忆"
+    return {
+        "status": "ready" if visual.get("status") == "ready" else "needs_more_evidence",
+        "summary_text": f"{match_title} {score} | {findings[0]}",
+        "findings": findings[:8],
+        "evidence": evidence_lines,
+        "recommendation": recommendation,
+    }
+
+
 def _video_review_ai_summary(settlement: dict, *, frame_count: int, notes: str, visual_analysis: dict | None = None) -> dict:
     tags: list[str] = []
     if settlement.get("is_correct") is False:
@@ -9867,6 +9910,7 @@ def _video_review_ai_summary(settlement: dict, *, frame_count: int, notes: str, 
                 tags.append(tag)
     visual_status = str(visual.get("status") or "")
     vision_model_status = "offline_visual_evidence_ready" if visual_status == "ready" else "pending_manual_or_llm_vision_review"
+    narrative = _video_review_narrative(settlement, visual, tags)
     return {
         "agent": "VideoReview Agent",
         "status": "visual_review_ready" if visual_status == "ready" else "frames_ready" if frame_count else "metadata_ready",
@@ -9874,6 +9918,8 @@ def _video_review_ai_summary(settlement: dict, *, frame_count: int, notes: str, 
         "frame_count": frame_count,
         "visual_summary": visual.get("summary_text") or "-",
         "key_frame_count": len(visual.get("key_frames") or []) if isinstance(visual.get("key_frames"), list) else 0,
+        "narrative_review": narrative,
+        "narrative_summary": narrative.get("summary_text") or "-",
         "prediction_alignment": "aligned" if settlement.get("is_correct") is True else "needs_review" if settlement.get("is_correct") is False else "unknown",
         "error_causes": tags,
         "operator_notes": notes,
