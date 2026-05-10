@@ -30,6 +30,8 @@ from .main_list_sync import (
 from .c1_apply_flow import resolve_selected_prediction_for_details, sync_tree_c1_action_column
 from .c1_availability_flow import (
     build_c1_availability_provider_status_lines,
+    build_c1_release_guard_report_filename,
+    build_c1_release_guard_report_lines,
     build_c1_release_review_availability_guard,
     build_c1_release_review_guard_status_text,
     build_c1_snapshot_import_message_text,
@@ -278,6 +280,8 @@ __all__ = [
     "resolve_selected_prediction_for_details",
     "sync_tree_c1_action_column",
     "build_c1_availability_provider_status_lines",
+    "build_c1_release_guard_report_filename",
+    "build_c1_release_guard_report_lines",
     "build_c1_release_review_availability_guard",
     "build_c1_release_review_guard_status_text",
     "build_c1_snapshot_import_message_text",

@@ -35,6 +35,8 @@ from .ui_modules import (
     build_c1_apply_dialog_text,
     build_c1_apply_status_text,
     build_c1_availability_provider_status_lines,
+    build_c1_release_guard_report_filename,
+    build_c1_release_guard_report_lines,
     build_c1_release_review_availability_guard,
     build_c1_release_review_guard_status_text,
     build_c1_snapshot_import_message_text,
@@ -913,6 +915,17 @@ class FootballPredictionApp:
         if hasattr(self, "c1_release_guard_var"):
             self.c1_release_guard_var.set(build_c1_release_review_guard_status_text(current_guard))
         return current_guard
+
+    def _write_c1_release_guard_block_report(self, guard: dict, *, matches_count: int) -> Path:
+        report_dir = PROJECT_ROOT / "reports"
+        report_dir.mkdir(parents=True, exist_ok=True)
+        now = datetime.now()
+        report_path = report_dir / build_c1_release_guard_report_filename(now)
+        report_path.write_text(
+            "\n".join(build_c1_release_guard_report_lines(guard, matches_count=matches_count, generated_at=now)),
+            encoding="utf-8",
+        )
+        return report_path
 
     def _restore_c1_marks_for_visible_matches(self) -> int:
         if not hasattr(self, "c1_comparison_marks"):
@@ -1864,8 +1877,12 @@ def _app_run_c1_release_review(self) -> None:
         self.c1_release_rows = []
         self.c1_release_summary = {"availability_guard": guard}
         self._apply_runtime_mode_default_filter()
-        self.status_var.set(str(guard.get("status_text") or "C1 放行评估已阻止"))
-        messagebox.showwarning("C1 放行评估", str(guard.get("message") or "C1 阵容源质量门控未通过。"))
+        report_path = self._write_c1_release_guard_block_report(guard, matches_count=len(matches))
+        self.status_var.set(f"{guard.get('status_text') or 'C1 放行评估已阻止'} | {report_path.name}")
+        messagebox.showwarning(
+            "C1 放行评估",
+            f"{guard.get('message') or 'C1 阵容源质量门控未通过。'}\n\n审计报告: {report_path}",
+        )
         return
     self._run_background(
         task_key="c1_release_review",
@@ -1881,6 +1898,7 @@ def _app_run_c1_release_review_worker(matches: list[AppMatch]) -> dict:
     if not bool(guard.get("allowed", True)):
         return {
             "total_matches": 0,
+            "requested_matches": len(matches),
             "rows": [],
             "summary": {
                 "release_allowed_count": 0,
@@ -1941,8 +1959,13 @@ def _app_refresh_release_gate_after_analysis(self, matches: list[AppMatch]) -> N
     if bool(result.get("blocked_by_availability_guard")):
         guard = self.c1_release_summary.get("availability_guard", {})
         self._refresh_c1_release_guard_status(guard if isinstance(guard, dict) else None)
+        if isinstance(guard, dict):
+            report_path = self._write_c1_release_guard_block_report(guard, matches_count=len(matches))
+        else:
+            report_path = None
         if hasattr(self, "status_var"):
-            self.status_var.set(str(guard.get("status_text") or "C1 放行评估已阻止"))
+            suffix = f" | {report_path.name}" if report_path is not None else ""
+            self.status_var.set(f"{guard.get('status_text') or 'C1 放行评估已阻止'}{suffix}")
         self._apply_runtime_mode_default_filter()
         return
     for match in matches:
@@ -1981,8 +2004,20 @@ def _app_apply_c1_release_review_result(self, result: dict) -> None:
     self._apply_runtime_mode_default_filter()
     if isinstance(result, dict) and bool(result.get("blocked_by_availability_guard")):
         guard = self.c1_release_summary.get("availability_guard", {})
-        self.status_var.set(str(guard.get("status_text") or "C1 放行评估已阻止"))
-        messagebox.showwarning("C1 放行评估", str(result.get("block_message") or "C1 阵容源质量门控未通过。"))
+        report_path = (
+            self._write_c1_release_guard_block_report(
+                guard,
+                matches_count=int(result.get("requested_matches", result.get("total_matches", 0)) or 0),
+            )
+            if isinstance(guard, dict)
+            else None
+        )
+        suffix = f" | {report_path.name}" if report_path is not None else ""
+        self.status_var.set(f"{guard.get('status_text') or 'C1 放行评估已阻止'}{suffix}")
+        message = str(result.get("block_message") or "C1 阵容源质量门控未通过。")
+        if report_path is not None:
+            message += f"\n\n审计报告: {report_path}"
+        messagebox.showwarning("C1 放行评估", message)
         return
     self.status_var.set(
         build_release_review_status_text(

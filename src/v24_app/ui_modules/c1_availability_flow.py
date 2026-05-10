@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -133,6 +134,42 @@ def build_c1_release_review_guard_status_text(guard: Mapping[str, object] | None
     if status in {"warn", "missing"}:
         return f"放行门控: 可运行 | smoke={status}"
     return f"放行门控: 可运行 | smoke={status or '-'}"
+
+
+def build_c1_release_guard_report_filename(now: datetime | None = None) -> str:
+    current = now or datetime.now()
+    return f"c1_release_guard_block_{current.strftime('%Y%m%d_%H%M%S')}.md"
+
+
+def build_c1_release_guard_report_lines(
+    guard: Mapping[str, object] | None,
+    *,
+    matches_count: int,
+    generated_at: datetime | None = None,
+) -> list[str]:
+    item = guard if isinstance(guard, Mapping) else {}
+    issues = item.get("issues") if isinstance(item.get("issues"), list) else []
+    now = generated_at or datetime.now()
+    lines = [
+        "# C1 Release Review Guard Block",
+        "",
+        f"- Generated At: {now.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- Matches Requested: {int(matches_count)}",
+        f"- Allowed: {bool(item.get('allowed', True))}",
+        f"- Smoke: {item.get('status', '-')}",
+        f"- Quality Fail/Warn: {_safe_int(item.get('quality_failures', 0))}/{_safe_int(item.get('quality_warnings', 0))}",
+        f"- Status Text: {item.get('status_text', '-')}",
+        "",
+        "## Issues",
+    ]
+    if issues:
+        lines.extend(f"- {issue}" for issue in issues)
+    else:
+        lines.append("- none")
+    message = str(item.get("message") or "").strip()
+    if message:
+        lines.extend(["", "## Message", "```text", message, "```"])
+    return lines
 
 
 def get_c1_release_review_availability_guard(project_root: Path) -> dict:

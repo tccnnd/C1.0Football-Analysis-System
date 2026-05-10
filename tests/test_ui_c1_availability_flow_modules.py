@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 
@@ -14,6 +15,8 @@ if str(SRC_ROOT) not in sys.path:
 
 from v24_app.ui_modules import (
     build_c1_availability_provider_status_lines,
+    build_c1_release_guard_report_filename,
+    build_c1_release_guard_report_lines,
     build_c1_release_review_availability_guard,
     build_c1_release_review_guard_status_text,
     build_c1_snapshot_import_message_text,
@@ -76,6 +79,32 @@ class UIC1AvailabilityFlowModuleTests(unittest.TestCase):
         self.assertIn("已跳过", guard["message"])
         self.assertIn("阻止", build_c1_release_review_guard_status_text(guard))
         self.assertIn("fail/warn=1/2", build_c1_release_review_guard_status_text(guard))
+
+    def test_release_guard_block_report_lines(self) -> None:
+        generated_at = datetime(2026, 5, 11, 10, 30, 5)
+        self.assertEqual(
+            build_c1_release_guard_report_filename(generated_at),
+            "c1_release_guard_block_20260511_103005.md",
+        )
+        lines = build_c1_release_guard_report_lines(
+            {
+                "allowed": False,
+                "status": "fail",
+                "quality_failures": 1,
+                "quality_warnings": 0,
+                "status_text": "blocked",
+                "issues": ["provider quality_gate failed"],
+                "message": "sync again",
+            },
+            matches_count=12,
+            generated_at=generated_at,
+        )
+        payload = "\n".join(lines)
+        self.assertIn("C1 Release Review Guard Block", payload)
+        self.assertIn("Matches Requested: 12", payload)
+        self.assertIn("Quality Fail/Warn: 1/0", payload)
+        self.assertIn("provider quality_gate failed", payload)
+        self.assertIn("sync again", payload)
 
     def test_release_review_guard_allows_warn_or_missing_status(self) -> None:
         warn_guard = build_c1_release_review_availability_guard(
