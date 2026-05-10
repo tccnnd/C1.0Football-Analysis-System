@@ -1591,6 +1591,8 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
                     "title": "2024-06-15 | UEFA Euro | Spain vs Croatia",
                     "matched_tags": ["xg_direction_failed"],
                     "matched_health_issues": ["required_tag_gap"],
+                    "repair_score": 88,
+                    "repair_reasons": ["required_tag_gap +25", "missing_tags +35"],
                     "tags": ["statsbomb_post_match_review", "xg_direction_failed"],
                 }
             ],
@@ -1641,11 +1643,55 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertEqual(payload["items"][0]["review_status"], "draft")
         self.assertIn("xg_direction_failed", payload["items"][0]["labels"]["tags"])
         self.assertIn("required_tag_gap", payload["items"][0]["meta"]["matched_health_issues"])
+        self.assertEqual(payload["items"][0]["meta"]["repair_score"], 88)
+        self.assertIn("required_tag_gap +25", payload["items"][0]["meta"]["repair_reasons"])
+        self.assertEqual(payload["summary"]["top_repair_score"], 88)
         self.assertEqual(payload["summary"]["health_issue_counts"]["required_tag_gap"], 1)
         self.assertIn("validation", payload)
         self.assertIn("required_tag_gap", review_text)
+        self.assertIn("修复评分", review_text)
+        self.assertIn("required_tag_gap +25", review_text)
         self.assertIn("StatsBomb Few-shot 草稿审查", review_text)
         self.assertIn("赛前预测特征", review_text)
+
+    def test_statsbomb_fewshot_draft_payload_uses_recent_candidate_without_baseline(self) -> None:
+        monitor = {
+            "sample_count": 3,
+            "current_matched_count": 0,
+            "current_query_tags": ["xg_direction_failed", "strategy_miss"],
+            "missing_tags": [],
+        }
+        quality = {"alert_count": 0, "alerts": []}
+        settlements = [
+            {
+                "match_id": "recent",
+                "match_date": "2024-06-20",
+                "league": "UEFA Euro",
+                "home_team": "Recent",
+                "away_team": "Case",
+                "statsbomb_event_summary": {
+                    "event_count": 3500,
+                    "team_stats": {
+                        "Recent": {"xg": 0.6, "shots": 7, "goals": 0},
+                        "Case": {"xg": 1.5, "shots": 13, "goals": 1},
+                    },
+                },
+                "high_accuracy_strategy_items": [
+                    {"play_type": "market_1x2", "pick": "HOME", "actual": "AWAY", "is_hit": False}
+                ],
+            }
+        ]
+        queue = build_statsbomb_fewshot_backfill_queue(monitor, quality, settlements, {}, limit=2)
+
+        payload = build_statsbomb_fewshot_draft_payload(queue, {}, generated_at=datetime(2026, 5, 10, 22, 15, 30))
+
+        self.assertEqual(payload["summary"]["draft_count"], 1)
+        self.assertEqual(payload["summary"]["skipped_count"], 0)
+        self.assertEqual(payload["items"][0]["meta"]["match_id"], "recent")
+        self.assertEqual(payload["items"][0]["meta"]["candidate_source"], "recent_settlement")
+        self.assertGreater(payload["items"][0]["meta"]["repair_score"], 0)
+        self.assertIn("recent_settlement +15", payload["items"][0]["meta"]["repair_reasons"])
+        self.assertIn("补样优先级", payload["items"][0]["prompt"])
 
     def test_statsbomb_fewshot_draft_validation_blocks_invalid_samples(self) -> None:
         payload = {

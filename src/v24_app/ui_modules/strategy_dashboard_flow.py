@@ -1088,18 +1088,56 @@ def _statsbomb_settlement_backfill_row(
     source: str,
     priority_base: int = 0,
 ) -> dict[str, object]:
-    title = f"{settlement.get('match_date') or '-'} | {settlement.get('league') or '-'} | {settlement.get('home_team') or '-'} vs {settlement.get('away_team') or '-'}"
+    home_stats, away_stats, home_team, away_team = _statsbomb_team_stats(settlement)
+    home_team = home_team or str(settlement.get("home_team") or "-")
+    away_team = away_team or str(settlement.get("away_team") or "-")
+    title = f"{settlement.get('match_date') or '-'} | {settlement.get('league') or '-'} | {home_team} vs {away_team}"
     tag_list = [str(tag) for tag in tags if str(tag)]
-    return {
+    row: dict[str, object] = {
         "source": source,
         "match_id": settlement.get("match_id") or "-",
         "match_date": settlement.get("match_date") or "-",
         "league": settlement.get("league") or "-",
+        "home_team": home_team,
+        "away_team": away_team,
         "title": title,
         "tags": tag_list,
         "priority_score": priority_base,
         "body": f"{title}\n标签: {', '.join(tag_list[:6]) if tag_list else '-'}",
     }
+    if home_stats and away_stats:
+        summary = _as_mapping(settlement.get("statsbomb_event_summary"))
+        home_goals = _safe_int(home_stats.get("goals"), _safe_int(settlement.get("home_goals")))
+        away_goals = _safe_int(away_stats.get("goals"), _safe_int(settlement.get("away_goals")))
+        home_xg = _safe_float(home_stats.get("xg"))
+        away_xg = _safe_float(away_stats.get("xg"))
+        home_shots = _safe_int(home_stats.get("shots"))
+        away_shots = _safe_int(away_stats.get("shots"))
+        goal_margin = home_goals - away_goals
+        xg_margin = home_xg - away_xg
+        shot_margin = home_shots - away_shots
+        score_winner = _side_from_margin(float(goal_margin))
+        xg_winner = _side_from_margin(xg_margin, threshold=0.25)
+        shot_winner = _side_from_margin(float(shot_margin), threshold=2.0)
+        row.update(
+            {
+                "score": f"{home_goals}-{away_goals}",
+                "home_xg": home_xg,
+                "away_xg": away_xg,
+                "home_shots": home_shots,
+                "away_shots": away_shots,
+                "goal_margin": goal_margin,
+                "xg_margin": round(xg_margin, 4),
+                "shot_margin": shot_margin,
+                "event_count": _safe_int(summary.get("event_count")),
+                "score_winner": score_winner,
+                "xg_winner": xg_winner,
+                "xg_aligned_with_score": xg_winner == score_winner,
+                "shot_aligned_with_score": shot_winner == score_winner,
+                "finishing_variance": xg_winner != "draw" and xg_winner != score_winner,
+            }
+        )
+    return row
 
 
 def build_statsbomb_fewshot_backfill_queue(
@@ -1420,6 +1458,11 @@ def _statsbomb_baseline_row_key(row: Mapping[str, object]) -> list[str]:
     return keys
 
 
+def _statsbomb_backfill_candidate_has_draft_fields(candidate: Mapping[str, object]) -> bool:
+    required_fields = ("home_team", "away_team", "home_xg", "away_xg", "home_shots", "away_shots", "score")
+    return all(candidate.get(field) not in {None, ""} for field in required_fields)
+
+
 def _statsbomb_fewshot_draft_from_baseline_row(
     row: Mapping[str, object],
     candidate: Mapping[str, object],
@@ -1442,6 +1485,8 @@ def _statsbomb_fewshot_draft_from_baseline_row(
     shot_margin = _safe_float(row.get("shot_margin"), float(home_shots - away_shots))
     match_title = f"{row.get('home_team') or '-'} vs {row.get('away_team') or '-'}"
     matched_health_issues = [str(issue) for issue in _as_list(candidate.get("matched_health_issues"))]
+    repair_score = _safe_int(candidate.get("repair_score", candidate.get("priority_score")))
+    repair_reasons = [str(reason) for reason in _as_list(candidate.get("repair_reasons")) if str(reason)]
     prompt = (
         "请作为 Evaluation Agent 复盘一场使用 StatsBomb 赛后事件的历史案例。\n"
         f"比赛: {row.get('match_date') or '-'} | {row.get('league') or '-'} | {match_title}\n"
@@ -1450,6 +1495,8 @@ def _statsbomb_fewshot_draft_from_baseline_row(
     )
     if matched_health_issues:
         prompt += f"\n健康驱动: {', '.join(matched_health_issues[:6])}"
+    if repair_score > 0 or repair_reasons:
+        prompt += f"\n补样优先级: 修复评分 {repair_score} | 排序原因: {', '.join(repair_reasons[:6]) if repair_reasons else '-'}"
     if is_hit:
         completion = "结论: 模拟策略命中。StatsBomb 事件方向与赛果一致，可作为 Evaluation Agent 的正向对照复盘样本。"
     else:
@@ -1492,6 +1539,8 @@ def _statsbomb_fewshot_draft_from_baseline_row(
             "score": row.get("score"),
             "matched_backfill_tags": [str(tag) for tag in _as_list(candidate.get("matched_tags"))],
             "matched_health_issues": matched_health_issues,
+            "repair_score": repair_score,
+            "repair_reasons": repair_reasons,
         },
     }
 
@@ -1518,8 +1567,19 @@ def build_statsbomb_fewshot_draft_payload(
         lookup_keys = [str(candidate.get("match_id") or "").strip(), str(candidate.get("title") or "").strip()]
         baseline_row = next((baseline_index[key] for key in lookup_keys if key and key in baseline_index), None)
         if not baseline_row:
-            skipped.append({"match_id": candidate.get("match_id") or "-", "title": candidate.get("title") or "-", "reason": "missing_baseline_row"})
-            continue
+            if _statsbomb_backfill_candidate_has_draft_fields(candidate):
+                baseline_row = candidate
+            else:
+                skipped.append(
+                    {
+                        "match_id": candidate.get("match_id") or "-",
+                        "title": candidate.get("title") or "-",
+                        "reason": "missing_baseline_row",
+                        "repair_score": _safe_int(candidate.get("repair_score", candidate.get("priority_score"))),
+                        "repair_reasons": [str(reason) for reason in _as_list(candidate.get("repair_reasons")) if str(reason)],
+                    }
+                )
+                continue
         draft = _statsbomb_fewshot_draft_from_baseline_row(baseline_row, candidate)
         draft_id = str(draft.get("id") or "")
         if draft_id in seen_ids:
@@ -1530,16 +1590,23 @@ def build_statsbomb_fewshot_draft_payload(
             break
     tag_counts: dict[str, int] = {}
     health_issue_counts: dict[str, int] = {}
+    repair_reason_counts: dict[str, int] = {}
+    top_repair_score = 0
     for item in items:
         labels = _as_mapping(item.get("labels"))
         for tag in _as_list(labels.get("tags")):
             tag_text = str(tag)
             tag_counts[tag_text] = tag_counts.get(tag_text, 0) + 1
         meta = _as_mapping(item.get("meta"))
+        top_repair_score = max(top_repair_score, _safe_int(meta.get("repair_score")))
         for issue in _as_list(meta.get("matched_health_issues")):
             issue_text = str(issue)
             if issue_text:
                 health_issue_counts[issue_text] = health_issue_counts.get(issue_text, 0) + 1
+        for reason in _as_list(meta.get("repair_reasons")):
+            reason_text = str(reason)
+            if reason_text:
+                repair_reason_counts[reason_text] = repair_reason_counts.get(reason_text, 0) + 1
     leakage_note = "Draft samples use post-match StatsBomb event data for Evaluation Agent review only; do not use as pre-match prediction features."
     payload = {
         "updated_at": current.strftime("%Y-%m-%d %H:%M:%S"),
@@ -1553,6 +1620,8 @@ def build_statsbomb_fewshot_draft_payload(
             "skipped_count": len(skipped),
             "tag_counts": dict(sorted(tag_counts.items())),
             "health_issue_counts": dict(sorted(health_issue_counts.items())),
+            "repair_reason_counts": dict(sorted(repair_reason_counts.items())),
+            "top_repair_score": top_repair_score,
         },
         "backfill_summary": resolved_queue.get("summary_text") or "-",
         "backfill_health_summary": resolved_queue.get("health_summary") or "-",
@@ -2718,6 +2787,7 @@ def build_statsbomb_fewshot_draft_review_lines(payload: Mapping[str, object] | o
         f"- 生成时间: {resolved.get('updated_at') or '-'}",
         f"- 草稿数量: {_safe_int(summary.get('draft_count'))}",
         f"- 候选数量: {_safe_int(summary.get('candidate_count'))}",
+        f"- 最高修复评分: {_safe_int(summary.get('top_repair_score'))}",
         f"- 跳过数量: {_safe_int(summary.get('skipped_count'))}",
         f"- 防泄漏边界: {resolved.get('leakage_note') or '-'}",
         f"- 校验摘要: {validation.get('summary_text') or '-'}",
@@ -2766,6 +2836,8 @@ def build_statsbomb_fewshot_draft_review_lines(payload: Mapping[str, object] | o
                 "",
                 f"- ID: {item.get('id') or '-'}",
                 f"- Health issues: {', '.join(str(issue) for issue in _as_list(meta.get('matched_health_issues'))) or '-'}",
+                f"- 修复评分: {_safe_int(meta.get('repair_score'))}",
+                f"- 排序原因: {', '.join(str(reason) for reason in _as_list(meta.get('repair_reasons'))) or '-'}",
                 f"- 状态: {item.get('review_status') or '-'}",
                 f"- 模拟/实际: {labels.get('simulated_pick') or '-'} / {labels.get('actual') or '-'}",
                 f"- 命中: {labels.get('is_hit')}",
