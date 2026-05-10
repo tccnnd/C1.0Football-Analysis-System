@@ -1400,6 +1400,7 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
                     "match_id": "sb1",
                     "title": "2024-06-15 | UEFA Euro | Spain vs Croatia",
                     "matched_tags": ["xg_direction_failed"],
+                    "matched_health_issues": ["required_tag_gap"],
                     "tags": ["statsbomb_post_match_review", "xg_direction_failed"],
                 }
             ],
@@ -1449,7 +1450,10 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertEqual(payload["summary"]["draft_count"], 1)
         self.assertEqual(payload["items"][0]["review_status"], "draft")
         self.assertIn("xg_direction_failed", payload["items"][0]["labels"]["tags"])
+        self.assertIn("required_tag_gap", payload["items"][0]["meta"]["matched_health_issues"])
+        self.assertEqual(payload["summary"]["health_issue_counts"]["required_tag_gap"], 1)
         self.assertIn("validation", payload)
+        self.assertIn("required_tag_gap", review_text)
         self.assertIn("StatsBomb Few-shot 草稿审查", review_text)
         self.assertIn("赛前预测特征", review_text)
 

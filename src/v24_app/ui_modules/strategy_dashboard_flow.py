@@ -1360,12 +1360,15 @@ def _statsbomb_fewshot_draft_from_baseline_row(
     away_shots = _safe_int(row.get("away_shots"))
     shot_margin = _safe_float(row.get("shot_margin"), float(home_shots - away_shots))
     match_title = f"{row.get('home_team') or '-'} vs {row.get('away_team') or '-'}"
+    matched_health_issues = [str(issue) for issue in _as_list(candidate.get("matched_health_issues"))]
     prompt = (
         "请作为 Evaluation Agent 复盘一场使用 StatsBomb 赛后事件的历史案例。\n"
         f"比赛: {row.get('match_date') or '-'} | {row.get('league') or '-'} | {match_title}\n"
         f"比分: {row.get('score') or '-'} | 模拟策略: 按 xG 方向选择 {_statsbomb_side_to_pick(simulated_pick)} | 实际: {_statsbomb_side_to_pick(actual)}\n"
         f"xG: {home_xg:.2f}-{away_xg:.2f} | 射门: {home_shots}-{away_shots} | 草稿目标标签: {', '.join(_as_list(candidate.get('matched_tags'))[:6]) or '-'}"
     )
+    if matched_health_issues:
+        prompt += f"\n健康驱动: {', '.join(matched_health_issues[:6])}"
     if is_hit:
         completion = "结论: 模拟策略命中。StatsBomb 事件方向与赛果一致，可作为 Evaluation Agent 的正向对照复盘样本。"
     else:
@@ -1407,6 +1410,7 @@ def _statsbomb_fewshot_draft_from_baseline_row(
             "away_team": row.get("away_team"),
             "score": row.get("score"),
             "matched_backfill_tags": [str(tag) for tag in _as_list(candidate.get("matched_tags"))],
+            "matched_health_issues": matched_health_issues,
         },
     }
 
@@ -1444,11 +1448,17 @@ def build_statsbomb_fewshot_draft_payload(
         if len(items) >= max(0, int(limit)):
             break
     tag_counts: dict[str, int] = {}
+    health_issue_counts: dict[str, int] = {}
     for item in items:
         labels = _as_mapping(item.get("labels"))
         for tag in _as_list(labels.get("tags")):
             tag_text = str(tag)
             tag_counts[tag_text] = tag_counts.get(tag_text, 0) + 1
+        meta = _as_mapping(item.get("meta"))
+        for issue in _as_list(meta.get("matched_health_issues")):
+            issue_text = str(issue)
+            if issue_text:
+                health_issue_counts[issue_text] = health_issue_counts.get(issue_text, 0) + 1
     leakage_note = "Draft samples use post-match StatsBomb event data for Evaluation Agent review only; do not use as pre-match prediction features."
     payload = {
         "updated_at": current.strftime("%Y-%m-%d %H:%M:%S"),
@@ -1461,8 +1471,10 @@ def build_statsbomb_fewshot_draft_payload(
             "candidate_count": len(candidates),
             "skipped_count": len(skipped),
             "tag_counts": dict(sorted(tag_counts.items())),
+            "health_issue_counts": dict(sorted(health_issue_counts.items())),
         },
         "backfill_summary": resolved_queue.get("summary_text") or "-",
+        "backfill_health_summary": resolved_queue.get("health_summary") or "-",
         "items": items,
         "skipped": skipped,
     }
@@ -2512,6 +2524,7 @@ def build_statsbomb_fewshot_draft_review_lines(payload: Mapping[str, object] | o
         f"- Medium: {_safe_int(validation.get('medium_count'))}",
         "",
     ]
+    lines.insert(19, f"- 健康驱动: {resolved.get('backfill_health_summary') or '-'}")
     validation_issues = [item for item in _as_list(validation.get("issues")) if isinstance(item, Mapping)]
     if validation_issues:
         lines.extend(["| 严重度 | 样本 | 代码 | 字段 |", "| --- | --- | --- | --- |"])
@@ -2547,6 +2560,7 @@ def build_statsbomb_fewshot_draft_review_lines(payload: Mapping[str, object] | o
                 f"### {meta.get('match_date') or '-'} | {meta.get('league') or '-'} | {meta.get('home_team') or '-'} vs {meta.get('away_team') or '-'}",
                 "",
                 f"- ID: {item.get('id') or '-'}",
+                f"- Health issues: {', '.join(str(issue) for issue in _as_list(meta.get('matched_health_issues'))) or '-'}",
                 f"- 状态: {item.get('review_status') or '-'}",
                 f"- 模拟/实际: {labels.get('simulated_pick') or '-'} / {labels.get('actual') or '-'}",
                 f"- 命中: {labels.get('is_hit')}",
