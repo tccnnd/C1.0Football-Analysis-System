@@ -51,6 +51,9 @@ from v24_app.ui_modules import (
     build_statsbomb_fewshot_memory_rollback_preview,
     build_statsbomb_fewshot_memory_rollback_report_filename,
     build_statsbomb_fewshot_memory_rollback_report_lines,
+    build_statsbomb_fewshot_memory_audit_report,
+    build_statsbomb_fewshot_memory_audit_report_filename,
+    build_statsbomb_fewshot_memory_audit_report_lines,
     build_statsbomb_fewshot_memory_summary,
     build_statsbomb_fewshot_memory_monitor,
     build_statsbomb_fewshot_memory_quality_alerts,
@@ -1770,6 +1773,54 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
 
         self.assertEqual(preview["status"], "blocked")
         self.assertGreater(preview["summary"]["high_count"], 0)
+
+    def test_statsbomb_fewshot_memory_audit_report_summarizes_state_and_backups(self) -> None:
+        memory = {
+            "updated_at": "2026-05-10 22:15:30",
+            "leakage_note": "post-match only",
+            "last_manual_apply": {"applied_at": "2026-05-10 22:20:00", "applied_count": 2},
+            "items": [
+                {
+                    "labels": {
+                        "is_hit": True,
+                        "root_cause": "event_evidence_aligned",
+                        "tags": ["statsbomb_post_match_review", "strategy_hit"],
+                    }
+                },
+                {
+                    "labels": {
+                        "is_hit": False,
+                        "root_cause": "statsbomb_finishing_variance",
+                        "tags": ["statsbomb_post_match_review", "strategy_miss", "xg_direction_failed"],
+                    }
+                },
+            ],
+        }
+        monitor = build_statsbomb_fewshot_memory_monitor(memory, {})
+        quality = build_statsbomb_fewshot_memory_quality_alerts(monitor, min_samples=5)
+
+        audit = build_statsbomb_fewshot_memory_audit_report(
+            memory,
+            monitor,
+            quality,
+            backup_rows=[{"name": "statsbomb_sandbox_fewshot_samples.backup_20260510_221530.json", "size": 123, "modified_at": "2026-05-10 22:15:30"}],
+            operation_rows=[{"name": "statsbomb_fewshot_merge_applied_20260510_222000.md", "type": "apply", "modified_at": "2026-05-10 22:20:00"}],
+            generated_at=datetime(2026, 5, 10, 23, 45, 0),
+        )
+        lines = build_statsbomb_fewshot_memory_audit_report_lines(audit)
+        payload = "\n".join(lines)
+
+        self.assertEqual(audit["status"], "attention")
+        self.assertEqual(audit["summary"]["sample_count"], 2)
+        self.assertEqual(audit["summary"]["backup_count"], 1)
+        self.assertEqual(audit["summary"]["operation_count"], 1)
+        self.assertEqual(audit["summary"]["last_manual_apply_count"], 2)
+        self.assertEqual(
+            build_statsbomb_fewshot_memory_audit_report_filename(datetime(2026, 5, 10, 23, 45, 0)),
+            "statsbomb_fewshot_memory_audit_20260510_234500.md",
+        )
+        self.assertIn("StatsBomb Few-shot Memory Audit", payload)
+        self.assertIn("statsbomb_sandbox_fewshot_samples.backup_20260510_221530.json", payload)
 
     def test_high_accuracy_dashboard_exposes_statsbomb_backfill_queue(self) -> None:
         memory = {

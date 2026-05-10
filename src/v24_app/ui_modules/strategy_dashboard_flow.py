@@ -2230,6 +2230,143 @@ def build_statsbomb_fewshot_memory_rollback_report_lines(preview: Mapping[str, o
     return lines
 
 
+def build_statsbomb_fewshot_memory_audit_report_filename(now: datetime | None = None) -> str:
+    current = now or datetime.now()
+    return f"statsbomb_fewshot_memory_audit_{current.strftime('%Y%m%d_%H%M%S')}.md"
+
+
+def build_statsbomb_fewshot_memory_audit_report(
+    memory: Mapping[str, object] | object | None = None,
+    monitor: Mapping[str, object] | object | None = None,
+    quality: Mapping[str, object] | object | None = None,
+    *,
+    backup_rows: Sequence[Mapping[str, object]] | None = None,
+    operation_rows: Sequence[Mapping[str, object]] | None = None,
+    generated_at: datetime | None = None,
+) -> dict[str, object]:
+    current = generated_at or datetime.now()
+    payload = _as_mapping(memory or {})
+    resolved_monitor = _as_mapping(monitor)
+    resolved_quality = _as_mapping(quality)
+    items = _statsbomb_memory_items(payload)
+    backups = [dict(row) for row in list(backup_rows or []) if isinstance(row, Mapping)]
+    operations = [dict(row) for row in list(operation_rows or []) if isinstance(row, Mapping)]
+    alerts = [_as_mapping(row) for row in _as_list(resolved_quality.get("alerts"))]
+    last_apply = _as_mapping(payload.get("last_manual_apply"))
+    status = "missing" if not items else "attention" if alerts else "healthy"
+    return {
+        "updated_at": current.strftime("%Y-%m-%d %H:%M:%S"),
+        "source": "StatsBomb few-shot memory",
+        "purpose": "memory_audit_report",
+        "status": status,
+        "memory_updated_at": payload.get("updated_at") or "-",
+        "leakage_note": payload.get("leakage_note")
+        or "These few-shot samples use post-match event data and must not be used as pre-match prediction features.",
+        "summary": {
+            "sample_count": len(items),
+            "hit_count": _safe_int(resolved_monitor.get("hit_count")),
+            "miss_count": _safe_int(resolved_monitor.get("miss_count")),
+            "tag_count": _safe_int(resolved_monitor.get("tag_count")),
+            "root_cause_count": _safe_int(resolved_monitor.get("root_cause_count")),
+            "coverage_rate_text": resolved_monitor.get("coverage_rate_text") or "-",
+            "missing_tag_count": len(_as_list(resolved_monitor.get("missing_tags"))),
+            "alert_count": _safe_int(resolved_quality.get("alert_count")),
+            "backup_count": len(backups),
+            "operation_count": len(operations),
+            "last_manual_apply_count": _safe_int(last_apply.get("applied_count")),
+            "last_manual_apply_at": last_apply.get("applied_at") or "-",
+        },
+        "tag_rows": [dict(row) for row in _as_list(resolved_monitor.get("tag_rows")) if isinstance(row, Mapping)],
+        "root_rows": [dict(row) for row in _as_list(resolved_monitor.get("root_rows")) if isinstance(row, Mapping)],
+        "missing_tags": [str(tag) for tag in _as_list(resolved_monitor.get("missing_tags"))],
+        "quality_alerts": [dict(row) for row in alerts],
+        "backup_rows": backups,
+        "operation_rows": operations,
+    }
+
+
+def build_statsbomb_fewshot_memory_audit_report_lines(audit: Mapping[str, object] | object) -> list[str]:
+    resolved = _as_mapping(audit)
+    summary = _as_mapping(resolved.get("summary"))
+    tag_rows = [row for row in _as_list(resolved.get("tag_rows")) if isinstance(row, Mapping)]
+    root_rows = [row for row in _as_list(resolved.get("root_rows")) if isinstance(row, Mapping)]
+    alerts = [row for row in _as_list(resolved.get("quality_alerts")) if isinstance(row, Mapping)]
+    backup_rows = [row for row in _as_list(resolved.get("backup_rows")) if isinstance(row, Mapping)]
+    operation_rows = [row for row in _as_list(resolved.get("operation_rows")) if isinstance(row, Mapping)]
+    lines = [
+        "# StatsBomb Few-shot Memory Audit",
+        "",
+        f"- Generated at: {resolved.get('updated_at') or '-'}",
+        f"- Status: {resolved.get('status') or '-'}",
+        f"- Memory updated at: {resolved.get('memory_updated_at') or '-'}",
+        f"- Leakage boundary: {resolved.get('leakage_note') or '-'}",
+        "",
+        "## Summary",
+        "",
+        f"- Samples: {_safe_int(summary.get('sample_count'))}",
+        f"- Hit / miss: {_safe_int(summary.get('hit_count'))} / {_safe_int(summary.get('miss_count'))}",
+        f"- Tags / root causes: {_safe_int(summary.get('tag_count'))} / {_safe_int(summary.get('root_cause_count'))}",
+        f"- Required tag coverage: {summary.get('coverage_rate_text') or '-'}",
+        f"- Missing required tags: {_safe_int(summary.get('missing_tag_count'))}",
+        f"- Quality alerts: {_safe_int(summary.get('alert_count'))}",
+        f"- Backups: {_safe_int(summary.get('backup_count'))}",
+        f"- Recent apply/rollback reports: {_safe_int(summary.get('operation_count'))}",
+        f"- Last manual apply: {summary.get('last_manual_apply_at') or '-'} | {_safe_int(summary.get('last_manual_apply_count'))} samples",
+        "",
+        "## Tag Coverage",
+        "",
+        "| Tag | Count |",
+        "| --- | --- |",
+    ]
+    if not tag_rows:
+        lines.append("| - | 0 |")
+    for row in tag_rows:
+        lines.append("| " + " | ".join([_md_cell(row.get("tag")), _md_cell(row.get("count"))]) + " |")
+    lines.extend(["", "## Root Causes", "", "| Root cause | Count |", "| --- | --- |"])
+    if not root_rows:
+        lines.append("| - | 0 |")
+    for row in root_rows:
+        lines.append("| " + " | ".join([_md_cell(row.get("root_cause")), _md_cell(row.get("count"))]) + " |")
+    missing_tags = [str(tag) for tag in _as_list(resolved.get("missing_tags"))]
+    lines.extend(["", "## Missing Required Tags", ""])
+    lines.append(", ".join(missing_tags) if missing_tags else "-")
+    lines.extend(["", "## Quality Alerts", "", "| Title | Tag |", "| --- | --- |"])
+    if not alerts:
+        lines.append("| - | - |")
+    for alert in alerts:
+        lines.append("| " + " | ".join([_md_cell(alert.get("title")), _md_cell(alert.get("tag"))]) + " |")
+    lines.extend(["", "## Backups", "", "| File | Size | Modified |", "| --- | --- | --- |"])
+    if not backup_rows:
+        lines.append("| - | - | - |")
+    for row in backup_rows[:20]:
+        lines.append(
+            "| "
+            + " | ".join([_md_cell(row.get("name")), _md_cell(row.get("size")), _md_cell(row.get("modified_at"))])
+            + " |"
+        )
+    lines.extend(["", "## Recent Operations", "", "| File | Type | Modified |", "| --- | --- | --- |"])
+    if not operation_rows:
+        lines.append("| - | - | - |")
+    for row in operation_rows[:20]:
+        lines.append(
+            "| "
+            + " | ".join([_md_cell(row.get("name")), _md_cell(row.get("type")), _md_cell(row.get("modified_at"))])
+            + " |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Next Checks",
+            "",
+            "- If quality alerts exist, prioritize backfill queue generation before adding new model behavior.",
+            "- Keep at least one recent backup after every manual apply or rollback.",
+            "- Do not use StatsBomb post-match few-shot samples as pre-match prediction features.",
+            "",
+        ]
+    )
+    return lines
+
+
 def build_statsbomb_fewshot_draft_review_lines(payload: Mapping[str, object] | object) -> list[str]:
     resolved = _as_mapping(payload)
     summary = _as_mapping(resolved.get("summary"))

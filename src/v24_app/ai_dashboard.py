@@ -94,6 +94,11 @@ from .ui_modules import (
     build_statsbomb_fewshot_memory_rollback_preview,
     build_statsbomb_fewshot_memory_rollback_report_filename,
     build_statsbomb_fewshot_memory_rollback_report_lines,
+    build_statsbomb_fewshot_memory_audit_report,
+    build_statsbomb_fewshot_memory_audit_report_filename,
+    build_statsbomb_fewshot_memory_audit_report_lines,
+    build_statsbomb_fewshot_memory_monitor,
+    build_statsbomb_fewshot_memory_quality_alerts,
     build_strategy_allowlist_filename,
     build_strategy_allowlist_report_lines,
     build_strategy_policy_audit_csv_filename,
@@ -4337,6 +4342,58 @@ class SmartMatchDashboard:
         )
         return report_path, safety_backup_path
 
+    def export_statsbomb_fewshot_memory_audit(self) -> Path:
+        memory = get_statsbomb_sandbox_fewshot_memory()
+        monitor = build_statsbomb_fewshot_memory_monitor(memory, {})
+        quality = build_statsbomb_fewshot_memory_quality_alerts(monitor)
+        state_dir = STATSBOMB_SANDBOX_FEWSHOT_FILE.parent
+        backup_files = sorted(
+            list(state_dir.glob("statsbomb_sandbox_fewshot_samples.backup_*.json"))
+            + list(state_dir.glob("statsbomb_sandbox_fewshot_samples.pre_rollback_*.json")),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        backup_rows = [
+            {
+                "name": path.name,
+                "size": path.stat().st_size,
+                "modified_at": datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            for path in backup_files[:20]
+        ]
+        REPORT_DIR.mkdir(parents=True, exist_ok=True)
+        operation_files = sorted(
+            list(REPORT_DIR.glob("statsbomb_fewshot_merge_applied_*.md"))
+            + list(REPORT_DIR.glob("statsbomb_fewshot_memory_rollback_*.md")),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        operation_rows = [
+            {
+                "name": path.name,
+                "type": "rollback" if "rollback" in path.name else "apply",
+                "modified_at": datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            for path in operation_files[:20]
+        ]
+        now = datetime.now()
+        audit = build_statsbomb_fewshot_memory_audit_report(
+            memory,
+            monitor,
+            quality,
+            backup_rows=backup_rows,
+            operation_rows=operation_rows,
+            generated_at=now,
+        )
+        path = REPORT_DIR / build_statsbomb_fewshot_memory_audit_report_filename(now)
+        path.write_text("\n".join(build_statsbomb_fewshot_memory_audit_report_lines(audit)), encoding="utf-8")
+        summary = audit.get("summary", {}) if isinstance(audit.get("summary"), dict) else {}
+        self.status_var.set(
+            f"StatsBomb few-shot audit: samples {summary.get('sample_count', 0)} | backups {summary.get('backup_count', 0)} | alerts {summary.get('alert_count', 0)}"
+        )
+        messagebox.showinfo("StatsBomb few-shot audit", f"Audit report generated:\n{path}")
+        return path
+
     def open_strategy_policy_audit_history(self) -> None:
         self.current_nav_index = 4
         self.current_view = "strategy_audit_history"
@@ -4353,7 +4410,8 @@ class SmartMatchDashboard:
             + list(REPORT_DIR.glob("statsbomb_fewshot_merge_bundle_review_*.md"))
             + list(REPORT_DIR.glob("statsbomb_fewshot_merge_apply_preview_*.md"))
             + list(REPORT_DIR.glob("statsbomb_fewshot_merge_applied_*.md"))
-            + list(REPORT_DIR.glob("statsbomb_fewshot_memory_rollback_*.md")),
+            + list(REPORT_DIR.glob("statsbomb_fewshot_memory_rollback_*.md"))
+            + list(REPORT_DIR.glob("statsbomb_fewshot_memory_audit_*.md")),
             key=lambda path: path.stat().st_mtime,
             reverse=True,
         )
@@ -5104,6 +5162,7 @@ class SmartMatchDashboard:
         self._strategy_toolbar_button(audit_tools, "StatsBomb\u9884\u89c8", self.preview_statsbomb_fewshot_merge_bundle)
         self._strategy_toolbar_button(audit_tools, "StatsBomb\u5e94\u7528", self.apply_statsbomb_fewshot_merge_bundle, danger=True)
         self._strategy_toolbar_button(audit_tools, "StatsBomb\u56de\u6eda", self.rollback_statsbomb_fewshot_memory, danger=True)
+        self._strategy_toolbar_button(audit_tools, "StatsBomb\u5ba1\u8ba1", self.export_statsbomb_fewshot_memory_audit)
         self._strategy_toolbar_button(
             audit_tools,
             "\u751f\u6548\u8be6\u60c5",
