@@ -2235,26 +2235,16 @@ def build_statsbomb_fewshot_memory_audit_report_filename(now: datetime | None = 
     return f"statsbomb_fewshot_memory_audit_{current.strftime('%Y%m%d_%H%M%S')}.md"
 
 
-def build_statsbomb_fewshot_memory_audit_report(
-    memory: Mapping[str, object] | object | None = None,
+def build_statsbomb_fewshot_memory_health_summary(
     monitor: Mapping[str, object] | object | None = None,
     quality: Mapping[str, object] | object | None = None,
     *,
-    backup_rows: Sequence[Mapping[str, object]] | None = None,
-    operation_rows: Sequence[Mapping[str, object]] | None = None,
-    generated_at: datetime | None = None,
+    backup_count: int | None = None,
 ) -> dict[str, object]:
-    current = generated_at or datetime.now()
-    payload = _as_mapping(memory or {})
     resolved_monitor = _as_mapping(monitor)
     resolved_quality = _as_mapping(quality)
-    items = _statsbomb_memory_items(payload)
-    backups = [dict(row) for row in list(backup_rows or []) if isinstance(row, Mapping)]
-    operations = [dict(row) for row in list(operation_rows or []) if isinstance(row, Mapping)]
-    alerts = [_as_mapping(row) for row in _as_list(resolved_quality.get("alerts"))]
-    last_apply = _as_mapping(payload.get("last_manual_apply"))
+    sample_count = _safe_int(resolved_monitor.get("sample_count"))
     missing_tags = [str(tag) for tag in _as_list(resolved_monitor.get("missing_tags"))]
-    sample_count = len(items)
     alert_count = _safe_int(resolved_quality.get("alert_count"))
     health_issues: list[dict[str, object]] = []
     if sample_count <= 0:
@@ -2275,7 +2265,7 @@ def build_statsbomb_fewshot_memory_audit_report(
                 "recommendation": "Prioritize high-confidence misses, cold results, and different leagues in the backfill queue.",
             }
         )
-    if sample_count > 0 and not backups:
+    if backup_count is not None and sample_count > 0 and backup_count <= 0:
         health_issues.append(
             {
                 "severity": "medium",
@@ -2303,6 +2293,42 @@ def build_statsbomb_fewshot_memory_audit_report(
             }
         )
     status = "missing" if sample_count <= 0 else "attention" if health_issues else "healthy"
+    tone = "bad" if status == "missing" else "warning" if status == "attention" else "good"
+    return {
+        "status": status,
+        "tone": tone,
+        "issue_count": len(health_issues),
+        "high_count": sum(1 for issue in health_issues if issue.get("severity") == "high"),
+        "medium_count": sum(1 for issue in health_issues if issue.get("severity") == "medium"),
+        "summary_text": f"{status} | issues {len(health_issues)} | samples {sample_count}",
+        "issues": health_issues,
+    }
+
+
+def build_statsbomb_fewshot_memory_audit_report(
+    memory: Mapping[str, object] | object | None = None,
+    monitor: Mapping[str, object] | object | None = None,
+    quality: Mapping[str, object] | object | None = None,
+    *,
+    backup_rows: Sequence[Mapping[str, object]] | None = None,
+    operation_rows: Sequence[Mapping[str, object]] | None = None,
+    generated_at: datetime | None = None,
+) -> dict[str, object]:
+    current = generated_at or datetime.now()
+    payload = _as_mapping(memory or {})
+    resolved_monitor = _as_mapping(monitor)
+    resolved_quality = _as_mapping(quality)
+    items = _statsbomb_memory_items(payload)
+    backups = [dict(row) for row in list(backup_rows or []) if isinstance(row, Mapping)]
+    operations = [dict(row) for row in list(operation_rows or []) if isinstance(row, Mapping)]
+    alerts = [_as_mapping(row) for row in _as_list(resolved_quality.get("alerts"))]
+    last_apply = _as_mapping(payload.get("last_manual_apply"))
+    missing_tags = [str(tag) for tag in _as_list(resolved_monitor.get("missing_tags"))]
+    sample_count = len(items)
+    alert_count = _safe_int(resolved_quality.get("alert_count"))
+    health = build_statsbomb_fewshot_memory_health_summary(resolved_monitor, resolved_quality, backup_count=len(backups))
+    health_issues = [dict(issue) for issue in _as_list(health.get("issues")) if isinstance(issue, Mapping)]
+    status = str(health.get("status") or "missing")
     return {
         "updated_at": current.strftime("%Y-%m-%d %H:%M:%S"),
         "source": "StatsBomb few-shot memory",
@@ -5199,6 +5225,10 @@ def build_high_accuracy_strategy_dashboard(
         statsbomb_fewshot_memory or {},
         _as_mapping(evaluation_agent.get("statsbomb_fewshot_memory")),
     )
+    statsbomb_fewshot_health = build_statsbomb_fewshot_memory_health_summary(
+        statsbomb_fewshot_monitor,
+        _as_mapping(evaluation_agent.get("statsbomb_fewshot_quality")),
+    )
     statsbomb_backfill_queue = build_statsbomb_fewshot_backfill_queue(
         statsbomb_fewshot_monitor,
         _as_mapping(evaluation_agent.get("statsbomb_fewshot_quality")),
@@ -5296,6 +5326,11 @@ def build_high_accuracy_strategy_dashboard(
             else "neutral",
         },
         {
+            "label": "SB Health",
+            "value": str(statsbomb_fewshot_health.get("summary_text") or "-"),
+            "tone": str(statsbomb_fewshot_health.get("tone") or "neutral"),
+        },
+        {
             "label": "SB Backfill",
             "value": str(statsbomb_backfill_queue.get("summary_text") or "-"),
             "tone": "warning" if _safe_int(statsbomb_backfill_queue.get("task_count")) else "good",
@@ -5390,6 +5425,7 @@ def build_high_accuracy_strategy_dashboard(
         "evaluation_agent": evaluation_agent,
         "statsbomb_event_review": statsbomb_event_review,
         "statsbomb_fewshot_monitor": statsbomb_fewshot_monitor,
+        "statsbomb_fewshot_health": statsbomb_fewshot_health,
         "statsbomb_backfill_queue": statsbomb_backfill_queue,
         "jc_bucket_feedback": jc_bucket_feedback,
         "allowlist_settlement_rows": build_strategy_allowlist_settlement_rows(settlement_items),

@@ -54,6 +54,7 @@ from v24_app.ui_modules import (
     build_statsbomb_fewshot_memory_audit_report,
     build_statsbomb_fewshot_memory_audit_report_filename,
     build_statsbomb_fewshot_memory_audit_report_lines,
+    build_statsbomb_fewshot_memory_health_summary,
     build_statsbomb_fewshot_memory_summary,
     build_statsbomb_fewshot_memory_monitor,
     build_statsbomb_fewshot_memory_quality_alerts,
@@ -1912,6 +1913,30 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertEqual(monitor["sample_count"], 1)
         self.assertEqual(monitor["miss_count"], 1)
         self.assertIn("statsbomb_finishing_variance", monitor["covered_tags"])
+
+    def test_high_accuracy_dashboard_exposes_statsbomb_fewshot_health_metric(self) -> None:
+        memory = {"items": [{"labels": {"is_hit": True, "tags": ["strategy_hit"], "root_cause": "event_evidence_aligned"}}]}
+
+        dashboard = build_high_accuracy_strategy_dashboard({"enabled": True}, [], [], {}, memory)
+        metrics = {item["label"]: item for item in dashboard["metrics"]}
+
+        self.assertIn("SB Health", metrics)
+        self.assertIn("statsbomb_fewshot_health", dashboard)
+        self.assertEqual(dashboard["statsbomb_fewshot_health"]["status"], "attention")
+        self.assertTrue(any(issue["code"] == "sample_count_low" for issue in dashboard["statsbomb_fewshot_health"]["issues"]))
+        self.assertEqual(metrics["SB Health"]["tone"], "warning")
+
+    def test_statsbomb_fewshot_memory_health_can_ignore_unknown_backup_count(self) -> None:
+        monitor = {
+            "sample_count": 20,
+            "missing_tags": [],
+        }
+        quality = {"alert_count": 0, "alerts": []}
+
+        health = build_statsbomb_fewshot_memory_health_summary(monitor, quality)
+
+        self.assertEqual(health["status"], "healthy")
+        self.assertFalse(any(issue["code"] == "backup_missing" for issue in health["issues"]))
 
     def test_evaluation_agent_recommends_tightening_on_weak_settlements(self) -> None:
         settlements = [
