@@ -1349,6 +1349,42 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertTrue(any("required_tag_gap" in row["matched_health_issues"] for row in queue["candidate_rows"]))
         self.assertIn("post-match", queue["leakage_note"])
 
+    def test_statsbomb_fewshot_backfill_queue_can_defer_candidates(self) -> None:
+        monitor = {
+            "sample_count": 3,
+            "missing_tags": ["xg_direction_failed"],
+            "current_query_tags": [],
+            "current_matched_count": 0,
+        }
+        quality = {"alert_count": 0, "alerts": []}
+        baseline = {
+            "items": [
+                {
+                    "match_id": "sb1",
+                    "match_date": "2024-06-15",
+                    "league": "UEFA Euro",
+                    "home_team": "Spain",
+                    "away_team": "Croatia",
+                    "home_xg": 1.12,
+                    "away_xg": 2.35,
+                    "home_shots": 11,
+                    "away_shots": 16,
+                    "goal_margin": 3,
+                    "finishing_variance": True,
+                    "xg_aligned_with_score": False,
+                    "shot_aligned_with_score": False,
+                }
+            ]
+        }
+
+        queue = build_statsbomb_fewshot_backfill_queue(monitor, quality, [], baseline, include_candidates=False)
+
+        self.assertEqual(queue["status"], "ready")
+        self.assertEqual(queue["candidate_generation"], "deferred")
+        self.assertEqual(queue["candidate_count"], 0)
+        self.assertEqual(queue["candidate_rows"], [])
+        self.assertGreaterEqual(queue["task_count"], 1)
+
     def test_statsbomb_fewshot_backfill_report_exports_queue(self) -> None:
         queue = {
             "status": "ready",
@@ -1928,7 +1964,20 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         dashboard = build_high_accuracy_strategy_dashboard({"enabled": True}, [], [], baseline, memory)
 
         self.assertIn("statsbomb_backfill_queue", dashboard)
+        self.assertEqual(dashboard["statsbomb_backfill_queue"]["candidate_generation"], "deferred")
+        self.assertEqual(dashboard["statsbomb_backfill_queue"]["candidate_rows"], [])
         self.assertGreaterEqual(dashboard["statsbomb_backfill_queue"]["task_count"], 1)
+
+        full_dashboard = build_high_accuracy_strategy_dashboard(
+            {"enabled": True},
+            [],
+            [],
+            baseline,
+            memory,
+            include_statsbomb_backfill_candidates=True,
+        )
+        self.assertEqual(full_dashboard["statsbomb_backfill_queue"]["candidate_generation"], "full")
+        self.assertGreaterEqual(full_dashboard["statsbomb_backfill_queue"]["candidate_count"], 1)
 
     def test_high_accuracy_dashboard_exposes_statsbomb_fewshot_monitor(self) -> None:
         memory = {

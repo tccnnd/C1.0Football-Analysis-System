@@ -4106,6 +4106,7 @@ class SmartMatchDashboard:
             get_strategy_admission_policy_history(limit=20),
             get_statsbomb_event_baseline(),
             get_statsbomb_sandbox_fewshot_memory(),
+            include_statsbomb_backfill_candidates=True,
         )
         queue = dashboard.get("statsbomb_backfill_queue", {}) if isinstance(dashboard.get("statsbomb_backfill_queue"), dict) else {}
         now = datetime.now()
@@ -4129,6 +4130,7 @@ class SmartMatchDashboard:
             get_strategy_admission_policy_history(limit=20),
             baseline,
             memory,
+            include_statsbomb_backfill_candidates=True,
         )
         queue = dashboard.get("statsbomb_backfill_queue", {}) if isinstance(dashboard.get("statsbomb_backfill_queue"), dict) else {}
         now = datetime.now()
