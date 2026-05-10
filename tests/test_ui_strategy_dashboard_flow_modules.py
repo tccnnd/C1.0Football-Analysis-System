@@ -1372,6 +1372,43 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertTrue(any("required_tag_gap" in row["matched_health_issues"] for row in queue["candidate_rows"]))
         self.assertIn("post-match", queue["leakage_note"])
 
+    def test_statsbomb_fewshot_backfill_queue_keeps_only_top_candidate_rows(self) -> None:
+        monitor = {
+            "sample_count": 3,
+            "current_matched_count": 0,
+            "current_query_tags": [],
+            "missing_tags": ["xg_direction_failed"],
+        }
+        quality = {"alert_count": 0, "alerts": []}
+        baseline = {
+            "items": [
+                {
+                    "match_id": f"sb{index}",
+                    "match_date": f"2024-06-{index + 1:02d}",
+                    "league": "UEFA Euro",
+                    "home_team": f"Home{index}",
+                    "away_team": f"Away{index}",
+                    "home_xg": 1.0,
+                    "away_xg": 2.0,
+                    "home_shots": 8,
+                    "away_shots": 14,
+                    "goal_margin": 1,
+                    "finishing_variance": True,
+                    "xg_aligned_with_score": False,
+                    "shot_aligned_with_score": False,
+                }
+                for index in range(12)
+            ]
+        }
+
+        queue = build_statsbomb_fewshot_backfill_queue(monitor, quality, [], baseline, limit=3)
+
+        self.assertEqual(queue["candidate_generation"], "full")
+        self.assertEqual(queue["candidate_count"], 12)
+        self.assertEqual(len(queue["candidate_rows"]), 3)
+        self.assertIn("候选 12", queue["summary_text"])
+        self.assertEqual([row["match_id"] for row in queue["candidate_rows"]], ["sb0", "sb1", "sb2"])
+
     def test_statsbomb_fewshot_backfill_queue_can_defer_candidates(self) -> None:
         monitor = {
             "sample_count": 3,

@@ -1150,8 +1150,44 @@ def build_statsbomb_fewshot_backfill_queue(
     if not target_tag_set:
         target_tag_set = set(required_tags)
     scored_rows: list[dict[str, object]] = []
+    scored_count = 0
     if include_candidates:
-        candidate_rows: list[dict[str, object]] = []
+        row_limit = max(0, int(limit))
+
+        def score_candidate(row: Mapping[str, object]) -> None:
+            nonlocal scored_count
+            row_tags = {str(tag) for tag in _as_list(row.get("tags"))}
+            overlap = sorted(row_tags & target_tag_set)
+            if tasks and not overlap:
+                return
+            matched_health_issues: list[str] = []
+            if overlap and missing_tags and set(overlap) & set(missing_tags):
+                matched_health_issues.append("required_tag_gap")
+            if sample_count < 20 and overlap:
+                matched_health_issues.append("sample_count_low")
+            if _safe_int(quality_data.get("alert_count")) and overlap:
+                matched_health_issues.append("quality_alerts_present")
+            for issue in health_issues:
+                issue_code = str(issue.get("code") or "")
+                if issue_code in {"memory_missing", "sample_count_low", "required_tag_gap", "quality_alerts_present"} and issue_code not in matched_health_issues:
+                    if issue_code == "memory_missing" or overlap:
+                        matched_health_issues.append(issue_code)
+            scored_count += 1
+            if row_limit <= 0:
+                return
+            scored = dict(row)
+            scored["matched_tags"] = overlap
+            scored["matched_health_issues"] = matched_health_issues
+            scored["priority_score"] = _safe_int(row.get("priority_score")) + len(overlap) * 12
+            scored["body"] = (
+                f"{row.get('body', '-')}\n"
+                f"命中补样目标: {', '.join(overlap[:6]) if overlap else '-'}\n"
+                f"健康问题: {', '.join(matched_health_issues[:4]) if matched_health_issues else '-'}"
+            )
+            scored_rows.append(scored)
+            scored_rows.sort(key=lambda row: (-_safe_int(row.get("priority_score")), str(row.get("match_date") or ""), str(row.get("title") or "")))
+            del scored_rows[row_limit:]
+
         for item in settlements if isinstance(settlements, Sequence) else []:
             if not isinstance(item, Mapping) or not _as_mapping(item.get("statsbomb_event_summary")):
                 continue
@@ -1159,7 +1195,7 @@ def build_statsbomb_fewshot_backfill_queue(
             event_review = build_statsbomb_event_review_summary([item], statsbomb_event_baseline or {})
             tags = _statsbomb_memory_query_tags(attribution, event_review)
             if tags:
-                candidate_rows.append(_statsbomb_settlement_backfill_row(item, tags, source="recent_settlement", priority_base=20))
+                score_candidate(_statsbomb_settlement_backfill_row(item, tags, source="recent_settlement", priority_base=20))
 
         baseline_items = [
             item
@@ -1175,42 +1211,13 @@ def build_statsbomb_fewshot_backfill_queue(
                 "home_team": item.get("home_team"),
                 "away_team": item.get("away_team"),
             }
-            candidate_rows.append(_statsbomb_settlement_backfill_row(settlement, tags, source="statsbomb_baseline", priority_base=5))
-
-        for row in candidate_rows:
-            row_tags = {str(tag) for tag in _as_list(row.get("tags"))}
-            overlap = sorted(row_tags & target_tag_set)
-            if tasks and not overlap:
-                continue
-            matched_health_issues: list[str] = []
-            if overlap and missing_tags and set(overlap) & set(missing_tags):
-                matched_health_issues.append("required_tag_gap")
-            if sample_count < 20 and overlap:
-                matched_health_issues.append("sample_count_low")
-            if _safe_int(quality_data.get("alert_count")) and overlap:
-                matched_health_issues.append("quality_alerts_present")
-            for issue in health_issues:
-                issue_code = str(issue.get("code") or "")
-                if issue_code in {"memory_missing", "sample_count_low", "required_tag_gap", "quality_alerts_present"} and issue_code not in matched_health_issues:
-                    if issue_code == "memory_missing" or overlap:
-                        matched_health_issues.append(issue_code)
-            scored = dict(row)
-            scored["matched_tags"] = overlap
-            scored["matched_health_issues"] = matched_health_issues
-            scored["priority_score"] = _safe_int(row.get("priority_score")) + len(overlap) * 12
-            scored["body"] = (
-                f"{row.get('body', '-')}\n"
-                f"命中补样目标: {', '.join(overlap[:6]) if overlap else '-'}\n"
-                f"健康问题: {', '.join(matched_health_issues[:4]) if matched_health_issues else '-'}"
-            )
-            scored_rows.append(scored)
-        scored_rows.sort(key=lambda row: (-_safe_int(row.get("priority_score")), str(row.get("match_date") or ""), str(row.get("title") or "")))
+            score_candidate(_statsbomb_settlement_backfill_row(settlement, tags, source="statsbomb_baseline", priority_base=5))
     tasks.sort(key=lambda row: (-_safe_int(row.get("priority")), str(row.get("title") or "")))
     status = "ready" if tasks else "healthy"
     return {
         "status": status,
         "task_count": len(tasks),
-        "candidate_count": len(scored_rows),
+        "candidate_count": scored_count,
         "health_status": health.get("status") or "-",
         "health_summary": health.get("summary_text") or "-",
         "health_issues": [dict(issue) for issue in health_issues],
@@ -1218,7 +1225,7 @@ def build_statsbomb_fewshot_backfill_queue(
         "candidate_generation": "full" if include_candidates else "deferred",
         "tasks": tasks[: max(0, int(limit))],
         "candidate_rows": scored_rows[: max(0, int(limit))],
-        "summary_text": f"补样任务 {len(tasks)} | 候选 {len(scored_rows)} | 目标标签 {len(target_tag_set)}",
+        "summary_text": f"补样任务 {len(tasks)} | 候选 {scored_count} | 目标标签 {len(target_tag_set)}",
         "leakage_note": "Backfill queue uses post-match StatsBomb event evidence for review memory only; never feed it into pre-match prediction features.",
     }
 
