@@ -1637,12 +1637,14 @@ def build_statsbomb_fewshot_merge_plan(
             continue
         seen_draft_keys.update(item_keys)
         labels = _as_mapping(item.get("labels"))
+        health_issues = [str(issue) for issue in _as_list(meta.get("matched_health_issues"))]
         mergeable.append(
             {
                 "id": item_id,
                 "title": title,
                 "root_cause": labels.get("root_cause") or "-",
                 "tags": [str(tag) for tag in _as_list(labels.get("tags"))],
+                "health_issues": health_issues,
                 "item": item,
             }
         )
@@ -1680,11 +1682,11 @@ def build_statsbomb_fewshot_merge_plan_lines(plan: Mapping[str, object] | object
         "",
         "## 可合并样本",
         "",
-        "| ID | 比赛 | 根因 | 标签 |",
-        "| --- | --- | --- | --- |",
+        "| ID | 比赛 | 根因 | 健康驱动 | 标签 |",
+        "| --- | --- | --- | --- | --- |",
     ]
     if not mergeable:
-        lines.append("| - | 暂无可合并样本 | - | - |")
+        lines.append("| - | 暂无可合并样本 | - | - | - |")
     for row in mergeable:
         lines.append(
             "| "
@@ -1693,6 +1695,7 @@ def build_statsbomb_fewshot_merge_plan_lines(plan: Mapping[str, object] | object
                     _md_cell(row.get("id")),
                     _md_cell(row.get("title")),
                     _md_cell(row.get("root_cause")),
+                    _md_cell(", ".join(str(issue) for issue in _as_list(row.get("health_issues")))),
                     _md_cell(", ".join(str(tag) for tag in _as_list(row.get("tags")))),
                 ]
             )
@@ -1749,6 +1752,13 @@ def build_statsbomb_fewshot_merge_bundle(
     validation = _as_mapping(resolved.get("validation"))
     mergeable = [item for item in _as_list(resolved.get("mergeable_items")) if isinstance(item, Mapping)]
     bundle_items = [_as_mapping(item.get("item")) for item in mergeable if _as_mapping(item.get("item"))]
+    health_issue_counts: dict[str, int] = {}
+    for item in bundle_items:
+        meta = _as_mapping(item.get("meta"))
+        for issue in _as_list(meta.get("matched_health_issues")):
+            issue_text = str(issue)
+            if issue_text:
+                health_issue_counts[issue_text] = health_issue_counts.get(issue_text, 0) + 1
     status = "blocked"
     if str(resolved.get("status") or "") in {"ready", "review"} and bundle_items:
         status = "pending_manual_apply"
@@ -1769,6 +1779,7 @@ def build_statsbomb_fewshot_merge_bundle(
             "merge_plan_status": resolved.get("status") or "-",
             "skipped_count": _safe_int(resolved.get("skipped_count")),
             "existing_count": _safe_int(resolved.get("existing_count")),
+            "health_issue_counts": dict(sorted(health_issue_counts.items())),
         },
         "items": bundle_items,
         "skipped_rows": [dict(row) for row in _as_list(resolved.get("skipped_rows")) if isinstance(row, Mapping)],
@@ -1797,18 +1808,20 @@ def build_statsbomb_fewshot_merge_bundle_report_lines(bundle: Mapping[str, objec
         f"- 合并计划状态: {summary.get('merge_plan_status') or '-'}",
         f"- 跳过样本: {_safe_int(summary.get('skipped_count'))}",
         f"- 现有记忆样本: {_safe_int(summary.get('existing_count'))}",
+        f"- 健康驱动: {', '.join(f'{key}:{value}' for key, value in _as_mapping(summary.get('health_issue_counts')).items()) or '-'}",
         "",
         "## 可应用样本",
         "",
-        "| ID | 比赛 | 根因 | 标签 |",
-        "| --- | --- | --- | --- |",
+        "| ID | 比赛 | 根因 | 健康驱动 | 标签 |",
+        "| --- | --- | --- | --- | --- |",
     ]
     if not items:
-        lines.append("| - | 暂无可应用样本 | - | - |")
+        lines.append("| - | 暂无可应用样本 | - | - | - |")
     for item in items:
         labels = _as_mapping(item.get("labels"))
         meta = _as_mapping(item.get("meta"))
         title = f"{meta.get('match_date') or '-'} | {meta.get('league') or '-'} | {meta.get('home_team') or '-'} vs {meta.get('away_team') or '-'}"
+        health_issues = ", ".join(str(issue) for issue in _as_list(meta.get("matched_health_issues"))) or "-"
         lines.append(
             "| "
             + " | ".join(
@@ -1816,6 +1829,7 @@ def build_statsbomb_fewshot_merge_bundle_report_lines(bundle: Mapping[str, objec
                     _md_cell(item.get("id")),
                     _md_cell(title),
                     _md_cell(labels.get("root_cause")),
+                    _md_cell(health_issues),
                     _md_cell(", ".join(str(tag) for tag in _as_list(labels.get("tags")))),
                 ]
             )
@@ -2052,11 +2066,18 @@ def build_statsbomb_fewshot_merge_apply_result(
     existing = _as_mapping(existing_memory or {})
     existing_items = [dict(item) for item in _statsbomb_memory_items(existing)]
     approved_items: list[dict[str, object]] = []
+    health_issue_counts: dict[str, int] = {}
     for item in append_items:
         approved = dict(item)
         approved["review_status"] = "approved"
         approved["applied_at"] = current.strftime("%Y-%m-%d %H:%M:%S")
         approved_items.append(approved)
+        meta = _as_mapping(approved.get("meta"))
+        for issue in _as_list(meta.get("matched_health_issues")):
+            issue_text = str(issue)
+            if issue_text:
+                health_issue_counts[issue_text] = health_issue_counts.get(issue_text, 0) + 1
+    health_issue_counts = dict(sorted(health_issue_counts.items()))
     merged_items = existing_items + approved_items
     tag_counts: dict[str, int] = {}
     hit_count = 0
@@ -2080,6 +2101,7 @@ def build_statsbomb_fewshot_merge_apply_result(
             "miss_count": miss_count,
             "last_manual_apply_at": current.strftime("%Y-%m-%d %H:%M:%S"),
             "last_manual_apply_count": len(approved_items),
+            "last_manual_apply_health_issue_counts": health_issue_counts,
         }
     )
     leakage_note = (
@@ -2101,6 +2123,7 @@ def build_statsbomb_fewshot_merge_apply_result(
                 "applied_count": len(approved_items),
                 "skipped_count": _safe_int(preview_summary.get("skipped_count")),
                 "backup_filename": preview.get("backup_filename") or "-",
+                "health_issue_counts": health_issue_counts,
             },
         }
     )
@@ -2115,6 +2138,7 @@ def build_statsbomb_fewshot_merge_apply_result(
             "existing_count": len(existing_items),
             "final_count": len(merged_items),
             "skipped_count": _safe_int(preview_summary.get("skipped_count")),
+            "health_issue_counts": health_issue_counts,
         },
         "updated_memory": updated_memory,
     }
@@ -2124,6 +2148,8 @@ def build_statsbomb_fewshot_merge_apply_report_lines(result: Mapping[str, object
     resolved = _as_mapping(result)
     summary = _as_mapping(resolved.get("summary"))
     preview = _as_mapping(resolved.get("preview"))
+    health_issue_counts = _as_mapping(summary.get("health_issue_counts"))
+    health_issue_text = ", ".join(f"{key}:{value}" for key, value in health_issue_counts.items()) or "-"
     lines = [
         "# StatsBomb Few-shot Merge Apply",
         "",
@@ -2134,18 +2160,20 @@ def build_statsbomb_fewshot_merge_apply_report_lines(result: Mapping[str, object
         f"- Skipped samples: {_safe_int(summary.get('skipped_count'))}",
         f"- Existing samples before apply: {_safe_int(summary.get('existing_count'))}",
         f"- Final memory samples: {_safe_int(summary.get('final_count'))}",
+        f"- Health issues: {health_issue_text}",
         f"- Backup filename: {preview.get('backup_filename') or '-'}",
         f"- Leakage boundary: {preview.get('leakage_note') or '-'}",
         "",
         "## Applied Items",
         "",
-        "| ID | Match | Root cause | Tags |",
-        "| --- | --- | --- | --- |",
+        "| ID | Match | Root cause | Health issues | Tags |",
+        "| --- | --- | --- | --- | --- |",
     ]
     for item in [item for item in _as_list(preview.get("append_items")) if isinstance(item, Mapping)]:
         labels = _as_mapping(item.get("labels"))
         meta = _as_mapping(item.get("meta"))
         title = f"{meta.get('match_date') or '-'} | {meta.get('league') or '-'} | {meta.get('home_team') or '-'} vs {meta.get('away_team') or '-'}"
+        health_issues = ", ".join(str(issue) for issue in _as_list(meta.get("matched_health_issues"))) or "-"
         lines.append(
             "| "
             + " | ".join(
@@ -2153,13 +2181,14 @@ def build_statsbomb_fewshot_merge_apply_report_lines(result: Mapping[str, object
                     _md_cell(item.get("id")),
                     _md_cell(title),
                     _md_cell(labels.get("root_cause")),
+                    _md_cell(health_issues),
                     _md_cell(", ".join(str(tag) for tag in _as_list(labels.get("tags")))),
                 ]
             )
             + " |"
         )
     if _safe_int(summary.get("applied_count")) == 0:
-        lines.append("| - | No sample was applied | - | - |")
+        lines.append("| - | No sample was applied | - | - | - |")
     lines.extend(
         [
             "",

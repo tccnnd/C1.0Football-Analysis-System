@@ -1508,7 +1508,15 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
                     "completion": "done",
                     "labels": {"simulated_pick": "AWAY", "actual": "HOME", "is_hit": False, "root_cause": "statsbomb_finishing_variance", "tags": ["statsbomb_post_match_review", "strategy_miss", "xg_direction_failed"]},
                     "features": {"home_xg": 1.0, "away_xg": 1.5, "xg_margin": -0.5, "home_shots": 10, "away_shots": 15, "shot_margin": -5, "event_count": 3000},
-                    "meta": {"match_id": "m2", "match_date": "2024-06-16", "league": "UEFA Euro", "home_team": "A", "away_team": "B", "score": "1-0"},
+                    "meta": {
+                        "match_id": "m2",
+                        "match_date": "2024-06-16",
+                        "league": "UEFA Euro",
+                        "home_team": "A",
+                        "away_team": "B",
+                        "score": "1-0",
+                        "matched_health_issues": ["required_tag_gap"],
+                    },
                 },
             ],
         }
@@ -1521,6 +1529,7 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertEqual(plan["status"], "review")
         self.assertEqual(plan["mergeable_count"], 1)
         self.assertEqual(plan["skipped_count"], 1)
+        self.assertEqual(plan["mergeable_items"][0]["health_issues"], ["required_tag_gap"])
         self.assertTrue(any(row["reason"] == "already_in_memory" for row in plan["skipped_rows"]))
         self.assertEqual(
             build_statsbomb_fewshot_merge_plan_filename(datetime(2026, 5, 10, 22, 15, 30)),
@@ -1528,6 +1537,7 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         )
         self.assertIn("StatsBomb Few-shot 合并计划", payload)
         self.assertIn("draft:new", payload)
+        self.assertIn("required_tag_gap", payload)
 
     def test_statsbomb_fewshot_merge_plan_blocks_high_validation(self) -> None:
         draft_payload = {
@@ -1557,7 +1567,13 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
                         "id": "draft:new",
                         "review_status": "draft",
                         "labels": {"root_cause": "statsbomb_finishing_variance", "tags": ["statsbomb_post_match_review", "strategy_miss"]},
-                        "meta": {"match_date": "2024-06-16", "league": "UEFA Euro", "home_team": "A", "away_team": "B"},
+                        "meta": {
+                            "match_date": "2024-06-16",
+                            "league": "UEFA Euro",
+                            "home_team": "A",
+                            "away_team": "B",
+                            "matched_health_issues": ["required_tag_gap"],
+                        },
                     },
                 }
             ],
@@ -1570,6 +1586,7 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
 
         self.assertEqual(bundle["status"], "pending_manual_apply")
         self.assertEqual(bundle["summary"]["bundle_count"], 1)
+        self.assertEqual(bundle["summary"]["health_issue_counts"]["required_tag_gap"], 1)
         self.assertTrue(bundle["approval_required"])
         self.assertEqual(
             build_statsbomb_fewshot_merge_bundle_filename(datetime(2026, 5, 10, 22, 15, 30)),
@@ -1581,6 +1598,7 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         )
         self.assertIn("StatsBomb Few-shot 合并可应用包", payload)
         self.assertIn("draft:new", payload)
+        self.assertIn("required_tag_gap", payload)
 
     def test_statsbomb_fewshot_merge_apply_preview_dry_run_checks_duplicates(self) -> None:
         item = {
@@ -1611,6 +1629,7 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
                 "home_team": "A",
                 "away_team": "B",
                 "score": "1-0",
+                "matched_health_issues": ["required_tag_gap"],
             },
         }
         existing = {"items": [{"id": "official:1", "meta": {"match_id": "m1"}}]}
@@ -1682,6 +1701,7 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
                 "home_team": "A",
                 "away_team": "B",
                 "score": "1-0",
+                "matched_health_issues": ["required_tag_gap"],
             },
         }
         existing = {
@@ -1711,8 +1731,10 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertEqual(result["status"], "ready_to_write")
         self.assertEqual(result["summary"]["applied_count"], 1)
         self.assertEqual(result["summary"]["final_count"], 2)
+        self.assertEqual(result["summary"]["health_issue_counts"]["required_tag_gap"], 1)
         self.assertEqual(updated_memory["summary"]["sample_count"], 2)
         self.assertEqual(updated_memory["summary"]["miss_count"], 1)
+        self.assertEqual(updated_memory["last_manual_apply"]["health_issue_counts"]["required_tag_gap"], 1)
         self.assertEqual(updated_memory["items"][1]["review_status"], "approved")
         self.assertEqual(
             build_statsbomb_fewshot_merge_apply_report_filename(datetime(2026, 5, 10, 22, 15, 30)),
@@ -1720,6 +1742,7 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         )
         self.assertIn("StatsBomb Few-shot Merge Apply", payload)
         self.assertIn("draft:new", payload)
+        self.assertIn("required_tag_gap", payload)
 
     def test_statsbomb_fewshot_memory_rollback_preview_validates_backup(self) -> None:
         backup = {
