@@ -172,6 +172,70 @@ def build_c1_release_guard_report_lines(
     return lines
 
 
+def load_c1_release_guard_report_history(report_dir: Path, *, limit: int = 10) -> list[dict[str, object]]:
+    if not report_dir.exists():
+        return []
+    rows: list[dict[str, object]] = []
+    paths = sorted(
+        report_dir.glob("c1_release_guard_block_*.md"),
+        key=lambda item: item.name,
+        reverse=True,
+    )
+    for path in paths[: max(1, int(limit))]:
+        try:
+            stat = path.stat()
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        rows.append(
+            {
+                "name": path.name,
+                "path": str(path),
+                "updated_at": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                "size": stat.st_size,
+                "text": text,
+            }
+        )
+    return rows
+
+
+def build_c1_release_guard_history_text(rows: list[Mapping[str, object]] | object) -> str:
+    items = rows if isinstance(rows, list) else []
+    lines = [
+        "# C1 Release Guard Block History",
+        "",
+        f"- Reports: {len(items)}",
+        "",
+    ]
+    if not items:
+        lines.append("No blocked release guard reports found.")
+        return "\n".join(lines)
+    lines.extend(
+        [
+            "| Time | File | Size |",
+            "|---|---|---:|",
+        ]
+    )
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        lines.append(f"| {item.get('updated_at', '-')} | {item.get('name', '-')} | {int(item.get('size', 0) or 0)} |")
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        lines.extend(
+            [
+                "",
+                f"## {item.get('name', '-')}",
+                "",
+                f"Path: {item.get('path', '-')}",
+                "",
+                str(item.get("text") or "").strip() or "-",
+            ]
+        )
+    return "\n".join(lines)
+
+
 def get_c1_release_review_availability_guard(project_root: Path) -> dict:
     store = C1AvailabilityStore(project_root)
     return build_c1_release_review_availability_guard(store.load_sync_status())

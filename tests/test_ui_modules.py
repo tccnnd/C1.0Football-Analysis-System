@@ -116,6 +116,7 @@ class UIModulesTests(unittest.TestCase):
             "_app_sync_c1_availability_sources": object(),
             "_app_apply_sync_c1_availability_sources_result": object(),
             "_app_show_c1_availability_provider_status": object(),
+            "_app_open_c1_release_guard_history": object(),
             "_app_apply_import_c1_availability_snapshots_result": object(),
             "_app_run_c1_shadow_comparison": object(),
             "_app_apply_c1_shadow_comparison_result": object(),

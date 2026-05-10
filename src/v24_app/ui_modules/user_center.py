@@ -71,6 +71,7 @@ USER_CENTER_LAYOUT: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("阵容源状态", "show_c1_availability_provider_status"),
             ("运行C1对照", "run_c1_shadow_comparison"),
             ("运行放行评估", "run_c1_release_review"),
+            ("放行门控审计", "open_c1_release_guard_history"),
             ("正式建议清单", "open_c1_formal_recommendations"),
             ("打开放行清单", "open_c1_release_allowlist"),
             ("打开C1工作台", "open_c1_workbench"),

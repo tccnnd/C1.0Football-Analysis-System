@@ -36,6 +36,7 @@ from .ui_modules import (
     build_c1_apply_status_text,
     build_c1_availability_provider_status_lines,
     build_c1_release_guard_report_filename,
+    build_c1_release_guard_history_text,
     build_c1_release_guard_report_lines,
     build_c1_release_review_availability_guard,
     build_c1_release_review_guard_status_text,
@@ -128,6 +129,7 @@ from .ui_modules import (
     get_c1_availability_provider_statuses,
     get_c1_release_review_availability_guard,
     import_c1_availability_snapshots,
+    load_c1_release_guard_report_history,
     should_auto_rerun_shadow_after_import,
     should_auto_rerun_shadow_after_sync,
     summarize_c1_rows,
@@ -226,6 +228,7 @@ class FootballPredictionApp:
         self.user_center_window: tk.Toplevel | None = None
         self.ops_daily_window: tk.Toplevel | None = None
         self.ops_trend_window: tk.Toplevel | None = None
+        self.c1_release_guard_history_window: tk.Toplevel | None = None
         self._busy_tasks: set[str] = set()
 
         self._configure_style()
@@ -1246,6 +1249,12 @@ def _app_close_ops_trend_window(self: FootballPredictionApp) -> None:
     self.ops_trend_window = None
 
 
+def _app_close_c1_release_guard_history_window(self: FootballPredictionApp) -> None:
+    if self.c1_release_guard_history_window is not None and self.c1_release_guard_history_window.winfo_exists():
+        self.c1_release_guard_history_window.destroy()
+    self.c1_release_guard_history_window = None
+
+
 def _app_show_ops_daily_report(self: FootballPredictionApp) -> None:
     report_dir = ensure_report_dir(PROJECT_ROOT)
     payload = read_latest_ops_daily_report(report_dir)
@@ -1782,6 +1791,27 @@ def _app_show_c1_availability_provider_status(self) -> None:
     messagebox.showinfo("阵容源状态", "\n".join(lines))
 
 
+def _app_open_c1_release_guard_history(self) -> None:
+    report_dir = PROJECT_ROOT / "reports"
+    rows = load_c1_release_guard_report_history(report_dir, limit=10)
+    if not rows:
+        messagebox.showinfo("放行门控审计", "当前没有 C1 放行门控阻止审计报告。")
+        return
+    latest = rows[0]
+    header = f"最近 {len(rows)} 份阻止报告 | 最新: {latest.get('name', '-')}"
+    self.c1_release_guard_history_window = open_text_view_window(
+        root=self.root,
+        existing_window=self.c1_release_guard_history_window,
+        title="C1 放行门控审计",
+        header=header,
+        content=build_c1_release_guard_history_text(rows),
+        on_close=lambda: _app_close_c1_release_guard_history_window(self),
+        width=1040,
+        height=720,
+    )
+    self.status_var.set(f"已打开 C1 放行门控审计 | {latest.get('name', '-')}")
+
+
 def _app_apply_import_c1_availability_snapshots_result(self, result: dict) -> None:
     imported_rows = int(result.get("imported_rows", 0))
     written_keys = int(result.get("written_keys", 0))
@@ -2253,6 +2283,7 @@ def _app_open_user_center_final(self) -> None:
         "import_c1_availability_snapshots": self.import_c1_availability_snapshots,
         "sync_c1_availability_sources": self.sync_c1_availability_sources,
         "show_c1_availability_provider_status": self.show_c1_availability_provider_status,
+        "open_c1_release_guard_history": self.open_c1_release_guard_history,
         "run_c1_shadow_comparison": self.run_c1_shadow_comparison,
         "run_c1_release_review": self.run_c1_release_review,
         "open_c1_formal_recommendations": self.open_c1_formal_recommendations,

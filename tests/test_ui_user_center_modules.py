@@ -57,6 +57,7 @@ class UIUserCenterModuleTests(unittest.TestCase):
             "import_c1_availability_snapshots",
             "sync_c1_availability_sources",
             "show_c1_availability_provider_status",
+            "open_c1_release_guard_history",
             "run_c1_shadow_comparison",
             "run_c1_release_review",
             "open_c1_formal_recommendations",
@@ -66,6 +67,7 @@ class UIUserCenterModuleTests(unittest.TestCase):
         actions = {key: (lambda: None) for key in required_keys}
         sections = build_user_center_sections(actions=actions)
         self.assertEqual(len(sections), 6)
+        self.assertEqual(sections[-1][1][6][0], "放行门控审计")
         self.assertEqual(sections[0][0], "分析与报告")
         self.assertEqual(sections[1][0], "结算与复盘")
         self.assertEqual(sections[-1][0], "C1 对照")

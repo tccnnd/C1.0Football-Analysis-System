@@ -54,6 +54,7 @@ FINAL_BINDING_MANIFEST: tuple[tuple[str, str], ...] = (
     ("sync_c1_availability_sources", "_app_sync_c1_availability_sources"),
     ("_apply_sync_c1_availability_sources_result", "_app_apply_sync_c1_availability_sources_result"),
     ("show_c1_availability_provider_status", "_app_show_c1_availability_provider_status"),
+    ("open_c1_release_guard_history", "_app_open_c1_release_guard_history"),
     ("_apply_import_c1_availability_snapshots_result", "_app_apply_import_c1_availability_snapshots_result"),
     ("run_c1_shadow_comparison", "_app_run_c1_shadow_comparison"),
     ("_apply_c1_shadow_comparison_result", "_app_apply_c1_shadow_comparison_result"),

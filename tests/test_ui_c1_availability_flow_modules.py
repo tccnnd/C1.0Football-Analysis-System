@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -15,6 +16,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from v24_app.ui_modules import (
     build_c1_availability_provider_status_lines,
+    build_c1_release_guard_history_text,
     build_c1_release_guard_report_filename,
     build_c1_release_guard_report_lines,
     build_c1_release_review_availability_guard,
@@ -25,6 +27,7 @@ from v24_app.ui_modules import (
     build_c1_sync_status_text,
     build_c1_template_export_message_text,
     build_c1_template_export_status_text,
+    load_c1_release_guard_report_history,
     should_auto_rerun_shadow_after_import,
     should_auto_rerun_shadow_after_sync,
 )
@@ -105,6 +108,21 @@ class UIC1AvailabilityFlowModuleTests(unittest.TestCase):
         self.assertIn("Quality Fail/Warn: 1/0", payload)
         self.assertIn("provider quality_gate failed", payload)
         self.assertIn("sync again", payload)
+
+    def test_release_guard_history_loads_recent_reports(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            report_dir = Path(tmp)
+            old_path = report_dir / "c1_release_guard_block_20260511_100000.md"
+            new_path = report_dir / "c1_release_guard_block_20260511_110000.md"
+            old_path.write_text("# old", encoding="utf-8")
+            new_path.write_text("# new", encoding="utf-8")
+            rows = load_c1_release_guard_report_history(report_dir, limit=2)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["name"], "c1_release_guard_block_20260511_110000.md")
+        text = build_c1_release_guard_history_text(rows)
+        self.assertIn("C1 Release Guard Block History", text)
+        self.assertIn("# new", text)
+        self.assertIn("# old", text)
 
     def test_release_review_guard_allows_warn_or_missing_status(self) -> None:
         warn_guard = build_c1_release_review_availability_guard(
