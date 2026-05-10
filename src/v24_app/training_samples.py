@@ -796,12 +796,13 @@ def import_historical_xgb_samples(
     input_path: Path,
     replace: bool = False,
     sync_ratings: bool = False,
+    sample_limit: int | None = None,
 ) -> dict[str, Any]:
     input_path = input_path.resolve()
     records = _read_input_records(input_path)
     samples, ratings_map, summary = build_xgb_samples_from_historical_records(records)
 
-    store = StateStore(project_dir)
+    store = StateStore(project_dir, xgb_sample_limit=sample_limit)
     existing = [] if replace else store.load_xgb_samples()
     merged: dict[str, dict] = {}
     for item in existing:
@@ -828,6 +829,7 @@ def import_historical_xgb_samples(
         "input_path": str(input_path),
         "replace": bool(replace),
         "sync_ratings": bool(sync_ratings),
+        "sample_limit_override": sample_limit,
         "existing_samples_before": 0 if replace else existing_count,
         "imported_samples": summary["imported_samples"],
         "merged_total": len(merged_items),

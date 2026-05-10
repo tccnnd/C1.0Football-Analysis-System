@@ -300,6 +300,7 @@ def main() -> int:
     parser.add_argument("--list-leagues", action="store_true", help="Print supported default league codes and exit.")
     parser.add_argument("--timeout", type=int, default=12, help="Per CSV network timeout in seconds.")
     parser.add_argument("--workers", type=int, default=6, help="Concurrent CSV download workers.")
+    parser.add_argument("--sample-limit", type=int, default=None, help="Override XGB sample storage limit.")
     args = parser.parse_args()
 
     if args.list_leagues:
@@ -371,6 +372,7 @@ def main() -> int:
         input_path=history_path,
         replace=args.replace,
         sync_ratings=args.sync_ratings,
+        sample_limit=args.sample_limit,
     )
 
     print(json.dumps(

@@ -30,6 +30,12 @@ def main() -> None:
         help="Also write the reconstructed end-of-history Elo ratings into elo_ratings.json.",
     )
     parser.add_argument(
+        "--sample-limit",
+        type=int,
+        default=None,
+        help="Override XGB sample storage limit.",
+    )
+    parser.add_argument(
         "--train",
         action="store_true",
         help="Train XGB immediately after import.",
@@ -53,6 +59,7 @@ def main() -> None:
         input_path=Path(args.input),
         replace=args.replace,
         sync_ratings=args.sync_ratings,
+        sample_limit=args.sample_limit,
     )
 
     output: dict[str, object] = {

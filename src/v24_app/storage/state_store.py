@@ -6,10 +6,10 @@ from pathlib import Path
 
 
 class StateStore:
-    def __init__(self, project_dir: Path) -> None:
+    def __init__(self, project_dir: Path, *, xgb_sample_limit: int | None = None) -> None:
         self.state_dir = project_dir / "data" / "state"
         self.state_dir.mkdir(parents=True, exist_ok=True)
-        self.xgb_sample_limit = 50000
+        self.xgb_sample_limit = max(1, int(xgb_sample_limit if xgb_sample_limit is not None else 100000))
         self.ratings_file = self.state_dir / "elo_ratings.json"
         self.national_team_ratings_file = self.state_dir / "national_team_elo_ratings.json"
         self.settlements_file = self.state_dir / "settlements.json"

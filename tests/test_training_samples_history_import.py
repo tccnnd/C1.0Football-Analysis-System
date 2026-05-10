@@ -59,8 +59,31 @@ class TrainingSamplesHistoryImportTests(unittest.TestCase):
 
             self.assertEqual(result["merged_total"], 2)
             self.assertEqual(result["saved_total"], 2)
-            self.assertEqual(result["storage_limit"], 50000)
+            self.assertEqual(result["storage_limit"], 100000)
             self.assertEqual(result["dropped_by_limit"], 0)
+
+    def test_import_accepts_sample_limit_override(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            input_path = temp_path / "history.jsonl"
+            input_path.write_text(
+                "\n".join(json.dumps(_record(f"m{index}"), ensure_ascii=False) for index in range(3)),
+                encoding="utf-8",
+            )
+
+            result = import_historical_xgb_samples(
+                project_dir=temp_path,
+                input_path=input_path,
+                replace=True,
+                sync_ratings=False,
+                sample_limit=2,
+            )
+
+            self.assertEqual(result["merged_total"], 3)
+            self.assertEqual(result["saved_total"], 2)
+            self.assertEqual(result["storage_limit"], 2)
+            self.assertEqual(result["dropped_by_limit"], 1)
+            self.assertEqual(result["sample_limit_override"], 2)
 
 
 if __name__ == "__main__":
