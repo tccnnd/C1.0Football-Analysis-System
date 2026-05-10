@@ -27,6 +27,7 @@ from .core import (
     get_recent_settlements,
     get_result_recovery_runs,
     get_statsbomb_event_baseline,
+    get_statsbomb_sandbox_fewshot_memory,
     get_strategy_admission_policy_status,
     get_strategy_admission_policy_history,
     mark_strategy_allowlist_snapshots,
@@ -4044,7 +4045,13 @@ class SmartMatchDashboard:
             return None
         settlements = list(reversed(get_recent_settlements(limit=300)))
         status = get_high_accuracy_strategy_status()
-        dashboard = build_high_accuracy_strategy_dashboard(status, settlements, policy_history, get_statsbomb_event_baseline())
+        dashboard = build_high_accuracy_strategy_dashboard(
+            status,
+            settlements,
+            policy_history,
+            get_statsbomb_event_baseline(),
+            get_statsbomb_sandbox_fewshot_memory(),
+        )
         policy_effect = dashboard.get("policy_effect_review", {}) if isinstance(dashboard.get("policy_effect_review"), dict) else {}
         now = datetime.now()
         REPORT_DIR.mkdir(parents=True, exist_ok=True)
@@ -4268,7 +4275,13 @@ class SmartMatchDashboard:
         policy_history = get_strategy_admission_policy_history(limit=20)
         settlements = list(reversed(get_recent_settlements(limit=200)))
         status = get_high_accuracy_strategy_status()
-        dashboard = build_high_accuracy_strategy_dashboard(status, settlements, policy_history, get_statsbomb_event_baseline())
+        dashboard = build_high_accuracy_strategy_dashboard(
+            status,
+            settlements,
+            policy_history,
+            get_statsbomb_event_baseline(),
+            get_statsbomb_sandbox_fewshot_memory(),
+        )
         monitor = dashboard.get("policy_stability_monitor", {}) if isinstance(dashboard.get("policy_stability_monitor"), dict) else {}
         return build_strategy_policy_tuning_guard(monitor, tuning if isinstance(tuning, dict) else {}, source=source)
 
@@ -4758,7 +4771,13 @@ class SmartMatchDashboard:
         admission_policy = admission_status.get("policy", {}) if isinstance(admission_status.get("policy"), dict) else {}
         settlements = list(reversed(get_recent_settlements(limit=200)))
         policy_history = get_strategy_admission_policy_history(limit=20)
-        dashboard = build_high_accuracy_strategy_dashboard(status, settlements, policy_history, get_statsbomb_event_baseline())
+        dashboard = build_high_accuracy_strategy_dashboard(
+            status,
+            settlements,
+            policy_history,
+            get_statsbomb_event_baseline(),
+            get_statsbomb_sandbox_fewshot_memory(),
+        )
         release_pool_rows = self._strategy_release_pool_rows(settlements)
         shell = self._page_shell(
             "\u7b56\u7565\u770b\u677f",
@@ -5037,6 +5056,18 @@ class SmartMatchDashboard:
         for item in evaluation_agent.get("recommendations", []) if isinstance(evaluation_agent.get("recommendations"), list) else []:
             if isinstance(item, dict):
                 self._strategy_row(right, str(item.get("title") or "-"), str(item.get("body") or "-"))
+        fewshot_memory = evaluation_agent.get("statsbomb_fewshot_memory", {}) if isinstance(evaluation_agent.get("statsbomb_fewshot_memory"), dict) else {}
+        memory_rows = fewshot_memory.get("rows", []) if isinstance(fewshot_memory.get("rows"), list) else []
+        if memory_rows:
+            self._strategy_section_title(right, "StatsBomb Few-shot \u8bb0\u5fc6")
+            self._strategy_row(
+                right,
+                str(fewshot_memory.get("summary_text") or "-"),
+                str(fewshot_memory.get("leakage_note") or "-"),
+            )
+            for row in memory_rows:
+                if isinstance(row, dict):
+                    self._strategy_row(right, str(row.get("title") or "-"), f"{row.get('body', '-')}\n{row.get('completion', '-')}")
 
         allowlist_summary = dashboard.get("allowlist_settlement_summary", {}) if isinstance(dashboard.get("allowlist_settlement_summary"), dict) else {}
         self._strategy_section_title(right, "\u653e\u884c\u590d\u76d8\u7edf\u8ba1")

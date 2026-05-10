@@ -706,6 +706,99 @@ def build_statsbomb_event_review_summary(
     }
 
 
+def _statsbomb_memory_items(memory: Mapping[str, object] | object) -> list[Mapping[str, object]]:
+    payload = _as_mapping(memory)
+    items = _as_list(payload.get("items"))
+    return [item for item in items if isinstance(item, Mapping)]
+
+
+def _statsbomb_memory_query_tags(
+    error_attribution: Mapping[str, object] | object,
+    event_review: Mapping[str, object] | object,
+) -> list[str]:
+    attribution = _as_mapping(error_attribution)
+    reason_counts = _as_mapping(attribution.get("reason_counts"))
+    review = _as_mapping(event_review)
+    has_statsbomb_signal = (
+        _safe_int(review.get("sample_count")) > 0
+        or _safe_int(reason_counts.get("statsbomb_finishing_variance")) > 0
+        or _safe_int(reason_counts.get("statsbomb_event_control_gap")) > 0
+        or _safe_int(reason_counts.get("statsbomb_xg_against_pick")) > 0
+    )
+    if not has_statsbomb_signal:
+        return []
+    tags: list[str] = ["statsbomb_post_match_review"]
+    if _safe_int(reason_counts.get("statsbomb_finishing_variance")) or _safe_int(review.get("finishing_variance_count")):
+        tags.extend(["statsbomb_finishing_variance", "xg_result_divergence"])
+    if _safe_int(reason_counts.get("statsbomb_event_control_gap")) or _safe_int(review.get("control_gap_count")):
+        tags.append("event_control_gap")
+    if _safe_int(reason_counts.get("statsbomb_xg_against_pick")):
+        tags.append("xg_direction_failed")
+    if _safe_int(attribution.get("miss_count")):
+        tags.append("strategy_miss")
+    deduped: list[str] = []
+    for tag in tags:
+        if tag not in deduped:
+            deduped.append(tag)
+    return deduped
+
+
+def build_statsbomb_fewshot_memory_summary(
+    error_attribution: Mapping[str, object] | object,
+    event_review: Mapping[str, object] | object,
+    memory: Mapping[str, object] | object | None = None,
+    *,
+    limit: int = 3,
+) -> dict[str, object]:
+    items = _statsbomb_memory_items(memory or {})
+    query_tags = _statsbomb_memory_query_tags(error_attribution, event_review)
+    rows: list[dict[str, object]] = []
+    for item in items:
+        labels = _as_mapping(item.get("labels"))
+        tags = [str(tag) for tag in _as_list(labels.get("tags"))]
+        matched = [tag for tag in query_tags if tag in tags]
+        if not matched:
+            continue
+        features = _as_mapping(item.get("features"))
+        meta = _as_mapping(item.get("meta"))
+        score = len(matched) * 10
+        if labels.get("is_hit") is False and "strategy_miss" in query_tags:
+            score += 4
+        if "statsbomb_finishing_variance" in matched:
+            score += 3
+        if "event_control_gap" in matched:
+            score += 2
+        rows.append(
+            {
+                "id": item.get("id") or "-",
+                "score": score,
+                "matched_tags": matched,
+                "title": f"{meta.get('match_date') or '-'} | {meta.get('league') or '-'} | {meta.get('home_team') or '-'} vs {meta.get('away_team') or '-'}",
+                "body": (
+                    f"{labels.get('simulated_pick') or '-'} -> {labels.get('actual') or '-'} | "
+                    f"{'命中' if labels.get('is_hit') is True else '未命中'} | "
+                    f"{labels.get('root_cause') or '-'} | xG差 {float(_safe_float(features.get('xg_margin'), 0.0) or 0.0):+.2f}"
+                ),
+                "completion": item.get("completion") or "-",
+                "tags": tags,
+            }
+        )
+    rows.sort(key=lambda row: (-_safe_int(row.get("score")), str(row.get("title") or "")))
+    limited = rows[: max(0, int(limit))]
+    memory_summary = _as_mapping(_as_mapping(memory or {}).get("summary"))
+    return {
+        "status": "ready" if items else "missing",
+        "sample_count": len(items),
+        "matched_count": len(rows),
+        "query_tags": query_tags,
+        "baseline_match_count": _safe_int(memory_summary.get("baseline_match_count")),
+        "rows": limited,
+        "summary_text": f"记忆库 {len(items)} | 命中 {len(rows)} | 标签 {', '.join(query_tags[:4])}",
+        "leakage_note": _as_mapping(memory or {}).get("leakage_note")
+        or "These few-shot samples use post-match event data and must not be used as pre-match prediction features.",
+    }
+
+
 def _statsbomb_sandbox_row(row: Mapping[str, object], baseline: Mapping[str, object] | object | None = None) -> dict[str, object]:
     xg_margin = _safe_float(row.get("xg_margin"))
     goal_margin = _safe_int(row.get("goal_margin"))
@@ -1943,6 +2036,7 @@ def build_strategy_evaluation_agent_summary(
     status: Mapping[str, object] | object,
     settlements: Sequence[Mapping[str, object]] | object,
     statsbomb_event_baseline: Mapping[str, object] | object | None = None,
+    statsbomb_fewshot_memory: Mapping[str, object] | object | None = None,
 ) -> dict[str, object]:
     settlement_items = [item for item in settlements if isinstance(item, Mapping)] if isinstance(settlements, Sequence) else []
     settlement_summary = build_high_accuracy_strategy_settlement_summary(settlement_items)
@@ -1950,6 +2044,7 @@ def build_strategy_evaluation_agent_summary(
     allowlist_summary = build_strategy_allowlist_settlement_summary(settlement_items)
     jc_feedback = build_jc_bucket_feedback_summary(status, settlement_items)
     event_review = build_statsbomb_event_review_summary(settlement_items, statsbomb_event_baseline or {})
+    fewshot_memory = build_statsbomb_fewshot_memory_summary(error_attribution, event_review, statsbomb_fewshot_memory or {})
     known_count = _safe_int(settlement_summary.get("known_count"))
     hit_rate = settlement_summary.get("hit_rate")
     hit_rate_value = _safe_float(hit_rate, -1.0) if hit_rate is not None else -1.0
@@ -2067,6 +2162,17 @@ def build_strategy_evaluation_agent_summary(
                     ),
                 }
             )
+    if _safe_int(fewshot_memory.get("matched_count")):
+        memory_tags.append("statsbomb_fewshot_memory")
+        recommendations.append(
+            {
+                "title": "\u53c2\u8003StatsBomb\u5386\u53f2\u590d\u76d8\u8bb0\u5fc6",
+                "body": (
+                    f"{fewshot_memory.get('summary_text') or '-'}\u3002"
+                    "\u5efa\u8bae\u5c06\u76f8\u4f3c\u6848\u4f8b\u4f5c\u4e3a\u590d\u76d8\u8bed\u5883\uff0c\u533a\u5206\u7ec8\u7ed3\u6ce2\u52a8\u3001\u573a\u9762\u52a3\u52bf\u548c\u771f\u6b63\u7684\u8d5b\u524d\u5224\u65ad\u5931\u6548\u3002"
+                ),
+            }
+        )
     if data_missing_count:
         score -= min(12, data_missing_count * 4)
         recommendations.append(
@@ -2100,7 +2206,8 @@ def build_strategy_evaluation_agent_summary(
         "error_attribution": error_attribution,
         "jc_bucket_feedback": jc_feedback,
         "statsbomb_event_review": event_review,
-        "recommendations": recommendations[:6],
+        "statsbomb_fewshot_memory": fewshot_memory,
+        "recommendations": recommendations[:8],
         "memory_tags": memory_tags,
     }
 
@@ -3316,6 +3423,7 @@ def build_high_accuracy_strategy_dashboard(
     settlements: Sequence[Mapping[str, object]] | object,
     policy_history: Sequence[Mapping[str, object]] | object | None = None,
     statsbomb_event_baseline: Mapping[str, object] | object | None = None,
+    statsbomb_fewshot_memory: Mapping[str, object] | object | None = None,
 ) -> dict[str, object]:
     resolved = _as_mapping(status)
     settlement_items = [item for item in settlements if isinstance(item, Mapping)] if isinstance(settlements, Sequence) else []
@@ -3336,7 +3444,12 @@ def build_high_accuracy_strategy_dashboard(
     handicap_margin_backtest = build_handicap_margin_backtest_summary(settlement_items)
     jc_bucket_feedback = build_jc_bucket_feedback_summary(resolved, settlement_items)
     statsbomb_event_review = build_statsbomb_event_review_summary(settlement_items, statsbomb_event_baseline or {})
-    evaluation_agent = build_strategy_evaluation_agent_summary(resolved, settlement_items, statsbomb_event_baseline or {})
+    evaluation_agent = build_strategy_evaluation_agent_summary(
+        resolved,
+        settlement_items,
+        statsbomb_event_baseline or {},
+        statsbomb_fewshot_memory or {},
+    )
     stable_count = sum(1 for item in pool if bool(_strategy_stability(item).get("stable")))
     primary_count = sum(1 for item in pool if str(item.get("role") or "") == "primary")
     backup_count = sum(1 for item in pool if str(item.get("role") or "") == "backup")

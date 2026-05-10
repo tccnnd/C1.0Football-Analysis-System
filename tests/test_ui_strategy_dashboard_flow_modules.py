@@ -28,6 +28,7 @@ from v24_app.ui_modules import (
     build_market_entropy_backtest_summary,
     build_strategy_evaluation_agent_summary,
     build_strategy_error_attribution_summary,
+    build_statsbomb_fewshot_memory_summary,
     build_statsbomb_event_replay_case,
     build_statsbomb_event_review_summary,
     build_statsbomb_event_sandbox_report_filename,
@@ -1086,6 +1087,79 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertEqual(evaluation["statsbomb_event_review"]["sample_count"], 1)
         self.assertIn("statsbomb_post_match_review", evaluation["memory_tags"])
         self.assertTrue(any("StatsBomb" in item["title"] for item in evaluation["recommendations"]))
+
+    def test_evaluation_agent_uses_statsbomb_fewshot_memory(self) -> None:
+        settlements = [
+            {
+                "league": "UEFA Euro",
+                "home_team": "Spain",
+                "away_team": "Croatia",
+                "statsbomb_event_summary": {
+                    "event_count": 3500,
+                    "team_stats": {
+                        "Spain": {"xg": 1.12, "shots": 11, "goals": 3},
+                        "Croatia": {"xg": 2.35, "shots": 16, "goals": 0},
+                    },
+                },
+                "high_accuracy_strategy_items": [
+                    {
+                        "play_type": "market_1x2",
+                        "pick": "AWAY",
+                        "actual": "HOME",
+                        "confidence": 0.70,
+                        "min_confidence": 0.65,
+                        "backtest_accuracy": 0.72,
+                        "backtest_samples": 180,
+                        "is_hit": False,
+                    }
+                ],
+            }
+        ]
+        memory = {
+            "leakage_note": "post-match memory only",
+            "summary": {"baseline_match_count": 53},
+            "items": [
+                {
+                    "id": "statsbomb_sandbox:1",
+                    "completion": "历史案例显示这是终结波动。",
+                    "labels": {
+                        "is_hit": False,
+                        "simulated_pick": "AWAY",
+                        "actual": "HOME",
+                        "root_cause": "statsbomb_finishing_variance",
+                        "tags": ["statsbomb_post_match_review", "strategy_miss", "statsbomb_finishing_variance", "xg_result_divergence"],
+                    },
+                    "features": {"xg_margin": -1.23},
+                    "meta": {
+                        "match_date": "2024-06-15",
+                        "league": "UEFA Euro",
+                        "home_team": "Spain",
+                        "away_team": "Croatia",
+                    },
+                }
+            ],
+        }
+        base_evaluation = build_strategy_evaluation_agent_summary(
+            {"enabled": True},
+            settlements,
+            {"summary": {"match_count": 53, "finishing_variance_rate": "35.8%"}},
+        )
+        memory_summary = build_statsbomb_fewshot_memory_summary(
+            base_evaluation["error_attribution"],
+            base_evaluation["statsbomb_event_review"],
+            memory,
+        )
+        evaluation = build_strategy_evaluation_agent_summary(
+            {"enabled": True},
+            settlements,
+            {"summary": {"match_count": 53, "finishing_variance_rate": "35.8%"}},
+            memory,
+        )
+
+        self.assertEqual(memory_summary["matched_count"], 1)
+        self.assertEqual(evaluation["statsbomb_fewshot_memory"]["matched_count"], 1)
+        self.assertIn("statsbomb_fewshot_memory", evaluation["memory_tags"])
+        self.assertTrue(any("历史复盘记忆" in item["title"] for item in evaluation["recommendations"]))
 
     def test_evaluation_agent_recommends_tightening_on_weak_settlements(self) -> None:
         settlements = [
