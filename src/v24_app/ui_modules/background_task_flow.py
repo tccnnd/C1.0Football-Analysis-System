@@ -196,6 +196,10 @@ def build_background_task_rows(tasks: Sequence[Mapping[str, object]] | object, *
         mode = str(item.get("mode") or "thread")
         group = str(item.get("group") or "default")
         priority = item.get("priority", 100)
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), Mapping) else {}
+        retry_count = int(_safe_float(metadata.get("retry_count") if isinstance(metadata, Mapping) else 0))
+        max_retries = int(_safe_float(metadata.get("max_retries") if isinstance(metadata, Mapping) else 0))
+        retry_text = f" | 重试 {retry_count}/{max_retries}" if max_retries else ""
         elapsed = item.get("elapsed_seconds")
         elapsed_text = f"{_safe_float(elapsed):.2f}s" if elapsed is not None else "-"
         detail = str(item.get("error") or item.get("result_summary") or "-")
@@ -205,7 +209,7 @@ def build_background_task_rows(tasks: Sequence[Mapping[str, object]] | object, *
                 "body": (
                     f"ID {item.get('task_id', '-')} | {MODE_LABELS.get(mode, mode)} | "
                     f"{GROUP_LABELS.get(group, group)} | P{priority} | "
-                    f"开始 {item.get('started_at', '-') or '-'} | 耗时 {elapsed_text}\n{detail}"
+                    f"开始 {item.get('started_at', '-') or '-'} | 耗时 {elapsed_text}{retry_text}\n{detail}"
                 ),
                 "task_id": str(item.get("task_id") or ""),
                 "status": status,
@@ -274,6 +278,8 @@ def build_background_task_detail_lines(task: Mapping[str, object] | object) -> l
     mode = str(item.get("mode") or "thread")
     group = str(item.get("group") or "default")
     priority = item.get("priority", 100)
+    retry_count = int(_safe_float(metadata.get("retry_count") if isinstance(metadata, Mapping) else 0))
+    max_retries = int(_safe_float(metadata.get("max_retries") if isinstance(metadata, Mapping) else 0))
     elapsed = item.get("elapsed_seconds")
     elapsed_text = f"{_safe_float(elapsed):.2f}s" if elapsed is not None else "-"
     lines = [
@@ -285,6 +291,7 @@ def build_background_task_detail_lines(task: Mapping[str, object] | object) -> l
         f"执行模式: {MODE_LABELS.get(mode, mode)}",
         f"任务分组: {GROUP_LABELS.get(group, group)}",
         f"优先级: P{priority}",
+        f"重试: {retry_count}/{max_retries}",
         f"状态: {STATUS_LABELS.get(status, status)}",
         f"入队时间: {item.get('queued_at', '-') or '-'}",
         f"开始时间: {item.get('started_at', '-') or '-'}",

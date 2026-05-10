@@ -110,6 +110,7 @@ class BackgroundTaskCenter:
         self._active_keys: set[str] = set()
         self._futures: dict[str, Future] = {}
         self._pending: dict[str, dict[str, Any]] = {}
+        self._running_specs: dict[str, dict[str, Any]] = {}
         self._running_by_mode: dict[TaskMode, int] = {"thread": 0, "process": 0}
         self._running_by_group: dict[str, int] = {}
         self._shutdown = False
@@ -126,6 +127,7 @@ class BackgroundTaskCenter:
         mode: TaskMode = "thread",
         group: str = "default",
         priority: int = 100,
+        max_retries: int = 0,
         allow_duplicate: bool = False,
         metadata: dict[str, Any] | None = None,
         on_success: Callable[[Any, BackgroundTaskRecord], None] | None = None,
@@ -141,6 +143,9 @@ class BackgroundTaskCenter:
                 return None
             task_id = f"task-{next(self._counter):06d}"
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            record_metadata = dict(metadata or {})
+            record_metadata["max_retries"] = max(0, int(max_retries))
+            record_metadata.setdefault("retry_count", 0)
             record = BackgroundTaskRecord(
                 task_id=task_id,
                 key=resolved_key,
@@ -150,7 +155,7 @@ class BackgroundTaskCenter:
                 priority=int(priority),
                 status="queued",
                 queued_at=now,
-                metadata=dict(metadata or {}),
+                metadata=record_metadata,
             )
             self._records[task_id] = record
             self._order.insert(0, task_id)
@@ -195,6 +200,7 @@ class BackgroundTaskCenter:
                 record.metadata["cancelled_at"] = record.finished_at
                 self._active_keys.discard(record.key)
                 self._futures.pop(resolved_id, None)
+                self._running_specs.pop(resolved_id, None)
                 self._release_running_slot_locked(record)
                 self._schedule_locked()
                 self._persist_locked()
@@ -321,6 +327,7 @@ class BackgroundTaskCenter:
         executor = self._thread_pool if record.mode == "thread" else self._process_executor()
         future = executor.submit(_run_task_callable, pending["func"], pending["args"], pending["kwargs"])
         self._futures[task_id] = future
+        self._running_specs[task_id] = pending
         future.add_done_callback(
             lambda completed: self._complete_future(
                 completed,
@@ -353,6 +360,7 @@ class BackgroundTaskCenter:
                 record.error = record.error or "cancelled"
                 self._active_keys.discard(record.key)
                 self._futures.pop(task_id, None)
+                self._running_specs.pop(task_id, None)
                 self._release_running_slot_locked(record)
                 self._schedule_locked()
                 self._persist_locked()
@@ -367,6 +375,7 @@ class BackgroundTaskCenter:
                 record.error = record.error or "cancelled"
                 self._active_keys.discard(record.key)
                 self._futures.pop(task_id, None)
+                self._running_specs.pop(task_id, None)
                 self._release_running_slot_locked(record)
                 self._schedule_locked()
                 self._persist_locked()
@@ -374,13 +383,40 @@ class BackgroundTaskCenter:
         except BaseException as exc:
             with self._lock:
                 record = self._records[task_id]
-                record.status = "failed"
-                record.finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                record.finished_at = now
                 record.error = str(exc)
-                record.metadata["traceback"] = traceback.format_exc(limit=6)
-                self._active_keys.discard(record.key)
+                trace = traceback.format_exc(limit=6)
+                record.metadata["traceback"] = trace
                 self._futures.pop(task_id, None)
+                spec = self._running_specs.pop(task_id, None)
                 self._release_running_slot_locked(record)
+                retry_count = int(record.metadata.get("retry_count") or 0)
+                max_retries = int(record.metadata.get("max_retries") or 0)
+                if (
+                    spec is not None
+                    and retry_count < max_retries
+                    and not record.metadata.get("cancel_requested")
+                    and not self._shutdown
+                ):
+                    retry_count += 1
+                    record.status = "queued"
+                    record.queued_at = now
+                    record.started_at = ""
+                    record.finished_at = ""
+                    record.elapsed_seconds = None
+                    record.error = f"retrying_after_failure: {exc}"
+                    record.metadata["retry_count"] = retry_count
+                    record.metadata["last_retry_at"] = now
+                    record.metadata["last_error"] = str(exc)
+                    record.metadata["last_traceback"] = trace
+                    self._pending[task_id] = spec
+                    self._queue.append(task_id)
+                    self._schedule_locked()
+                    self._persist_locked()
+                    return
+                record.status = "failed"
+                self._active_keys.discard(record.key)
                 self._schedule_locked()
                 self._persist_locked()
                 callback_record = BackgroundTaskRecord(**record.as_dict())
@@ -393,11 +429,16 @@ class BackgroundTaskCenter:
             record.status = "success"
             record.finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             record.elapsed_seconds = round(float(elapsed), 4)
+            record.error = ""
             record.result_summary = summarize_task_result(result)
+            if int(record.metadata.get("retry_count") or 0) > 0:
+                record.metadata["recovered_after_retry"] = True
+                record.metadata.pop("traceback", None)
             if record.metadata.get("cancel_requested"):
                 record.metadata["cancel_request_completed"] = True
             self._active_keys.discard(record.key)
             self._futures.pop(task_id, None)
+            self._running_specs.pop(task_id, None)
             self._release_running_slot_locked(record)
             self._schedule_locked()
             self._persist_locked()

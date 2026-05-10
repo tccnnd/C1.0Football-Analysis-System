@@ -206,6 +206,73 @@ class BackgroundTaskCenterTests(unittest.TestCase):
         finally:
             center.shutdown()
 
+    def test_retryable_task_requeues_and_succeeds_without_error_callback(self) -> None:
+        completed = threading.Event()
+        errors: list[str] = []
+        attempts = {"count": 0}
+        center = BackgroundTaskCenter(dispatcher=lambda callback: callback(), max_thread_workers=1)
+
+        def flaky() -> dict[str, object]:
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise RuntimeError("temporary source failure")
+            return {"summary_text": "recovered"}
+
+        try:
+            record = center.submit(
+                key="flaky",
+                label="Flaky",
+                func=flaky,
+                max_retries=1,
+                on_success=lambda _result, _record: completed.set(),
+                on_error=lambda exc, _record: errors.append(str(exc)),
+            )
+
+            self.assertIsNotNone(record)
+            self.assertTrue(completed.wait(5))
+            snapshot = center.snapshot()[0]
+            self.assertEqual(snapshot["status"], "success")
+            self.assertEqual(snapshot["result_summary"], "recovered")
+            self.assertEqual(snapshot["metadata"]["retry_count"], 1)
+            self.assertEqual(snapshot["metadata"]["max_retries"], 1)
+            self.assertIn("temporary source failure", snapshot["metadata"]["last_error"])
+            self.assertTrue(snapshot["metadata"]["recovered_after_retry"])
+            self.assertEqual(snapshot["error"], "")
+            self.assertNotIn("traceback", snapshot["metadata"])
+            self.assertEqual(errors, [])
+        finally:
+            center.shutdown()
+
+    def test_retry_exhaustion_marks_failed_and_calls_error_callback(self) -> None:
+        failed = threading.Event()
+        errors: list[str] = []
+        attempts = {"count": 0}
+        center = BackgroundTaskCenter(dispatcher=lambda callback: callback(), max_thread_workers=1)
+
+        def always_fails() -> None:
+            attempts["count"] += 1
+            raise RuntimeError("still failing")
+
+        try:
+            record = center.submit(
+                key="always_fails",
+                label="Always Fails",
+                func=always_fails,
+                max_retries=1,
+                on_error=lambda exc, _record: (errors.append(str(exc)), failed.set()),
+            )
+
+            self.assertIsNotNone(record)
+            self.assertTrue(failed.wait(5))
+            snapshot = center.snapshot()[0]
+            self.assertEqual(attempts["count"], 2)
+            self.assertEqual(snapshot["status"], "failed")
+            self.assertEqual(snapshot["metadata"]["retry_count"], 1)
+            self.assertEqual(snapshot["metadata"]["max_retries"], 1)
+            self.assertEqual(errors, ["still failing"])
+        finally:
+            center.shutdown()
+
     def test_ui_task_rows_and_summary(self) -> None:
         tasks = [
             {
@@ -216,6 +283,7 @@ class BackgroundTaskCenterTests(unittest.TestCase):
                 "priority": 20,
                 "status": "running",
                 "started_at": "2026-05-10 10:00:00",
+                "metadata": {"retry_count": 1, "max_retries": 2},
             },
             {
                 "task_id": "t2",
@@ -239,6 +307,7 @@ class BackgroundTaskCenterTests(unittest.TestCase):
         self.assertTrue(rows[0]["can_cancel"])
         self.assertIn("赛果回收", rows[0]["body"])
         self.assertIn("P20", rows[0]["body"])
+        self.assertIn("重试 1/2", rows[0]["body"])
         self.assertIn("进程", rows[1]["body"])
         self.assertIn("boom", rows[1]["body"])
 
@@ -343,7 +412,7 @@ class BackgroundTaskCenterTests(unittest.TestCase):
                 "elapsed_seconds": 3.25,
                 "error": "boom",
                 "result_summary": "-",
-                "metadata": {"trigger": "manual", "traceback": "Traceback line"},
+                "metadata": {"trigger": "manual", "retry_count": 1, "max_retries": 2, "traceback": "Traceback line"},
             }
         )
         text = "\n".join(lines)
@@ -352,6 +421,7 @@ class BackgroundTaskCenterTests(unittest.TestCase):
         self.assertIn("进程", text)
         self.assertIn("模型任务", text)
         self.assertIn("P160", text)
+        self.assertIn("重试: 1/2", text)
         self.assertIn("入队时间", text)
         self.assertIn("boom", text)
         self.assertIn("manual", text)

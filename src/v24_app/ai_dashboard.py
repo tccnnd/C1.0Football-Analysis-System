@@ -3146,6 +3146,7 @@ class SmartMatchDashboard:
             mode="thread",
             group="recovery",
             priority=20,
+            max_retries=1,
             metadata={"trigger": trigger, "lookback_days": lookback_days, "group": "recovery", "priority": 20},
             on_success=lambda result, record: self._finish_result_recovery(
                 result if isinstance(result, dict) else {},
