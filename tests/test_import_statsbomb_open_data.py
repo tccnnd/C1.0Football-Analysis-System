@@ -144,8 +144,78 @@ class ImportStatsBombOpenDataTests(unittest.TestCase):
             self.assertEqual(len(summary["items"]), 1)
             self.assertEqual(summary["items"][0]["event_summary"]["event_count"], 9)
             self.assertEqual(audit["records"], 1)
+            self.assertEqual(audit["output_records"], 1)
             self.assertEqual(audit["total_events"], 9)
             self.assertEqual(audit["competition_counts"]["1. Bundesliga"], 1)
+
+    def test_import_can_merge_existing_records_and_filter_by_date(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            offline_dir = root / "offline"
+            state_dir = root / "data" / "state"
+            write_json(
+                offline_dir / "competitions.json",
+                [
+                    {
+                        "competition_id": 9,
+                        "season_id": 281,
+                        "competition_name": "1. Bundesliga",
+                        "season_name": "2023/2024",
+                    }
+                ],
+            )
+            old_match = fake_match(1000)
+            old_match["match_date"] = "2024-03-01"
+            new_match = fake_match(1001)
+            new_match["match_date"] = "2024-04-14"
+            skipped_match = fake_match(1002)
+            skipped_match["match_date"] = "2024-05-18"
+            write_json(offline_dir / "matches" / "9" / "281.json", [old_match, new_match, skipped_match])
+            write_json(offline_dir / "events" / "1001.json", fake_events())
+            write_json(
+                state_dir / "statsbomb_event_summaries.json",
+                {
+                    "items": [
+                        {
+                            "match_id": "statsbomb:old",
+                            "source_match_id": 99,
+                            "match_date": "2024-01-01",
+                            "league": "Existing",
+                            "home_team": "Old",
+                            "away_team": "Team",
+                            "event_summary": {"event_count": 1},
+                        }
+                    ]
+                },
+            )
+
+            result = importer.import_statsbomb_open_data(
+                project_root=root,
+                offline_dir=offline_dir,
+                competition_id=9,
+                season_id=281,
+                match_date_from="2024-04-01",
+                match_date_to="2024-04-30",
+                merge=True,
+            )
+
+            summary = json.loads((state_dir / "statsbomb_event_summaries.json").read_text(encoding="utf-8"))
+            audit = json.loads((state_dir / "statsbomb_import_audit.json").read_text(encoding="utf-8"))
+
+            self.assertEqual(result["records"], 1)
+            self.assertEqual(result["output_records"], 2)
+            self.assertEqual(len(summary["items"]), 2)
+            self.assertTrue(audit["merge"])
+            self.assertEqual(audit["match_date_from"], "2024-04-01")
+            self.assertEqual(audit["match_date_to"], "2024-04-30")
+
+    def test_filter_matches_accepts_explicit_match_ids(self) -> None:
+        selected = importer.filter_matches(
+            [fake_match(1001), fake_match(1002)],
+            match_ids={1002},
+        )
+
+        self.assertEqual([item["match_id"] for item in selected], [1002])
 
 
 if __name__ == "__main__":

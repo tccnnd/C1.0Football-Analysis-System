@@ -318,6 +318,63 @@ def build_audit(
     }
 
 
+def load_existing_records(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    items = payload.get("items", []) if isinstance(payload, dict) else []
+    return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+
+
+def merge_records(existing: list[dict], incoming: list[dict]) -> list[dict]:
+    merged: dict[str, dict] = {}
+    for item in existing + incoming:
+        key = str(item.get("match_id") or item.get("source_match_id") or "").strip()
+        if not key:
+            key = "|".join(
+                [
+                    str(item.get("match_date") or ""),
+                    str(item.get("league") or ""),
+                    str(item.get("home_team") or ""),
+                    str(item.get("away_team") or ""),
+                ]
+            )
+        if key:
+            merged[key] = item
+    return sorted(merged.values(), key=lambda item: (str(item.get("match_date") or ""), str(item.get("match_id") or "")))
+
+
+def filter_matches(
+    matches: list[dict],
+    *,
+    match_date_from: str | None = None,
+    match_date_to: str | None = None,
+    match_ids: set[int] | None = None,
+    limit_matches: int | None = None,
+) -> list[dict]:
+    selected: list[dict] = []
+    for item in matches:
+        try:
+            match_id = int(item.get("match_id"))
+        except Exception:
+            match_id = None
+        match_date = str(item.get("match_date") or "")
+        if match_ids is not None and match_id not in match_ids:
+            continue
+        if match_date_from and match_date < match_date_from:
+            continue
+        if match_date_to and match_date > match_date_to:
+            continue
+        selected.append(item)
+    selected.sort(key=lambda item: (str(item.get("match_date") or ""), int(item.get("match_id") or 0)))
+    if limit_matches is not None:
+        selected = selected[: max(0, int(limit_matches))]
+    return selected
+
+
 def import_statsbomb_open_data(
     *,
     project_root: Path = PROJECT_ROOT,
@@ -326,6 +383,10 @@ def import_statsbomb_open_data(
     season_id: int | None = None,
     limit_competitions: int | None = None,
     limit_matches: int | None = None,
+    match_date_from: str | None = None,
+    match_date_to: str | None = None,
+    match_ids: list[int] | None = None,
+    merge: bool = False,
     timeout: int = 30,
 ) -> dict:
     competitions = filter_competitions(
@@ -354,9 +415,13 @@ def import_statsbomb_open_data(
             failures.append(f"{current_competition_id}/{current_season_id}: {exc}")
             continue
 
-        matches.sort(key=lambda item: (str(item.get("match_date") or ""), int(item.get("match_id") or 0)))
-        if limit_matches is not None:
-            matches = matches[: max(0, int(limit_matches))]
+        matches = filter_matches(
+            matches,
+            match_date_from=match_date_from,
+            match_date_to=match_date_to,
+            match_ids=set(match_ids) if match_ids else None,
+            limit_matches=limit_matches,
+        )
 
         for match in matches:
             match_id = int(match.get("match_id"))
@@ -374,18 +439,25 @@ def import_statsbomb_open_data(
     state_dir = project_root / "data" / "state"
     summaries_path = state_dir / "statsbomb_event_summaries.json"
     audit_path = state_dir / "statsbomb_import_audit.json"
+    output_records = merge_records(load_existing_records(summaries_path), records) if merge else records
     payload = {
         "updated_at": now_text(),
         "source": SOURCE_NAME,
         "source_url": SOURCE_URL,
         "attribution": "Data source: StatsBomb",
-        "items": records,
+        "items": output_records,
     }
     audit = build_audit(competitions=competitions, records=records, failures=failures, event_failures=event_failures)
+    audit["merge"] = bool(merge)
+    audit["output_records"] = len(output_records)
+    audit["match_date_from"] = match_date_from
+    audit["match_date_to"] = match_date_to
+    audit["match_ids"] = match_ids or []
     write_json(summaries_path, payload)
     write_json(audit_path, audit)
     return {
         "records": len(records),
+        "output_records": len(output_records),
         "total_events": audit["total_events"],
         "failure_count": audit["failure_count"],
         "summaries_path": str(summaries_path),
@@ -401,6 +473,10 @@ def main() -> int:
     parser.add_argument("--season-id", type=int, default=None)
     parser.add_argument("--limit-competitions", type=int, default=None)
     parser.add_argument("--limit-matches", type=int, default=None)
+    parser.add_argument("--match-date-from", default=None)
+    parser.add_argument("--match-date-to", default=None)
+    parser.add_argument("--match-ids", nargs="*", type=int, default=None)
+    parser.add_argument("--merge", action="store_true", help="Merge imported summaries with existing statsbomb_event_summaries.json.")
     parser.add_argument("--timeout", type=int, default=30)
     args = parser.parse_args()
 
@@ -411,6 +487,10 @@ def main() -> int:
         season_id=args.season_id,
         limit_competitions=args.limit_competitions,
         limit_matches=args.limit_matches,
+        match_date_from=args.match_date_from,
+        match_date_to=args.match_date_to,
+        match_ids=args.match_ids,
+        merge=args.merge,
         timeout=max(1, int(args.timeout)),
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
