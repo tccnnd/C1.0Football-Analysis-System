@@ -66,6 +66,8 @@ from .ui_modules import (
     build_high_accuracy_strategy_dashboard,
     build_strategy_allowlist_settlement_summary,
     build_strategy_allowlist_tuning_recommendation,
+    build_statsbomb_event_sandbox_report_filename,
+    build_statsbomb_event_sandbox_report_lines,
     build_statsbomb_event_sandbox_summary,
     build_strategy_allowlist_filename,
     build_strategy_allowlist_report_lines,
@@ -4558,7 +4560,8 @@ class SmartMatchDashboard:
             show_samples(row_by_iid.get(children[0]))
 
     def open_statsbomb_event_sandbox_window(self) -> None:
-        sandbox = build_statsbomb_event_sandbox_summary(get_statsbomb_event_baseline(), limit=60)
+        baseline = get_statsbomb_event_baseline()
+        sandbox = build_statsbomb_event_sandbox_summary(baseline, limit=60)
         window = tk.Toplevel(self.root)
         window.title("StatsBomb \u5386\u53f2\u4e8b\u4ef6\u590d\u76d8\u6c99\u76d2")
         window.geometry("1180x760")
@@ -4700,6 +4703,17 @@ class SmartMatchDashboard:
             row = row_by_iid.get(selected[0]) if selected else None
             show_detail(row, evaluation_only=True)
 
+        def export_sandbox_report() -> None:
+            now = datetime.now()
+            REPORT_DIR.mkdir(parents=True, exist_ok=True)
+            path = REPORT_DIR / build_statsbomb_event_sandbox_report_filename(now)
+            path.write_text(
+                "\n".join(build_statsbomb_event_sandbox_report_lines(baseline, generated_at=now, limit=30)),
+                encoding="utf-8",
+            )
+            self.status_var.set(f"StatsBomb\u590d\u76d8\u6c99\u76d2\u62a5\u544a\u5df2\u5bfc\u51fa: {path.name}")
+            messagebox.showinfo("StatsBomb\u6c99\u76d2", f"\u5df2\u751f\u6210\u590d\u76d8\u62a5\u544a:\n{path}")
+
         tree.bind("<<TreeviewSelect>>", on_select)
         children = tree.get_children()
         if children:
@@ -4719,7 +4733,20 @@ class SmartMatchDashboard:
             font=("Microsoft YaHei UI", 10, "bold"),
             padx=16,
             pady=7,
-        ).pack(anchor=tk.E, pady=(8, 0))
+        ).pack(side=tk.RIGHT, pady=(8, 0))
+        tk.Button(
+            header,
+            text="\u5bfc\u51fa\u590d\u76d8\u62a5\u544a",
+            command=export_sandbox_report,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=16,
+            pady=7,
+        ).pack(side=tk.RIGHT, padx=(0, 10), pady=(8, 0))
         self.status_var.set(f"StatsBomb\u6c99\u76d2: {sandbox.get('summary_text', '-')}")
 
     def open_strategy_library(self) -> None:

@@ -30,6 +30,8 @@ from v24_app.ui_modules import (
     build_strategy_error_attribution_summary,
     build_statsbomb_event_replay_case,
     build_statsbomb_event_review_summary,
+    build_statsbomb_event_sandbox_report_filename,
+    build_statsbomb_event_sandbox_report_lines,
     build_statsbomb_event_sandbox_summary,
     build_strategy_allowlist_filename,
     build_strategy_allowlist_report_lines,
@@ -997,6 +999,20 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertEqual(len(sandbox["bucket_rows"]), 1)
         self.assertIn("终结波动", sandbox["variance_rows"][0]["diagnosis"])
         self.assertIn("Spain vs Croatia", sandbox["variance_rows"][0]["title"])
+
+        self.assertEqual(
+            build_statsbomb_event_sandbox_report_filename(datetime(2026, 5, 10, 22, 15, 30)),
+            "statsbomb_event_sandbox_20260510_221530.md",
+        )
+        lines = build_statsbomb_event_sandbox_report_lines(
+            baseline,
+            generated_at=datetime(2026, 5, 10, 22, 15, 30),
+        )
+        payload = "\n".join(lines)
+        self.assertIn("StatsBomb", payload)
+        self.assertIn("Evaluation Agent", payload)
+        self.assertIn("Spain vs Croatia", payload)
+        self.assertIn("post match only", payload)
 
     def test_statsbomb_event_replay_case_generates_evaluation_chain(self) -> None:
         row = {

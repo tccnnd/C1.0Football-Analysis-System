@@ -895,6 +895,109 @@ def build_statsbomb_event_sandbox_summary(
     }
 
 
+def build_statsbomb_event_sandbox_report_filename(now: datetime | None = None) -> str:
+    current = now or datetime.now()
+    return f"statsbomb_event_sandbox_{current.strftime('%Y%m%d_%H%M%S')}.md"
+
+
+def build_statsbomb_event_sandbox_report_lines(
+    baseline: Mapping[str, object] | object,
+    *,
+    generated_at: datetime | None = None,
+    limit: int = 20,
+) -> list[str]:
+    current = generated_at or datetime.now()
+    sandbox = build_statsbomb_event_sandbox_summary(baseline, limit=limit)
+    lines = [
+        "# StatsBomb \u5386\u53f2\u4e8b\u4ef6\u590d\u76d8\u6c99\u76d2",
+        "",
+        f"- \u751f\u6210\u65f6\u95f4: {current.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- \u6570\u636e\u6e90: {sandbox.get('source', '-')}",
+        f"- \u57fa\u7ebf\u66f4\u65b0: {sandbox.get('updated_at', '-')}",
+        f"- \u6458\u8981: {sandbox.get('summary_text', '-')}",
+        f"- \u9632\u6cc4\u6f0f\u8fb9\u754c: {sandbox.get('leakage_note', '-')}",
+        "",
+        "## \u8d5b\u4e8b\u57fa\u7ebf",
+        "",
+        "| \u8d5b\u4e8b | \u6458\u8981 |",
+        "| --- | --- |",
+    ]
+    competition_rows = [row for row in _as_list(sandbox.get("competition_rows")) if isinstance(row, Mapping)]
+    if competition_rows:
+        for row in competition_rows:
+            lines.append(f"| {_md_cell(row.get('label'))} | {_md_cell(row.get('body'))} |")
+    else:
+        lines.append("| - | \u6682\u65e0\u8d5b\u4e8b\u57fa\u7ebf |")
+    lines.extend(
+        [
+            "",
+            "## xG\u5dee\u503c\u5206\u6876",
+            "",
+            "| \u5206\u6876 | \u6458\u8981 |",
+            "| --- | --- |",
+        ]
+    )
+    bucket_rows = [row for row in _as_list(sandbox.get("bucket_rows")) if isinstance(row, Mapping)]
+    if bucket_rows:
+        for row in bucket_rows:
+            lines.append(f"| {_md_cell(row.get('label'))} | {_md_cell(row.get('body'))} |")
+    else:
+        lines.append("| - | \u6682\u65e0xG\u5206\u6876 |")
+    lines.extend(
+        [
+            "",
+            "## Evaluation Agent \u6a21\u62df\u590d\u76d8\u6848\u4f8b",
+            "",
+            "| \u65e5\u671f | \u8d5b\u4e8b | \u5bf9\u9635 | \u6bd4\u5206 | xG | \u8bca\u65ad | Evaluation | \u4e3b\u9519\u56e0 |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        ]
+    )
+    rows = [row for row in _as_list(sandbox.get("variance_rows")) if isinstance(row, Mapping)]
+    if not rows:
+        rows = [row for row in _as_list(sandbox.get("rows")) if isinstance(row, Mapping)]
+    if not rows:
+        lines.append("| - | - | - | - | - | - | - | - |")
+    for row in rows[: max(0, int(limit))]:
+        case = _as_mapping(row.get("evaluation_case"))
+        evaluation = _as_mapping(case.get("evaluation"))
+        attribution = _as_mapping(evaluation.get("error_attribution"))
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    _md_cell(row.get("match_date")),
+                    _md_cell(row.get("league")),
+                    _md_cell(row.get("title")),
+                    _md_cell(row.get("score")),
+                    _md_cell(row.get("xg")),
+                    _md_cell(row.get("diagnosis")),
+                    _md_cell(f"{evaluation.get('status', '-')} / {evaluation.get('score', '-')}"),
+                    _md_cell(attribution.get("top_reason")),
+                ]
+            )
+            + " |"
+        )
+    lines.extend(["", "## \u6848\u4f8b\u8be6\u60c5", ""])
+    for index, row in enumerate(rows[: max(0, int(limit))], start=1):
+        case = _as_mapping(row.get("evaluation_case"))
+        lines.extend(
+            [
+                f"### {index}. {_text(row.get('title'))}",
+                "",
+                f"- \u65e5\u671f: {_text(row.get('match_date'))}",
+                f"- \u8d5b\u4e8b: {_text(row.get('league'))}",
+                f"- \u6bd4\u5206 / xG / \u5c04\u95e8: {_text(row.get('score'))} / {_text(row.get('xg'))} / {_text(row.get('shots'))}",
+                f"- \u6837\u672c\u8bca\u65ad: {_text(row.get('diagnosis'))}",
+                "",
+                "```text",
+                _text(case.get("body")),
+                "```",
+                "",
+            ]
+        )
+    return lines
+
+
 def _strategy_error_codes(settlement: Mapping[str, object], item: Mapping[str, object]) -> list[str]:
     if item.get("is_hit") is None:
         return ["data_missing"]
