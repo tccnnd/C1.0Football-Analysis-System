@@ -1342,13 +1342,18 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertEqual(queue["status"], "ready")
         self.assertGreaterEqual(queue["task_count"], 2)
         self.assertGreaterEqual(queue["candidate_count"], 1)
+        self.assertEqual(queue["health_status"], "attention")
+        self.assertTrue(any(issue["code"] == "sample_count_low" for issue in queue["health_issues"]))
         self.assertTrue(any("xg_direction_failed" in row["matched_tags"] for row in queue["candidate_rows"]))
+        self.assertTrue(any("required_tag_gap" in row["matched_health_issues"] for row in queue["candidate_rows"]))
         self.assertIn("post-match", queue["leakage_note"])
 
     def test_statsbomb_fewshot_backfill_report_exports_queue(self) -> None:
         queue = {
             "status": "ready",
             "summary_text": "补样任务 1 | 候选 1 | 目标标签 1",
+            "health_summary": "attention | issues 1 | samples 6",
+            "health_issues": [{"code": "required_tag_gap", "severity": "medium", "recommendation": "cover missing tags"}],
             "leakage_note": "post-match only",
             "tasks": [
                 {
@@ -1366,6 +1371,7 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
                     "league": "UEFA Euro",
                     "title": "2024-06-15 | UEFA Euro | Spain vs Croatia",
                     "matched_tags": ["xg_direction_failed"],
+                    "matched_health_issues": ["required_tag_gap"],
                     "tags": ["statsbomb_post_match_review", "xg_direction_failed"],
                 }
             ],
@@ -1381,6 +1387,8 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("StatsBomb Few-shot 补样队列", payload)
         self.assertIn("补充当前错因相似样本", payload)
         self.assertIn("Spain vs Croatia", payload)
+        self.assertIn("Health Drivers", payload)
+        self.assertIn("required_tag_gap", payload)
         self.assertIn("post-match only", payload)
 
     def test_statsbomb_fewshot_draft_payload_builds_reviewable_samples(self) -> None:

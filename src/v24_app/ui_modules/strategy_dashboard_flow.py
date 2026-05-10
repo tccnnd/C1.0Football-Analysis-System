@@ -1085,6 +1085,8 @@ def build_statsbomb_fewshot_backfill_queue(
     monitor_data = _as_mapping(monitor)
     quality_data = _as_mapping(quality)
     alert_rows = [_as_mapping(alert) for alert in _as_list(quality_data.get("alerts"))]
+    health = build_statsbomb_fewshot_memory_health_summary(monitor_data, quality_data)
+    health_issues = [_as_mapping(issue) for issue in _as_list(health.get("issues"))]
     required_tags = _statsbomb_required_backfill_tags(monitor_data)
     sample_count = _safe_int(monitor_data.get("sample_count"))
     missing_tags = [str(tag) for tag in _as_list(monitor_data.get("missing_tags"))]
@@ -1178,10 +1180,27 @@ def build_statsbomb_fewshot_backfill_queue(
         overlap = sorted(row_tags & target_tag_set)
         if tasks and not overlap:
             continue
+        matched_health_issues: list[str] = []
+        if overlap and missing_tags and set(overlap) & set(missing_tags):
+            matched_health_issues.append("required_tag_gap")
+        if sample_count < 20 and overlap:
+            matched_health_issues.append("sample_count_low")
+        if _safe_int(quality_data.get("alert_count")) and overlap:
+            matched_health_issues.append("quality_alerts_present")
+        for issue in health_issues:
+            issue_code = str(issue.get("code") or "")
+            if issue_code in {"memory_missing", "sample_count_low", "required_tag_gap", "quality_alerts_present"} and issue_code not in matched_health_issues:
+                if issue_code == "memory_missing" or overlap:
+                    matched_health_issues.append(issue_code)
         scored = dict(row)
         scored["matched_tags"] = overlap
+        scored["matched_health_issues"] = matched_health_issues
         scored["priority_score"] = _safe_int(row.get("priority_score")) + len(overlap) * 12
-        scored["body"] = f"{row.get('body', '-')}\n命中补样目标: {', '.join(overlap[:6]) if overlap else '-'}"
+        scored["body"] = (
+            f"{row.get('body', '-')}\n"
+            f"命中补样目标: {', '.join(overlap[:6]) if overlap else '-'}\n"
+            f"健康问题: {', '.join(matched_health_issues[:4]) if matched_health_issues else '-'}"
+        )
         scored_rows.append(scored)
     scored_rows.sort(key=lambda row: (-_safe_int(row.get("priority_score")), str(row.get("match_date") or ""), str(row.get("title") or "")))
     tasks.sort(key=lambda row: (-_safe_int(row.get("priority")), str(row.get("title") or "")))
@@ -1190,6 +1209,10 @@ def build_statsbomb_fewshot_backfill_queue(
         "status": status,
         "task_count": len(tasks),
         "candidate_count": len(scored_rows),
+        "health_status": health.get("status") or "-",
+        "health_summary": health.get("summary_text") or "-",
+        "health_issues": [dict(issue) for issue in health_issues],
+        "target_tags": sorted(str(tag) for tag in target_tag_set),
         "tasks": tasks[: max(0, int(limit))],
         "candidate_rows": scored_rows[: max(0, int(limit))],
         "summary_text": f"补样任务 {len(tasks)} | 候选 {len(scored_rows)} | 目标标签 {len(target_tag_set)}",
@@ -1211,6 +1234,7 @@ def build_statsbomb_fewshot_backfill_report_lines(
     resolved = _as_mapping(queue)
     tasks = [row for row in _as_list(resolved.get("tasks")) if isinstance(row, Mapping)]
     candidates = [row for row in _as_list(resolved.get("candidate_rows")) if isinstance(row, Mapping)]
+    health_issues = [row for row in _as_list(resolved.get("health_issues")) if isinstance(row, Mapping)]
     lines = [
         "# StatsBomb Few-shot 补样队列",
         "",
@@ -1224,6 +1248,16 @@ def build_statsbomb_fewshot_backfill_report_lines(
         "| 优先级 | 任务 | 目标标签 | 说明 |",
         "| ---: | --- | --- | --- |",
     ]
+    lines.extend(["", "## Health Drivers", "", "| Issue | Severity | Recommendation |", "| --- | --- | --- |"])
+    if not health_issues:
+        lines.append("| - | - | - |")
+    for issue in health_issues:
+        lines.append(
+            "| "
+            + " | ".join([_md_cell(issue.get("code")), _md_cell(issue.get("severity")), _md_cell(issue.get("recommendation"))])
+            + " |"
+        )
+    lines.extend(["", "## Backfill Tasks", "", "| Priority | Task | Target tags | Description |", "| ---: | --- | --- | --- |"])
     if not tasks:
         lines.append("| 0 | 暂无补样任务 | - | 当前 StatsBomb few-shot 记忆覆盖健康。 |")
     for task in tasks:
