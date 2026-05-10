@@ -19,6 +19,7 @@ from .core import (
     auto_settle_finished_matches,
     build_result_recovery_snapshot_audit,
     fetch_matches_v24,
+    get_play_model_training_status,
     get_high_accuracy_strategy_status,
     get_recent_settlements,
     get_result_recovery_runs,
@@ -29,10 +30,20 @@ from .core import (
     predict_match,
     record_result_recovery_run,
     rollback_strategy_admission_policy,
+    run_high_accuracy_strategy_backtest,
+    run_play_model_backtest,
+    train_play_models_now,
 )
 from .ui_modules import (
     build_background_task_rows,
     build_background_task_summary,
+    build_high_accuracy_strategy_backtest_message,
+    build_high_accuracy_strategy_backtest_status_text,
+    build_play_model_backtest_apply_status_text,
+    build_play_model_backtest_success_message,
+    build_play_model_training_status_text,
+    build_train_play_models_apply_message,
+    build_train_play_models_apply_status_text,
     build_result_recovery_quality_alerts,
     build_result_recovery_review_summary,
     build_result_recovery_run_detail,
@@ -2244,6 +2255,103 @@ class SmartMatchDashboard:
         self.event_log.insert(0, (stamp, level, message))
         self.event_log = self.event_log[:200]
 
+    def run_high_accuracy_strategy_backtest_task(self) -> None:
+        self._submit_process_task(
+            key="high_accuracy_strategy_backtest",
+            label="\u9ad8\u51c6\u7b56\u7565\u5386\u53f2\u56de\u6d4b",
+            start_status="\u6b63\u5728\u540e\u53f0\u8fdb\u7a0b\u4e2d\u6267\u884c\u9ad8\u51c6\u7b56\u7565\u56de\u6d4b...",
+            func=run_high_accuracy_strategy_backtest,
+            on_success=self._finish_high_accuracy_strategy_backtest_task,
+            error_title="\u9ad8\u51c6\u7b56\u7565\u56de\u6d4b\u5931\u8d25",
+        )
+
+    def run_play_model_backtest_task(self) -> None:
+        self._submit_process_task(
+            key="play_model_backtest",
+            label="\u73a9\u6cd5\u6a21\u578b\u5386\u53f2\u56de\u6d4b",
+            start_status="\u6b63\u5728\u540e\u53f0\u8fdb\u7a0b\u4e2d\u6267\u884c\u73a9\u6cd5\u6a21\u578b\u56de\u6d4b...",
+            func=run_play_model_backtest,
+            on_success=self._finish_play_model_backtest_task,
+            error_title="\u73a9\u6cd5\u6a21\u578b\u56de\u6d4b\u5931\u8d25",
+        )
+
+    def train_play_models_task(self) -> None:
+        self._submit_process_task(
+            key="train_play_models",
+            label="\u73a9\u6cd5\u6a21\u578b\u8bad\u7ec3",
+            start_status="\u6b63\u5728\u540e\u53f0\u8fdb\u7a0b\u4e2d\u8bad\u7ec3\u73a9\u6cd5\u6a21\u578b...",
+            func=train_play_models_now,
+            on_success=self._finish_train_play_models_task,
+            error_title="\u73a9\u6cd5\u6a21\u578b\u8bad\u7ec3\u5931\u8d25",
+        )
+
+    def _submit_process_task(
+        self,
+        *,
+        key: str,
+        label: str,
+        start_status: str,
+        func,
+        on_success,
+        error_title: str,
+    ) -> None:
+        task = self.background_tasks.submit(
+            key=key,
+            label=label,
+            func=func,
+            mode="process",
+            on_success=on_success,
+            on_error=lambda exc, record: self._finish_process_task_error(error_title, exc, record),
+        )
+        if task is None:
+            message = f"{label}\u5df2\u5728\u540e\u53f0\u8fd0\u884c\uff0c\u8bf7\u5148\u7b49\u5f85\u5f53\u524d\u4efb\u52a1\u5b8c\u6210\u3002"
+            self.status_var.set(message)
+            self._log_event("INFO", message)
+            return
+        self.status_var.set(start_status)
+        self._log_event("INFO", f"\u5df2\u63d0\u4ea4\u540e\u53f0\u8fdb\u7a0b\u4efb\u52a1: {label} / {task.task_id}")
+        if getattr(self, "current_view", "") == "monitor":
+            self.open_monitor_center()
+
+    def _finish_process_task_error(self, title: str, exc: BaseException, record: BackgroundTaskRecord) -> None:
+        message = f"{title}: {exc}"
+        self.status_var.set(message)
+        self._log_event("ERROR", f"{message} | {record.task_id}")
+        if getattr(self, "current_view", "") == "monitor":
+            self.open_monitor_center()
+        messagebox.showerror(title, str(exc))
+
+    def _finish_high_accuracy_strategy_backtest_task(self, result: object, record: BackgroundTaskRecord) -> None:
+        payload = result if isinstance(result, dict) else {}
+        self.status_var.set(build_high_accuracy_strategy_backtest_status_text(payload))
+        self._log_event("OK", f"\u9ad8\u51c6\u7b56\u7565\u56de\u6d4b\u5b8c\u6210 | {record.task_id} | {record.elapsed_seconds or 0:.2f}s")
+        self.summary_vars["hit_rate"].set(self._historical_hit_rate())
+        self._refresh_current_view_after_release_state_change()
+        if bool(payload.get("ok")):
+            messagebox.showinfo("\u9ad8\u51c6\u7b56\u7565\u56de\u6d4b", build_high_accuracy_strategy_backtest_message(payload))
+        else:
+            messagebox.showinfo("\u9ad8\u51c6\u7b56\u7565\u56de\u6d4b", f"\u56de\u6d4b\u672a\u5b8c\u6210\n\u539f\u56e0: {payload.get('reason', '-')}")
+
+    def _finish_play_model_backtest_task(self, result: object, record: BackgroundTaskRecord) -> None:
+        payload = result if isinstance(result, dict) else {}
+        self.status_var.set(build_play_model_backtest_apply_status_text(payload))
+        self._log_event("OK", f"\u73a9\u6cd5\u6a21\u578b\u56de\u6d4b\u5b8c\u6210 | {record.task_id} | {record.elapsed_seconds or 0:.2f}s")
+        if getattr(self, "current_view", "") == "monitor":
+            self.open_monitor_center()
+        if bool(payload.get("ok")):
+            messagebox.showinfo("\u73a9\u6cd5\u6a21\u578b\u56de\u6d4b", build_play_model_backtest_success_message(payload))
+        else:
+            messagebox.showinfo("\u73a9\u6cd5\u6a21\u578b\u56de\u6d4b", f"\u56de\u6d4b\u672a\u5b8c\u6210\n\u539f\u56e0: {payload.get('reason', '-')}")
+
+    def _finish_train_play_models_task(self, result: object, record: BackgroundTaskRecord) -> None:
+        payload = result if isinstance(result, dict) else {}
+        self.status_var.set(build_train_play_models_apply_status_text(payload))
+        self._log_event("OK", f"\u73a9\u6cd5\u6a21\u578b\u8bad\u7ec3\u5b8c\u6210 | {record.task_id} | {record.elapsed_seconds or 0:.2f}s")
+        if getattr(self, "current_view", "") == "monitor":
+            self.open_monitor_center()
+        status_text = build_play_model_training_status_text(get_play_model_training_status())
+        messagebox.showinfo("\u73a9\u6cd5\u6a21\u578b\u8bad\u7ec3", build_train_play_models_apply_message(payload, status_text))
+
     def _release_recovery_alerts(self) -> dict[str, object]:
         return build_strategy_release_recovery_alerts(self._pending_snapshot_rows())
 
@@ -2288,6 +2396,45 @@ class SmartMatchDashboard:
         )
         header = tk.Frame(shell, bg=BG)
         header.pack(fill=tk.X)
+        tk.Button(
+            header,
+            text="\u73a9\u6cd5\u8bad\u7ec3(\u8fdb\u7a0b)",
+            command=self.train_play_models_task,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=14,
+            pady=7,
+        ).pack(side=tk.RIGHT, padx=(0, 10))
+        tk.Button(
+            header,
+            text="\u73a9\u6cd5\u56de\u6d4b(\u8fdb\u7a0b)",
+            command=self.run_play_model_backtest_task,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=14,
+            pady=7,
+        ).pack(side=tk.RIGHT, padx=(0, 10))
+        tk.Button(
+            header,
+            text="\u9ad8\u51c6\u56de\u6d4b(\u8fdb\u7a0b)",
+            command=self.run_high_accuracy_strategy_backtest_task,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=14,
+            pady=7,
+        ).pack(side=tk.RIGHT, padx=(0, 10))
         tk.Button(
             header,
             text="\u56de\u6536\u8fd0\u884c\u8bb0\u5f55",
@@ -4100,6 +4247,7 @@ class SmartMatchDashboard:
         primary_tools = tk.Frame(shell, bg=BG)
         primary_tools.pack(fill=tk.X, pady=(0, 6))
         self._strategy_toolbar_button(primary_tools, "\u5237\u65b0\u770b\u677f", self.open_strategy_library)
+        self._strategy_toolbar_button(primary_tools, "\u8fdb\u7a0b\u9ad8\u51c6\u56de\u6d4b", self.run_high_accuracy_strategy_backtest_task)
         self._strategy_toolbar_button(primary_tools, "\u5bfc\u51fa\u653e\u884c\u6e05\u5355", self.export_strategy_allowlist, primary=True)
         self._strategy_toolbar_button(
             primary_tools,
