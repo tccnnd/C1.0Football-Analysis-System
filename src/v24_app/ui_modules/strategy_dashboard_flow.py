@@ -3959,13 +3959,35 @@ def build_strategy_evaluation_agent_summary(
     settlements: Sequence[Mapping[str, object]] | object,
     statsbomb_event_baseline: Mapping[str, object] | object | None = None,
     statsbomb_fewshot_memory: Mapping[str, object] | object | None = None,
+    *,
+    settlement_summary: Mapping[str, object] | object | None = None,
+    error_attribution: Mapping[str, object] | object | None = None,
+    allowlist_summary: Mapping[str, object] | object | None = None,
+    jc_feedback: Mapping[str, object] | object | None = None,
+    event_review: Mapping[str, object] | object | None = None,
 ) -> dict[str, object]:
     settlement_items = [item for item in settlements if isinstance(item, Mapping)] if isinstance(settlements, Sequence) else []
-    settlement_summary = build_high_accuracy_strategy_settlement_summary(settlement_items)
-    error_attribution = build_strategy_error_attribution_summary(settlement_items)
-    allowlist_summary = build_strategy_allowlist_settlement_summary(settlement_items)
-    jc_feedback = build_jc_bucket_feedback_summary(status, settlement_items)
-    event_review = build_statsbomb_event_review_summary(settlement_items, statsbomb_event_baseline or {})
+    settlement_summary = (
+        _as_mapping(settlement_summary)
+        if settlement_summary is not None
+        else build_high_accuracy_strategy_settlement_summary(settlement_items)
+    )
+    error_attribution = (
+        _as_mapping(error_attribution)
+        if error_attribution is not None
+        else build_strategy_error_attribution_summary(settlement_items)
+    )
+    allowlist_summary = (
+        _as_mapping(allowlist_summary)
+        if allowlist_summary is not None
+        else build_strategy_allowlist_settlement_summary(settlement_items)
+    )
+    jc_feedback = _as_mapping(jc_feedback) if jc_feedback is not None else build_jc_bucket_feedback_summary(status, settlement_items)
+    event_review = (
+        _as_mapping(event_review)
+        if event_review is not None
+        else build_statsbomb_event_review_summary(settlement_items, statsbomb_event_baseline or {})
+    )
     fewshot_memory = build_statsbomb_fewshot_memory_summary(error_attribution, event_review, statsbomb_fewshot_memory or {})
     fewshot_monitor = build_statsbomb_fewshot_memory_monitor(statsbomb_fewshot_memory or {}, fewshot_memory)
     fewshot_quality = build_statsbomb_fewshot_memory_quality_alerts(fewshot_monitor)
@@ -5397,18 +5419,21 @@ def build_high_accuracy_strategy_dashboard(
         settlement_items,
         statsbomb_event_baseline or {},
         statsbomb_fewshot_memory or {},
+        settlement_summary=settlement_summary,
+        error_attribution=error_attribution,
+        allowlist_summary=allowlist_summary,
+        jc_feedback=jc_bucket_feedback,
+        event_review=statsbomb_event_review,
     )
-    statsbomb_fewshot_monitor = build_statsbomb_fewshot_memory_monitor(
-        statsbomb_fewshot_memory or {},
-        _as_mapping(evaluation_agent.get("statsbomb_fewshot_memory")),
-    )
+    statsbomb_fewshot_monitor = _as_mapping(evaluation_agent.get("statsbomb_fewshot_monitor"))
+    statsbomb_fewshot_quality = _as_mapping(evaluation_agent.get("statsbomb_fewshot_quality"))
     statsbomb_fewshot_health = build_statsbomb_fewshot_memory_health_summary(
         statsbomb_fewshot_monitor,
-        _as_mapping(evaluation_agent.get("statsbomb_fewshot_quality")),
+        statsbomb_fewshot_quality,
     )
     statsbomb_backfill_queue = build_statsbomb_fewshot_backfill_queue(
         statsbomb_fewshot_monitor,
-        _as_mapping(evaluation_agent.get("statsbomb_fewshot_quality")),
+        statsbomb_fewshot_quality,
         settlement_items,
         statsbomb_event_baseline or {},
         include_candidates=include_statsbomb_backfill_candidates,

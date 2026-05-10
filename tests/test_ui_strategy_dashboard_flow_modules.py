@@ -1192,6 +1192,29 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("statsbomb_fewshot_memory", evaluation["memory_tags"])
         self.assertTrue(any("历史复盘记忆" in item["title"] for item in evaluation["recommendations"]))
 
+    def test_evaluation_agent_accepts_precomputed_dashboard_summaries(self) -> None:
+        evaluation = build_strategy_evaluation_agent_summary(
+            {"enabled": True},
+            [],
+            {},
+            {},
+            settlement_summary={"known_count": 12, "hit_rate": 0.5, "hit_rate_text": "50.0%", "summary_text": "precomputed settlements"},
+            error_attribution={
+                "top_reason": "precomputed_reason",
+                "reason_counts": {"high_confidence_miss": 1},
+                "miss_count": 1,
+            },
+            allowlist_summary={"hit_rate": 0.5, "hit_rate_text": "50.0%"},
+            jc_feedback={"summary_text": "precomputed jc", "status_counts": {"watch": 1}},
+            event_review={"sample_count": 1, "finishing_variance_count": 1, "control_gap_count": 0, "baseline_match_count": 10},
+        )
+
+        self.assertIn("样本 12", evaluation["summary_text"])
+        self.assertIn("precomputed_reason", evaluation["summary_text"])
+        self.assertEqual(evaluation["settlement_summary"]["summary_text"], "precomputed settlements")
+        self.assertEqual(evaluation["jc_bucket_feedback"]["summary_text"], "precomputed jc")
+        self.assertEqual(evaluation["statsbomb_event_review"]["sample_count"], 1)
+
     def test_statsbomb_fewshot_memory_monitor_tracks_coverage_and_gaps(self) -> None:
         memory = {
             "leakage_note": "post-match memory only",
