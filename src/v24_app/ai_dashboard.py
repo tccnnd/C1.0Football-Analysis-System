@@ -4541,6 +4541,161 @@ class SmartMatchDashboard:
             pady=7,
         ).pack(side=tk.RIGHT, padx=(10, 0))
 
+    def _latest_statsbomb_artifact(self, patterns: list[str], *, root: Path | None = None) -> str:
+        base = root or REPORT_DIR
+        if not base.exists():
+            return "-"
+        files: list[Path] = []
+        for pattern in patterns:
+            files.extend(base.glob(pattern))
+        if not files:
+            return "-"
+        latest = max(files, key=lambda path: path.stat().st_mtime)
+        return latest.name
+
+    def _strategy_workflow_step(
+        self,
+        parent: tk.Widget,
+        index: int,
+        title: str,
+        status: str,
+        body: str,
+        command,
+        *,
+        tone: str = "neutral",
+        action_text: str = "执行",
+        secondary_text: str | None = None,
+        secondary_command=None,
+        danger: bool = False,
+    ) -> None:
+        frame = tk.Frame(parent, bg=PANEL_2, highlightbackground="#172638", highlightthickness=1)
+        frame.pack(fill=tk.X, padx=18, pady=5)
+        top = tk.Frame(frame, bg=PANEL_2)
+        top.pack(fill=tk.X, padx=12, pady=(10, 3))
+        tk.Label(
+            top,
+            text=f"{index}",
+            bg=self._tone_color(tone),
+            fg=BG,
+            font=("Microsoft YaHei UI", 9, "bold"),
+            width=3,
+        ).pack(side=tk.LEFT)
+        tk.Label(top, text=title, bg=PANEL_2, fg=TEXT, font=("Microsoft YaHei UI", 10, "bold")).pack(side=tk.LEFT, padx=(10, 8))
+        tk.Label(top, text=status, bg=PANEL_2, fg=self._tone_color(tone), font=("Microsoft YaHei UI", 9, "bold")).pack(side=tk.RIGHT)
+        tk.Label(
+            frame,
+            text=body,
+            bg=PANEL_2,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 9),
+            justify=tk.LEFT,
+            wraplength=350,
+        ).pack(anchor=tk.W, padx=12, pady=(0, 8))
+        actions = tk.Frame(frame, bg=PANEL_2)
+        actions.pack(fill=tk.X, padx=12, pady=(0, 10))
+        if command:
+            tk.Button(
+                actions,
+                text=action_text,
+                command=command,
+                bg=RED if danger else PANEL,
+                fg="white" if danger else TEXT,
+                activebackground="#d94743" if danger else "#172638",
+                activeforeground="white",
+                relief=tk.FLAT,
+                font=("Microsoft YaHei UI", 9, "bold"),
+                padx=12,
+                pady=4,
+            ).pack(side=tk.LEFT)
+        if secondary_text and secondary_command:
+            tk.Button(
+                actions,
+                text=secondary_text,
+                command=secondary_command,
+                bg=PANEL,
+                fg=TEXT,
+                activebackground="#172638",
+                activeforeground="white",
+                relief=tk.FLAT,
+                font=("Microsoft YaHei UI", 9, "bold"),
+                padx=12,
+                pady=4,
+            ).pack(side=tk.LEFT, padx=(8, 0))
+
+    def _strategy_statsbomb_workflow_panel(self, parent: tk.Widget, dashboard: dict) -> None:
+        backfill_queue = dashboard.get("statsbomb_backfill_queue", {}) if isinstance(dashboard.get("statsbomb_backfill_queue"), dict) else {}
+        monitor = dashboard.get("statsbomb_fewshot_monitor", {}) if isinstance(dashboard.get("statsbomb_fewshot_monitor"), dict) else {}
+        health = dashboard.get("statsbomb_fewshot_health", {}) if isinstance(dashboard.get("statsbomb_fewshot_health"), dict) else {}
+        candidate_count = int(backfill_queue.get("candidate_count", 0) or 0)
+        task_count = int(backfill_queue.get("task_count", 0) or 0)
+        sample_count = int(monitor.get("sample_count", 0) or 0)
+        alert_count = int(health.get("issue_count", 0) or 0)
+        latest_backfill = self._latest_statsbomb_artifact(["statsbomb_fewshot_backfill_*.md"])
+        latest_draft = self._latest_statsbomb_artifact(["statsbomb_fewshot_draft_*.json"])
+        latest_bundle = self._latest_statsbomb_artifact(["statsbomb_fewshot_merge_bundle_*.json"])
+        latest_preview = self._latest_statsbomb_artifact(["statsbomb_fewshot_merge_apply_preview_*.md"])
+        latest_apply = self._latest_statsbomb_artifact(["statsbomb_fewshot_merge_applied_*.md"])
+        latest_audit = self._latest_statsbomb_artifact(["statsbomb_fewshot_memory_audit_*.md"])
+        latest_backup = self._latest_statsbomb_artifact(
+            ["statsbomb_sandbox_fewshot_samples.backup_*.json", "statsbomb_sandbox_fewshot_samples.pre_rollback_*.json"],
+            root=STATSBOMB_SANDBOX_FEWSHOT_FILE.parent,
+        )
+
+        self._strategy_section_title(parent, "StatsBomb 补样闭环")
+        self._strategy_workflow_step(
+            parent,
+            1,
+            "生成补样队列",
+            "待补样" if task_count else "健康",
+            f"{backfill_queue.get('summary_text') or '-'}\n最近队列: {latest_backfill}",
+            self.export_statsbomb_fewshot_backfill_report,
+            tone="warning" if task_count else "good",
+            action_text="导出队列",
+        )
+        self._strategy_workflow_step(
+            parent,
+            2,
+            "候选转草稿",
+            "可生成" if candidate_count else "等待候选",
+            f"候选 {candidate_count} 场，草稿只进入 Evaluation Agent 赛后记忆。\n最近草稿: {latest_draft}",
+            self.export_statsbomb_fewshot_draft,
+            tone="info" if candidate_count else "neutral",
+            action_text="生成草稿",
+        )
+        self._strategy_workflow_step(
+            parent,
+            3,
+            "预览合并包",
+            "有合并包" if latest_bundle != "-" else "未生成",
+            f"先预览重复、校验和追加数量，再决定是否应用。\n最近合并包: {latest_bundle}\n最近预览: {latest_preview}",
+            self.preview_statsbomb_fewshot_merge_bundle,
+            tone="info" if latest_bundle != "-" else "neutral",
+            action_text="选择预览",
+        )
+        self._strategy_workflow_step(
+            parent,
+            4,
+            "应用到记忆库",
+            "需确认",
+            f"应用会写入官方 Evaluation Agent few-shot 记忆，并自动保留备份。\n最近应用: {latest_apply}",
+            self.apply_statsbomb_fewshot_merge_bundle,
+            tone="warning",
+            action_text="选择应用",
+            danger=True,
+        )
+        self._strategy_workflow_step(
+            parent,
+            5,
+            "审计与回滚",
+            "有告警" if alert_count else "可审计",
+            f"当前样本 {sample_count} 条，健康问题 {alert_count} 个。\n最近审计: {latest_audit}\n最近备份: {latest_backup}",
+            self.export_statsbomb_fewshot_memory_audit,
+            tone="warning" if alert_count else "good",
+            action_text="生成审计",
+            secondary_text="选择回滚",
+            secondary_command=self.rollback_statsbomb_fewshot_memory,
+        )
+
     def _configure_dark_tree_style(
         self,
         style_name: str,
@@ -5454,6 +5609,7 @@ class SmartMatchDashboard:
             for row in driver_rows[:6]:
                 if isinstance(row, dict):
                     self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
+        self._strategy_statsbomb_workflow_panel(right, dashboard)
         fewshot_quality = evaluation_agent.get("statsbomb_fewshot_quality", {}) if isinstance(evaluation_agent.get("statsbomb_fewshot_quality"), dict) else {}
         quality_alerts = fewshot_quality.get("alerts", []) if isinstance(fewshot_quality.get("alerts"), list) else []
         if quality_alerts:
