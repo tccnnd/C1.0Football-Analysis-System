@@ -38,6 +38,10 @@ from v24_app.ui_modules import (
     build_statsbomb_fewshot_merge_plan,
     build_statsbomb_fewshot_merge_plan_filename,
     build_statsbomb_fewshot_merge_plan_lines,
+    build_statsbomb_fewshot_merge_bundle,
+    build_statsbomb_fewshot_merge_bundle_filename,
+    build_statsbomb_fewshot_merge_bundle_report_filename,
+    build_statsbomb_fewshot_merge_bundle_report_lines,
     build_statsbomb_fewshot_memory_summary,
     build_statsbomb_fewshot_memory_monitor,
     build_statsbomb_fewshot_memory_quality_alerts,
@@ -1510,6 +1514,48 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
 
         self.assertEqual(plan["status"], "blocked")
         self.assertEqual(plan["mergeable_count"], 0)
+
+    def test_statsbomb_fewshot_merge_bundle_exports_only_mergeable_items(self) -> None:
+        plan = {
+            "status": "review",
+            "summary_text": "合并计划 review | 可合并 1 | 跳过 1 | 现有 2",
+            "skipped_count": 1,
+            "existing_count": 2,
+            "validation": {"summary_text": "草稿校验 review"},
+            "mergeable_items": [
+                {
+                    "id": "draft:new",
+                    "title": "2024-06-16 | UEFA Euro | A vs B",
+                    "root_cause": "statsbomb_finishing_variance",
+                    "tags": ["statsbomb_post_match_review", "strategy_miss"],
+                    "item": {
+                        "id": "draft:new",
+                        "review_status": "draft",
+                        "labels": {"root_cause": "statsbomb_finishing_variance", "tags": ["statsbomb_post_match_review", "strategy_miss"]},
+                        "meta": {"match_date": "2024-06-16", "league": "UEFA Euro", "home_team": "A", "away_team": "B"},
+                    },
+                }
+            ],
+            "skipped_rows": [{"id": "draft:old", "title": "old", "reason": "already_in_memory"}],
+        }
+
+        bundle = build_statsbomb_fewshot_merge_bundle(plan, generated_at=datetime(2026, 5, 10, 22, 15, 30))
+        lines = build_statsbomb_fewshot_merge_bundle_report_lines(bundle)
+        payload = "\n".join(lines)
+
+        self.assertEqual(bundle["status"], "pending_manual_apply")
+        self.assertEqual(bundle["summary"]["bundle_count"], 1)
+        self.assertTrue(bundle["approval_required"])
+        self.assertEqual(
+            build_statsbomb_fewshot_merge_bundle_filename(datetime(2026, 5, 10, 22, 15, 30)),
+            "statsbomb_fewshot_merge_bundle_20260510_221530.json",
+        )
+        self.assertEqual(
+            build_statsbomb_fewshot_merge_bundle_report_filename(datetime(2026, 5, 10, 22, 15, 30)),
+            "statsbomb_fewshot_merge_bundle_review_20260510_221530.md",
+        )
+        self.assertIn("StatsBomb Few-shot 合并可应用包", payload)
+        self.assertIn("draft:new", payload)
 
     def test_high_accuracy_dashboard_exposes_statsbomb_backfill_queue(self) -> None:
         memory = {

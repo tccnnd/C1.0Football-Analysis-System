@@ -1683,6 +1683,121 @@ def build_statsbomb_fewshot_merge_plan_lines(plan: Mapping[str, object] | object
     return lines
 
 
+def build_statsbomb_fewshot_merge_bundle_filename(now: datetime | None = None) -> str:
+    current = now or datetime.now()
+    return f"statsbomb_fewshot_merge_bundle_{current.strftime('%Y%m%d_%H%M%S')}.json"
+
+
+def build_statsbomb_fewshot_merge_bundle_report_filename(now: datetime | None = None) -> str:
+    current = now or datetime.now()
+    return f"statsbomb_fewshot_merge_bundle_review_{current.strftime('%Y%m%d_%H%M%S')}.md"
+
+
+def build_statsbomb_fewshot_merge_bundle(
+    plan: Mapping[str, object] | object,
+    *,
+    generated_at: datetime | None = None,
+) -> dict[str, object]:
+    current = generated_at or datetime.now()
+    resolved = _as_mapping(plan)
+    validation = _as_mapping(resolved.get("validation"))
+    mergeable = [item for item in _as_list(resolved.get("mergeable_items")) if isinstance(item, Mapping)]
+    bundle_items = [_as_mapping(item.get("item")) for item in mergeable if _as_mapping(item.get("item"))]
+    status = "blocked"
+    if str(resolved.get("status") or "") in {"ready", "review"} and bundle_items:
+        status = "pending_manual_apply"
+    elif str(resolved.get("status") or "") == "empty":
+        status = "empty"
+    return {
+        "updated_at": current.strftime("%Y-%m-%d %H:%M:%S"),
+        "source": "StatsBomb few-shot merge plan",
+        "purpose": "manual_apply_bundle",
+        "status": status,
+        "approval_required": True,
+        "write_policy": "read_only_export_no_state_write",
+        "leakage_note": "Bundle contains post-match StatsBomb review samples only; applying it must not feed samples into pre-match prediction features.",
+        "plan_summary": resolved.get("summary_text") or "-",
+        "validation_summary": validation.get("summary_text") or "-",
+        "summary": {
+            "bundle_count": len(bundle_items),
+            "merge_plan_status": resolved.get("status") or "-",
+            "skipped_count": _safe_int(resolved.get("skipped_count")),
+            "existing_count": _safe_int(resolved.get("existing_count")),
+        },
+        "items": bundle_items,
+        "skipped_rows": [dict(row) for row in _as_list(resolved.get("skipped_rows")) if isinstance(row, Mapping)],
+    }
+
+
+def build_statsbomb_fewshot_merge_bundle_report_lines(bundle: Mapping[str, object] | object) -> list[str]:
+    resolved = _as_mapping(bundle)
+    summary = _as_mapping(resolved.get("summary"))
+    items = [item for item in _as_list(resolved.get("items")) if isinstance(item, Mapping)]
+    skipped = [item for item in _as_list(resolved.get("skipped_rows")) if isinstance(item, Mapping)]
+    lines = [
+        "# StatsBomb Few-shot 合并可应用包",
+        "",
+        f"- 生成时间: {resolved.get('updated_at') or '-'}",
+        f"- 状态: {resolved.get('status') or '-'}",
+        f"- 审批要求: {'YES' if resolved.get('approval_required') else 'NO'}",
+        f"- 写入策略: {resolved.get('write_policy') or '-'}",
+        f"- 计划摘要: {resolved.get('plan_summary') or '-'}",
+        f"- 校验摘要: {resolved.get('validation_summary') or '-'}",
+        f"- 防泄漏边界: {resolved.get('leakage_note') or '-'}",
+        "",
+        "## Bundle 摘要",
+        "",
+        f"- 可应用样本: {_safe_int(summary.get('bundle_count'))}",
+        f"- 合并计划状态: {summary.get('merge_plan_status') or '-'}",
+        f"- 跳过样本: {_safe_int(summary.get('skipped_count'))}",
+        f"- 现有记忆样本: {_safe_int(summary.get('existing_count'))}",
+        "",
+        "## 可应用样本",
+        "",
+        "| ID | 比赛 | 根因 | 标签 |",
+        "| --- | --- | --- | --- |",
+    ]
+    if not items:
+        lines.append("| - | 暂无可应用样本 | - | - |")
+    for item in items:
+        labels = _as_mapping(item.get("labels"))
+        meta = _as_mapping(item.get("meta"))
+        title = f"{meta.get('match_date') or '-'} | {meta.get('league') or '-'} | {meta.get('home_team') or '-'} vs {meta.get('away_team') or '-'}"
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    _md_cell(item.get("id")),
+                    _md_cell(title),
+                    _md_cell(labels.get("root_cause")),
+                    _md_cell(", ".join(str(tag) for tag in _as_list(labels.get("tags")))),
+                ]
+            )
+            + " |"
+        )
+    if skipped:
+        lines.extend(["", "## 跳过记录", "", "| ID | 比赛 | 原因 |", "| --- | --- | --- |"])
+        for row in skipped[:20]:
+            lines.append(
+                "| "
+                + " | ".join([_md_cell(row.get("id")), _md_cell(row.get("title")), _md_cell(row.get("reason"))])
+                + " |"
+            )
+    lines.extend(
+        [
+            "",
+            "## 应用前检查",
+            "",
+            "- [ ] 人工确认 bundle 中每条样本都来自赛后事件证据。",
+            "- [ ] 人工确认没有 high 级草稿校验问题。",
+            "- [ ] 应用前备份正式 few-shot 记忆库。",
+            "- [ ] 应用后重新运行记忆监控、补样队列和 Evaluation Agent 相关测试。",
+            "",
+        ]
+    )
+    return lines
+
+
 def build_statsbomb_fewshot_draft_review_lines(payload: Mapping[str, object] | object) -> list[str]:
     resolved = _as_mapping(payload)
     summary = _as_mapping(resolved.get("summary"))
