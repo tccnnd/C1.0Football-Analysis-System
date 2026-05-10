@@ -212,6 +212,42 @@ class BackgroundTaskCenter:
                 task_ids = task_ids[: max(0, int(limit))]
             return [self._records[task_id].as_dict() for task_id in task_ids if task_id in self._records]
 
+    def queue_state(self) -> dict[str, Any]:
+        with self._lock:
+            groups = sorted({*self._group_limits.keys(), *(record.group for record in self._records.values())})
+            group_rows: list[dict[str, Any]] = []
+            for group in groups:
+                records = [record for record in self._records.values() if record.group == group]
+                running = sum(1 for record in records if record.status == "running")
+                queued = sum(1 for record in records if record.status == "queued")
+                success = sum(1 for record in records if record.status == "success")
+                failed = sum(1 for record in records if record.status == "failed")
+                cancelled = sum(1 for record in records if record.status == "cancelled")
+                latest = max(records, key=lambda record: record.queued_at or record.started_at or record.task_id) if records else None
+                group_rows.append(
+                    {
+                        "group": group,
+                        "limit": self._group_limits.get(group, self._default_group_limit),
+                        "running": running,
+                        "queued": queued,
+                        "active": running + queued,
+                        "success": success,
+                        "failed": failed,
+                        "cancelled": cancelled,
+                        "latest_label": latest.label if latest is not None else "-",
+                        "latest_status": latest.status if latest is not None else "-",
+                    }
+                )
+            group_rows.sort(key=lambda row: (int(row["active"]) == 0, str(row["group"])))
+            return {
+                "thread_running": self._running_by_mode.get("thread", 0),
+                "thread_limit": self._max_thread_workers,
+                "process_running": self._running_by_mode.get("process", 0),
+                "process_limit": self._max_process_workers,
+                "groups": group_rows,
+                "shutdown": self._shutdown,
+            }
+
     def active_count(self) -> int:
         with self._lock:
             return sum(1 for record in self._records.values() if record.status in {"queued", "running"})

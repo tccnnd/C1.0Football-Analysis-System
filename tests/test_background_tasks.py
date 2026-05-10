@@ -17,7 +17,12 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from v24_app.background_tasks import BackgroundTaskCenter, summarize_task_result
-from v24_app.ui_modules import build_background_task_detail_lines, build_background_task_rows, build_background_task_summary
+from v24_app.ui_modules import (
+    build_background_task_detail_lines,
+    build_background_task_group_rows,
+    build_background_task_rows,
+    build_background_task_summary,
+)
 
 
 def _sample_process_task(value: int) -> dict[str, object]:
@@ -143,6 +148,11 @@ class BackgroundTaskCenterTests(unittest.TestCase):
 
             snapshot = {item["task_id"]: item for item in center.snapshot()}
             self.assertEqual(snapshot[second.task_id]["status"], "queued")
+            queue_state = center.queue_state()
+            model_group = next(item for item in queue_state["groups"] if item["group"] == "model")
+            self.assertEqual(model_group["running"], 1)
+            self.assertEqual(model_group["queued"], 1)
+            self.assertEqual(model_group["limit"], 1)
             release.set()
         finally:
             center.shutdown()
@@ -227,6 +237,36 @@ class BackgroundTaskCenterTests(unittest.TestCase):
         self.assertIn("P20", rows[0]["body"])
         self.assertIn("进程", rows[1]["body"])
         self.assertIn("boom", rows[1]["body"])
+
+    def test_build_background_task_group_rows(self) -> None:
+        rows = build_background_task_group_rows(
+            {
+                "thread_running": 1,
+                "thread_limit": 4,
+                "process_running": 1,
+                "process_limit": 2,
+                "groups": [
+                    {
+                        "group": "model",
+                        "limit": 1,
+                        "running": 1,
+                        "queued": 2,
+                        "success": 3,
+                        "failed": 0,
+                        "cancelled": 1,
+                        "latest_label": "玩法模型训练",
+                        "latest_status": "running",
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertIn("模型任务", rows[0]["title"])
+        self.assertIn("1/1", rows[0]["title"])
+        self.assertIn("2 排队", rows[0]["title"])
+        self.assertIn("玩法模型训练", rows[0]["body"])
+        self.assertEqual(rows[0]["tone"], "warning")
 
     def test_build_background_task_detail_lines_includes_metadata_and_traceback(self) -> None:
         lines = build_background_task_detail_lines(

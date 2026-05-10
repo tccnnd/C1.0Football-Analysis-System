@@ -37,6 +37,7 @@ from .core import (
 from .ui_modules import (
     build_background_task_rows,
     build_background_task_detail_lines,
+    build_background_task_group_rows,
     build_background_task_summary,
     build_high_accuracy_strategy_backtest_message,
     build_high_accuracy_strategy_backtest_status_text,
@@ -2592,6 +2593,7 @@ class SmartMatchDashboard:
         load_report = self.last_load_diagnostics if isinstance(self.last_load_diagnostics, dict) else {}
         background_task_snapshot = self.background_tasks.snapshot(limit=10)
         background_task_summary = build_background_task_summary(background_task_snapshot)
+        background_queue_state = self.background_tasks.queue_state()
         load_failure_count = int(load_report.get("failure_count", 0) or 0)
         snapshot_failure_count = int(load_report.get("snapshot_failure_count", 0) or 0)
         fetched_count = int(load_report.get("fetched_count", len(self.rows)) or 0)
@@ -2613,6 +2615,11 @@ class SmartMatchDashboard:
             ("\u56de\u6536\u544a\u8b66", str(len(recovery_quality_alerts)), RED if any(item.get("severity") == "high" for item in recovery_quality_alerts) else YELLOW if recovery_quality_alerts else GREEN),
             ("\u540e\u53f0\u4efb\u52a1", str(background_task_summary.get("running", 0)), YELLOW if int(background_task_summary.get("running", 0) or 0) else GREEN),
             ("\u591a\u8fdb\u7a0b", str(background_task_summary.get("process_running", 0)), "#7aa2ff"),
+            (
+                "\u961f\u5217\u8d44\u6e90",
+                f"T {background_queue_state.get('thread_running', 0)}/{background_queue_state.get('thread_limit', 0)} | P {background_queue_state.get('process_running', 0)}/{background_queue_state.get('process_limit', 0)}",
+                "#7aa2ff",
+            ),
         ]
         for label, value, color in metrics:
             self._detail_metric(top, label, value, color)
@@ -2687,6 +2694,19 @@ class SmartMatchDashboard:
                 self._alert_card(left, str(alert.get("title") or "-"), str(alert.get("body") or "-"), tone=str(alert.get("tone") or "warning"))
 
         tk.Label(right, text="\u540e\u53f0\u4efb\u52a1", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
+        group_rows = build_background_task_group_rows(background_queue_state)
+        if group_rows:
+            for row in group_rows:
+                self._alert_card(
+                    right,
+                    str(row.get("title") or "-"),
+                    str(row.get("body") or "-"),
+                    tone=str(row.get("tone") or "neutral"),
+                )
+        else:
+            self._kv_row(right, "\u961f\u5217\u5206\u7ec4", "\u6682\u65e0\u540e\u53f0\u4efb\u52a1\u5206\u7ec4")
+
+        tk.Label(right, text="\u6700\u8fd1\u4efb\u52a1", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
         task_rows = build_background_task_rows(background_task_snapshot, limit=6)
         if task_rows:
             for row in task_rows:

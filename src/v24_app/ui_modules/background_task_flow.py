@@ -86,6 +86,35 @@ def build_background_task_summary(tasks: Sequence[Mapping[str, object]] | object
     }
 
 
+def build_background_task_group_rows(queue_state: Mapping[str, object] | object, *, limit: int = 6) -> list[dict[str, object]]:
+    state = _as_mapping(queue_state)
+    groups = state.get("groups")
+    items = [item for item in groups if isinstance(item, Mapping)] if isinstance(groups, Sequence) else []
+    rows: list[dict[str, object]] = []
+    for item in items[: max(0, int(limit))]:
+        group = str(item.get("group") or "default")
+        running = int(_safe_float(item.get("running"), 0))
+        queued = int(_safe_float(item.get("queued"), 0))
+        limit_value = int(_safe_float(item.get("limit"), 0))
+        failed = int(_safe_float(item.get("failed"), 0))
+        latest_status = str(item.get("latest_status") or "-")
+        tone = "bad" if failed else "warning" if queued else "good" if running else "neutral"
+        rows.append(
+            {
+                "title": f"{GROUP_LABELS.get(group, group)} | {running}/{limit_value} 运行 | {queued} 排队",
+                "body": (
+                    f"最新任务: {item.get('latest_label', '-')}\n"
+                    f"状态: {STATUS_LABELS.get(latest_status, latest_status)} | "
+                    f"完成 {int(_safe_float(item.get('success'), 0))} | "
+                    f"失败 {failed} | 已取消 {int(_safe_float(item.get('cancelled'), 0))}"
+                ),
+                "tone": tone,
+                "group": group,
+            }
+        )
+    return rows
+
+
 def build_background_task_detail_lines(task: Mapping[str, object] | object) -> list[str]:
     item = _as_mapping(task)
     metadata = item.get("metadata") if isinstance(item.get("metadata"), Mapping) else {}
