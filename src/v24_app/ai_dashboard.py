@@ -830,6 +830,7 @@ class SmartMatchDashboard:
             max_process_workers=2,
             dispatcher=lambda callback: self.root.after(0, callback),
             history_path=PROJECT_ROOT / "data" / "state" / "background_tasks.json",
+            group_limits={"recovery": 1, "backtest": 1, "model": 1},
         )
         self.result_recovery_buttons: list[tk.Button] = []
         self.result_recovery_run_record: dict[str, object] | None = None
@@ -2263,6 +2264,8 @@ class SmartMatchDashboard:
             label="\u9ad8\u51c6\u7b56\u7565\u5386\u53f2\u56de\u6d4b",
             start_status="\u6b63\u5728\u540e\u53f0\u8fdb\u7a0b\u4e2d\u6267\u884c\u9ad8\u51c6\u7b56\u7565\u56de\u6d4b...",
             func=run_high_accuracy_strategy_backtest,
+            group="backtest",
+            priority=120,
             on_success=self._finish_high_accuracy_strategy_backtest_task,
             error_title="\u9ad8\u51c6\u7b56\u7565\u56de\u6d4b\u5931\u8d25",
         )
@@ -2273,6 +2276,8 @@ class SmartMatchDashboard:
             label="\u73a9\u6cd5\u6a21\u578b\u5386\u53f2\u56de\u6d4b",
             start_status="\u6b63\u5728\u540e\u53f0\u8fdb\u7a0b\u4e2d\u6267\u884c\u73a9\u6cd5\u6a21\u578b\u56de\u6d4b...",
             func=run_play_model_backtest,
+            group="backtest",
+            priority=130,
             on_success=self._finish_play_model_backtest_task,
             error_title="\u73a9\u6cd5\u6a21\u578b\u56de\u6d4b\u5931\u8d25",
         )
@@ -2283,6 +2288,8 @@ class SmartMatchDashboard:
             label="\u73a9\u6cd5\u6a21\u578b\u8bad\u7ec3",
             start_status="\u6b63\u5728\u540e\u53f0\u8fdb\u7a0b\u4e2d\u8bad\u7ec3\u73a9\u6cd5\u6a21\u578b...",
             func=train_play_models_now,
+            group="model",
+            priority=160,
             on_success=self._finish_train_play_models_task,
             error_title="\u73a9\u6cd5\u6a21\u578b\u8bad\u7ec3\u5931\u8d25",
         )
@@ -2296,12 +2303,17 @@ class SmartMatchDashboard:
         func,
         on_success,
         error_title: str,
+        group: str = "model",
+        priority: int = 150,
     ) -> None:
         task = self.background_tasks.submit(
             key=key,
             label=label,
             func=func,
             mode="process",
+            group=group,
+            priority=priority,
+            metadata={"group": group, "priority": priority},
             on_success=on_success,
             on_error=lambda exc, record: self._finish_process_task_error(error_title, exc, record),
         )
@@ -3093,7 +3105,9 @@ class SmartMatchDashboard:
             func=auto_settle_finished_matches,
             kwargs={"prediction_cache": prediction_cache, "lookback_days": lookback_days},
             mode="thread",
-            metadata={"trigger": trigger, "lookback_days": lookback_days},
+            group="recovery",
+            priority=20,
+            metadata={"trigger": trigger, "lookback_days": lookback_days, "group": "recovery", "priority": 20},
             on_success=lambda result, record: self._finish_result_recovery(
                 result if isinstance(result, dict) else {},
                 float(record.elapsed_seconds or 0.0),

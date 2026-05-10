@@ -67,12 +67,82 @@ class BackgroundTaskCenterTests(unittest.TestCase):
             second = center.submit(key="second", label="Second", func=lambda: True)
             self.assertIsNotNone(first)
             self.assertIsNotNone(second)
+            second_snapshot = next(item for item in center.snapshot() if item["task_id"] == second.task_id)
+            self.assertEqual(second_snapshot["status"], "queued")
 
             cancelled = center.cancel_task(second.task_id)
 
             self.assertIsNotNone(cancelled)
             self.assertEqual(cancelled["status"], "cancelled")
             self.assertEqual(cancelled["error"], "cancelled_by_user")
+            release.set()
+        finally:
+            center.shutdown()
+
+    def test_priority_dispatches_higher_priority_before_older_queued_task(self) -> None:
+        release = threading.Event()
+        completed = threading.Event()
+        executed: list[str] = []
+        center = BackgroundTaskCenter(dispatcher=lambda callback: callback(), max_thread_workers=1)
+
+        def blocked() -> bool:
+            executed.append("first")
+            return release.wait(5)
+
+        def marker(name: str) -> str:
+            executed.append(name)
+            if len(executed) >= 3:
+                completed.set()
+            return name
+
+        try:
+            first = center.submit(key="first", label="First", func=blocked, priority=100)
+            low = center.submit(key="low", label="Low", func=marker, args=("low",), priority=200)
+            high = center.submit(key="high", label="High", func=marker, args=("high",), priority=10)
+            self.assertIsNotNone(first)
+            self.assertIsNotNone(low)
+            self.assertIsNotNone(high)
+
+            release.set()
+
+            self.assertTrue(completed.wait(5))
+            self.assertEqual(executed[:3], ["first", "high", "low"])
+        finally:
+            center.shutdown()
+
+    def test_group_limit_keeps_same_group_queued_while_other_group_runs(self) -> None:
+        first_started = threading.Event()
+        release = threading.Event()
+        other_started = threading.Event()
+        center = BackgroundTaskCenter(
+            dispatcher=lambda callback: callback(),
+            max_thread_workers=2,
+            group_limits={"model": 1},
+        )
+
+        def first_model() -> bool:
+            first_started.set()
+            return release.wait(5)
+
+        def second_model() -> bool:
+            return True
+
+        def other_group() -> bool:
+            other_started.set()
+            return True
+
+        try:
+            first = center.submit(key="model-1", label="Model 1", func=first_model, group="model")
+            second = center.submit(key="model-2", label="Model 2", func=second_model, group="model")
+            other = center.submit(key="other", label="Other", func=other_group, group="default")
+            self.assertIsNotNone(first)
+            self.assertIsNotNone(second)
+            self.assertIsNotNone(other)
+            self.assertTrue(first_started.wait(5))
+            self.assertTrue(other_started.wait(5))
+
+            snapshot = {item["task_id"]: item for item in center.snapshot()}
+            self.assertEqual(snapshot[second.task_id]["status"], "queued")
             release.set()
         finally:
             center.shutdown()
@@ -124,8 +194,25 @@ class BackgroundTaskCenterTests(unittest.TestCase):
 
     def test_ui_task_rows_and_summary(self) -> None:
         tasks = [
-            {"task_id": "t1", "label": "A", "mode": "thread", "status": "running", "started_at": "2026-05-10 10:00:00"},
-            {"task_id": "t2", "label": "B", "mode": "process", "status": "failed", "error": "boom", "elapsed_seconds": 1.2},
+            {
+                "task_id": "t1",
+                "label": "A",
+                "mode": "thread",
+                "group": "recovery",
+                "priority": 20,
+                "status": "running",
+                "started_at": "2026-05-10 10:00:00",
+            },
+            {
+                "task_id": "t2",
+                "label": "B",
+                "mode": "process",
+                "group": "model",
+                "priority": 160,
+                "status": "failed",
+                "error": "boom",
+                "elapsed_seconds": 1.2,
+            },
         ]
 
         summary = build_background_task_summary(tasks)
@@ -136,6 +223,8 @@ class BackgroundTaskCenterTests(unittest.TestCase):
         self.assertIn("运行中", rows[0]["title"])
         self.assertEqual(rows[0]["task_id"], "t1")
         self.assertTrue(rows[0]["can_cancel"])
+        self.assertIn("赛果回收", rows[0]["body"])
+        self.assertIn("P20", rows[0]["body"])
         self.assertIn("进程", rows[1]["body"])
         self.assertIn("boom", rows[1]["body"])
 
@@ -146,7 +235,10 @@ class BackgroundTaskCenterTests(unittest.TestCase):
                 "key": "sample",
                 "label": "Sample",
                 "mode": "process",
+                "group": "model",
+                "priority": 160,
                 "status": "failed",
+                "queued_at": "2026-05-10 09:59:59",
                 "started_at": "2026-05-10 10:00:00",
                 "finished_at": "2026-05-10 10:00:03",
                 "elapsed_seconds": 3.25,
@@ -159,6 +251,9 @@ class BackgroundTaskCenterTests(unittest.TestCase):
         self.assertIn("后台任务详情", text)
         self.assertIn("任务ID: t9", text)
         self.assertIn("进程", text)
+        self.assertIn("模型任务", text)
+        self.assertIn("P160", text)
+        self.assertIn("入队时间", text)
         self.assertIn("boom", text)
         self.assertIn("manual", text)
         self.assertIn("Traceback line", text)

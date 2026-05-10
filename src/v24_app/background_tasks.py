@@ -9,7 +9,7 @@ from concurrent.futures import CancelledError, Future, ProcessPoolExecutor, Thre
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, Mapping
 
 
 TaskMode = Literal["thread", "process"]
@@ -22,7 +22,10 @@ class BackgroundTaskRecord:
     key: str
     label: str
     mode: TaskMode
+    group: str = "default"
+    priority: int = 100
     status: TaskStatus = "queued"
+    queued_at: str = ""
     started_at: str = ""
     finished_at: str = ""
     elapsed_seconds: float | None = None
@@ -36,7 +39,10 @@ class BackgroundTaskRecord:
             "key": self.key,
             "label": self.label,
             "mode": self.mode,
+            "group": self.group,
+            "priority": self.priority,
             "status": self.status,
+            "queued_at": self.queued_at,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "elapsed_seconds": self.elapsed_seconds,
@@ -81,10 +87,18 @@ class BackgroundTaskCenter:
         dispatcher: Callable[[Callable[[], None]], None] | None = None,
         history_limit: int = 80,
         history_path: Path | str | None = None,
+        group_limits: Mapping[str, int] | None = None,
     ) -> None:
-        self._thread_pool = ThreadPoolExecutor(max_workers=max(1, int(max_thread_workers)))
+        self._max_thread_workers = max(1, int(max_thread_workers))
+        self._thread_pool = ThreadPoolExecutor(max_workers=self._max_thread_workers)
         self._process_pool: ProcessPoolExecutor | None = None
         self._max_process_workers = max(1, int(max_process_workers))
+        self._group_limits = {
+            str(group): max(1, int(limit))
+            for group, limit in (group_limits or {}).items()
+            if str(group)
+        }
+        self._default_group_limit = self._max_thread_workers + self._max_process_workers
         self._dispatcher = dispatcher or (lambda callback: callback())
         self._history_limit = max(10, int(history_limit))
         self._history_path = Path(history_path) if history_path is not None else None
@@ -92,8 +106,13 @@ class BackgroundTaskCenter:
         self._lock = threading.RLock()
         self._records: dict[str, BackgroundTaskRecord] = {}
         self._order: list[str] = []
+        self._queue: list[str] = []
         self._active_keys: set[str] = set()
         self._futures: dict[str, Future] = {}
+        self._pending: dict[str, dict[str, Any]] = {}
+        self._running_by_mode: dict[TaskMode, int] = {"thread": 0, "process": 0}
+        self._running_by_group: dict[str, int] = {}
+        self._shutdown = False
         self._load_history()
 
     def submit(
@@ -105,44 +124,48 @@ class BackgroundTaskCenter:
         args: tuple[Any, ...] = (),
         kwargs: dict[str, Any] | None = None,
         mode: TaskMode = "thread",
+        group: str = "default",
+        priority: int = 100,
         allow_duplicate: bool = False,
         metadata: dict[str, Any] | None = None,
         on_success: Callable[[Any, BackgroundTaskRecord], None] | None = None,
         on_error: Callable[[BaseException, BackgroundTaskRecord], None] | None = None,
     ) -> BackgroundTaskRecord | None:
         resolved_key = str(key or "task")
+        resolved_mode: TaskMode = "process" if mode == "process" else "thread"
+        resolved_group = str(group or "default")
         with self._lock:
+            if self._shutdown:
+                return None
             if not allow_duplicate and resolved_key in self._active_keys:
                 return None
             task_id = f"task-{next(self._counter):06d}"
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             record = BackgroundTaskRecord(
                 task_id=task_id,
                 key=resolved_key,
                 label=str(label or resolved_key),
-                mode=mode,
-                status="running",
-                started_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                mode=resolved_mode,
+                group=resolved_group,
+                priority=int(priority),
+                status="queued",
+                queued_at=now,
                 metadata=dict(metadata or {}),
             )
             self._records[task_id] = record
             self._order.insert(0, task_id)
+            self._queue.append(task_id)
             self._active_keys.add(resolved_key)
+            self._pending[task_id] = {
+                "func": func,
+                "args": tuple(args),
+                "kwargs": dict(kwargs or {}),
+                "on_success": on_success,
+                "on_error": on_error,
+            }
             self._trim_locked()
+            self._schedule_locked()
             self._persist_locked()
-
-        call_kwargs = dict(kwargs or {})
-        executor = self._thread_pool if mode == "thread" else self._process_executor()
-        future = executor.submit(_run_task_callable, func, args, call_kwargs)
-        with self._lock:
-            self._futures[task_id] = future
-        future.add_done_callback(
-            lambda completed: self._complete_future(
-                completed,
-                task_id=task_id,
-                on_success=on_success,
-                on_error=on_error,
-            )
-        )
         return record
 
     def cancel_task(self, task_id: str | object, *, reason: str = "cancelled_by_user") -> dict[str, Any] | None:
@@ -153,6 +176,17 @@ class BackgroundTaskCenter:
                 return None
             if record.status not in {"queued", "running"}:
                 return record.as_dict()
+            if record.status == "queued":
+                if resolved_id in self._queue:
+                    self._queue.remove(resolved_id)
+                self._pending.pop(resolved_id, None)
+                record.status = "cancelled"
+                record.finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                record.error = reason
+                record.metadata["cancelled_at"] = record.finished_at
+                self._active_keys.discard(record.key)
+                self._persist_locked()
+                return record.as_dict()
             future = self._futures.get(resolved_id)
             if future is not None and future.cancel():
                 record.status = "cancelled"
@@ -161,6 +195,8 @@ class BackgroundTaskCenter:
                 record.metadata["cancelled_at"] = record.finished_at
                 self._active_keys.discard(record.key)
                 self._futures.pop(resolved_id, None)
+                self._release_running_slot_locked(record)
+                self._schedule_locked()
                 self._persist_locked()
                 return record.as_dict()
             record.metadata["cancel_requested"] = True
@@ -181,6 +217,19 @@ class BackgroundTaskCenter:
             return sum(1 for record in self._records.values() if record.status in {"queued", "running"})
 
     def shutdown(self) -> None:
+        with self._lock:
+            self._shutdown = True
+            for task_id in list(self._queue):
+                record = self._records.get(task_id)
+                if record is None:
+                    continue
+                record.status = "cancelled"
+                record.finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                record.error = record.error or "shutdown_before_dispatch"
+                self._active_keys.discard(record.key)
+                self._pending.pop(task_id, None)
+            self._queue.clear()
+            self._persist_locked()
         self._thread_pool.shutdown(wait=False, cancel_futures=True)
         if self._process_pool is not None:
             self._process_pool.shutdown(wait=False, cancel_futures=True)
@@ -189,6 +238,68 @@ class BackgroundTaskCenter:
         if self._process_pool is None:
             self._process_pool = ProcessPoolExecutor(max_workers=self._max_process_workers)
         return self._process_pool
+
+    def _schedule_locked(self) -> None:
+        if self._shutdown:
+            return
+        while True:
+            dispatchable = [
+                task_id
+                for task_id in self._queue
+                if task_id in self._records and self._can_dispatch_locked(self._records[task_id])
+            ]
+            if not dispatchable:
+                return
+            task_id = min(
+                dispatchable,
+                key=lambda item: (
+                    int(self._records[item].priority),
+                    self._order.index(item) * -1 if item in self._order else 0,
+                    item,
+                ),
+            )
+            self._dispatch_locked(task_id)
+
+    def _can_dispatch_locked(self, record: BackgroundTaskRecord) -> bool:
+        if record.mode == "process":
+            if self._running_by_mode["process"] >= self._max_process_workers:
+                return False
+        elif self._running_by_mode["thread"] >= self._max_thread_workers:
+            return False
+        group_limit = self._group_limits.get(record.group, self._default_group_limit)
+        return self._running_by_group.get(record.group, 0) < group_limit
+
+    def _dispatch_locked(self, task_id: str) -> None:
+        record = self._records.get(task_id)
+        pending = self._pending.pop(task_id, None)
+        if record is None or pending is None:
+            if task_id in self._queue:
+                self._queue.remove(task_id)
+            return
+        if task_id in self._queue:
+            self._queue.remove(task_id)
+        record.status = "running"
+        record.started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self._running_by_mode[record.mode] = self._running_by_mode.get(record.mode, 0) + 1
+        self._running_by_group[record.group] = self._running_by_group.get(record.group, 0) + 1
+        executor = self._thread_pool if record.mode == "thread" else self._process_executor()
+        future = executor.submit(_run_task_callable, pending["func"], pending["args"], pending["kwargs"])
+        self._futures[task_id] = future
+        future.add_done_callback(
+            lambda completed: self._complete_future(
+                completed,
+                task_id=task_id,
+                on_success=pending["on_success"],
+                on_error=pending["on_error"],
+            )
+        )
+
+    def _release_running_slot_locked(self, record: BackgroundTaskRecord) -> None:
+        self._running_by_mode[record.mode] = max(0, self._running_by_mode.get(record.mode, 0) - 1)
+        if record.group in self._running_by_group:
+            self._running_by_group[record.group] = max(0, self._running_by_group.get(record.group, 0) - 1)
+            if self._running_by_group[record.group] <= 0:
+                self._running_by_group.pop(record.group, None)
 
     def _complete_future(
         self,
@@ -206,6 +317,8 @@ class BackgroundTaskCenter:
                 record.error = record.error or "cancelled"
                 self._active_keys.discard(record.key)
                 self._futures.pop(task_id, None)
+                self._release_running_slot_locked(record)
+                self._schedule_locked()
                 self._persist_locked()
             return
         try:
@@ -218,6 +331,8 @@ class BackgroundTaskCenter:
                 record.error = record.error or "cancelled"
                 self._active_keys.discard(record.key)
                 self._futures.pop(task_id, None)
+                self._release_running_slot_locked(record)
+                self._schedule_locked()
                 self._persist_locked()
             return
         except BaseException as exc:
@@ -229,6 +344,8 @@ class BackgroundTaskCenter:
                 record.metadata["traceback"] = traceback.format_exc(limit=6)
                 self._active_keys.discard(record.key)
                 self._futures.pop(task_id, None)
+                self._release_running_slot_locked(record)
+                self._schedule_locked()
                 self._persist_locked()
                 callback_record = BackgroundTaskRecord(**record.as_dict())
             if on_error is not None:
@@ -245,6 +362,8 @@ class BackgroundTaskCenter:
                 record.metadata["cancel_request_completed"] = True
             self._active_keys.discard(record.key)
             self._futures.pop(task_id, None)
+            self._release_running_slot_locked(record)
+            self._schedule_locked()
             self._persist_locked()
             callback_record = BackgroundTaskRecord(**record.as_dict())
         if on_success is not None:
@@ -280,7 +399,10 @@ class BackgroundTaskCenter:
                     key=str(item.get("key") or "task"),
                     label=str(item.get("label") or item.get("key") or "task"),
                     mode="process" if str(item.get("mode") or "") == "process" else "thread",
+                    group=str(item.get("group") or "default"),
+                    priority=int(item.get("priority") or 100),
                     status=str(item.get("status") or "queued"),  # type: ignore[arg-type]
+                    queued_at=str(item.get("queued_at") or ""),
                     started_at=str(item.get("started_at") or ""),
                     finished_at=str(item.get("finished_at") or ""),
                     elapsed_seconds=float(item["elapsed_seconds"]) if item.get("elapsed_seconds") is not None else None,
