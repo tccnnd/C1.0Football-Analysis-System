@@ -802,6 +802,74 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("jc_odds_drift", summary["reason_counts"])
         self.assertIn("\u9ad8\u7f6e\u4fe1\u5931\u8bef", summary["rows"][0]["body"])
 
+    def test_strategy_error_attribution_uses_statsbomb_event_evidence(self) -> None:
+        settlements = [
+            {
+                "league": "1. Bundesliga",
+                "match_date": "2024-04-14",
+                "home_team": "Bayer Leverkusen",
+                "away_team": "Werder Bremen",
+                "statsbomb_event_summary": {
+                    "team_stats": {
+                        "Bayer Leverkusen": {"xg": 0.72, "shots": 7, "goals": 0},
+                        "Werder Bremen": {"xg": 1.48, "shots": 14, "goals": 1},
+                    }
+                },
+                "high_accuracy_strategy_items": [
+                    {
+                        "play_type": "market_1x2",
+                        "pick": "HOME",
+                        "actual": "AWAY",
+                        "confidence": 0.71,
+                        "min_confidence": 0.65,
+                        "backtest_accuracy": 0.74,
+                        "backtest_samples": 180,
+                        "is_hit": False,
+                    }
+                ],
+            }
+        ]
+
+        summary = build_strategy_error_attribution_summary(settlements)
+        evaluation = build_strategy_evaluation_agent_summary({"enabled": True}, settlements)
+
+        self.assertIn("statsbomb_xg_against_pick", summary["reason_counts"])
+        self.assertIn("statsbomb_event_control_gap", summary["reason_counts"])
+        self.assertIn("StatsBomb", summary["rows"][0]["body"])
+        self.assertIn("statsbomb_event_gap", evaluation["memory_tags"])
+
+    def test_strategy_error_attribution_marks_statsbomb_finishing_variance(self) -> None:
+        settlements = [
+            {
+                "league": "1. Bundesliga",
+                "home_team": "Bayer Leverkusen",
+                "away_team": "RB Leipzig",
+                "statsbomb_event_summary": {
+                    "team_stats": {
+                        "Bayer Leverkusen": {"xg": 2.10, "shots": 16, "goals": 1},
+                        "RB Leipzig": {"xg": 0.92, "shots": 8, "goals": 2},
+                    }
+                },
+                "high_accuracy_strategy_items": [
+                    {
+                        "play_type": "market_1x2",
+                        "pick": "HOME",
+                        "actual": "AWAY",
+                        "confidence": 0.68,
+                        "min_confidence": 0.65,
+                        "backtest_accuracy": 0.70,
+                        "backtest_samples": 180,
+                        "is_hit": False,
+                    }
+                ],
+            }
+        ]
+
+        summary = build_strategy_error_attribution_summary(settlements)
+
+        self.assertIn("statsbomb_finishing_variance", summary["reason_counts"])
+        self.assertIn("StatsBomb", summary["rows"][0]["body"])
+
     def test_evaluation_agent_recommends_tightening_on_weak_settlements(self) -> None:
         settlements = [
             {

@@ -51,6 +51,7 @@ CACHE_FILE = PROJECT_DIR / "data" / "cache" / "500_matches_today.json"
 REPORT_DIR = PROJECT_DIR / "reports"
 VIDEO_REVIEW_DIR = PROJECT_DIR / "data" / "video_reviews"
 VIDEO_REVIEW_FILE = PROJECT_DIR / "data" / "state" / "video_reviews.json"
+STATSBOMB_EVENT_SUMMARIES_FILE = PROJECT_DIR / "data" / "state" / "statsbomb_event_summaries.json"
 ENSEMBLE_WEIGHTS_FILE = PROJECT_DIR / "data" / "models" / "ensemble_weights_v1.json"
 PLAY_THRESHOLDS_FILE = PROJECT_DIR / "data" / "models" / "play_thresholds_v1.json"
 PLAY_MODEL_POLICY_FILE = PROJECT_DIR / "data" / "models" / "play_model_policy_v1.json"
@@ -10125,6 +10126,51 @@ def settle_match_result(
     return settlement
 
 
+def _statsbomb_key(*parts: object) -> str:
+    return "|".join(normalize_text(part).lower() for part in parts if normalize_text(part))
+
+
+def _load_statsbomb_event_summary_index() -> dict[str, dict]:
+    if not STATSBOMB_EVENT_SUMMARIES_FILE.exists():
+        return {}
+    try:
+        payload = json.loads(STATSBOMB_EVENT_SUMMARIES_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    items = payload.get("items", []) if isinstance(payload, dict) else []
+    if not isinstance(items, list):
+        return {}
+    index: dict[str, dict] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        keys = [
+            _statsbomb_key(item.get("match_id")),
+            _statsbomb_key(item.get("source_match_id")),
+            _statsbomb_key(item.get("match_date"), item.get("home_team"), item.get("away_team")),
+            _statsbomb_key(item.get("match_date"), item.get("league"), item.get("home_team"), item.get("away_team")),
+        ]
+        for key in keys:
+            if key and key not in index:
+                index[key] = item
+    return index
+
+
+def _match_statsbomb_event_summary(settlement: dict, index: dict[str, dict]) -> dict | None:
+    if not index:
+        return None
+    keys = [
+        _statsbomb_key(settlement.get("match_id")),
+        _statsbomb_key(settlement.get("statsbomb_source_match_id")),
+        _statsbomb_key(settlement.get("match_date"), settlement.get("home_team"), settlement.get("away_team")),
+        _statsbomb_key(settlement.get("match_date"), settlement.get("league"), settlement.get("home_team"), settlement.get("away_team")),
+    ]
+    for key in keys:
+        if key and key in index:
+            return index[key]
+    return None
+
+
 def get_recent_settlements(limit: int = 20) -> list[dict]:
     items = STATE_STORE.load_settlements()
     video_reviews_by_match: dict[str, dict] = {}
@@ -10139,7 +10185,8 @@ def get_recent_settlements(limit: int = 20) -> list[dict]:
         history = STATE_STORE.load_analysis_history()
     except Exception:
         history = {}
-    if isinstance(history, dict) or video_reviews_by_match:
+    statsbomb_by_match = _load_statsbomb_event_summary_index()
+    if isinstance(history, dict) or video_reviews_by_match or statsbomb_by_match:
         enriched: list[dict] = []
         for item in items:
             if not isinstance(item, dict):
@@ -10168,6 +10215,13 @@ def get_recent_settlements(limit: int = 20) -> list[dict]:
             if isinstance(video_review, dict) and video_review:
                 record["video_review"] = video_review
                 record["video_review_status"] = (video_review.get("agent_review") or {}).get("status") if isinstance(video_review.get("agent_review"), dict) else "ready"
+            statsbomb_record = _match_statsbomb_event_summary(record, statsbomb_by_match)
+            if isinstance(statsbomb_record, dict) and statsbomb_record:
+                summary = statsbomb_record.get("event_summary")
+                if isinstance(summary, dict):
+                    record["statsbomb_event_summary"] = summary
+                    record["statsbomb_source_match_id"] = statsbomb_record.get("source_match_id")
+                    record["statsbomb_source_url"] = statsbomb_record.get("source_url")
             enriched.append(record)
         items = enriched
     if limit <= 0:

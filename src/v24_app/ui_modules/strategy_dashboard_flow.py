@@ -472,10 +472,92 @@ ERROR_ATTRIBUTION_LABELS = {
     "jc_odds_drift": "JC\u8d54\u7387\u6f02\u79fb",
     "jc_confidence_drift": "JC\u7f6e\u4fe1\u6f02\u79fb",
     "jc_live_downgraded": "JC\u7a33\u5b9a\u6876\u964d\u7ea7",
+    "statsbomb_xg_against_pick": "StatsBomb xG\u53cd\u5411",
+    "statsbomb_finishing_variance": "StatsBomb\u7ec8\u7ed3\u504f\u5dee",
+    "statsbomb_event_control_gap": "StatsBomb\u573a\u9762\u52a3\u52bf",
     "small_sample": "\u6837\u672c\u4e0d\u8db3",
     "shadow_observation": "\u89c2\u5bdf\u7b56\u7565\u5931\u8bef",
     "unknown": "\u672a\u5b9a\u4e49\u9519\u56e0",
 }
+
+
+def _pick_side(value: object) -> str:
+    text = _text(value, "").upper()
+    if text in {"HOME", "HOME_WIN", "H", "1"} or "HOME" in text:
+        return "home"
+    if text in {"AWAY", "AWAY_WIN", "A", "2"} or "AWAY" in text:
+        return "away"
+    if "\u4e3b" in text:
+        return "home"
+    if "\u5ba2" in text:
+        return "away"
+    return ""
+
+
+def _actual_side(value: object) -> str:
+    text = _text(value, "").upper()
+    if text in {"HOME", "HOME_WIN", "H", "1"} or "HOME" in text:
+        return "home"
+    if text in {"AWAY", "AWAY_WIN", "A", "2"} or "AWAY" in text:
+        return "away"
+    if text in {"DRAW", "D", "X"} or "DRAW" in text:
+        return "draw"
+    if "\u4e3b" in text:
+        return "home"
+    if "\u5ba2" in text:
+        return "away"
+    if "\u5e73" in text:
+        return "draw"
+    return ""
+
+
+def _statsbomb_team_stats(settlement: Mapping[str, object]) -> tuple[Mapping[str, object], Mapping[str, object], str, str]:
+    summary = _as_mapping(settlement.get("statsbomb_event_summary"))
+    team_stats = _as_mapping(summary.get("team_stats"))
+    home = _text(settlement.get("home_team"), "")
+    away = _text(settlement.get("away_team"), "")
+    home_stats = _as_mapping(team_stats.get(home))
+    away_stats = _as_mapping(team_stats.get(away))
+    if (not home_stats or not away_stats) and len(team_stats) >= 2:
+        names = list(team_stats.keys())
+        if not home_stats:
+            home = _text(names[0], home)
+            home_stats = _as_mapping(team_stats.get(names[0]))
+        if not away_stats:
+            away = _text(names[1], away)
+            away_stats = _as_mapping(team_stats.get(names[1]))
+    return home_stats, away_stats, home, away
+
+
+def _statsbomb_event_evidence(settlement: Mapping[str, object], item: Mapping[str, object]) -> dict[str, object]:
+    home_stats, away_stats, home, away = _statsbomb_team_stats(settlement)
+    if not home_stats or not away_stats:
+        return {"codes": [], "body": "", "available": False}
+    home_xg = _safe_float(home_stats.get("xg"))
+    away_xg = _safe_float(away_stats.get("xg"))
+    home_shots = _safe_int(home_stats.get("shots"))
+    away_shots = _safe_int(away_stats.get("shots"))
+    home_goals = _safe_int(home_stats.get("goals"), _safe_int(settlement.get("home_goals")))
+    away_goals = _safe_int(away_stats.get("goals"), _safe_int(settlement.get("away_goals")))
+    pick_side = _pick_side(item.get("pick"))
+    actual_side = _actual_side(item.get("actual"))
+    codes: list[str] = []
+    if item.get("is_hit") is False and pick_side in {"home", "away"}:
+        picked_xg = home_xg if pick_side == "home" else away_xg
+        opponent_xg = away_xg if pick_side == "home" else home_xg
+        picked_shots = home_shots if pick_side == "home" else away_shots
+        opponent_shots = away_shots if pick_side == "home" else home_shots
+        if picked_xg + 0.25 < opponent_xg:
+            codes.append("statsbomb_xg_against_pick")
+        if picked_xg >= opponent_xg + 0.35 and actual_side and actual_side != pick_side:
+            codes.append("statsbomb_finishing_variance")
+        if picked_xg + 0.15 < opponent_xg and picked_shots + 4 <= opponent_shots:
+            codes.append("statsbomb_event_control_gap")
+    body = (
+        f"StatsBomb: xG {home} {home_xg:.2f} - {away_xg:.2f} {away} | "
+        f"\u5c04\u95e8 {home_shots}-{away_shots} | \u8fdb\u7403 {home_goals}-{away_goals}"
+    )
+    return {"codes": codes, "body": body, "available": True}
 
 
 def _strategy_error_codes(settlement: Mapping[str, object], item: Mapping[str, object]) -> list[str]:
@@ -521,6 +603,9 @@ def _strategy_error_codes(settlement: Mapping[str, object], item: Mapping[str, o
         historical_confidence = bucket.get("avg_confidence")
         if historical_confidence not in (None, "") and confidence + 0.05 < _safe_float(historical_confidence):
             codes.append("jc_confidence_drift")
+    statsbomb_evidence = _statsbomb_event_evidence(settlement, item)
+    for code in _as_list(statsbomb_evidence.get("codes")):
+        codes.append(str(code))
     if not codes:
         codes.append("unknown")
     deduped: list[str] = []
@@ -553,14 +638,19 @@ def build_strategy_error_attribution_summary(
         if item.get("is_hit") is False:
             labels = [ERROR_ATTRIBUTION_LABELS.get(code, code) for code in codes]
             labels_text = "\u3001".join(labels)
+            statsbomb_evidence = _statsbomb_event_evidence(settlement, item)
+            evidence_body = str(statsbomb_evidence.get("body") or "")
+            base_body = (
+                f"\u73a9\u6cd5: {_label(PLAY_LABELS, item.get('play_type'))} | \u9884\u6d4b {item.get('pick') or '-'} / \u5b9e\u9645 {item.get('actual') or '-'}\n"
+                f"\u9519\u56e0: {labels_text}\n"
+                f"\u7f6e\u4fe1: {_pct(item.get('confidence'))} | \u56de\u6d4b {_pct(item.get('backtest_accuracy') or item.get('accuracy'))} | \u6837\u672c {_safe_int(item.get('backtest_samples') or item.get('sample_count'))}"
+            )
+            if evidence_body:
+                base_body = f"{base_body}\n{evidence_body}"
             rows.append(
                 {
                     "title": f"{settlement.get('league') or '-'} | {settlement.get('home_team') or '-'} vs {settlement.get('away_team') or '-'}",
-                    "body": (
-                        f"\u73a9\u6cd5: {_label(PLAY_LABELS, item.get('play_type'))} | \u9884\u6d4b {item.get('pick') or '-'} / \u5b9e\u9645 {item.get('actual') or '-'}\n"
-                        f"\u9519\u56e0: {labels_text}\n"
-                        f"\u7f6e\u4fe1: {_pct(item.get('confidence'))} | \u56de\u6d4b {_pct(item.get('backtest_accuracy') or item.get('accuracy'))} | \u6837\u672c {_safe_int(item.get('backtest_samples') or item.get('sample_count'))}"
-                    ),
+                    "body": base_body,
                 }
             )
     ranked = sorted(counts.items(), key=lambda item: (-item[1], ERROR_ATTRIBUTION_LABELS.get(item[0], item[0])))
@@ -1432,6 +1522,9 @@ def build_strategy_evaluation_agent_summary(
     high_conf_miss_count = _safe_int(reason_counts.get("high_confidence_miss"))
     historical_gap_count = _safe_int(reason_counts.get("historical_gap"))
     data_missing_count = _safe_int(reason_counts.get("data_missing"))
+    statsbomb_against_count = _safe_int(reason_counts.get("statsbomb_xg_against_pick"))
+    statsbomb_variance_count = _safe_int(reason_counts.get("statsbomb_finishing_variance"))
+    statsbomb_control_gap_count = _safe_int(reason_counts.get("statsbomb_event_control_gap"))
     recommendations: list[dict[str, str]] = []
     memory_tags: list[str] = []
     score = 100
@@ -1497,6 +1590,24 @@ def build_strategy_evaluation_agent_summary(
             }
         )
         memory_tags.append("jc_bucket_watch")
+    if statsbomb_against_count or statsbomb_control_gap_count:
+        status_text = "watch" if status_text == "healthy" else status_text
+        score -= min(18, (statsbomb_against_count + statsbomb_control_gap_count) * 5)
+        recommendations.append(
+            {
+                "title": "\u7eb3\u5165\u8d5b\u540e\u4e8b\u4ef6\u8bc1\u636e",
+                "body": f"StatsBomb \u663e\u793a xG \u53cd\u5411 {statsbomb_against_count} / \u573a\u9762\u52a3\u52bf {statsbomb_control_gap_count}\uff0c\u5efa\u8bae\u5c06\u5c04\u95e8\u3001xG\u3001\u538b\u8feb\u7b49\u8d5b\u540e\u7279\u5f81\u7eb3\u5165\u9519\u56e0\u8bb0\u5fc6\u3002",
+            }
+        )
+        memory_tags.append("statsbomb_event_gap")
+    if statsbomb_variance_count:
+        recommendations.append(
+            {
+                "title": "\u6807\u8bb0\u7ec8\u7ed3\u6ce2\u52a8",
+                "body": f"StatsBomb \u8bc6\u522b {statsbomb_variance_count} \u9879 xG \u5360\u4f18\u4f46\u672a\u547d\u4e2d\u7684\u7ec8\u7ed3\u504f\u5dee\uff0c\u8fd9\u7c7b\u4e0d\u5e94\u7b80\u5355\u5f52\u4e3a\u6a21\u578b\u65b9\u5411\u9519\u8bef\u3002",
+            }
+        )
+        memory_tags.append("finishing_variance")
     if data_missing_count:
         score -= min(12, data_missing_count * 4)
         recommendations.append(
