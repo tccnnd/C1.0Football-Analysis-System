@@ -23,6 +23,7 @@ from v24_app.ui_modules import (
     build_agent_replay_guard_tuning_recommendation,
     build_strategy_policy_effect_review,
     build_strategy_policy_stability_monitor,
+    build_strategy_policy_tuning_guard,
     build_handicap_margin_backtest_summary,
     build_market_entropy_backtest_summary,
     build_strategy_evaluation_agent_summary,
@@ -411,6 +412,29 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertTrue(monitor["weekly_rows"])
         self.assertIn("Replay", monitor["summary_text"])
 
+    def test_strategy_policy_tuning_guard_blocks_unstable_versions(self) -> None:
+        guard = build_strategy_policy_tuning_guard(
+            {"status": "regression", "label": "\u51fa\u73b0\u56de\u9000", "summary_text": "\u56de\u9000"},
+            {"action": "tighten", "policy_update": {"min_confidence": 0.72}},
+            source="strategy_allowlist_tuning",
+        )
+
+        self.assertFalse(guard["allowed"])
+        self.assertEqual(guard["decision"], "block")
+        self.assertIn("\u6682\u505c", guard["label"])
+        self.assertIn("\u56de\u6eda", guard["body"])
+
+    def test_strategy_policy_tuning_guard_requires_confirmation_on_watch(self) -> None:
+        guard = build_strategy_policy_tuning_guard(
+            {"status": "watch", "label": "\u9700\u89c2\u5bdf", "summary_text": "\u89c2\u5bdf"},
+            {"action": "tighten_guard"},
+            source="agent_replay_guard_tuning",
+        )
+
+        self.assertTrue(guard["allowed"])
+        self.assertTrue(guard["confirm_required"])
+        self.assertEqual(guard["source_label"], "Replay Guard")
+
     def test_strategy_policy_audit_report_exports_review_and_samples(self) -> None:
         history = [
             {"version_id": "v1", "updated_at": "2026-05-01 10:00:00", "source": "strategy_allowlist_tuning"},
@@ -436,6 +460,7 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         report = "\n".join(lines)
         self.assertIn("# \u7b56\u7565\u8c03\u53c2\u5ba1\u8ba1\u62a5\u544a", report)
         self.assertIn("\u7248\u672c\u7a33\u5b9a\u76d1\u63a7", report)
+        self.assertIn("\u8c03\u53c2\u95e8\u63a7", report)
         self.assertIn("\u7248\u672c\u6548\u679c\u603b\u89c8", report)
         self.assertIn("v1", report)
         self.assertIn("Bad1", report)
@@ -568,9 +593,11 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("Replay Tuning", metrics)
         self.assertIn("\u8c03\u53c2\u751f\u6548", metrics)
         self.assertIn("\u7248\u672c\u7a33\u5b9a", metrics)
+        self.assertIn("\u8c03\u53c2\u95e8\u63a7", metrics)
         self.assertIn("agent_replay_guard_tuning", dashboard)
         self.assertIn("policy_effect_review", dashboard)
         self.assertIn("policy_stability_monitor", dashboard)
+        self.assertIn("policy_tuning_guard", dashboard)
         self.assertIn("APP 40", dashboard["validation_rows"][0][1])
         self.assertEqual(len(dashboard["pool_rows"]), 2)
         self.assertIn("\u89c2\u5bdf(\u539f\u4e3b\u7b56\u7565)", dashboard["pool_rows"][0]["title"])

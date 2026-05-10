@@ -1236,6 +1236,61 @@ def build_strategy_policy_stability_monitor(policy_effect_review: Mapping[str, o
     }
 
 
+def build_strategy_policy_tuning_guard(
+    stability_monitor: Mapping[str, object] | object,
+    tuning: Mapping[str, object] | object | None = None,
+    *,
+    source: str = "",
+) -> dict[str, object]:
+    monitor = _as_mapping(stability_monitor)
+    tuning_payload = _as_mapping(tuning)
+    status = str(monitor.get("status") or "none")
+    action = str(tuning_payload.get("action") or "").strip()
+    source_label = {
+        "strategy_allowlist_tuning": "\u653e\u884c\u95e8\u69db",
+        "agent_replay_guard_tuning": "Replay Guard",
+    }.get(source, "\u7b56\u7565\u8c03\u53c2")
+    if status in {"regression", "volatile"}:
+        decision = "block"
+        label = "\u6682\u505c\u81ea\u52a8\u8c03\u53c2"
+        tone = "bad"
+        reasons = [
+            f"\u7248\u672c\u7a33\u5b9a\u72b6\u6001: {monitor.get('label', '-')}",
+            "\u6700\u65b0\u53c2\u6570\u6548\u679c\u5c1a\u672a\u7a33\u5b9a\uff0c\u7ee7\u7eed\u81ea\u52a8\u5199\u5165\u65b0\u53c2\u6570\u53ef\u80fd\u653e\u5927\u56de\u9000\u3002",
+            "\u5efa\u8bae\u5148\u67e5\u770b\u751f\u6548\u8be6\u60c5\uff0c\u590d\u6838\u8d1f\u5411\u6837\u672c\uff0c\u5fc5\u8981\u65f6\u56de\u6eda\u4e0a\u4e00\u7248\u3002",
+        ]
+    elif status == "watch":
+        decision = "confirm"
+        label = "\u9700\u4eba\u5de5\u786e\u8ba4"
+        tone = "warning"
+        reasons = [
+            f"\u7248\u672c\u7a33\u5b9a\u72b6\u6001: {monitor.get('label', '-')}",
+            "\u5df2\u6709\u8d1f\u5411\u4fe1\u53f7\uff0c\u8c03\u53c2\u524d\u9700\u786e\u8ba4\u6837\u672c\u4e0d\u662f\u77ed\u671f\u566a\u58f0\u3002",
+        ]
+    else:
+        decision = "allow"
+        label = "\u5141\u8bb8\u8c03\u53c2"
+        tone = "good" if status in {"improving", "stable"} else "neutral"
+        reasons = [f"\u7248\u672c\u7a33\u5b9a\u72b6\u6001: {monitor.get('label', '-')}"]
+    if action:
+        reasons.append(f"\u5f85\u5e94\u7528\u52a8\u4f5c: {action}")
+    body = "\n".join(str(item) for item in reasons if item)
+    return {
+        "decision": decision,
+        "allowed": decision in {"allow", "confirm"},
+        "confirm_required": decision == "confirm",
+        "label": label,
+        "tone": tone,
+        "source": source,
+        "source_label": source_label,
+        "status": status,
+        "action": action or "-",
+        "reasons": reasons,
+        "body": body,
+        "summary_text": f"{source_label}: {label} | {monitor.get('summary_text', '-')}",
+    }
+
+
 def build_strategy_policy_effect_review(
     policy_history: Sequence[Mapping[str, object]] | object,
     settlements: Sequence[Mapping[str, object]] | object,
@@ -2365,6 +2420,7 @@ def build_strategy_policy_audit_report_lines(
     current = generated_at or datetime.now()
     rows = [row for row in _as_list(review.get("rows")) if isinstance(row, Mapping)]
     stability = _as_mapping(review.get("stability_monitor"))
+    tuning_guard = build_strategy_policy_tuning_guard(stability, source="audit")
     lines = [
         "# \u7b56\u7565\u8c03\u53c2\u5ba1\u8ba1\u62a5\u544a",
         "",
@@ -2372,6 +2428,7 @@ def build_strategy_policy_audit_report_lines(
         f"- \u7248\u672c\u6570: {review.get('history_count', 0)}",
         f"- \u6700\u65b0\u72b6\u6001: {review.get('latest_label', '-')}",
         f"- \u7248\u672c\u7a33\u5b9a: {stability.get('summary_text', '-')}",
+        f"- \u8c03\u53c2\u95e8\u63a7: {tuning_guard.get('summary_text', '-')}",
         f"- \u6458\u8981: {review.get('summary_text', '-')}",
         "",
         "## \u7248\u672c\u7a33\u5b9a\u76d1\u63a7",
@@ -2385,6 +2442,7 @@ def build_strategy_policy_audit_report_lines(
         if isinstance(stability.get("cumulative_replay_net"), int)
         else f"- Replay\u7d2f\u8ba1\u51c0\u503c: {stability.get('cumulative_replay_net', 0)}",
         f"- \u5efa\u8bae: {stability.get('recommendation_text', '-')}",
+        f"- \u8c03\u53c2\u95e8\u63a7: {tuning_guard.get('label', '-')} / {tuning_guard.get('body', '-')}",
         "",
         "| \u5468\u671f | \u7248\u672c | \u6837\u672c | \u653e\u884c\u547d\u4e2d | Replay\u51c0\u503c | \u6b63\u5411 | \u8d1f\u5411 | \u79ef\u7d2f |",
         "| --- | ---: | ---: | --- | ---: | ---: | ---: | ---: |",
@@ -2685,6 +2743,7 @@ def build_high_accuracy_strategy_dashboard(
     allowlist_tuning = build_strategy_allowlist_tuning_recommendation(settlement_items)
     policy_effect_review = build_strategy_policy_effect_review(policy_history or [], settlement_items)
     policy_stability_monitor = _as_mapping(policy_effect_review.get("stability_monitor"))
+    policy_tuning_guard = build_strategy_policy_tuning_guard(policy_stability_monitor, source="dashboard")
     market_entropy_backtest = build_market_entropy_backtest_summary(settlement_items)
     handicap_margin_backtest = build_handicap_margin_backtest_summary(settlement_items)
     jc_bucket_feedback = build_jc_bucket_feedback_summary(resolved, settlement_items)
@@ -2746,6 +2805,11 @@ def build_high_accuracy_strategy_dashboard(
             "label": "\u7248\u672c\u7a33\u5b9a",
             "value": str(policy_stability_monitor.get("label") or "-"),
             "tone": str(policy_stability_monitor.get("tone") or "neutral"),
+        },
+        {
+            "label": "\u8c03\u53c2\u95e8\u63a7",
+            "value": str(policy_tuning_guard.get("label") or "-"),
+            "tone": str(policy_tuning_guard.get("tone") or "neutral"),
         },
         {
             "label": "Evaluation",
@@ -2853,6 +2917,7 @@ def build_high_accuracy_strategy_dashboard(
         "allowlist_tuning": allowlist_tuning,
         "policy_effect_review": policy_effect_review,
         "policy_stability_monitor": policy_stability_monitor,
+        "policy_tuning_guard": policy_tuning_guard,
         "market_entropy_backtest": market_entropy_backtest,
         "handicap_margin_backtest": handicap_margin_backtest,
     }

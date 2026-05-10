@@ -48,6 +48,7 @@ from .ui_modules import (
     build_strategy_policy_audit_csv_text,
     build_strategy_policy_audit_report_filename,
     build_strategy_policy_audit_report_lines,
+    build_strategy_policy_tuning_guard,
     build_strategy_release_recovery_alerts,
     build_strategy_release_pool_rows,
     compute_strategy_admission_counts,
@@ -3727,6 +3728,25 @@ class SmartMatchDashboard:
                 justify=tk.LEFT,
             ).pack(anchor=tk.W, padx=14, pady=(0, 12))
 
+    def _current_strategy_policy_tuning_guard(self, tuning: dict | object, source: str) -> dict:
+        policy_history = get_strategy_admission_policy_history(limit=20)
+        settlements = list(reversed(get_recent_settlements(limit=200)))
+        status = get_high_accuracy_strategy_status()
+        dashboard = build_high_accuracy_strategy_dashboard(status, settlements, policy_history)
+        monitor = dashboard.get("policy_stability_monitor", {}) if isinstance(dashboard.get("policy_stability_monitor"), dict) else {}
+        return build_strategy_policy_tuning_guard(monitor, tuning if isinstance(tuning, dict) else {}, source=source)
+
+    def _block_strategy_policy_tuning_if_needed(self, tuning: dict | object, source: str) -> dict | None:
+        guard = self._current_strategy_policy_tuning_guard(tuning, source)
+        if not bool(guard.get("allowed")):
+            messagebox.showwarning(
+                str(guard.get("source_label") or "\u7b56\u7565\u8c03\u53c2"),
+                f"{guard.get('label', '-')}\n\n{guard.get('body', '-')}",
+            )
+            self.status_var.set(str(guard.get("summary_text") or guard.get("label") or "\u8c03\u53c2\u5df2\u6682\u505c"))
+            return None
+        return guard
+
     def apply_strategy_allowlist_tuning(self, tuning: dict | object) -> None:
         if not isinstance(tuning, dict):
             messagebox.showinfo("\u653e\u884c\u95e8\u69db", "\u5f53\u524d\u6ca1\u6709\u53ef\u5e94\u7528\u7684\u95e8\u69db\u5efa\u8bae\u3002")
@@ -3738,8 +3758,12 @@ class SmartMatchDashboard:
         if not update:
             messagebox.showinfo("\u653e\u884c\u95e8\u69db", "\u5efa\u8bae\u4e2d\u6ca1\u6709\u53ef\u5199\u5165\u7684\u95e8\u69db\u53c2\u6570\u3002")
             return
+        guard = self._block_strategy_policy_tuning_if_needed(tuning, "strategy_allowlist_tuning")
+        if guard is None:
+            return
         current = get_strategy_admission_policy_status().get("policy", {})
         reason_text = "\n".join(str(item) for item in tuning.get("reasons", []) if item) if isinstance(tuning.get("reasons"), list) else "-"
+        guard_text = f"\n\n\u8c03\u53c2\u95e8\u63a7:\n{guard.get('body', '-')}" if bool(guard.get("confirm_required")) else ""
         confirm = messagebox.askyesno(
             "\u5e94\u7528\u653e\u884c\u95e8\u69db",
             (
@@ -3748,6 +3772,7 @@ class SmartMatchDashboard:
                 f"\u9ad8\u51c6\u7b56\u7565\u6570: {int(current.get('active_strategy_min', 1) or 1)} -> {int(update.get('active_strategy_min', 1) or 1)}\n"
                 f"\u4e2d\u98ce\u9669\u653e\u884c: {'ON' if current.get('medium_risk_allowed', True) else 'OFF'} -> {'ON' if update.get('medium_risk_allowed', True) else 'OFF'}\n\n"
                 f"\u539f\u56e0:\n{reason_text}\n\n\u786e\u8ba4\u540e\uff0c\u540e\u7eed\u5206\u6790\u4f1a\u6309\u65b0\u95e8\u69db\u5224\u5b9a\u6b63\u5f0f\u653e\u884c\u3002"
+                f"{guard_text}"
             ),
         )
         if not confirm:
@@ -3769,8 +3794,12 @@ class SmartMatchDashboard:
         if not update:
             messagebox.showinfo("Replay Guard", "\u5efa\u8bae\u4e2d\u6ca1\u6709\u53ef\u5199\u5165\u7684 Replay Guard \u53c2\u6570\u3002")
             return
+        guard = self._block_strategy_policy_tuning_if_needed(tuning, "agent_replay_guard_tuning")
+        if guard is None:
+            return
         current = get_strategy_admission_policy_status().get("policy", {})
         reason_text = "\n".join(str(item) for item in tuning.get("reasons", []) if item) if isinstance(tuning.get("reasons"), list) else "-"
+        guard_text = f"\n\n\u8c03\u53c2\u95e8\u63a7:\n{guard.get('body', '-')}" if bool(guard.get("confirm_required")) else ""
         confirm = messagebox.askyesno(
             "\u5e94\u7528 Replay Guard \u8c03\u53c2",
             (
@@ -3779,6 +3808,7 @@ class SmartMatchDashboard:
                 f"1X2\u5931\u8bef\u7ebf: {float(current.get('agent_replay_prediction_miss_threshold', 0.55) or 0.55):.2f} -> {float(update.get('agent_replay_prediction_miss_threshold', 0.55) or 0.55):.2f}\n"
                 f"\u8ba9\u7403\u5931\u8bef\u7ebf: {float(current.get('agent_replay_handicap_miss_threshold', 0.60) or 0.60):.2f} -> {float(update.get('agent_replay_handicap_miss_threshold', 0.60) or 0.60):.2f}\n\n"
                 f"\u539f\u56e0:\n{reason_text}\n\n\u786e\u8ba4\u540e\uff0c\u540e\u7eed\u5206\u6790\u4f1a\u6309\u65b0 Replay Guard \u95e8\u69db\u5224\u5b9a\u662f\u5426\u964d\u7ea7\u4e3a\u89c2\u5bdf\u3002"
+                f"{guard_text}"
             ),
         )
         if not confirm:
@@ -4208,6 +4238,14 @@ class SmartMatchDashboard:
                     str(row.get("body") or "-"),
                     command=lambda review=policy_effect: self.open_policy_effect_detail_window(review),
                 )
+        tuning_guard = dashboard.get("policy_tuning_guard", {}) if isinstance(dashboard.get("policy_tuning_guard"), dict) else {}
+        self._strategy_section_title(right, "\u8c03\u53c2\u95e8\u63a7")
+        self._strategy_row(
+            right,
+            str(tuning_guard.get("summary_text") or "-"),
+            str(tuning_guard.get("body") or "-"),
+            command=lambda review=policy_effect: self.open_policy_effect_detail_window(review),
+        )
 
         entropy_backtest = dashboard.get("market_entropy_backtest", {}) if isinstance(dashboard.get("market_entropy_backtest"), dict) else {}
         self._strategy_section_title(right, "MarketEntropy 避险回测")
