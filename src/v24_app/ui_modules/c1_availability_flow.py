@@ -172,6 +172,31 @@ def build_c1_release_guard_report_lines(
     return lines
 
 
+def _extract_guard_report_field(text: str, label: str, default: str = "-") -> str:
+    prefix = f"- {label}:"
+    for line in text.splitlines():
+        if line.startswith(prefix):
+            return line[len(prefix) :].strip() or default
+    return default
+
+
+def _extract_guard_report_issues(text: str) -> list[str]:
+    issues: list[str] = []
+    in_section = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped == "## Issues":
+            in_section = True
+            continue
+        if in_section and stripped.startswith("## "):
+            break
+        if in_section and stripped.startswith("- "):
+            value = stripped[2:].strip()
+            if value and value.lower() != "none":
+                issues.append(value)
+    return issues
+
+
 def load_c1_release_guard_report_history(report_dir: Path, *, limit: int = 10) -> list[dict[str, object]]:
     if not report_dir.exists():
         return []
@@ -187,6 +212,8 @@ def load_c1_release_guard_report_history(report_dir: Path, *, limit: int = 10) -
             text = path.read_text(encoding="utf-8")
         except OSError:
             continue
+        fail_warn = _extract_guard_report_field(text, "Quality Fail/Warn", "0/0").split("/", 1)
+        issues = _extract_guard_report_issues(text)
         rows.append(
             {
                 "name": path.name,
@@ -194,6 +221,11 @@ def load_c1_release_guard_report_history(report_dir: Path, *, limit: int = 10) -
                 "updated_at": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
                 "size": stat.st_size,
                 "text": text,
+                "matches_requested": _safe_int(_extract_guard_report_field(text, "Matches Requested", "0")),
+                "smoke_status": _extract_guard_report_field(text, "Smoke", "-").lower(),
+                "quality_failures": _safe_int(fail_warn[0] if fail_warn else 0),
+                "quality_warnings": _safe_int(fail_warn[1] if len(fail_warn) > 1 else 0),
+                "issues": issues,
             }
         )
     return rows
@@ -201,17 +233,43 @@ def load_c1_release_guard_report_history(report_dir: Path, *, limit: int = 10) -
 
 def build_c1_release_guard_history_text(rows: list[Mapping[str, object]] | object) -> str:
     items = rows if isinstance(rows, list) else []
+    total_matches = sum(_safe_int(item.get("matches_requested", 0)) for item in items if isinstance(item, Mapping))
+    smoke_counts: dict[str, int] = {}
+    issue_counts: dict[str, int] = {}
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        smoke = str(item.get("smoke_status") or "-")
+        smoke_counts[smoke] = smoke_counts.get(smoke, 0) + 1
+        issues = item.get("issues") if isinstance(item.get("issues"), list) else []
+        for issue in issues:
+            issue_text = str(issue).strip()
+            if issue_text:
+                issue_counts[issue_text] = issue_counts.get(issue_text, 0) + 1
+    top_issues = sorted(issue_counts.items(), key=lambda pair: (-pair[1], pair[0]))[:8]
     lines = [
         "# C1 Release Guard Block History",
         "",
         f"- Reports: {len(items)}",
+        f"- Matches Requested: {total_matches}",
+        f"- Smoke Counts: {smoke_counts or {}}",
         "",
     ]
     if not items:
         lines.append("No blocked release guard reports found.")
         return "\n".join(lines)
+    lines.extend(["## Issue Summary", ""])
+    if top_issues:
+        lines.extend(["| Issue | Count |", "|---|---:|"])
+        for issue, count in top_issues:
+            lines.append(f"| {issue} | {count} |")
+    else:
+        lines.append("- no parsed issues")
+    lines.append("")
     lines.extend(
         [
+            "## Reports",
+            "",
             "| Time | File | Size |",
             "|---|---|---:|",
         ]

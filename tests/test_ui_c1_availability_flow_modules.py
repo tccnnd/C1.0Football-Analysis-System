@@ -114,15 +114,36 @@ class UIC1AvailabilityFlowModuleTests(unittest.TestCase):
             report_dir = Path(tmp)
             old_path = report_dir / "c1_release_guard_block_20260511_100000.md"
             new_path = report_dir / "c1_release_guard_block_20260511_110000.md"
-            old_path.write_text("# old", encoding="utf-8")
-            new_path.write_text("# new", encoding="utf-8")
+            old_path.write_text(
+                "\n".join(
+                    build_c1_release_guard_report_lines(
+                        {"status": "fail", "quality_failures": 1, "issues": ["provider quality_gate failed"]},
+                        matches_count=3,
+                    )
+                ),
+                encoding="utf-8",
+            )
+            new_path.write_text(
+                "\n".join(
+                    build_c1_release_guard_report_lines(
+                        {"status": "fail", "quality_failures": 2, "issues": ["api-football: suspended"]},
+                        matches_count=4,
+                    )
+                ),
+                encoding="utf-8",
+            )
             rows = load_c1_release_guard_report_history(report_dir, limit=2)
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[0]["name"], "c1_release_guard_block_20260511_110000.md")
+        self.assertEqual(rows[0]["matches_requested"], 4)
+        self.assertEqual(rows[0]["smoke_status"], "fail")
+        self.assertEqual(rows[0]["quality_failures"], 2)
         text = build_c1_release_guard_history_text(rows)
         self.assertIn("C1 Release Guard Block History", text)
-        self.assertIn("# new", text)
-        self.assertIn("# old", text)
+        self.assertIn("Matches Requested: 7", text)
+        self.assertIn("Smoke Counts: {'fail': 2}", text)
+        self.assertIn("api-football: suspended", text)
+        self.assertIn("provider quality_gate failed", text)
 
     def test_release_review_guard_allows_warn_or_missing_status(self) -> None:
         warn_guard = build_c1_release_review_availability_guard(
