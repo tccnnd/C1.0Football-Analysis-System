@@ -9707,7 +9707,147 @@ def _extract_video_review_frames(video_path: Path, review_id: str, *, interval_s
     }
 
 
-def _video_review_ai_summary(settlement: dict, *, frame_count: int, notes: str) -> dict:
+def _mean(values: list[float]) -> float:
+    return sum(values) / len(values) if values else 0.0
+
+
+def _video_review_frame_visual_analysis(frames: list[dict]) -> dict:
+    if not frames:
+        return {
+            "status": "no_frames",
+            "frame_count": 0,
+            "summary_text": "no key frames available for visual analysis",
+            "frame_rows": [],
+            "tags": [],
+        }
+    try:
+        from PIL import Image, ImageChops, ImageFilter, ImageStat
+    except Exception as exc:
+        return {
+            "status": "vision_library_unavailable",
+            "frame_count": len(frames),
+            "summary_text": f"Pillow unavailable: {exc}",
+            "frame_rows": [],
+            "tags": ["vision_dependency_missing"],
+        }
+
+    rows: list[dict] = []
+    previous = None
+    for frame in frames:
+        path = Path(str(frame.get("path") or ""))
+        if not path.exists() or not path.is_file():
+            rows.append(
+                {
+                    "index": _safe_int(frame.get("index")),
+                    "timestamp_seconds": _safe_int(frame.get("timestamp_seconds")),
+                    "status": "missing_file",
+                    "path": str(path),
+                }
+            )
+            continue
+        try:
+            with Image.open(path) as image:
+                gray = image.convert("L").resize((160, 90))
+                stat = ImageStat.Stat(gray)
+                brightness = float(stat.mean[0])
+                contrast = float(stat.stddev[0])
+                edge = gray.filter(ImageFilter.FIND_EDGES)
+                edge_score = float(ImageStat.Stat(edge).mean[0])
+                motion_score = 0.0
+                if previous is not None:
+                    diff = ImageChops.difference(gray, previous)
+                    motion_score = float(ImageStat.Stat(diff).mean[0])
+                previous = gray.copy()
+        except Exception as exc:
+            rows.append(
+                {
+                    "index": _safe_int(frame.get("index")),
+                    "timestamp_seconds": _safe_int(frame.get("timestamp_seconds")),
+                    "status": "read_failed",
+                    "path": str(path),
+                    "error": str(exc),
+                }
+            )
+            continue
+        quality = "good"
+        if brightness < 35 or brightness > 225:
+            quality = "exposure_risk"
+        elif contrast < 18 or edge_score < 4:
+            quality = "low_detail"
+        rows.append(
+            {
+                "index": _safe_int(frame.get("index")),
+                "timestamp_seconds": _safe_int(frame.get("timestamp_seconds")),
+                "status": "ok",
+                "path": str(path),
+                "brightness": round(brightness, 2),
+                "contrast": round(contrast, 2),
+                "edge_score": round(edge_score, 2),
+                "motion_score": round(motion_score, 2),
+                "quality": quality,
+            }
+        )
+
+    ok_rows = [row for row in rows if row.get("status") == "ok"]
+    brightness_values = [_safe_float(row.get("brightness")) for row in ok_rows]
+    contrast_values = [_safe_float(row.get("contrast")) for row in ok_rows]
+    edge_values = [_safe_float(row.get("edge_score")) for row in ok_rows]
+    motion_values = [_safe_float(row.get("motion_score")) for row in ok_rows[1:]]
+    tags: list[str] = []
+    avg_brightness = _mean(brightness_values)
+    avg_contrast = _mean(contrast_values)
+    avg_edge = _mean(edge_values)
+    avg_motion = _mean(motion_values)
+    if avg_brightness < 45:
+        tags.append("low_light_evidence")
+    elif avg_brightness > 215:
+        tags.append("overexposed_evidence")
+    if avg_contrast < 22 or avg_edge < 5:
+        tags.append("low_detail_frames")
+    if avg_motion >= 18:
+        tags.append("high_scene_change")
+    elif ok_rows and avg_motion < 4:
+        tags.append("low_motion_evidence")
+    usable_count = len(ok_rows)
+    status = "ready" if usable_count else "no_readable_frames"
+    top_frames = sorted(
+        ok_rows,
+        key=lambda row: (
+            -(_safe_float(row.get("motion_score")) + _safe_float(row.get("edge_score")) + _safe_float(row.get("contrast")) / 4.0),
+            _safe_int(row.get("index")),
+        ),
+    )[:5]
+    if not tags and usable_count:
+        tags.append("visual_evidence_available")
+    return {
+        "status": status,
+        "frame_count": len(frames),
+        "usable_frame_count": usable_count,
+        "avg_brightness": round(avg_brightness, 2),
+        "avg_contrast": round(avg_contrast, 2),
+        "avg_edge_score": round(avg_edge, 2),
+        "avg_motion_score": round(avg_motion, 2),
+        "summary_text": (
+            f"frames {usable_count}/{len(frames)} | brightness {avg_brightness:.1f} | "
+            f"contrast {avg_contrast:.1f} | motion {avg_motion:.1f}"
+        ),
+        "tags": tags,
+        "key_frames": [
+            {
+                "index": row.get("index"),
+                "timestamp_seconds": row.get("timestamp_seconds"),
+                "quality": row.get("quality"),
+                "motion_score": row.get("motion_score"),
+                "edge_score": row.get("edge_score"),
+                "path": row.get("path"),
+            }
+            for row in top_frames
+        ],
+        "frame_rows": rows[:80],
+    }
+
+
+def _video_review_ai_summary(settlement: dict, *, frame_count: int, notes: str, visual_analysis: dict | None = None) -> dict:
     tags: list[str] = []
     if settlement.get("is_correct") is False:
         tags.append("prediction_direction_miss")
@@ -9719,11 +9859,21 @@ def _video_review_ai_summary(settlement: dict, *, frame_count: int, notes: str) 
         tags.append("scoreline_path_miss")
     if not tags:
         tags.append("no_obvious_model_error")
+    visual = visual_analysis if isinstance(visual_analysis, dict) else {}
+    visual_tags = [str(tag) for tag in visual.get("tags", [])] if isinstance(visual.get("tags"), list) else []
+    if visual_tags:
+        for tag in visual_tags:
+            if tag not in tags:
+                tags.append(tag)
+    visual_status = str(visual.get("status") or "")
+    vision_model_status = "offline_visual_evidence_ready" if visual_status == "ready" else "pending_manual_or_llm_vision_review"
     return {
         "agent": "VideoReview Agent",
-        "status": "frames_ready" if frame_count else "metadata_ready",
-        "vision_model_status": "pending_manual_or_llm_vision_review",
+        "status": "visual_review_ready" if visual_status == "ready" else "frames_ready" if frame_count else "metadata_ready",
+        "vision_model_status": vision_model_status,
         "frame_count": frame_count,
+        "visual_summary": visual.get("summary_text") or "-",
+        "key_frame_count": len(visual.get("key_frames") or []) if isinstance(visual.get("key_frames"), list) else 0,
         "prediction_alignment": "aligned" if settlement.get("is_correct") is True else "needs_review" if settlement.get("is_correct") is False else "unknown",
         "error_causes": tags,
         "operator_notes": notes,
@@ -9775,7 +9925,13 @@ def create_video_review(
             interval_seconds=interval_seconds,
             max_frames=max_frames,
         )
-    agent_review = _video_review_ai_summary(settlement, frame_count=len(frames), notes=str(notes or ""))
+    visual_analysis = _video_review_frame_visual_analysis(frames)
+    agent_review = _video_review_ai_summary(
+        settlement,
+        frame_count=len(frames),
+        notes=str(notes or ""),
+        visual_analysis=visual_analysis,
+    )
     item = {
         "review_id": review_id,
         "created_at": created_at,
@@ -9794,6 +9950,7 @@ def create_video_review(
         "frame_plan": frame_plan,
         "frames": frames,
         "extraction": extraction,
+        "visual_analysis": visual_analysis,
         "agent_review": agent_review,
     }
     items = _load_video_review_items()
@@ -9843,6 +10000,8 @@ def extract_video_review_frames_now(
     review["frames"] = frames
     review["extraction"] = extraction
     review["extracted_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    visual_analysis = _video_review_frame_visual_analysis(frames)
+    review["visual_analysis"] = visual_analysis
 
     settlement = next(
         (
@@ -9857,6 +10016,7 @@ def extract_video_review_frames_now(
             settlement,
             frame_count=len(frames),
             notes=str((review.get("agent_review") or {}).get("operator_notes") or "") if isinstance(review.get("agent_review"), dict) else "",
+            visual_analysis=visual_analysis,
         )
     elif isinstance(review.get("agent_review"), dict):
         agent_review = dict(review["agent_review"])

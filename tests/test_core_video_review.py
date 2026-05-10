@@ -111,6 +111,62 @@ class CoreVideoReviewTests(unittest.TestCase):
         self.assertEqual(review["agent_review"]["status"], "metadata_ready")
         self.assertEqual(review["agent_review"]["frame_count"], 0)
 
+    def test_extract_video_review_frames_adds_offline_visual_analysis(self) -> None:
+        from PIL import Image, ImageDraw
+
+        settlement = {
+            "match_id": "m-3",
+            "home_team": "Alpha",
+            "away_team": "Bravo",
+            "home_goals": 0,
+            "away_goals": 1,
+            "result": "客胜",
+            "is_correct": False,
+            "handicap_is_correct": False,
+        }
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            video_path = root / "replay.mp4"
+            video_path.write_bytes(b"fake-video")
+            review_file = root / "video_reviews.json"
+            review_dir = root / "video_review_frames"
+            frame_dir = review_dir / "frames_source"
+            frame_dir.mkdir(parents=True)
+            frame_paths: list[Path] = []
+            for index, color in enumerate((40, 110, 210), start=1):
+                frame_path = frame_dir / f"frame_{index:04d}.jpg"
+                image = Image.new("RGB", (180, 100), (color, color, color))
+                draw = ImageDraw.Draw(image)
+                draw.rectangle((20 + index * 8, 20, 120, 70), outline=(255 - color, 80, 40), width=4)
+                draw.text((10, 8), f"{index}", fill=(255, 255, 255))
+                image.save(frame_path)
+                frame_paths.append(frame_path)
+
+            def fake_extract(_video_path: Path, _review_id: str, *, interval_seconds: int, max_frames: int):
+                frames = [
+                    {"index": index, "path": str(path), "timestamp_seconds": (index - 1) * interval_seconds}
+                    for index, path in enumerate(frame_paths, start=1)
+                ]
+                return frames, {"status": "ok", "frame_count": len(frames)}
+
+            with patch.object(core, "STATE_STORE", _VideoReviewStore(settlement)):
+                with patch.object(core, "VIDEO_REVIEW_FILE", review_file):
+                    with patch.object(core, "VIDEO_REVIEW_DIR", review_dir):
+                        with patch("v24_app.core.shutil.which", return_value=None):
+                            created = core.create_video_review("m-3", video_path)
+                        with patch("v24_app.core._extract_video_review_frames", side_effect=fake_extract):
+                            result = core.extract_video_review_frames_now(created["review"]["review_id"], interval_seconds=5)
+                            review = core.get_video_review_for_match("m-3")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(review["visual_analysis"]["status"], "ready")
+        self.assertEqual(review["visual_analysis"]["usable_frame_count"], 3)
+        self.assertGreater(review["visual_analysis"]["avg_motion_score"], 0)
+        self.assertGreater(len(review["visual_analysis"]["key_frames"]), 0)
+        self.assertEqual(review["agent_review"]["status"], "visual_review_ready")
+        self.assertEqual(review["agent_review"]["vision_model_status"], "offline_visual_evidence_ready")
+        self.assertTrue(set(review["visual_analysis"]["tags"]) & set(review["agent_review"]["error_causes"]))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2437,7 +2437,10 @@ class SmartMatchDashboard:
         status = str((payload.get("extraction") if isinstance(payload.get("extraction"), dict) else {}).get("status") or payload.get("reason") or "-")
         frame_count = int(payload.get("frame_count", 0) or 0)
         review_id = str(payload.get("review_id") or (record.metadata or {}).get("review_id") or "-")
-        self.status_var.set(f"\u89c6\u9891\u590d\u76d8\u62bd\u5e27: {status} / frames={frame_count}")
+        review = payload.get("review") if isinstance(payload.get("review"), dict) else {}
+        agent_review = review.get("agent_review") if isinstance(review.get("agent_review"), dict) else {}
+        vision_status = str(agent_review.get("vision_model_status") or "-")
+        self.status_var.set(f"\u89c6\u9891\u590d\u76d8\u62bd\u5e27: {status} / frames={frame_count} / vision={vision_status}")
         self._log_event("OK", f"\u89c6\u9891\u590d\u76d8\u62bd\u5e27\u5b8c\u6210 | {review_id} | {status} | {record.elapsed_seconds or 0:.2f}s")
         if getattr(self, "current_view", "") == "review":
             self.open_review_center()
@@ -2445,7 +2448,7 @@ class SmartMatchDashboard:
             self.open_monitor_center()
         title = "\u89c6\u9891\u590d\u76d8\u62bd\u5e27"
         if bool(payload.get("ok")):
-            messagebox.showinfo(title, f"\u62bd\u5e27\u5b8c\u6210\n\nreview_id: {review_id}\nframes: {frame_count}")
+            messagebox.showinfo(title, f"\u62bd\u5e27\u5b8c\u6210\n\nreview_id: {review_id}\nframes: {frame_count}\nvision: {vision_status}")
         else:
             messagebox.showwarning(title, f"\u62bd\u5e27\u672a\u5b8c\u6210\n\nreview_id: {review_id}\n\u72b6\u6001: {status}\n\u539f\u56e0: {payload.get('reason', '-')}")
 
@@ -3756,6 +3759,7 @@ class SmartMatchDashboard:
         video_review = item.get("video_review") if isinstance(item.get("video_review"), dict) else {}
         video_agent = video_review.get("agent_review") if isinstance(video_review.get("agent_review"), dict) else {}
         video_payload = video_review.get("video") if isinstance(video_review.get("video"), dict) else {}
+        visual_analysis = video_review.get("visual_analysis") if isinstance(video_review.get("visual_analysis"), dict) else {}
         if video_review:
             video_lines = [
                 "",
@@ -3763,6 +3767,8 @@ class SmartMatchDashboard:
                 f"- 状态: {video_agent.get('status') or '-'} / {video_agent.get('vision_model_status') or '-'}",
                 f"- 视频: {video_payload.get('filename') or '-'}",
                 f"- 抽帧: {len(video_review.get('frames') or [])} 已生成 / {len(video_review.get('frame_plan') or [])} 计划",
+                f"- 视觉证据: {visual_analysis.get('summary_text') or video_agent.get('visual_summary') or '-'}",
+                f"- 关键帧: {len(visual_analysis.get('key_frames') or []) if isinstance(visual_analysis.get('key_frames'), list) else video_agent.get('key_frame_count') or 0}",
                 f"- 预测对齐: {video_agent.get('prediction_alignment') or '-'}",
                 f"- 视频归因: {', '.join(video_agent.get('error_causes') or []) if isinstance(video_agent.get('error_causes'), list) else '-'}",
             ]
