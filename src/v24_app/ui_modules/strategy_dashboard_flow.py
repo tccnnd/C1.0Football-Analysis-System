@@ -2380,6 +2380,101 @@ def build_statsbomb_fewshot_memory_health_summary(
     }
 
 
+def build_statsbomb_fewshot_health_driver_summary(
+    health: Mapping[str, object] | object | None = None,
+    backfill_queue: Mapping[str, object] | object | None = None,
+    memory: Mapping[str, object] | object | None = None,
+    *,
+    limit: int = 6,
+) -> dict[str, object]:
+    resolved_health = _as_mapping(health)
+    resolved_queue = _as_mapping(backfill_queue)
+    resolved_memory = _as_mapping(memory)
+    issue_rows = [_as_mapping(issue) for issue in _as_list(resolved_health.get("issues"))]
+    candidate_rows = [_as_mapping(row) for row in _as_list(resolved_queue.get("candidate_rows"))]
+    last_apply = _as_mapping(resolved_memory.get("last_manual_apply"))
+    memory_summary = _as_mapping(resolved_memory.get("summary"))
+    last_apply_counts = _as_mapping(last_apply.get("health_issue_counts")) or _as_mapping(
+        memory_summary.get("last_manual_apply_health_issue_counts")
+    )
+
+    active_driver_counts: dict[str, int] = {}
+    for issue in issue_rows:
+        code = str(issue.get("code") or "").strip()
+        if code:
+            active_driver_counts[code] = active_driver_counts.get(code, 0) + 1
+
+    backfill_driver_counts: dict[str, int] = {}
+    for row in candidate_rows:
+        for issue in _as_list(row.get("matched_health_issues")):
+            issue_text = str(issue).strip()
+            if issue_text:
+                backfill_driver_counts[issue_text] = backfill_driver_counts.get(issue_text, 0) + 1
+
+    resolved_last_apply_counts: dict[str, int] = {}
+    for key, value in last_apply_counts.items():
+        key_text = str(key).strip()
+        if key_text:
+            resolved_last_apply_counts[key_text] = _safe_int(value)
+
+    rows: list[dict[str, object]] = []
+    for issue in issue_rows:
+        code = str(issue.get("code") or "-")
+        rows.append(
+            {
+                "kind": "active_issue",
+                "title": f"{code} | {issue.get('severity') or '-'}",
+                "body": str(issue.get("recommendation") or issue.get("title") or "-"),
+                "driver": code,
+                "count": 1,
+                "tone": "bad" if str(issue.get("severity") or "") == "high" else "warning",
+            }
+        )
+    for driver, count in sorted(backfill_driver_counts.items(), key=lambda item: (-_safe_int(item[1]), str(item[0]))):
+        rows.append(
+            {
+                "kind": "backfill_candidate",
+                "title": f"补样候选 | {driver}",
+                "body": f"当前补样队列有 {_safe_int(count)} 场候选可覆盖该健康驱动。",
+                "driver": driver,
+                "count": _safe_int(count),
+                "tone": "info",
+            }
+        )
+    for driver, count in sorted(resolved_last_apply_counts.items(), key=lambda item: (-_safe_int(item[1]), str(item[0]))):
+        rows.append(
+            {
+                "kind": "last_apply",
+                "title": f"最近应用 | {driver}",
+                "body": f"最近一次 few-shot 应用已补入 {_safe_int(count)} 条该健康驱动样本。",
+                "driver": driver,
+                "count": _safe_int(count),
+                "tone": "good",
+            }
+        )
+
+    status = "healthy"
+    if active_driver_counts:
+        status = "attention"
+    elif backfill_driver_counts:
+        status = "queued"
+    elif resolved_last_apply_counts:
+        status = "recently_applied"
+    tone = "warning" if status == "attention" else "info" if status == "queued" else "good" if status == "recently_applied" else "neutral"
+    active_text = ", ".join(f"{key}:{value}" for key, value in sorted(active_driver_counts.items())) or "-"
+    queued_text = ", ".join(f"{key}:{value}" for key, value in sorted(backfill_driver_counts.items())) or "-"
+    applied_text = ", ".join(f"{key}:{value}" for key, value in sorted(resolved_last_apply_counts.items())) or "-"
+    return {
+        "status": status,
+        "tone": tone,
+        "active_driver_counts": dict(sorted(active_driver_counts.items())),
+        "backfill_driver_counts": dict(sorted(backfill_driver_counts.items())),
+        "last_apply_driver_counts": dict(sorted(resolved_last_apply_counts.items())),
+        "summary_text": f"active {active_text} | queued {queued_text} | applied {applied_text}",
+        "rows": rows[: max(0, int(limit))],
+    }
+
+
 def build_statsbomb_fewshot_memory_audit_report(
     memory: Mapping[str, object] | object | None = None,
     monitor: Mapping[str, object] | object | None = None,
@@ -5312,6 +5407,11 @@ def build_high_accuracy_strategy_dashboard(
         settlement_items,
         statsbomb_event_baseline or {},
     )
+    statsbomb_health_drivers = build_statsbomb_fewshot_health_driver_summary(
+        statsbomb_fewshot_health,
+        statsbomb_backfill_queue,
+        statsbomb_fewshot_memory or {},
+    )
     stable_count = sum(1 for item in pool if bool(_strategy_stability(item).get("stable")))
     primary_count = sum(1 for item in pool if str(item.get("role") or "") == "primary")
     backup_count = sum(1 for item in pool if str(item.get("role") or "") == "backup")
@@ -5413,6 +5513,11 @@ def build_high_accuracy_strategy_dashboard(
             "tone": "warning" if _safe_int(statsbomb_backfill_queue.get("task_count")) else "good",
         },
         {
+            "label": "SB Drivers",
+            "value": str(statsbomb_health_drivers.get("summary_text") or "-"),
+            "tone": str(statsbomb_health_drivers.get("tone") or "neutral"),
+        },
+        {
             "label": "JC\u7a33\u5b9a\u6876",
             "value": str(jc_bucket_feedback.get("summary_text") or "-"),
             "tone": "bad"
@@ -5503,6 +5608,7 @@ def build_high_accuracy_strategy_dashboard(
         "statsbomb_event_review": statsbomb_event_review,
         "statsbomb_fewshot_monitor": statsbomb_fewshot_monitor,
         "statsbomb_fewshot_health": statsbomb_fewshot_health,
+        "statsbomb_fewshot_health_drivers": statsbomb_health_drivers,
         "statsbomb_backfill_queue": statsbomb_backfill_queue,
         "jc_bucket_feedback": jc_bucket_feedback,
         "allowlist_settlement_rows": build_strategy_allowlist_settlement_rows(settlement_items),

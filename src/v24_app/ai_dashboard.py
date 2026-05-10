@@ -5437,6 +5437,18 @@ class SmartMatchDashboard:
                 str(fewshot_health.get("summary_text") or "-"),
                 "\n".join(str(item.get("recommendation") or item.get("title") or "-") for item in health_issues if isinstance(item, dict)),
             )
+        health_drivers = dashboard.get("statsbomb_fewshot_health_drivers", {}) if isinstance(dashboard.get("statsbomb_fewshot_health_drivers"), dict) else {}
+        driver_rows = health_drivers.get("rows", []) if isinstance(health_drivers.get("rows"), list) else []
+        if driver_rows:
+            self._strategy_section_title(right, "StatsBomb \u5065\u5eb7\u9a71\u52a8")
+            self._strategy_row(
+                right,
+                str(health_drivers.get("summary_text") or "-"),
+                "\u7528\u4e8e\u5224\u65ad\u5f53\u524d few-shot \u8bb0\u5fc6\u7f3a\u53e3\u3001\u8865\u6837\u5019\u9009\u548c\u6700\u8fd1\u5e94\u7528\u662f\u5426\u95ed\u73af\u3002",
+            )
+            for row in driver_rows[:6]:
+                if isinstance(row, dict):
+                    self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
         fewshot_quality = evaluation_agent.get("statsbomb_fewshot_quality", {}) if isinstance(evaluation_agent.get("statsbomb_fewshot_quality"), dict) else {}
         quality_alerts = fewshot_quality.get("alerts", []) if isinstance(fewshot_quality.get("alerts"), list) else []
         if quality_alerts:

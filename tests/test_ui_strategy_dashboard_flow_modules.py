@@ -54,6 +54,7 @@ from v24_app.ui_modules import (
     build_statsbomb_fewshot_memory_audit_report,
     build_statsbomb_fewshot_memory_audit_report_filename,
     build_statsbomb_fewshot_memory_audit_report_lines,
+    build_statsbomb_fewshot_health_driver_summary,
     build_statsbomb_fewshot_memory_health_summary,
     build_statsbomb_fewshot_memory_summary,
     build_statsbomb_fewshot_memory_monitor,
@@ -1960,6 +1961,62 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertEqual(dashboard["statsbomb_fewshot_health"]["status"], "attention")
         self.assertTrue(any(issue["code"] == "sample_count_low" for issue in dashboard["statsbomb_fewshot_health"]["issues"]))
         self.assertEqual(metrics["SB Health"]["tone"], "warning")
+
+    def test_statsbomb_fewshot_health_driver_summary_tracks_active_queue_and_apply(self) -> None:
+        health = {
+            "issues": [
+                {
+                    "code": "required_tag_gap",
+                    "severity": "medium",
+                    "title": "Missing tag",
+                    "recommendation": "Add tag coverage",
+                }
+            ]
+        }
+        queue = {
+            "candidate_rows": [
+                {"matched_health_issues": ["required_tag_gap", "sample_count_low"]},
+                {"matched_health_issues": ["required_tag_gap"]},
+            ]
+        }
+        memory = {
+            "last_manual_apply": {
+                "health_issue_counts": {
+                    "required_tag_gap": 1,
+                }
+            }
+        }
+
+        summary = build_statsbomb_fewshot_health_driver_summary(health, queue, memory)
+
+        self.assertEqual(summary["status"], "attention")
+        self.assertEqual(summary["active_driver_counts"]["required_tag_gap"], 1)
+        self.assertEqual(summary["backfill_driver_counts"]["required_tag_gap"], 2)
+        self.assertEqual(summary["last_apply_driver_counts"]["required_tag_gap"], 1)
+        self.assertTrue(any(row["kind"] == "active_issue" for row in summary["rows"]))
+        self.assertIn("required_tag_gap", summary["summary_text"])
+
+    def test_high_accuracy_dashboard_exposes_statsbomb_health_drivers(self) -> None:
+        memory = {
+            "last_manual_apply": {"health_issue_counts": {"required_tag_gap": 1}},
+            "items": [
+                {
+                    "labels": {
+                        "is_hit": True,
+                        "tags": ["strategy_hit"],
+                        "root_cause": "event_evidence_aligned",
+                    }
+                }
+            ],
+        }
+
+        dashboard = build_high_accuracy_strategy_dashboard({"enabled": True}, [], [], {}, memory)
+        metrics = {item["label"]: item for item in dashboard["metrics"]}
+
+        self.assertIn("SB Drivers", metrics)
+        self.assertIn("statsbomb_fewshot_health_drivers", dashboard)
+        self.assertIn("required_tag_gap", dashboard["statsbomb_fewshot_health_drivers"]["summary_text"])
+        self.assertTrue(dashboard["statsbomb_fewshot_health_drivers"]["rows"])
 
     def test_statsbomb_fewshot_memory_health_can_ignore_unknown_backup_count(self) -> None:
         monitor = {
