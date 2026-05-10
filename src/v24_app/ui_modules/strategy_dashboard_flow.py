@@ -1120,6 +1120,8 @@ def build_statsbomb_fewshot_backfill_queue(
     sample_count = _safe_int(monitor_data.get("sample_count"))
     missing_tags = [str(tag) for tag in _as_list(monitor_data.get("missing_tags"))]
     current_query_tags = [str(tag) for tag in _as_list(monitor_data.get("current_query_tags"))]
+    missing_tag_set = set(missing_tags)
+    current_query_tag_set = set(current_query_tags)
     tasks: list[dict[str, object]] = []
 
     if sample_count <= 0 or any(str(alert.get("tag") or "") == "statsbomb_memory_missing" for alert in alert_rows):
@@ -1200,20 +1202,61 @@ def build_statsbomb_fewshot_backfill_queue(
                 if issue_code in {"memory_missing", "sample_count_low", "required_tag_gap", "quality_alerts_present"} and issue_code not in matched_health_issues:
                     if issue_code == "memory_missing" or overlap:
                         matched_health_issues.append(issue_code)
+            repair_score = _safe_int(row.get("priority_score"))
+            repair_reasons: list[str] = []
+            missing_hits = sorted(set(overlap) & missing_tag_set)
+            current_hits = sorted(set(overlap) & current_query_tag_set)
+            if missing_hits:
+                value = 35 * len(missing_hits)
+                repair_score += value
+                repair_reasons.append(f"missing_tags +{value}: {', '.join(missing_hits[:4])}")
+            if current_hits:
+                value = 25 * len(current_hits)
+                repair_score += value
+                repair_reasons.append(f"current_query +{value}: {', '.join(current_hits[:4])}")
+            for issue in matched_health_issues:
+                if issue == "memory_missing":
+                    repair_score += 40
+                    repair_reasons.append("memory_missing +40")
+                elif issue == "required_tag_gap":
+                    repair_score += 25
+                    repair_reasons.append("required_tag_gap +25")
+                elif issue == "sample_count_low":
+                    repair_score += 12
+                    repair_reasons.append("sample_count_low +12")
+                elif issue == "quality_alerts_present":
+                    repair_score += 10
+                    repair_reasons.append("quality_alerts_present +10")
+            if str(row.get("source") or "") == "recent_settlement":
+                repair_score += 15
+                repair_reasons.append("recent_settlement +15")
+            if not repair_reasons and overlap:
+                value = 8 * len(overlap)
+                repair_score += value
+                repair_reasons.append(f"target_overlap +{value}")
             scored_count += 1
             if row_limit <= 0:
                 return
             scored = dict(row)
             scored["matched_tags"] = overlap
             scored["matched_health_issues"] = matched_health_issues
-            scored["priority_score"] = _safe_int(row.get("priority_score")) + len(overlap) * 12
+            scored["repair_score"] = repair_score
+            scored["repair_reasons"] = repair_reasons
+            scored["priority_score"] = repair_score
             scored["body"] = (
                 f"{row.get('body', '-')}\n"
                 f"命中补样目标: {', '.join(overlap[:6]) if overlap else '-'}\n"
-                f"健康问题: {', '.join(matched_health_issues[:4]) if matched_health_issues else '-'}"
+                f"健康问题: {', '.join(matched_health_issues[:4]) if matched_health_issues else '-'}\n"
+                f"修复评分: {repair_score} | {', '.join(repair_reasons[:4]) if repair_reasons else '-'}"
             )
             scored_rows.append(scored)
-            scored_rows.sort(key=lambda row: (-_safe_int(row.get("priority_score")), str(row.get("match_date") or ""), str(row.get("title") or "")))
+            scored_rows.sort(
+                key=lambda row: (
+                    -_safe_int(row.get("repair_score", row.get("priority_score"))),
+                    str(row.get("match_date") or ""),
+                    str(row.get("title") or ""),
+                )
+            )
             del scored_rows[row_limit:]
 
         for item in settlements if isinstance(settlements, Sequence) else []:
@@ -1313,25 +1356,29 @@ def build_statsbomb_fewshot_backfill_report_lines(
             "",
             "## 候选比赛",
             "",
-            "| 优先级 | 来源 | 日期 | 赛事 | 比赛 | 命中目标 | 标签 |",
-            "| ---: | --- | --- | --- | --- | --- | --- |",
+            "| 修复评分 | 来源 | 日期 | 赛事 | 比赛 | 命中目标 | 健康驱动 | 排序原因 | 标签 |",
+            "| ---: | --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
     )
     if not candidates:
-        lines.append("| 0 | - | - | - | 暂无候选 | - | - |")
+        lines.append("| 0 | - | - | - | 暂无候选 | - | - | - | - |")
     for row in candidates:
         matched_tags = ", ".join(str(tag) for tag in _as_list(row.get("matched_tags"))) or "-"
+        health_issues = ", ".join(str(issue) for issue in _as_list(row.get("matched_health_issues"))) or "-"
+        repair_reasons = ", ".join(str(reason) for reason in _as_list(row.get("repair_reasons"))) or "-"
         tags = ", ".join(str(tag) for tag in _as_list(row.get("tags"))) or "-"
         lines.append(
             "| "
             + " | ".join(
                 [
-                    str(_safe_int(row.get("priority_score"))),
+                    str(_safe_int(row.get("repair_score", row.get("priority_score")))),
                     _md_cell(row.get("source")),
                     _md_cell(row.get("match_date")),
                     _md_cell(row.get("league")),
                     _md_cell(row.get("title")),
                     _md_cell(matched_tags),
+                    _md_cell(health_issues),
+                    _md_cell(repair_reasons),
                     _md_cell(tags),
                 ]
             )

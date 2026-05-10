@@ -1370,7 +1370,61 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertTrue(any(issue["code"] == "sample_count_low" for issue in queue["health_issues"]))
         self.assertTrue(any("xg_direction_failed" in row["matched_tags"] for row in queue["candidate_rows"]))
         self.assertTrue(any("required_tag_gap" in row["matched_health_issues"] for row in queue["candidate_rows"]))
+        self.assertGreater(queue["candidate_rows"][0]["repair_score"], 0)
+        self.assertTrue(queue["candidate_rows"][0]["repair_reasons"])
         self.assertIn("post-match", queue["leakage_note"])
+
+    def test_statsbomb_fewshot_backfill_queue_ranks_by_repair_value(self) -> None:
+        monitor = {
+            "sample_count": 3,
+            "current_matched_count": 0,
+            "current_query_tags": ["xg_direction_failed", "strategy_miss"],
+            "missing_tags": ["statsbomb_finishing_variance"],
+        }
+        quality = {"alert_count": 0, "alerts": []}
+        settlements = [
+            {
+                "match_id": "recent",
+                "match_date": "2024-06-20",
+                "league": "UEFA Euro",
+                "home_team": "Recent",
+                "away_team": "Case",
+                "statsbomb_event_summary": {
+                    "event_count": 3500,
+                    "team_stats": {
+                        "Recent": {"xg": 0.6, "shots": 7, "goals": 0},
+                        "Case": {"xg": 1.5, "shots": 13, "goals": 1},
+                    },
+                },
+                "high_accuracy_strategy_items": [
+                    {"play_type": "market_1x2", "pick": "HOME", "actual": "AWAY", "is_hit": False}
+                ],
+            }
+        ]
+        baseline = {
+            "items": [
+                {
+                    "match_id": "baseline",
+                    "match_date": "2024-06-01",
+                    "league": "UEFA Euro",
+                    "home_team": "Baseline",
+                    "away_team": "Case",
+                    "backfill_tags": ["statsbomb_finishing_variance", "xg_result_divergence"],
+                }
+            ],
+            "backfill_tag_index": {"statsbomb_finishing_variance": [0]},
+        }
+
+        queue = build_statsbomb_fewshot_backfill_queue(monitor, quality, settlements, baseline, limit=2)
+
+        self.assertEqual(queue["candidate_rows"][0]["match_id"], "recent")
+        self.assertGreater(
+            queue["candidate_rows"][0]["repair_score"],
+            queue["candidate_rows"][1]["repair_score"],
+        )
+        self.assertTrue(
+            any("recent_settlement" in reason for reason in queue["candidate_rows"][0]["repair_reasons"])
+        )
 
     def test_statsbomb_fewshot_backfill_queue_keeps_only_top_candidate_rows(self) -> None:
         monitor = {
@@ -1499,6 +1553,8 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
             "candidate_rows": [
                 {
                     "priority_score": 41,
+                    "repair_score": 88,
+                    "repair_reasons": ["required_tag_gap +25", "missing_tags +35"],
                     "source": "statsbomb_baseline",
                     "match_date": "2024-06-15",
                     "league": "UEFA Euro",
@@ -1522,6 +1578,7 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("Spain vs Croatia", payload)
         self.assertIn("Health Drivers", payload)
         self.assertIn("required_tag_gap", payload)
+        self.assertIn("required_tag_gap +25", payload)
         self.assertIn("post-match only", payload)
 
     def test_statsbomb_fewshot_draft_payload_builds_reviewable_samples(self) -> None:
