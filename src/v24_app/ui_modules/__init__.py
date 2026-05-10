@@ -30,6 +30,7 @@ from .main_list_sync import (
 from .c1_apply_flow import resolve_selected_prediction_for_details, sync_tree_c1_action_column
 from .c1_availability_flow import (
     build_c1_availability_provider_status_lines,
+    build_c1_release_review_availability_guard,
     build_c1_snapshot_import_message_text,
     build_c1_snapshot_import_status_text,
     build_c1_sync_message_text,
@@ -38,6 +39,7 @@ from .c1_availability_flow import (
     build_c1_template_export_status_text,
     export_c1_availability_template,
     get_c1_availability_provider_statuses,
+    get_c1_release_review_availability_guard,
     import_c1_availability_snapshots,
     should_auto_rerun_shadow_after_import,
     should_auto_rerun_shadow_after_sync,

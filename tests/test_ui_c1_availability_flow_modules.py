@@ -14,6 +14,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from v24_app.ui_modules import (
     build_c1_availability_provider_status_lines,
+    build_c1_release_review_availability_guard,
     build_c1_snapshot_import_message_text,
     build_c1_snapshot_import_status_text,
     build_c1_sync_message_text,
@@ -53,6 +54,44 @@ class UIC1AvailabilityFlowModuleTests(unittest.TestCase):
         self.assertFalse(should_auto_rerun_shadow_after_import(has_matches=False, imported_rows=5))
         self.assertTrue(should_auto_rerun_shadow_after_sync(has_matches=True))
         self.assertFalse(should_auto_rerun_shadow_after_sync(has_matches=False))
+
+    def test_release_review_guard_blocks_failed_smoke_check(self) -> None:
+        guard = build_c1_release_review_availability_guard(
+            {
+                "quality_failures": 1,
+                "quality_warnings": 2,
+                "provider_failure_reasons": ["api-football: suspended"],
+                "smoke_check": {
+                    "status": "fail",
+                    "issues": ["provider quality_gate failed"],
+                    "release_review_allowed": False,
+                },
+            }
+        )
+        self.assertFalse(guard["allowed"])
+        self.assertEqual(guard["status"], "fail")
+        self.assertIn("provider quality_gate failed", guard["issues"])
+        self.assertIn("api-football: suspended", guard["message"])
+        self.assertIn("已跳过", guard["message"])
+
+    def test_release_review_guard_allows_warn_or_missing_status(self) -> None:
+        warn_guard = build_c1_release_review_availability_guard(
+            {
+                "quality_failures": 0,
+                "quality_warnings": 1,
+                "smoke_check": {
+                    "status": "warn",
+                    "issues": ["availability_known_low"],
+                    "release_review_allowed": True,
+                },
+            }
+        )
+        self.assertTrue(warn_guard["allowed"])
+        self.assertEqual(warn_guard["status"], "warn")
+
+        missing_guard = build_c1_release_review_availability_guard({})
+        self.assertTrue(missing_guard["allowed"])
+        self.assertEqual(missing_guard["status"], "missing")
 
     def test_provider_status_lines(self) -> None:
         lines = build_c1_availability_provider_status_lines(

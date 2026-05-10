@@ -122,6 +122,7 @@ from .ui_modules import (
     should_refresh_after_auto_settle,
     export_c1_availability_template,
     get_c1_availability_provider_statuses,
+    get_c1_release_review_availability_guard,
     import_c1_availability_snapshots,
     should_auto_rerun_shadow_after_import,
     should_auto_rerun_shadow_after_sync,
@@ -1838,6 +1839,14 @@ def _app_run_c1_release_review(self) -> None:
     if not matches:
         messagebox.showinfo("C1 放行评估", "当前没有可用于放行评估的赛事。")
         return
+    guard = get_c1_release_review_availability_guard(PROJECT_ROOT)
+    if not bool(guard.get("allowed", True)):
+        self.c1_release_rows = []
+        self.c1_release_summary = {"availability_guard": guard}
+        self._apply_runtime_mode_default_filter()
+        self.status_var.set(str(guard.get("status_text") or "C1 放行评估已阻止"))
+        messagebox.showwarning("C1 放行评估", str(guard.get("message") or "C1 阵容源质量门控未通过。"))
+        return
     self._run_background(
         task_key="c1_release_review",
         start_status="正在运行 C1 受控放行评估...",
@@ -1848,6 +1857,19 @@ def _app_run_c1_release_review(self) -> None:
 
 
 def _app_run_c1_release_review_worker(matches: list[AppMatch]) -> dict:
+    guard = get_c1_release_review_availability_guard(PROJECT_ROOT)
+    if not bool(guard.get("allowed", True)):
+        return {
+            "total_matches": 0,
+            "rows": [],
+            "summary": {
+                "release_allowed_count": 0,
+                "availability_guard": guard,
+                "blocked_by_availability_guard": True,
+            },
+            "blocked_by_availability_guard": True,
+            "block_message": str(guard.get("message") or ""),
+        }
     result = run_controlled_release_for_legacy_matches(
         project_root=PROJECT_ROOT,
         matches=matches,
@@ -1896,6 +1918,12 @@ def _app_refresh_release_gate_after_analysis(self, matches: list[AppMatch]) -> N
     result = _app_run_c1_release_review_worker(matches)
     self.c1_release_summary = dict(result.get("summary", {}))
     self.c1_release_rows = list(result.get("rows", []))
+    if bool(result.get("blocked_by_availability_guard")):
+        guard = self.c1_release_summary.get("availability_guard", {})
+        if hasattr(self, "status_var"):
+            self.status_var.set(str(guard.get("status_text") or "C1 放行评估已阻止"))
+        self._apply_runtime_mode_default_filter()
+        return
     for match in matches:
         if match.match_id in self.predictions and self.tree.exists(match.match_id):
             self._update_tree_row(match, self.predictions[match.match_id])
@@ -1928,6 +1956,11 @@ def _app_apply_c1_release_review_result(self, result: dict) -> None:
     self.c1_release_summary = dict(summary) if isinstance(summary, dict) else {}
     self.c1_release_rows = list(result.get("rows", [])) if isinstance(result, dict) else []
     self._apply_runtime_mode_default_filter()
+    if isinstance(result, dict) and bool(result.get("blocked_by_availability_guard")):
+        guard = self.c1_release_summary.get("availability_guard", {})
+        self.status_var.set(str(guard.get("status_text") or "C1 放行评估已阻止"))
+        messagebox.showwarning("C1 放行评估", str(result.get("block_message") or "C1 阵容源质量门控未通过。"))
+        return
     self.status_var.set(
         build_release_review_status_text(
             int(result.get("total_matches", 0)),

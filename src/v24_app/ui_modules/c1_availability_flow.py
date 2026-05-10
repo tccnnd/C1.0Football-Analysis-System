@@ -56,6 +56,76 @@ def sync_c1_availability_sources(project_root: Path, *, replace: bool = False) -
     return chain.sync_to_store(project_root, replace=replace)
 
 
+def _safe_int(value: object, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_allowed_flag(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"false", "0", "no", "off"}:
+        return False
+    return True
+
+
+def build_c1_release_review_availability_guard(sync_summary: Mapping[str, object] | None) -> dict:
+    summary = sync_summary if isinstance(sync_summary, Mapping) else {}
+    smoke = summary.get("smoke_check") if isinstance(summary.get("smoke_check"), Mapping) else {}
+    smoke_status = str(smoke.get("status") or ("missing" if not smoke else "-")).strip().lower()
+    release_review_allowed = _safe_allowed_flag(smoke.get("release_review_allowed", True))
+    quality_failures = _safe_int(summary.get("quality_failures", 0))
+    quality_warnings = _safe_int(summary.get("quality_warnings", 0))
+
+    blocked = not release_review_allowed or smoke_status == "fail" or quality_failures > 0
+    issues: list[str] = []
+    smoke_issues = smoke.get("issues") if isinstance(smoke.get("issues"), list) else []
+    provider_reasons = (
+        summary.get("provider_failure_reasons") if isinstance(summary.get("provider_failure_reasons"), list) else []
+    )
+    for value in [*smoke_issues, *provider_reasons]:
+        text = str(value).strip()
+        if text and text not in issues:
+            issues.append(text)
+    if blocked and not issues:
+        issues.append("availability quality gate failed")
+
+    status_text = "C1 放行评估已阻止 | 阵容源质量门控失败" if blocked else "C1 放行评估门控通过"
+    if not blocked and smoke_status in {"warn", "missing"}:
+        status_text = f"C1 放行评估门控可运行 | smoke={smoke_status}"
+
+    message_lines = [
+        "C1 阵容源质量门控未通过，已跳过本次放行评估。"
+        if blocked
+        else "C1 阵容源质量门控允许本次放行评估。",
+        f"Smoke: {smoke_status or '-'}",
+        f"Quality fail/warn: {quality_failures}/{quality_warnings}",
+    ]
+    if issues:
+        message_lines.append("原因:")
+        message_lines.extend(f"- {item}" for item in issues[:8])
+    if blocked:
+        message_lines.append("请先重新同步 C1 阵容源，或修复失败数据源后再运行放行评估。")
+
+    return {
+        "allowed": not blocked,
+        "status": smoke_status or "-",
+        "quality_failures": quality_failures,
+        "quality_warnings": quality_warnings,
+        "issues": issues,
+        "status_text": status_text,
+        "message": "\n".join(message_lines),
+    }
+
+
+def get_c1_release_review_availability_guard(project_root: Path) -> dict:
+    store = C1AvailabilityStore(project_root)
+    return build_c1_release_review_availability_guard(store.load_sync_status())
+
+
 def get_c1_availability_provider_statuses(project_root: Path) -> list[dict]:
     chain = AvailabilityProviderChain.from_project_root(project_root)
     statuses = [item for item in chain.provider_statuses() if isinstance(item, dict)]
