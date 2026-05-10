@@ -5099,6 +5099,22 @@ class SmartMatchDashboard:
             for row in quality_alerts:
                 if isinstance(row, dict):
                     self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
+        backfill_queue = dashboard.get("statsbomb_backfill_queue", {}) if isinstance(dashboard.get("statsbomb_backfill_queue"), dict) else {}
+        backfill_tasks = backfill_queue.get("tasks", []) if isinstance(backfill_queue.get("tasks"), list) else []
+        backfill_candidates = backfill_queue.get("candidate_rows", []) if isinstance(backfill_queue.get("candidate_rows"), list) else []
+        if backfill_tasks:
+            self._strategy_section_title(right, "StatsBomb \u8865\u6837\u961f\u5217")
+            self._strategy_row(
+                right,
+                str(backfill_queue.get("summary_text") or "-"),
+                str(backfill_queue.get("leakage_note") or "-"),
+            )
+            for row in backfill_tasks[:4]:
+                if isinstance(row, dict):
+                    self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
+            for row in backfill_candidates[:4]:
+                if isinstance(row, dict):
+                    self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
 
         allowlist_summary = dashboard.get("allowlist_settlement_summary", {}) if isinstance(dashboard.get("allowlist_settlement_summary"), dict) else {}
         self._strategy_section_title(right, "\u653e\u884c\u590d\u76d8\u7edf\u8ba1")

@@ -28,6 +28,7 @@ from v24_app.ui_modules import (
     build_market_entropy_backtest_summary,
     build_strategy_evaluation_agent_summary,
     build_strategy_error_attribution_summary,
+    build_statsbomb_fewshot_backfill_queue,
     build_statsbomb_fewshot_memory_summary,
     build_statsbomb_fewshot_memory_monitor,
     build_statsbomb_fewshot_memory_quality_alerts,
@@ -1271,6 +1272,90 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertEqual(evaluation["statsbomb_fewshot_monitor"]["current_matched_count"], 0)
         self.assertIn("statsbomb_memory_no_current_match", evaluation["memory_tags"])
         self.assertTrue(any("相似样本" in item["title"] for item in evaluation["recommendations"]))
+
+    def test_statsbomb_fewshot_backfill_queue_builds_tasks_and_candidates(self) -> None:
+        monitor = {
+            "sample_count": 6,
+            "current_matched_count": 0,
+            "current_query_tags": ["statsbomb_finishing_variance", "strategy_miss"],
+            "missing_tags": ["xg_direction_failed"],
+        }
+        quality = build_statsbomb_fewshot_memory_quality_alerts(
+            {
+                **monitor,
+                "tag_rows": [{"tag": "statsbomb_finishing_variance", "count": 6}],
+                "root_rows": [{"root_cause": "statsbomb_finishing_variance", "count": 6}],
+            },
+            min_samples=5,
+        )
+        baseline = {
+            "items": [
+                {
+                    "match_id": "sb1",
+                    "match_date": "2024-06-15",
+                    "league": "UEFA Euro",
+                    "home_team": "Spain",
+                    "away_team": "Croatia",
+                    "score": "3-0",
+                    "home_xg": 1.12,
+                    "away_xg": 2.35,
+                    "home_shots": 11,
+                    "away_shots": 16,
+                    "goal_margin": 3,
+                    "xg_margin": -1.23,
+                    "finishing_variance": True,
+                    "xg_aligned_with_score": False,
+                    "shot_aligned_with_score": False,
+                }
+            ]
+        }
+
+        queue = build_statsbomb_fewshot_backfill_queue(monitor, quality, [], baseline)
+
+        self.assertEqual(queue["status"], "ready")
+        self.assertGreaterEqual(queue["task_count"], 2)
+        self.assertGreaterEqual(queue["candidate_count"], 1)
+        self.assertTrue(any("xg_direction_failed" in row["matched_tags"] for row in queue["candidate_rows"]))
+        self.assertIn("post-match", queue["leakage_note"])
+
+    def test_high_accuracy_dashboard_exposes_statsbomb_backfill_queue(self) -> None:
+        memory = {
+            "items": [
+                {
+                    "labels": {
+                        "is_hit": True,
+                        "root_cause": "event_evidence_aligned",
+                        "tags": ["strategy_hit"],
+                    }
+                }
+            ],
+        }
+        baseline = {
+            "items": [
+                {
+                    "match_id": "sb1",
+                    "match_date": "2024-06-15",
+                    "league": "UEFA Euro",
+                    "home_team": "Spain",
+                    "away_team": "Croatia",
+                    "score": "3-0",
+                    "home_xg": 1.12,
+                    "away_xg": 2.35,
+                    "home_shots": 11,
+                    "away_shots": 16,
+                    "goal_margin": 3,
+                    "xg_margin": -1.23,
+                    "finishing_variance": True,
+                    "xg_aligned_with_score": False,
+                    "shot_aligned_with_score": False,
+                }
+            ]
+        }
+
+        dashboard = build_high_accuracy_strategy_dashboard({"enabled": True}, [], [], baseline, memory)
+
+        self.assertIn("statsbomb_backfill_queue", dashboard)
+        self.assertGreaterEqual(dashboard["statsbomb_backfill_queue"]["task_count"], 1)
 
     def test_high_accuracy_dashboard_exposes_statsbomb_fewshot_monitor(self) -> None:
         memory = {

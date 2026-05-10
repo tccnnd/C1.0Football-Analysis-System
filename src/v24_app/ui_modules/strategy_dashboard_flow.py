@@ -995,6 +995,208 @@ def build_statsbomb_fewshot_memory_quality_alerts(
     }
 
 
+def _statsbomb_required_backfill_tags(monitor: Mapping[str, object]) -> list[str]:
+    tags: list[str] = []
+    for source in (monitor.get("current_query_tags"), monitor.get("missing_tags")):
+        for tag in _as_list(source):
+            tag_text = str(tag).strip()
+            if tag_text and tag_text not in tags:
+                tags.append(tag_text)
+    if not tags:
+        tags.extend(
+            [
+                "strategy_miss",
+                "strategy_hit",
+                "statsbomb_finishing_variance",
+                "event_control_gap",
+                "xg_direction_failed",
+            ]
+        )
+    return tags
+
+
+def _statsbomb_backfill_task_title(tag: str) -> str:
+    labels = {
+        "strategy_miss": "补充未命中复盘样本",
+        "strategy_hit": "补充命中对照样本",
+        "statsbomb_finishing_variance": "补充终结波动样本",
+        "event_control_gap": "补充场面劣势样本",
+        "xg_result_divergence": "补充xG与赛果背离样本",
+        "shot_result_divergence": "补充射门与赛果背离样本",
+        "xg_direction_failed": "补充xG方向失效样本",
+    }
+    return labels.get(tag, f"补充 {tag} 样本")
+
+
+def _statsbomb_baseline_backfill_tags(row: Mapping[str, object]) -> list[str]:
+    tags = ["statsbomb_post_match_review"]
+    if bool(row.get("finishing_variance")):
+        tags.extend(["statsbomb_finishing_variance", "xg_result_divergence"])
+    if "xg_aligned_with_score" in row and not bool(row.get("xg_aligned_with_score")):
+        tags.extend(["xg_result_divergence", "xg_direction_failed"])
+    if "shot_aligned_with_score" in row and not bool(row.get("shot_aligned_with_score")):
+        tags.append("shot_result_divergence")
+    home_shots = _safe_int(row.get("home_shots"))
+    away_shots = _safe_int(row.get("away_shots"))
+    goal_margin = _safe_float(row.get("goal_margin"))
+    shot_margin = home_shots - away_shots
+    if (goal_margin > 0 and shot_margin < -3) or (goal_margin < 0 and shot_margin > 3):
+        tags.append("event_control_gap")
+    if "xg_aligned_with_score" in row and bool(row.get("xg_aligned_with_score")):
+        tags.append("strategy_hit")
+    else:
+        tags.append("strategy_miss")
+    deduped: list[str] = []
+    for tag in tags:
+        if tag not in deduped:
+            deduped.append(tag)
+    return deduped
+
+
+def _statsbomb_settlement_backfill_row(
+    settlement: Mapping[str, object],
+    tags: Sequence[str],
+    *,
+    source: str,
+    priority_base: int = 0,
+) -> dict[str, object]:
+    title = f"{settlement.get('match_date') or '-'} | {settlement.get('league') or '-'} | {settlement.get('home_team') or '-'} vs {settlement.get('away_team') or '-'}"
+    tag_list = [str(tag) for tag in tags if str(tag)]
+    return {
+        "source": source,
+        "match_id": settlement.get("match_id") or "-",
+        "match_date": settlement.get("match_date") or "-",
+        "league": settlement.get("league") or "-",
+        "title": title,
+        "tags": tag_list,
+        "priority_score": priority_base,
+        "body": f"{title}\n标签: {', '.join(tag_list[:6]) if tag_list else '-'}",
+    }
+
+
+def build_statsbomb_fewshot_backfill_queue(
+    monitor: Mapping[str, object] | object | None = None,
+    quality: Mapping[str, object] | object | None = None,
+    settlements: Sequence[Mapping[str, object]] | object | None = None,
+    statsbomb_event_baseline: Mapping[str, object] | object | None = None,
+    *,
+    limit: int = 8,
+) -> dict[str, object]:
+    monitor_data = _as_mapping(monitor)
+    quality_data = _as_mapping(quality)
+    alert_rows = [_as_mapping(alert) for alert in _as_list(quality_data.get("alerts"))]
+    required_tags = _statsbomb_required_backfill_tags(monitor_data)
+    sample_count = _safe_int(monitor_data.get("sample_count"))
+    missing_tags = [str(tag) for tag in _as_list(monitor_data.get("missing_tags"))]
+    current_query_tags = [str(tag) for tag in _as_list(monitor_data.get("current_query_tags"))]
+    tasks: list[dict[str, object]] = []
+
+    if sample_count <= 0 or any(str(alert.get("tag") or "") == "statsbomb_memory_missing" for alert in alert_rows):
+        tasks.append(
+            {
+                "task": "seed_memory",
+                "priority": 100,
+                "title": "建立StatsBomb few-shot种子库",
+                "target_tags": required_tags,
+                "body": "优先从已结束且带 StatsBomb 事件数据的比赛生成基础 few-shot 样本，命中和未命中样本都要覆盖。",
+            }
+        )
+    if any(str(alert.get("tag") or "") == "statsbomb_memory_low_sample" for alert in alert_rows):
+        tasks.append(
+            {
+                "task": "increase_sample_size",
+                "priority": 90,
+                "title": "扩大StatsBomb few-shot样本数",
+                "target_tags": required_tags,
+                "body": f"当前样本 {sample_count} 条，优先补充高置信失误、冷门和命中对照样本。",
+            }
+        )
+    if missing_tags:
+        for tag in missing_tags[:6]:
+            tasks.append(
+                {
+                    "task": "cover_missing_tag",
+                    "priority": 85,
+                    "title": _statsbomb_backfill_task_title(tag),
+                    "target_tags": [tag],
+                    "body": f"记忆库缺少 {tag}，需要从赛后事件复盘中补齐这一类 few-shot 样本。",
+                }
+            )
+    if current_query_tags and _safe_int(monitor_data.get("current_matched_count")) <= 0:
+        tasks.append(
+            {
+                "task": "cover_current_context",
+                "priority": 95,
+                "title": "补充当前错因相似样本",
+                "target_tags": current_query_tags,
+                "body": f"当前查询标签 {', '.join(current_query_tags[:6])} 没有命中历史记忆，需要优先补充同类赛后案例。",
+            }
+        )
+    if any(str(alert.get("tag") or "") in {"statsbomb_memory_concentrated", "statsbomb_memory_tag_concentrated"} for alert in alert_rows):
+        tasks.append(
+            {
+                "task": "diversify_memory",
+                "priority": 70,
+                "title": "分散复盘记忆分布",
+                "target_tags": required_tags,
+                "body": "当前 few-shot 记忆集中在少数根因或标签，建议补充不同联赛、不同比分结构、不同事件形态的样本。",
+            }
+        )
+
+    candidate_rows: list[dict[str, object]] = []
+    for item in settlements if isinstance(settlements, Sequence) else []:
+        if not isinstance(item, Mapping) or not _as_mapping(item.get("statsbomb_event_summary")):
+            continue
+        attribution = build_strategy_error_attribution_summary([item])
+        event_review = build_statsbomb_event_review_summary([item], statsbomb_event_baseline or {})
+        tags = _statsbomb_memory_query_tags(attribution, event_review)
+        if tags:
+            candidate_rows.append(_statsbomb_settlement_backfill_row(item, tags, source="recent_settlement", priority_base=20))
+
+    baseline_items = [
+        item
+        for item in _as_list(_as_mapping(statsbomb_event_baseline).get("items"))
+        if isinstance(item, Mapping)
+    ]
+    for item in baseline_items:
+        tags = _statsbomb_baseline_backfill_tags(item)
+        settlement = {
+            "match_id": item.get("match_id"),
+            "match_date": item.get("match_date"),
+            "league": item.get("league"),
+            "home_team": item.get("home_team"),
+            "away_team": item.get("away_team"),
+        }
+        candidate_rows.append(_statsbomb_settlement_backfill_row(settlement, tags, source="statsbomb_baseline", priority_base=5))
+
+    target_tag_set = {tag for task in tasks for tag in _as_list(task.get("target_tags"))}
+    if not target_tag_set:
+        target_tag_set = set(required_tags)
+    scored_rows: list[dict[str, object]] = []
+    for row in candidate_rows:
+        row_tags = {str(tag) for tag in _as_list(row.get("tags"))}
+        overlap = sorted(row_tags & target_tag_set)
+        if tasks and not overlap:
+            continue
+        scored = dict(row)
+        scored["matched_tags"] = overlap
+        scored["priority_score"] = _safe_int(row.get("priority_score")) + len(overlap) * 12
+        scored["body"] = f"{row.get('body', '-')}\n命中补样目标: {', '.join(overlap[:6]) if overlap else '-'}"
+        scored_rows.append(scored)
+    scored_rows.sort(key=lambda row: (-_safe_int(row.get("priority_score")), str(row.get("match_date") or ""), str(row.get("title") or "")))
+    tasks.sort(key=lambda row: (-_safe_int(row.get("priority")), str(row.get("title") or "")))
+    status = "ready" if tasks else "healthy"
+    return {
+        "status": status,
+        "task_count": len(tasks),
+        "candidate_count": len(scored_rows),
+        "tasks": tasks[: max(0, int(limit))],
+        "candidate_rows": scored_rows[: max(0, int(limit))],
+        "summary_text": f"补样任务 {len(tasks)} | 候选 {len(scored_rows)} | 目标标签 {len(target_tag_set)}",
+        "leakage_note": "Backfill queue uses post-match StatsBomb event evidence for review memory only; never feed it into pre-match prediction features.",
+    }
+
+
 def _statsbomb_sandbox_row(row: Mapping[str, object], baseline: Mapping[str, object] | object | None = None) -> dict[str, object]:
     xg_margin = _safe_float(row.get("xg_margin"))
     goal_margin = _safe_int(row.get("goal_margin"))
@@ -3674,6 +3876,12 @@ def build_high_accuracy_strategy_dashboard(
         statsbomb_fewshot_memory or {},
         _as_mapping(evaluation_agent.get("statsbomb_fewshot_memory")),
     )
+    statsbomb_backfill_queue = build_statsbomb_fewshot_backfill_queue(
+        statsbomb_fewshot_monitor,
+        _as_mapping(evaluation_agent.get("statsbomb_fewshot_quality")),
+        settlement_items,
+        statsbomb_event_baseline or {},
+    )
     stable_count = sum(1 for item in pool if bool(_strategy_stability(item).get("stable")))
     primary_count = sum(1 for item in pool if str(item.get("role") or "") == "primary")
     backup_count = sum(1 for item in pool if str(item.get("role") or "") == "backup")
@@ -3765,6 +3973,11 @@ def build_high_accuracy_strategy_dashboard(
             else "neutral",
         },
         {
+            "label": "SB Backfill",
+            "value": str(statsbomb_backfill_queue.get("summary_text") or "-"),
+            "tone": "warning" if _safe_int(statsbomb_backfill_queue.get("task_count")) else "good",
+        },
+        {
             "label": "JC\u7a33\u5b9a\u6876",
             "value": str(jc_bucket_feedback.get("summary_text") or "-"),
             "tone": "bad"
@@ -3854,6 +4067,7 @@ def build_high_accuracy_strategy_dashboard(
         "evaluation_agent": evaluation_agent,
         "statsbomb_event_review": statsbomb_event_review,
         "statsbomb_fewshot_monitor": statsbomb_fewshot_monitor,
+        "statsbomb_backfill_queue": statsbomb_backfill_queue,
         "jc_bucket_feedback": jc_bucket_feedback,
         "allowlist_settlement_rows": build_strategy_allowlist_settlement_rows(settlement_items),
         "validation_rows": validation_rows,
