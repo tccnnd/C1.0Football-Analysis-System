@@ -706,7 +706,7 @@ def build_statsbomb_event_review_summary(
     }
 
 
-def _statsbomb_sandbox_row(row: Mapping[str, object]) -> dict[str, object]:
+def _statsbomb_sandbox_row(row: Mapping[str, object], baseline: Mapping[str, object] | object | None = None) -> dict[str, object]:
     xg_margin = _safe_float(row.get("xg_margin"))
     goal_margin = _safe_int(row.get("goal_margin"))
     diagnosis: list[str] = []
@@ -737,6 +737,99 @@ def _statsbomb_sandbox_row(row: Mapping[str, object]) -> dict[str, object]:
             f"\u6bd4\u5206 {row.get('score') or '-'} | xG {_safe_float(row.get('home_xg')):.2f}-{_safe_float(row.get('away_xg')):.2f} | "
             f"\u5c04\u95e8 {_safe_int(row.get('home_shots'))}-{_safe_int(row.get('away_shots'))} | \u8bca\u65ad {diagnosis_text}"
         ),
+        "evaluation_case": build_statsbomb_event_replay_case(row, baseline or {}),
+    }
+
+
+def _statsbomb_side_to_pick(side: object) -> str:
+    text = str(side or "").strip().lower()
+    if text == "home":
+        return "HOME"
+    if text == "away":
+        return "AWAY"
+    if text == "draw":
+        return "DRAW"
+    return "-"
+
+
+def _statsbomb_event_summary_from_baseline_row(row: Mapping[str, object]) -> dict[str, object]:
+    home = str(row.get("home_team") or "")
+    away = str(row.get("away_team") or "")
+    return {
+        "event_count": _safe_int(row.get("event_count")),
+        "team_stats": {
+            home: {
+                "xg": _safe_float(row.get("home_xg")),
+                "shots": _safe_int(row.get("home_shots")),
+                "shots_on_target": _safe_int(row.get("home_shots_on_target")),
+                "goals": _safe_int(str(row.get("score") or "0-0").split("-", 1)[0]),
+            },
+            away: {
+                "xg": _safe_float(row.get("away_xg")),
+                "shots": _safe_int(row.get("away_shots")),
+                "shots_on_target": _safe_int(row.get("away_shots_on_target")),
+                "goals": _safe_int(str(row.get("score") or "0-0").split("-", 1)[1] if "-" in str(row.get("score") or "") else 0),
+            },
+        },
+    }
+
+
+def build_statsbomb_event_replay_case(
+    row: Mapping[str, object] | object,
+    baseline: Mapping[str, object] | object | None = None,
+) -> dict[str, object]:
+    source = _as_mapping(row)
+    if not source:
+        return {"status": "empty", "body": "-"}
+    score_winner = str(source.get("score_winner") or "").strip().lower()
+    xg_winner = str(source.get("xg_winner") or "").strip().lower()
+    if not score_winner:
+        score_winner = _side_from_margin(_safe_float(source.get("goal_margin")))
+    if not xg_winner:
+        xg_winner = _side_from_margin(_safe_float(source.get("xg_margin")), threshold=0.25)
+    simulated_pick = xg_winner if xg_winner in {"home", "away", "draw"} else score_winner
+    actual = score_winner if score_winner in {"home", "away", "draw"} else "draw"
+    is_hit = simulated_pick == actual
+    settlement = {
+        "match_id": source.get("match_id"),
+        "match_date": source.get("match_date"),
+        "league": source.get("league"),
+        "home_team": source.get("home_team"),
+        "away_team": source.get("away_team"),
+        "home_goals": _safe_int(str(source.get("score") or "0-0").split("-", 1)[0]),
+        "away_goals": _safe_int(str(source.get("score") or "0-0").split("-", 1)[1] if "-" in str(source.get("score") or "") else 0),
+        "statsbomb_event_summary": _statsbomb_event_summary_from_baseline_row(source),
+        "high_accuracy_strategy_items": [
+            {
+                "data_layer": "statsbomb_event_sandbox",
+                "play_type": "market_1x2",
+                "pick": _statsbomb_side_to_pick(simulated_pick),
+                "actual": _statsbomb_side_to_pick(actual),
+                "confidence": 0.70 if bool(source.get("finishing_variance")) else 0.62,
+                "min_confidence": 0.65,
+                "backtest_accuracy": 0.72,
+                "backtest_samples": 180,
+                "is_hit": is_hit,
+            }
+        ],
+    }
+    evaluation = build_strategy_evaluation_agent_summary({"enabled": True}, [settlement], baseline or {})
+    attribution = _as_mapping(evaluation.get("error_attribution"))
+    event_review = _as_mapping(evaluation.get("statsbomb_event_review"))
+    body = (
+        f"Evaluation: {evaluation.get('status', '-')} / score {evaluation.get('score', '-')}\n"
+        f"\u6a21\u62df\u7b56\u7565: \u6309xG\u65b9\u5411\u9009 {settlement['high_accuracy_strategy_items'][0]['pick']} | "
+        f"\u5b9e\u9645 {settlement['high_accuracy_strategy_items'][0]['actual']} | {'\u547d\u4e2d' if is_hit else '\u672a\u547d\u4e2d'}\n"
+        f"\u4e3b\u9519\u56e0: {attribution.get('top_reason') or '-'} | \u4e8b\u4ef6\u590d\u76d8: {event_review.get('summary_text') or '-'}"
+    )
+    recommendations = evaluation.get("recommendations") if isinstance(evaluation.get("recommendations"), list) else []
+    if recommendations:
+        body = f"{body}\n\u5efa\u8bae: " + " | ".join(str(item.get("title") or "-") for item in recommendations if isinstance(item, Mapping))
+    return {
+        "status": "hit" if is_hit else "miss",
+        "settlement": settlement,
+        "evaluation": evaluation,
+        "body": body,
     }
 
 
@@ -751,7 +844,7 @@ def build_statsbomb_event_sandbox_summary(
     variance_rows = [item for item in _as_list(resolved.get("variance_rows")) if isinstance(item, Mapping)]
     competition_profiles = _as_mapping(resolved.get("competition_profiles"))
     bucket_profiles = _as_mapping(resolved.get("xg_margin_buckets"))
-    sandbox_rows = [_statsbomb_sandbox_row(item) for item in item_rows]
+    sandbox_rows = [_statsbomb_sandbox_row(item, resolved) for item in item_rows]
     sandbox_rows.sort(
         key=lambda row: (
             "终结波动" not in str(row.get("diagnosis") or ""),
@@ -798,7 +891,7 @@ def build_statsbomb_event_sandbox_summary(
         "competition_rows": competition_rows,
         "bucket_rows": bucket_rows,
         "rows": sandbox_rows[: max(0, int(limit))],
-        "variance_rows": [_statsbomb_sandbox_row(item) for item in variance_rows][: max(0, int(limit))],
+        "variance_rows": [_statsbomb_sandbox_row(item, resolved) for item in variance_rows][: max(0, int(limit))],
     }
 
 

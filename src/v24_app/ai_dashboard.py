@@ -4679,15 +4679,26 @@ class SmartMatchDashboard:
             )
             row_by_iid[iid] = row
 
-        def show_detail(row: dict | None) -> None:
+        def show_detail(row: dict | None, *, evaluation_only: bool = False) -> None:
+            case = row.get("evaluation_case") if isinstance(row, dict) and isinstance(row.get("evaluation_case"), dict) else {}
+            sample_body = str((row or {}).get("body") or "\u8bf7\u9009\u62e9\u4e00\u573a\u5386\u53f2\u6837\u672c\u67e5\u770b\u590d\u76d8\u8bca\u65ad\u3002")
+            case_body = str(case.get("body") or "")
+            content = case_body if evaluation_only and case_body else sample_body
+            if case_body and not evaluation_only:
+                content = f"{sample_body}\n\nEvaluation Agent \u6a21\u62df\u590d\u76d8\u6848\u4f8b\n{case_body}"
             detail.configure(state=tk.NORMAL)
             detail.delete("1.0", tk.END)
-            detail.insert("1.0", str((row or {}).get("body") or "\u8bf7\u9009\u62e9\u4e00\u573a\u5386\u53f2\u6837\u672c\u67e5\u770b\u590d\u76d8\u8bca\u65ad\u3002"))
+            detail.insert("1.0", content)
             detail.configure(state=tk.DISABLED)
 
         def on_select(_event=None) -> None:
             selected = tree.selection()
             show_detail(row_by_iid.get(selected[0]) if selected else None)
+
+        def show_selected_evaluation_case() -> None:
+            selected = tree.selection()
+            row = row_by_iid.get(selected[0]) if selected else None
+            show_detail(row, evaluation_only=True)
 
         tree.bind("<<TreeviewSelect>>", on_select)
         children = tree.get_children()
@@ -4696,6 +4707,19 @@ class SmartMatchDashboard:
             show_detail(row_by_iid.get(children[0]))
         else:
             show_detail(None)
+        tk.Button(
+            header,
+            text="\u751f\u6210Evaluation\u6848\u4f8b",
+            command=show_selected_evaluation_case,
+            bg=BLUE,
+            fg="white",
+            activebackground="#3d5ee7",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=16,
+            pady=7,
+        ).pack(anchor=tk.E, pady=(8, 0))
         self.status_var.set(f"StatsBomb\u6c99\u76d2: {sandbox.get('summary_text', '-')}")
 
     def open_strategy_library(self) -> None:

@@ -28,6 +28,7 @@ from v24_app.ui_modules import (
     build_market_entropy_backtest_summary,
     build_strategy_evaluation_agent_summary,
     build_strategy_error_attribution_summary,
+    build_statsbomb_event_replay_case,
     build_statsbomb_event_review_summary,
     build_statsbomb_event_sandbox_summary,
     build_strategy_allowlist_filename,
@@ -996,6 +997,41 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertEqual(len(sandbox["bucket_rows"]), 1)
         self.assertIn("终结波动", sandbox["variance_rows"][0]["diagnosis"])
         self.assertIn("Spain vs Croatia", sandbox["variance_rows"][0]["title"])
+
+    def test_statsbomb_event_replay_case_generates_evaluation_chain(self) -> None:
+        row = {
+            "match_id": "statsbomb:1",
+            "match_date": "2024-06-15",
+            "league": "UEFA Euro",
+            "season": "2024",
+            "home_team": "Spain",
+            "away_team": "Croatia",
+            "score": "3-0",
+            "score_winner": "home",
+            "xg_winner": "away",
+            "home_xg": 1.12,
+            "away_xg": 2.35,
+            "home_shots": 11,
+            "away_shots": 16,
+            "xg_margin": -1.23,
+            "goal_margin": 3,
+            "xg_aligned_with_score": False,
+            "shot_aligned_with_score": False,
+            "finishing_variance": True,
+            "event_count": 3500,
+        }
+
+        case = build_statsbomb_event_replay_case(row, {"summary": {"match_count": 53, "finishing_variance_rate": "35.8%"}})
+
+        self.assertEqual(case["status"], "miss")
+        item = case["settlement"]["high_accuracy_strategy_items"][0]
+        self.assertEqual(item["pick"], "AWAY")
+        self.assertEqual(item["actual"], "HOME")
+        evaluation = case["evaluation"]
+        self.assertEqual(evaluation["statsbomb_event_review"]["baseline_match_count"], 53)
+        self.assertIn("statsbomb_post_match_review", evaluation["memory_tags"])
+        self.assertIn("statsbomb_finishing_variance", evaluation["error_attribution"]["reason_counts"])
+        self.assertIn("Evaluation:", case["body"])
 
     def test_evaluation_agent_embeds_statsbomb_event_review(self) -> None:
         settlements = [
