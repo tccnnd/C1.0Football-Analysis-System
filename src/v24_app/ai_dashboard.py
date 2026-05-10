@@ -19,6 +19,7 @@ from .core import (
     auto_settle_finished_matches,
     build_result_recovery_snapshot_audit,
     fetch_matches_v24,
+    get_play_model_policy_status,
     get_play_model_training_status,
     get_high_accuracy_strategy_status,
     get_recent_settlements,
@@ -45,6 +46,8 @@ from .ui_modules import (
     build_high_accuracy_strategy_backtest_status_text,
     build_play_model_backtest_apply_status_text,
     build_play_model_backtest_success_message,
+    build_play_model_policy_decision_rows,
+    build_play_model_policy_status_text,
     build_play_model_training_status_text,
     build_train_play_models_apply_message,
     build_train_play_models_apply_status_text,
@@ -2369,6 +2372,55 @@ class SmartMatchDashboard:
         status_text = build_play_model_training_status_text(get_play_model_training_status())
         messagebox.showinfo("\u73a9\u6cd5\u6a21\u578b\u8bad\u7ec3", build_train_play_models_apply_message(payload, status_text))
 
+    def _play_model_policy_status(self) -> dict:
+        try:
+            status = get_play_model_policy_status()
+        except Exception as exc:
+            self._log_event("ERROR", f"\u73a9\u6cd5\u63a5\u7ba1\u7b56\u7565\u8bfb\u53d6\u5931\u8d25: {exc}")
+            return {}
+        return status if isinstance(status, dict) else {}
+
+    def open_play_model_policy_detail_window(self) -> None:
+        status = self._play_model_policy_status()
+        window = tk.Toplevel(self.root)
+        window.title("\u73a9\u6cd5\u63a5\u7ba1\u7b56\u7565\u660e\u7ec6")
+        window.configure(bg=BG)
+        window.geometry("820x560")
+        header = tk.Frame(window, bg=BG)
+        header.pack(fill=tk.X, padx=16, pady=(14, 8))
+        tk.Label(
+            header,
+            text="\u73a9\u6cd5\u63a5\u7ba1\u7b56\u7565",
+            bg=BG,
+            fg=TEXT,
+            font=("Microsoft YaHei UI", 14, "bold"),
+        ).pack(anchor=tk.W)
+        tk.Label(
+            header,
+            text="\u663e\u793a\u603b\u8fdb\u7403\u548c\u6bd4\u5206\u6a21\u578b\u7684\u63a5\u7ba1\u95e8\u69db\u3001\u56de\u6d4b\u8868\u73b0\u548c\u963b\u65ad\u539f\u56e0\u3002",
+            bg=BG,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 10),
+        ).pack(anchor=tk.W, pady=(4, 0))
+        frame = tk.Frame(window, bg=PANEL, highlightbackground="#172638", highlightthickness=1)
+        frame.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 16))
+        text = tk.Text(
+            frame,
+            bg=PANEL,
+            fg=TEXT,
+            insertbackground=TEXT,
+            selectbackground=BLUE,
+            relief=tk.FLAT,
+            wrap=tk.WORD,
+            font=("Consolas", 10),
+        )
+        scrollbar = tk.Scrollbar(frame, orient=tk.VERTICAL, command=text.yview)
+        text.configure(yscrollcommand=scrollbar.set)
+        text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(12, 0), pady=12)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 12), pady=12)
+        text.insert(tk.END, build_play_model_policy_status_text(status))
+        text.configure(state=tk.DISABLED)
+
     def open_background_task_detail_window(self, task_id: str | object) -> None:
         resolved_id = str(task_id or "")
         record = next(
@@ -2525,6 +2577,19 @@ class SmartMatchDashboard:
         ).pack(side=tk.RIGHT, padx=(0, 10))
         tk.Button(
             header,
+            text="\u63a5\u7ba1\u7b56\u7565",
+            command=self.open_play_model_policy_detail_window,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=14,
+            pady=7,
+        ).pack(side=tk.RIGHT, padx=(0, 10))
+        tk.Button(
+            header,
             text="\u9ad8\u51c6\u56de\u6d4b(\u8fdb\u7a0b)",
             command=self.run_high_accuracy_strategy_backtest_task,
             bg=PANEL_2,
@@ -2598,6 +2663,7 @@ class SmartMatchDashboard:
         background_task_summary = build_background_task_summary(background_task_snapshot)
         background_queue_state = self.background_tasks.queue_state()
         background_stability = build_background_task_stability_summary(background_task_history)
+        play_policy_status = self._play_model_policy_status()
         load_failure_count = int(load_report.get("failure_count", 0) or 0)
         snapshot_failure_count = int(load_report.get("snapshot_failure_count", 0) or 0)
         fetched_count = int(load_report.get("fetched_count", len(self.rows)) or 0)
@@ -2701,6 +2767,21 @@ class SmartMatchDashboard:
             tk.Label(left, text="\u56de\u6536\u8d28\u91cf\u544a\u8b66", bg=PANEL, fg=YELLOW, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
             for alert in recovery_quality_alerts[:3]:
                 self._alert_card(left, str(alert.get("title") or "-"), str(alert.get("body") or "-"), tone=str(alert.get("tone") or "warning"))
+
+        tk.Label(right, text="\u73a9\u6cd5\u63a5\u7ba1\u7b56\u7565", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
+        for row in build_play_model_policy_decision_rows(play_policy_status):
+            self._alert_card(
+                right,
+                str(row.get("title") or "-"),
+                str(row.get("body") or "-"),
+                tone=str(row.get("tone") or "neutral"),
+            )
+        self._strategy_row(
+            right,
+            "\u63a5\u7ba1\u7b56\u7565\u660e\u7ec6",
+            "\u67e5\u770b\u5b8c\u6574\u95e8\u69db\u3001\u6821\u51c6\u6837\u672c\u548c\u63a5\u7ba1\u539f\u56e0",
+            command=self.open_play_model_policy_detail_window,
+        )
 
         tk.Label(right, text="\u540e\u53f0\u4efb\u52a1", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
         tk.Label(right, text="\u7a33\u5b9a\u6027\u9762\u677f", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))

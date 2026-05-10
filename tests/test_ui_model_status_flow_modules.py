@@ -22,6 +22,7 @@ from v24_app.ui_modules import (
     build_play_model_backtest_success_message,
     build_play_model_policy_apply_status_text,
     build_play_model_policy_apply_success_message,
+    build_play_model_policy_decision_rows,
     build_play_model_policy_status_text,
     build_play_model_training_status_text,
     build_play_threshold_apply_status_text,
@@ -103,11 +104,34 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
         )
         self.assertIn("玩法接管策略", policy_status)
         self.assertIn("联合最优", policy_status)
+        self.assertIn("Takeover decisions", policy_status)
+        self.assertIn("Total Goals takeover: ON", policy_status)
         self.assertIn("玩法接管策略完成", build_play_model_policy_apply_status_text({"calibrated": True, "reason": "ok"}))
         self.assertIn(
             "验证样本: 120",
             build_play_model_policy_apply_success_message({"validation": {"sample_count": 120}}, policy_status),
         )
+
+        decision_rows = build_play_model_policy_decision_rows(
+            {
+                "policy": {"scoreline": {"takeover_enabled": True}, "total_goals": {"takeover_enabled": False, "min_confidence": 0.26}},
+                "metrics": {
+                    "total_goals": {
+                        "current_accuracy": 0.50,
+                        "best": {"accuracy": 0.52, "hits": 52, "covered": 100, "takeover_enabled": True},
+                        "uplift": 0.02,
+                        "min_required_uplift": 0.03,
+                        "reason": "insufficient_calibration_uplift",
+                    },
+                    "scoreline_best": {"score_hits": 25, "score_covered": 100, "score_accuracy": 0.25, "combined_hits": 77},
+                },
+            }
+        )
+        self.assertEqual(decision_rows[0]["title"], "Total Goals takeover: SHADOW")
+        self.assertEqual(decision_rows[0]["tone"], "warning")
+        self.assertIn("uplift +2.00% / required +3.00%", decision_rows[0]["body"])
+        self.assertIn("insufficient_calibration_uplift", decision_rows[0]["body"])
+        self.assertEqual(decision_rows[1]["title"], "Scoreline takeover: ON")
 
     def test_play_model_training_and_backtest(self) -> None:
         status_text = build_play_model_training_status_text(
