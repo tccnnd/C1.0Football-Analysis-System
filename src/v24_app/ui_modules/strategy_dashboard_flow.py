@@ -560,6 +560,152 @@ def _statsbomb_event_evidence(settlement: Mapping[str, object], item: Mapping[st
     return {"codes": codes, "body": body, "available": True}
 
 
+def _side_from_margin(value: float, *, threshold: float = 0.0) -> str:
+    if value > threshold:
+        return "home"
+    if value < -threshold:
+        return "away"
+    return "draw"
+
+
+def _pct_text_to_float(value: object) -> float | None:
+    text = str(value or "").strip()
+    if not text or text == "-":
+        return None
+    if text.endswith("%"):
+        text = text[:-1]
+        try:
+            return float(text) / 100.0
+        except (TypeError, ValueError):
+            return None
+    try:
+        number = float(text)
+    except (TypeError, ValueError):
+        return None
+    return number
+
+
+def _statsbomb_baseline_summary(baseline: Mapping[str, object] | object) -> Mapping[str, object]:
+    resolved = _as_mapping(baseline)
+    return _as_mapping(resolved.get("summary"))
+
+
+def build_statsbomb_event_review_summary(
+    settlements: Sequence[Mapping[str, object]] | object,
+    baseline: Mapping[str, object] | object | None = None,
+    *,
+    limit: int = 8,
+) -> dict[str, object]:
+    settlement_items = [item for item in settlements if isinstance(item, Mapping)] if isinstance(settlements, Sequence) else []
+    rows: list[dict[str, object]] = []
+    xg_aligned = 0
+    shot_aligned = 0
+    finishing_variance = 0
+    control_gap = 0
+    xg_totals: list[float] = []
+    event_counts: list[int] = []
+
+    for settlement in settlement_items:
+        home_stats, away_stats, home, away = _statsbomb_team_stats(settlement)
+        if not home_stats or not away_stats:
+            continue
+        home_goals = _safe_int(home_stats.get("goals"), _safe_int(settlement.get("home_goals")))
+        away_goals = _safe_int(away_stats.get("goals"), _safe_int(settlement.get("away_goals")))
+        home_xg = _safe_float(home_stats.get("xg"))
+        away_xg = _safe_float(away_stats.get("xg"))
+        home_shots = _safe_int(home_stats.get("shots"))
+        away_shots = _safe_int(away_stats.get("shots"))
+        summary = _as_mapping(settlement.get("statsbomb_event_summary"))
+        event_count = _safe_int(summary.get("event_count"))
+        score_winner = _side_from_margin(float(home_goals - away_goals))
+        xg_winner = _side_from_margin(home_xg - away_xg, threshold=0.25)
+        shot_winner = _side_from_margin(float(home_shots - away_shots), threshold=2.0)
+        xg_ok = xg_winner == score_winner
+        shot_ok = shot_winner == score_winner
+        variance = xg_winner != "draw" and xg_winner != score_winner
+        gap = abs(home_xg - away_xg) >= 0.35 and abs(home_shots - away_shots) >= 4
+        xg_aligned += 1 if xg_ok else 0
+        shot_aligned += 1 if shot_ok else 0
+        finishing_variance += 1 if variance else 0
+        control_gap += 1 if gap else 0
+        xg_totals.append(home_xg + away_xg)
+        event_counts.append(event_count)
+        diagnosis: list[str] = []
+        if variance:
+            diagnosis.append("\u7ec8\u7ed3\u6ce2\u52a8")
+        if gap and not xg_ok:
+            diagnosis.append("\u573a\u9762\u4e0e\u8d5b\u679c\u80cc\u79bb")
+        if xg_ok and shot_ok:
+            diagnosis.append("\u4e8b\u4ef6\u652f\u6301\u8d5b\u679c")
+        if not diagnosis:
+            diagnosis.append("\u5747\u52bf\u6216\u4f4e\u5dee\u5f02")
+        diagnosis_text = "\u3001".join(diagnosis)
+        rows.append(
+            {
+                "title": f"{settlement.get('league') or '-'} | {home or '-'} vs {away or '-'}",
+                "body": (
+                    f"xG {home or '-'} {home_xg:.2f} - {away_xg:.2f} {away or '-'} | "
+                    f"\u5c04\u95e8 {home_shots}-{away_shots} | \u6bd4\u5206 {home_goals}-{away_goals}\n"
+                    f"\u5224\u5b9a: {diagnosis_text} | \u4e8b\u4ef6 {event_count}"
+                ),
+                "xg_aligned": xg_ok,
+                "shot_aligned": shot_ok,
+                "finishing_variance": variance,
+                "control_gap": gap,
+                "xg_margin": round(home_xg - away_xg, 4),
+                "event_count": event_count,
+            }
+        )
+
+    sample_count = len(rows)
+    baseline_summary = _statsbomb_baseline_summary(baseline or {})
+    baseline_match_count = _safe_int(baseline_summary.get("match_count"))
+    baseline_xg_alignment = baseline_summary.get("xg_alignment_rate") or "-"
+    baseline_variance = baseline_summary.get("finishing_variance_rate") or "-"
+    xg_alignment_rate = xg_aligned / sample_count if sample_count else None
+    variance_rate = finishing_variance / sample_count if sample_count else None
+    baseline_variance_value = _pct_text_to_float(baseline_variance)
+    status = "no_event_data"
+    if sample_count:
+        status = "review_ready"
+        if baseline_variance_value is not None and variance_rate is not None and variance_rate > baseline_variance_value + 0.08:
+            status = "variance_watch"
+        elif control_gap:
+            status = "control_gap_watch"
+    rows.sort(
+        key=lambda row: (
+            not bool(row.get("finishing_variance")),
+            not bool(row.get("control_gap")),
+            -abs(_safe_float(row.get("xg_margin"))),
+            str(row.get("title") or ""),
+        )
+    )
+    return {
+        "status": status,
+        "sample_count": sample_count,
+        "xg_aligned": xg_aligned,
+        "xg_alignment_rate": xg_alignment_rate,
+        "xg_alignment_rate_text": _pct(xg_alignment_rate) if xg_alignment_rate is not None else "-",
+        "shot_aligned": shot_aligned,
+        "shot_alignment_rate_text": _pct(shot_aligned / sample_count) if sample_count else "-",
+        "finishing_variance_count": finishing_variance,
+        "finishing_variance_rate": variance_rate,
+        "finishing_variance_rate_text": _pct(variance_rate) if variance_rate is not None else "-",
+        "control_gap_count": control_gap,
+        "avg_xg_total": round(sum(xg_totals) / sample_count, 4) if sample_count else 0.0,
+        "avg_event_count": round(sum(event_counts) / sample_count, 2) if sample_count else 0.0,
+        "baseline_match_count": baseline_match_count,
+        "baseline_xg_alignment_rate": baseline_xg_alignment,
+        "baseline_finishing_variance_rate": baseline_variance,
+        "leakage_note": "\u8be5\u6a21\u5757\u4ec5\u7528\u4e8e\u8d5b\u540e\u590d\u76d8\uff0c\u4e0d\u53c2\u4e0e\u8d5b\u524d\u9884\u6d4b\u8f93\u5165\u3002",
+        "rows": rows[: max(0, int(limit))],
+        "summary_text": (
+            f"\u6837\u672c {sample_count} | xG\u5bf9\u9f50 {(_pct(xg_alignment_rate) if xg_alignment_rate is not None else '-')} | "
+            f"\u7ec8\u7ed3\u6ce2\u52a8 {finishing_variance} | \u57fa\u7ebf {baseline_match_count}\u573a"
+        ),
+    }
+
+
 def _strategy_error_codes(settlement: Mapping[str, object], item: Mapping[str, object]) -> list[str]:
     if item.get("is_hit") is None:
         return ["data_missing"]
@@ -1504,12 +1650,14 @@ def build_strategy_policy_effect_review(
 def build_strategy_evaluation_agent_summary(
     status: Mapping[str, object] | object,
     settlements: Sequence[Mapping[str, object]] | object,
+    statsbomb_event_baseline: Mapping[str, object] | object | None = None,
 ) -> dict[str, object]:
     settlement_items = [item for item in settlements if isinstance(item, Mapping)] if isinstance(settlements, Sequence) else []
     settlement_summary = build_high_accuracy_strategy_settlement_summary(settlement_items)
     error_attribution = build_strategy_error_attribution_summary(settlement_items)
     allowlist_summary = build_strategy_allowlist_settlement_summary(settlement_items)
     jc_feedback = build_jc_bucket_feedback_summary(status, settlement_items)
+    event_review = build_statsbomb_event_review_summary(settlement_items, statsbomb_event_baseline or {})
     known_count = _safe_int(settlement_summary.get("known_count"))
     hit_rate = settlement_summary.get("hit_rate")
     hit_rate_value = _safe_float(hit_rate, -1.0) if hit_rate is not None else -1.0
@@ -1525,6 +1673,9 @@ def build_strategy_evaluation_agent_summary(
     statsbomb_against_count = _safe_int(reason_counts.get("statsbomb_xg_against_pick"))
     statsbomb_variance_count = _safe_int(reason_counts.get("statsbomb_finishing_variance"))
     statsbomb_control_gap_count = _safe_int(reason_counts.get("statsbomb_event_control_gap"))
+    event_review_sample_count = _safe_int(event_review.get("sample_count"))
+    event_review_variance_count = _safe_int(event_review.get("finishing_variance_count"))
+    event_review_control_gap_count = _safe_int(event_review.get("control_gap_count"))
     recommendations: list[dict[str, str]] = []
     memory_tags: list[str] = []
     score = 100
@@ -1608,6 +1759,22 @@ def build_strategy_evaluation_agent_summary(
             }
         )
         memory_tags.append("finishing_variance")
+    if event_review_sample_count:
+        memory_tags.append("statsbomb_post_match_review")
+        if event_review_variance_count or event_review_control_gap_count:
+            status_text = "watch" if status_text == "healthy" else status_text
+            score -= min(10, event_review_variance_count * 3 + event_review_control_gap_count * 2)
+            recommendations.append(
+                {
+                    "title": "\u5bf9\u7167StatsBomb\u4e8b\u4ef6\u57fa\u7ebf",
+                    "body": (
+                        f"\u8d5b\u540e\u4e8b\u4ef6\u590d\u76d8 {event_review_sample_count} \u573a\uff0c"
+                        f"\u7ec8\u7ed3\u6ce2\u52a8 {event_review_variance_count}\uff0c\u573a\u9762\u5dee\u5f02 {event_review_control_gap_count}\u3002"
+                        f"\u5386\u53f2\u57fa\u7ebf {_safe_int(event_review.get('baseline_match_count'))} \u573a\uff0c"
+                        f"\u7ec8\u7ed3\u6ce2\u52a8\u7387 {event_review.get('baseline_finishing_variance_rate') or '-'}\u3002"
+                    ),
+                }
+            )
     if data_missing_count:
         score -= min(12, data_missing_count * 4)
         recommendations.append(
@@ -1640,6 +1807,7 @@ def build_strategy_evaluation_agent_summary(
         "settlement_summary": settlement_summary,
         "error_attribution": error_attribution,
         "jc_bucket_feedback": jc_feedback,
+        "statsbomb_event_review": event_review,
         "recommendations": recommendations[:6],
         "memory_tags": memory_tags,
     }
@@ -2801,6 +2969,7 @@ def build_strategy_allowlist_report_lines(
     error_attribution = build_strategy_error_attribution_summary(settlements or [])
     if _safe_int(error_attribution.get("miss_count")) or _safe_int(error_attribution.get("unknown_count")):
         evaluation_agent = build_strategy_evaluation_agent_summary({}, settlements or [])
+        statsbomb_review = build_statsbomb_event_review_summary(settlements or [])
         lines.extend(
             [
                 "## \u6700\u8fd1\u590d\u76d8\u9519\u56e0",
@@ -2813,6 +2982,21 @@ def build_strategy_allowlist_report_lines(
                 "",
             ]
         )
+        if _safe_int(statsbomb_review.get("sample_count")):
+            lines.extend(
+                [
+                    "### StatsBomb \u8d5b\u540e\u4e8b\u4ef6\u590d\u76d8",
+                    "",
+                    f"- \u6458\u8981: {statsbomb_review.get('summary_text') or '-'}",
+                    f"- xG\u5bf9\u9f50: {statsbomb_review.get('xg_alignment_rate_text') or '-'}",
+                    f"- \u7ec8\u7ed3\u6ce2\u52a8: {statsbomb_review.get('finishing_variance_rate_text') or '-'}",
+                    f"- \u6ce8\u610f: {statsbomb_review.get('leakage_note') or '-'}",
+                    "",
+                ]
+            )
+            for row in statsbomb_review.get("rows", []) if isinstance(statsbomb_review.get("rows"), list) else []:
+                if isinstance(row, Mapping):
+                    lines.extend([f"- {row.get('title') or '-'}: {_md_cell(row.get('body'))}", ""])
         recommendations = evaluation_agent.get("recommendations", []) if isinstance(evaluation_agent.get("recommendations"), list) else []
         if recommendations:
             lines.extend(["### Evaluation Agent \u5efa\u8bae", ""])
@@ -2839,6 +3023,7 @@ def build_high_accuracy_strategy_dashboard(
     status: Mapping[str, object] | object,
     settlements: Sequence[Mapping[str, object]] | object,
     policy_history: Sequence[Mapping[str, object]] | object | None = None,
+    statsbomb_event_baseline: Mapping[str, object] | object | None = None,
 ) -> dict[str, object]:
     resolved = _as_mapping(status)
     settlement_items = [item for item in settlements if isinstance(item, Mapping)] if isinstance(settlements, Sequence) else []
@@ -2858,7 +3043,8 @@ def build_high_accuracy_strategy_dashboard(
     market_entropy_backtest = build_market_entropy_backtest_summary(settlement_items)
     handicap_margin_backtest = build_handicap_margin_backtest_summary(settlement_items)
     jc_bucket_feedback = build_jc_bucket_feedback_summary(resolved, settlement_items)
-    evaluation_agent = build_strategy_evaluation_agent_summary(resolved, settlement_items)
+    statsbomb_event_review = build_statsbomb_event_review_summary(settlement_items, statsbomb_event_baseline or {})
+    evaluation_agent = build_strategy_evaluation_agent_summary(resolved, settlement_items, statsbomb_event_baseline or {})
     stable_count = sum(1 for item in pool if bool(_strategy_stability(item).get("stable")))
     primary_count = sum(1 for item in pool if str(item.get("role") or "") == "primary")
     backup_count = sum(1 for item in pool if str(item.get("role") or "") == "backup")
@@ -2930,6 +3116,15 @@ def build_high_accuracy_strategy_dashboard(
             else "warning"
             if str(evaluation_agent.get("status") or "") in {"watch", "collecting"}
             else "good",
+        },
+        {
+            "label": "StatsBomb",
+            "value": str(statsbomb_event_review.get("summary_text") or "-"),
+            "tone": "warning"
+            if str(statsbomb_event_review.get("status") or "") in {"variance_watch", "control_gap_watch"}
+            else "good"
+            if _safe_int(statsbomb_event_review.get("sample_count"))
+            else "neutral",
         },
         {
             "label": "JC\u7a33\u5b9a\u6876",
@@ -3019,6 +3214,7 @@ def build_high_accuracy_strategy_dashboard(
         "agent_replay_downgrade": agent_replay_downgrade,
         "agent_replay_guard_tuning": agent_replay_guard_tuning,
         "evaluation_agent": evaluation_agent,
+        "statsbomb_event_review": statsbomb_event_review,
         "jc_bucket_feedback": jc_bucket_feedback,
         "allowlist_settlement_rows": build_strategy_allowlist_settlement_rows(settlement_items),
         "validation_rows": validation_rows,

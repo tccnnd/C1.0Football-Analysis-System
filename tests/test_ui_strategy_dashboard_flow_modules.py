@@ -28,6 +28,7 @@ from v24_app.ui_modules import (
     build_market_entropy_backtest_summary,
     build_strategy_evaluation_agent_summary,
     build_strategy_error_attribution_summary,
+    build_statsbomb_event_review_summary,
     build_strategy_allowlist_filename,
     build_strategy_allowlist_report_lines,
     build_strategy_allowlist_settlement_rows,
@@ -870,6 +871,89 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("statsbomb_finishing_variance", summary["reason_counts"])
         self.assertIn("StatsBomb", summary["rows"][0]["body"])
 
+    def test_statsbomb_event_review_compares_settlements_with_baseline(self) -> None:
+        settlements = [
+            {
+                "league": "UEFA Euro",
+                "home_team": "Spain",
+                "away_team": "Croatia",
+                "statsbomb_event_summary": {
+                    "event_count": 3500,
+                    "team_stats": {
+                        "Spain": {"xg": 1.12, "shots": 11, "goals": 3},
+                        "Croatia": {"xg": 2.35, "shots": 16, "goals": 0},
+                    },
+                },
+            },
+            {
+                "league": "UEFA Euro",
+                "home_team": "Germany",
+                "away_team": "Scotland",
+                "statsbomb_event_summary": {
+                    "event_count": 3600,
+                    "team_stats": {
+                        "Germany": {"xg": 2.80, "shots": 19, "goals": 5},
+                        "Scotland": {"xg": 0.12, "shots": 1, "goals": 1},
+                    },
+                },
+            },
+        ]
+        baseline = {
+            "summary": {
+                "match_count": 53,
+                "xg_alignment_rate": "62.3%",
+                "finishing_variance_rate": "35.8%",
+            }
+        }
+
+        review = build_statsbomb_event_review_summary(settlements, baseline)
+
+        self.assertEqual(review["sample_count"], 2)
+        self.assertEqual(review["baseline_match_count"], 53)
+        self.assertEqual(review["finishing_variance_count"], 1)
+        self.assertEqual(review["control_gap_count"], 2)
+        self.assertIn("\u8d5b\u540e\u590d\u76d8", review["leakage_note"])
+        dashboard = build_high_accuracy_strategy_dashboard({}, settlements, [], baseline)
+        self.assertTrue(any(item["label"] == "StatsBomb" for item in dashboard["metrics"]))
+
+    def test_evaluation_agent_embeds_statsbomb_event_review(self) -> None:
+        settlements = [
+            {
+                "league": "UEFA Euro",
+                "home_team": "Spain",
+                "away_team": "Croatia",
+                "statsbomb_event_summary": {
+                    "event_count": 3500,
+                    "team_stats": {
+                        "Spain": {"xg": 1.12, "shots": 11, "goals": 3},
+                        "Croatia": {"xg": 2.35, "shots": 16, "goals": 0},
+                    },
+                },
+                "high_accuracy_strategy_items": [
+                    {
+                        "play_type": "market_1x2",
+                        "pick": "AWAY",
+                        "actual": "HOME",
+                        "confidence": 0.70,
+                        "min_confidence": 0.65,
+                        "backtest_accuracy": 0.72,
+                        "backtest_samples": 180,
+                        "is_hit": False,
+                    }
+                ],
+            }
+        ]
+
+        evaluation = build_strategy_evaluation_agent_summary(
+            {"enabled": True},
+            settlements,
+            {"summary": {"match_count": 53, "finishing_variance_rate": "35.8%"}},
+        )
+
+        self.assertEqual(evaluation["statsbomb_event_review"]["sample_count"], 1)
+        self.assertIn("statsbomb_post_match_review", evaluation["memory_tags"])
+        self.assertTrue(any("StatsBomb" in item["title"] for item in evaluation["recommendations"]))
+
     def test_evaluation_agent_recommends_tightening_on_weak_settlements(self) -> None:
         settlements = [
             {
@@ -1029,6 +1113,13 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
                     "league": "L1",
                     "home_team": "A",
                     "away_team": "B",
+                    "statsbomb_event_summary": {
+                        "event_count": 3000,
+                        "team_stats": {
+                            "A": {"xg": 0.5, "shots": 6, "goals": 0},
+                            "B": {"xg": 1.8, "shots": 14, "goals": 2},
+                        },
+                    },
                     "high_accuracy_strategy_items": [
                         {
                             "play_type": "market_1x2",
@@ -1047,6 +1138,7 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         payload_with_review = "\n".join(lines_with_review)
         self.assertIn("\u6700\u8fd1\u590d\u76d8\u9519\u56e0", payload_with_review)
         self.assertIn("Evaluation Agent", payload_with_review)
+        self.assertIn("StatsBomb \u8d5b\u540e\u4e8b\u4ef6\u590d\u76d8", payload_with_review)
         self.assertIn("\u9ad8\u7f6e\u4fe1\u5931\u8bef", payload_with_review)
 
     def test_strategy_allowlist_filename_is_timestamped(self) -> None:

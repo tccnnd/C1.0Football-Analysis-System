@@ -26,6 +26,7 @@ from .core import (
     get_high_accuracy_strategy_status,
     get_recent_settlements,
     get_result_recovery_runs,
+    get_statsbomb_event_baseline,
     get_strategy_admission_policy_status,
     get_strategy_admission_policy_history,
     mark_strategy_allowlist_snapshots,
@@ -4040,7 +4041,7 @@ class SmartMatchDashboard:
             return None
         settlements = list(reversed(get_recent_settlements(limit=300)))
         status = get_high_accuracy_strategy_status()
-        dashboard = build_high_accuracy_strategy_dashboard(status, settlements, policy_history)
+        dashboard = build_high_accuracy_strategy_dashboard(status, settlements, policy_history, get_statsbomb_event_baseline())
         policy_effect = dashboard.get("policy_effect_review", {}) if isinstance(dashboard.get("policy_effect_review"), dict) else {}
         now = datetime.now()
         REPORT_DIR.mkdir(parents=True, exist_ok=True)
@@ -4264,7 +4265,7 @@ class SmartMatchDashboard:
         policy_history = get_strategy_admission_policy_history(limit=20)
         settlements = list(reversed(get_recent_settlements(limit=200)))
         status = get_high_accuracy_strategy_status()
-        dashboard = build_high_accuracy_strategy_dashboard(status, settlements, policy_history)
+        dashboard = build_high_accuracy_strategy_dashboard(status, settlements, policy_history, get_statsbomb_event_baseline())
         monitor = dashboard.get("policy_stability_monitor", {}) if isinstance(dashboard.get("policy_stability_monitor"), dict) else {}
         return build_strategy_policy_tuning_guard(monitor, tuning if isinstance(tuning, dict) else {}, source=source)
 
@@ -4564,7 +4565,7 @@ class SmartMatchDashboard:
         admission_policy = admission_status.get("policy", {}) if isinstance(admission_status.get("policy"), dict) else {}
         settlements = list(reversed(get_recent_settlements(limit=200)))
         policy_history = get_strategy_admission_policy_history(limit=20)
-        dashboard = build_high_accuracy_strategy_dashboard(status, settlements, policy_history)
+        dashboard = build_high_accuracy_strategy_dashboard(status, settlements, policy_history, get_statsbomb_event_baseline())
         release_pool_rows = self._strategy_release_pool_rows(settlements)
         shell = self._page_shell(
             "\u7b56\u7565\u770b\u677f",
@@ -4815,6 +4816,22 @@ class SmartMatchDashboard:
                         f"主要信号 {row.get('top_signal', '-')}"
                     ),
                 )
+
+        statsbomb_review = dashboard.get("statsbomb_event_review", {}) if isinstance(dashboard.get("statsbomb_event_review"), dict) else {}
+        self._strategy_section_title(right, "StatsBomb \u8d5b\u540e\u4e8b\u4ef6")
+        self._strategy_row(
+            right,
+            str(statsbomb_review.get("summary_text") or "-"),
+            (
+                f"\u57fa\u7ebf {statsbomb_review.get('baseline_match_count', 0)} \u573a | "
+                f"xG\u5bf9\u9f50 {statsbomb_review.get('xg_alignment_rate_text', '-')} / \u57fa\u7ebf {statsbomb_review.get('baseline_xg_alignment_rate', '-')} | "
+                f"\u7ec8\u7ed3\u6ce2\u52a8 {statsbomb_review.get('finishing_variance_rate_text', '-')} / \u57fa\u7ebf {statsbomb_review.get('baseline_finishing_variance_rate', '-')}\n"
+                f"{statsbomb_review.get('leakage_note', '-')}"
+            ),
+        )
+        for row in statsbomb_review.get("rows", []) if isinstance(statsbomb_review.get("rows"), list) else []:
+            if isinstance(row, dict):
+                self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
 
         evaluation_agent = dashboard.get("evaluation_agent", {}) if isinstance(dashboard.get("evaluation_agent"), dict) else {}
         self._strategy_section_title(right, "Evaluation Agent")

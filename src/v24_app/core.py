@@ -52,6 +52,7 @@ REPORT_DIR = PROJECT_DIR / "reports"
 VIDEO_REVIEW_DIR = PROJECT_DIR / "data" / "video_reviews"
 VIDEO_REVIEW_FILE = PROJECT_DIR / "data" / "state" / "video_reviews.json"
 STATSBOMB_EVENT_SUMMARIES_FILE = PROJECT_DIR / "data" / "state" / "statsbomb_event_summaries.json"
+STATSBOMB_EVENT_BASELINE_FILE = PROJECT_DIR / "data" / "state" / "statsbomb_event_baseline.json"
 ENSEMBLE_WEIGHTS_FILE = PROJECT_DIR / "data" / "models" / "ensemble_weights_v1.json"
 PLAY_THRESHOLDS_FILE = PROJECT_DIR / "data" / "models" / "play_thresholds_v1.json"
 PLAY_MODEL_POLICY_FILE = PROJECT_DIR / "data" / "models" / "play_model_policy_v1.json"
@@ -5794,6 +5795,16 @@ def get_high_accuracy_strategy_status() -> dict:
     except Exception:
         settlements = []
     return _apply_high_accuracy_strategy_breakers(status, settlements)
+
+
+def get_statsbomb_event_baseline() -> dict:
+    if not STATSBOMB_EVENT_BASELINE_FILE.exists():
+        return {}
+    try:
+        payload = json.loads(STATSBOMB_EVENT_BASELINE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def _build_high_accuracy_strategy_pool(candidates: list[dict]) -> list[dict]:
