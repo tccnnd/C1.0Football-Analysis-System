@@ -19,6 +19,7 @@ from .core import (
     auto_settle_finished_matches,
     build_result_recovery_snapshot_audit,
     create_video_review,
+    extract_video_review_frames_now,
     fetch_matches_v24,
     get_play_model_policy_status,
     get_play_model_training_status,
@@ -837,7 +838,7 @@ class SmartMatchDashboard:
             max_process_workers=2,
             dispatcher=lambda callback: self.root.after(0, callback),
             history_path=PROJECT_ROOT / "data" / "state" / "background_tasks.json",
-            group_limits={"recovery": 1, "backtest": 1, "model": 1},
+            group_limits={"recovery": 1, "backtest": 1, "model": 1, "video": 1},
         )
         self.result_recovery_buttons: list[tk.Button] = []
         self.result_recovery_run_record: dict[str, object] | None = None
@@ -2312,15 +2313,20 @@ class SmartMatchDashboard:
         error_title: str,
         group: str = "model",
         priority: int = 150,
+        args: tuple = (),
+        kwargs: dict | None = None,
+        metadata: dict | None = None,
     ) -> None:
         task = self.background_tasks.submit(
             key=key,
             label=label,
             func=func,
+            args=args,
+            kwargs=kwargs or {},
             mode="process",
             group=group,
             priority=priority,
-            metadata={"group": group, "priority": priority},
+            metadata={"group": group, "priority": priority, **dict(metadata or {})},
             on_success=on_success,
             on_error=lambda exc, record: self._finish_process_task_error(error_title, exc, record),
         )
@@ -2372,6 +2378,41 @@ class SmartMatchDashboard:
             self.open_monitor_center()
         status_text = build_play_model_training_status_text(get_play_model_training_status())
         messagebox.showinfo("\u73a9\u6cd5\u6a21\u578b\u8bad\u7ec3", build_train_play_models_apply_message(payload, status_text))
+
+    def run_video_review_frame_extraction_task(self, review_id: str | object) -> None:
+        resolved_id = str(review_id or "").strip()
+        if not resolved_id:
+            messagebox.showinfo("\u89c6\u9891\u62bd\u5e27", "\u672a\u627e\u5230\u53ef\u62bd\u5e27\u7684\u89c6\u9891\u590d\u76d8\u8bb0\u5f55\u3002")
+            return
+        self._submit_process_task(
+            key=f"video_review_frames:{resolved_id}",
+            label="\u89c6\u9891\u590d\u76d8\u62bd\u5e27",
+            start_status=f"\u6b63\u5728\u540e\u53f0\u8fdb\u7a0b\u4e2d\u62bd\u53d6\u89c6\u9891\u590d\u76d8\u5173\u952e\u5e27... {resolved_id}",
+            func=extract_video_review_frames_now,
+            args=(resolved_id,),
+            group="video",
+            priority=170,
+            metadata={"review_id": resolved_id},
+            on_success=self._finish_video_review_frame_extraction_task,
+            error_title="\u89c6\u9891\u590d\u76d8\u62bd\u5e27\u5931\u8d25",
+        )
+
+    def _finish_video_review_frame_extraction_task(self, result: object, record: BackgroundTaskRecord) -> None:
+        payload = result if isinstance(result, dict) else {}
+        status = str((payload.get("extraction") if isinstance(payload.get("extraction"), dict) else {}).get("status") or payload.get("reason") or "-")
+        frame_count = int(payload.get("frame_count", 0) or 0)
+        review_id = str(payload.get("review_id") or (record.metadata or {}).get("review_id") or "-")
+        self.status_var.set(f"\u89c6\u9891\u590d\u76d8\u62bd\u5e27: {status} / frames={frame_count}")
+        self._log_event("OK", f"\u89c6\u9891\u590d\u76d8\u62bd\u5e27\u5b8c\u6210 | {review_id} | {status} | {record.elapsed_seconds or 0:.2f}s")
+        if getattr(self, "current_view", "") == "review":
+            self.open_review_center()
+        elif getattr(self, "current_view", "") == "monitor":
+            self.open_monitor_center()
+        title = "\u89c6\u9891\u590d\u76d8\u62bd\u5e27"
+        if bool(payload.get("ok")):
+            messagebox.showinfo(title, f"\u62bd\u5e27\u5b8c\u6210\n\nreview_id: {review_id}\nframes: {frame_count}")
+        else:
+            messagebox.showwarning(title, f"\u62bd\u5e27\u672a\u5b8c\u6210\n\nreview_id: {review_id}\n\u72b6\u6001: {status}\n\u539f\u56e0: {payload.get('reason', '-')}")
 
     def _play_model_policy_status(self) -> dict:
         try:
@@ -3080,8 +3121,9 @@ class SmartMatchDashboard:
         self.status_var.set(f"\u89c6\u9891\u590d\u76d8\u5df2\u5efa\u7acb: {review.get('review_id', '-')} / \u8ba1\u5212\u62bd\u5e27 {len(frame_plan)}")
         messagebox.showinfo(
             "\u89c6\u9891\u590d\u76d8",
-            f"VideoReview Agent \u5df2\u5efa\u7acb\n\nreview_id: {review.get('review_id', '-')}\n\u8ba1\u5212\u62bd\u5e27: {len(frame_plan)}\n\u72b6\u6001: metadata_ready",
+            f"VideoReview Agent \u5df2\u5efa\u7acb\n\nreview_id: {review.get('review_id', '-')}\n\u8ba1\u5212\u62bd\u5e27: {len(frame_plan)}\n\u72b6\u6001: metadata_ready\n\n\u5df2\u63d0\u4ea4\u540e\u53f0\u62bd\u5e27\u4efb\u52a1\u3002",
         )
+        self.run_video_review_frame_extraction_task(str(review.get("review_id") or ""))
         self.open_review_center()
 
     def open_recovery_run_center(self) -> None:

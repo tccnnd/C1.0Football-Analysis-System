@@ -80,6 +80,37 @@ class CoreVideoReviewTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "settlement_not_found")
 
+    def test_extract_video_review_frames_updates_existing_review(self) -> None:
+        settlement = {
+            "match_id": "m-2",
+            "home_team": "Alpha",
+            "away_team": "Bravo",
+            "home_goals": 2,
+            "away_goals": 0,
+            "result": "主胜",
+            "is_correct": True,
+        }
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            video_path = root / "replay.mp4"
+            video_path.write_bytes(b"fake-video")
+            review_file = root / "video_reviews.json"
+            review_dir = root / "video_review_frames"
+
+            with patch.object(core, "STATE_STORE", _VideoReviewStore(settlement)):
+                with patch.object(core, "VIDEO_REVIEW_FILE", review_file):
+                    with patch.object(core, "VIDEO_REVIEW_DIR", review_dir):
+                        with patch("v24_app.core.shutil.which", return_value=None):
+                            created = core.create_video_review("m-2", video_path)
+                            result = core.extract_video_review_frames_now(created["review"]["review_id"])
+                            review = core.get_video_review_for_match("m-2")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "ffmpeg_unavailable")
+        self.assertEqual(review["extraction"]["status"], "skipped")
+        self.assertEqual(review["agent_review"]["status"], "metadata_ready")
+        self.assertEqual(review["agent_review"]["frame_count"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -9745,6 +9745,80 @@ def create_video_review(
     return {"ok": True, "reason": "ok", "review": item}
 
 
+def extract_video_review_frames_now(
+    review_id: str,
+    *,
+    interval_seconds: int | None = None,
+    max_frames: int | None = None,
+) -> dict:
+    resolved_id = str(review_id or "").strip()
+    if not resolved_id:
+        return {"ok": False, "reason": "missing_review_id"}
+    items = _load_video_review_items()
+    target_index = next(
+        (index for index, item in enumerate(items) if isinstance(item, dict) and str(item.get("review_id") or "") == resolved_id),
+        None,
+    )
+    if target_index is None:
+        return {"ok": False, "reason": "review_not_found", "review_id": resolved_id}
+    review = dict(items[target_index])
+    video = review.get("video") if isinstance(review.get("video"), dict) else {}
+    path = Path(str(video.get("path") or ""))
+    if not path.exists() or not path.is_file():
+        extraction = {"status": "failed", "reason": "video_file_not_found"}
+        review["extraction"] = extraction
+        review["extracted_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        items[target_index] = review
+        _save_video_review_items(items)
+        return {"ok": False, "reason": "video_file_not_found", "review": review}
+
+    interval = max(1, int(interval_seconds or review.get("frame_interval_seconds") or 10))
+    limit = max(1, int(max_frames or review.get("max_frames") or 36))
+    frames, extraction = _extract_video_review_frames(
+        path,
+        resolved_id,
+        interval_seconds=interval,
+        max_frames=limit,
+    )
+    review["frame_interval_seconds"] = interval
+    review["max_frames"] = limit
+    review["frames"] = frames
+    review["extraction"] = extraction
+    review["extracted_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    settlement = next(
+        (
+            item
+            for item in STATE_STORE.load_settlements()
+            if isinstance(item, dict) and str(item.get("match_id") or "") == str(review.get("match_id") or "")
+        ),
+        {},
+    )
+    if settlement:
+        review["agent_review"] = _video_review_ai_summary(
+            settlement,
+            frame_count=len(frames),
+            notes=str((review.get("agent_review") or {}).get("operator_notes") or "") if isinstance(review.get("agent_review"), dict) else "",
+        )
+    elif isinstance(review.get("agent_review"), dict):
+        agent_review = dict(review["agent_review"])
+        agent_review["frame_count"] = len(frames)
+        agent_review["status"] = "frames_ready" if frames else "metadata_ready"
+        review["agent_review"] = agent_review
+
+    items[target_index] = review
+    _save_video_review_items(items)
+    return {
+        "ok": bool(extraction.get("status") == "ok"),
+        "reason": str(extraction.get("reason") or extraction.get("status") or "-"),
+        "review_id": resolved_id,
+        "frame_count": len(frames),
+        "extraction": extraction,
+        "review": review,
+        "summary_text": f"video_review={resolved_id} | frames={len(frames)} | status={extraction.get('status', '-')}",
+    }
+
+
 def load_c1_comparison_marks_cache() -> dict[str, dict]:
     return STATE_STORE.load_c1_comparison_marks()
 
