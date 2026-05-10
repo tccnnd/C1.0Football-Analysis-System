@@ -4504,7 +4504,7 @@ class SmartMatchDashboard:
 
         for path in files:
             stamp = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
-            kind = "CSV" if path.suffix.lower() == ".csv" else "MD"
+            kind = "CSV" if path.suffix.lower() == ".csv" else "JSON" if path.suffix.lower() == ".json" else "MD"
             listbox.insert(tk.END, f"{stamp}  [{kind}] {path.name}")
 
         if files:
@@ -4541,17 +4541,43 @@ class SmartMatchDashboard:
             pady=7,
         ).pack(side=tk.RIGHT, padx=(10, 0))
 
-    def _latest_statsbomb_artifact(self, patterns: list[str], *, root: Path | None = None) -> str:
+    def _latest_statsbomb_artifact_path(self, patterns: list[str], *, root: Path | None = None) -> Path | None:
         base = root or REPORT_DIR
         if not base.exists():
-            return "-"
+            return None
         files: list[Path] = []
         for pattern in patterns:
             files.extend(base.glob(pattern))
         if not files:
+            return None
+        return max(files, key=lambda path: path.stat().st_mtime)
+
+    def _latest_statsbomb_artifact(self, patterns: list[str], *, root: Path | None = None) -> str:
+        latest = self._latest_statsbomb_artifact_path(patterns, root=root)
+        return latest.name if latest else "-"
+
+    def _statsbomb_json_artifact_summary(self, path: Path | None, kind: str) -> str:
+        if not path:
             return "-"
-        latest = max(files, key=lambda path: path.stat().st_mtime)
-        return latest.name
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            return f"{path.name} | 读取失败: {exc}"
+        if not isinstance(payload, dict):
+            return f"{path.name} | 格式异常"
+        summary = payload.get("summary", {}) if isinstance(payload.get("summary"), dict) else {}
+        if kind == "draft":
+            validation = payload.get("validation", {}) if isinstance(payload.get("validation"), dict) else {}
+            return (
+                f"{path.name} | 草稿 {summary.get('draft_count', 0)} / 候选 {summary.get('candidate_count', 0)} | "
+                f"校验 {validation.get('status', '-')}"
+            )
+        if kind == "bundle":
+            return (
+                f"{path.name} | 状态 {payload.get('status', '-')} | "
+                f"可应用 {summary.get('bundle_count', 0)} | 跳过 {summary.get('skipped_count', 0)}"
+            )
+        return path.name
 
     def _strategy_workflow_step(
         self,
@@ -4631,8 +4657,10 @@ class SmartMatchDashboard:
         sample_count = int(monitor.get("sample_count", 0) or 0)
         alert_count = int(health.get("issue_count", 0) or 0)
         latest_backfill = self._latest_statsbomb_artifact(["statsbomb_fewshot_backfill_*.md"])
-        latest_draft = self._latest_statsbomb_artifact(["statsbomb_fewshot_draft_*.json"])
-        latest_bundle = self._latest_statsbomb_artifact(["statsbomb_fewshot_merge_bundle_*.json"])
+        latest_draft_path = self._latest_statsbomb_artifact_path(["statsbomb_fewshot_draft_*.json"])
+        latest_bundle_path = self._latest_statsbomb_artifact_path(["statsbomb_fewshot_merge_bundle_*.json"])
+        latest_draft = self._statsbomb_json_artifact_summary(latest_draft_path, "draft")
+        latest_bundle = self._statsbomb_json_artifact_summary(latest_bundle_path, "bundle")
         latest_preview = self._latest_statsbomb_artifact(["statsbomb_fewshot_merge_apply_preview_*.md"])
         latest_apply = self._latest_statsbomb_artifact(["statsbomb_fewshot_merge_applied_*.md"])
         latest_audit = self._latest_statsbomb_artifact(["statsbomb_fewshot_memory_audit_*.md"])
@@ -4666,10 +4694,10 @@ class SmartMatchDashboard:
             parent,
             3,
             "预览合并包",
-            "有合并包" if latest_bundle != "-" else "未生成",
+            "有合并包" if latest_bundle_path else "未生成",
             f"先预览重复、校验和追加数量，再决定是否应用。\n最近合并包: {latest_bundle}\n最近预览: {latest_preview}",
             self.preview_statsbomb_fewshot_merge_bundle,
-            tone="info" if latest_bundle != "-" else "neutral",
+            tone="info" if latest_bundle_path else "neutral",
             action_text="选择预览",
         )
         self._strategy_workflow_step(
