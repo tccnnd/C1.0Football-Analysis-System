@@ -4665,7 +4665,8 @@ class SmartMatchDashboard:
 
     def export_strategy_policy_audit_report(self) -> tuple[Path, Path] | None:
         policy_history = get_strategy_admission_policy_history(limit=50)
-        if not policy_history:
+        draw_guard_history = get_draw_release_guard_policy_history(limit=50)
+        if not policy_history and not draw_guard_history:
             messagebox.showinfo("\u7b56\u7565\u8c03\u53c2\u5ba1\u8ba1", "\u5c1a\u65e0\u53ef\u5bfc\u51fa\u7684\u7b56\u7565\u53c2\u6570\u7248\u672c\u8bb0\u5f55\u3002")
             return None
         settlements = list(reversed(get_recent_settlements(limit=300)))
@@ -4676,17 +4677,27 @@ class SmartMatchDashboard:
             policy_history,
             get_statsbomb_event_baseline(),
             get_statsbomb_sandbox_fewshot_memory(),
+            None,
+            get_draw_release_guard_policy_status(),
+            draw_guard_history,
         )
         policy_effect = dashboard.get("policy_effect_review", {}) if isinstance(dashboard.get("policy_effect_review"), dict) else {}
         now = datetime.now()
         REPORT_DIR.mkdir(parents=True, exist_ok=True)
         md_path = REPORT_DIR / build_strategy_policy_audit_report_filename(now)
         csv_path = REPORT_DIR / build_strategy_policy_audit_csv_filename(now)
+        draw_guard_report_kwargs = {
+            "draw_release_guard_policy_history": draw_guard_history,
+            "draw_release_guard_tuning_effect_review": dashboard.get("draw_release_guard_tuning_effect", {}),
+            "draw_release_guard_rollback_effect_review": dashboard.get("draw_release_guard_rollback_effect", {}),
+            "draw_release_guard_freeze_override_status": dashboard.get("draw_release_guard_freeze_override", {}),
+            "draw_release_guard_tuning_guard": dashboard.get("draw_release_guard_tuning_guard", {}),
+        }
         md_path.write_text(
-            "\n".join(build_strategy_policy_audit_report_lines(policy_effect, generated_at=now)),
+            "\n".join(build_strategy_policy_audit_report_lines(policy_effect, generated_at=now, **draw_guard_report_kwargs)),
             encoding="utf-8",
         )
-        csv_path.write_text(build_strategy_policy_audit_csv_text(policy_effect), encoding="utf-8-sig")
+        csv_path.write_text(build_strategy_policy_audit_csv_text(policy_effect, **draw_guard_report_kwargs), encoding="utf-8-sig")
         self.status_var.set(f"\u7b56\u7565\u8c03\u53c2\u5ba1\u8ba1\u5df2\u5bfc\u51fa: {md_path.name}")
         messagebox.showinfo(
             "\u7b56\u7565\u8c03\u53c2\u5ba1\u8ba1",
@@ -5874,9 +5885,25 @@ class SmartMatchDashboard:
             version_tree.selection_set(children[0])
             show_samples(row_by_iid.get(children[0]))
 
-    def open_policy_governance_event_window(self, policy_effect: dict | object) -> None:
+    def open_policy_governance_event_window(
+        self,
+        policy_effect: dict | object,
+        *,
+        draw_release_guard_policy_history: list[dict] | object | None = None,
+        draw_release_guard_tuning_effect_review: dict | object | None = None,
+        draw_release_guard_rollback_effect_review: dict | object | None = None,
+        draw_release_guard_freeze_override_status: dict | object | None = None,
+        draw_release_guard_tuning_guard: dict | object | None = None,
+    ) -> None:
         review = policy_effect if isinstance(policy_effect, dict) else {}
-        governance = build_strategy_policy_governance_event_summary(review)
+        governance = build_strategy_policy_governance_event_summary(
+            review,
+            draw_release_guard_policy_history=draw_release_guard_policy_history or [],
+            draw_release_guard_tuning_effect_review=draw_release_guard_tuning_effect_review,
+            draw_release_guard_rollback_effect_review=draw_release_guard_rollback_effect_review,
+            draw_release_guard_freeze_override_status=draw_release_guard_freeze_override_status,
+            draw_release_guard_tuning_guard=draw_release_guard_tuning_guard,
+        )
         rows = [row for row in governance.get("rows", []) if isinstance(row, dict)] if isinstance(governance.get("rows"), list) else []
 
         def as_text(value: object, default: str = "-") -> str:
@@ -5982,13 +6009,24 @@ class SmartMatchDashboard:
 
         def show_detail(row: dict | None) -> None:
             if isinstance(row, dict):
+                if str(row.get("domain") or "") == "draw_guard":
+                    metric_line = (
+                        f"DrawGuard样本: {as_int(row.get('sample_count'))} | "
+                        f"拦截 {as_int(row.get('draw_guard_blocked_count'))} | "
+                        f"避免 {as_text(row.get('draw_guard_avoid_rate_text'))} | "
+                        f"错过 {as_text(row.get('draw_guard_missed_rate_text'))}"
+                    )
+                else:
+                    metric_line = (
+                        f"\u6837\u672c: {as_int(row.get('sample_count'))} | \u5df2\u77e5\u653e\u884c {as_int(row.get('known_allow_count'))} | "
+                        f"Replay\u51c0\u503c {as_int(row.get('replay_guard_net')):+d}"
+                    )
                 content = (
                     f"{as_text(row.get('summary'))}\n\n"
                     f"\u4e8b\u4ef6\u7c7b\u578b: {as_text(row.get('event_type'))}\n"
                     f"\u6765\u6e90: {as_text(row.get('source'))}\n"
                     f"\u5173\u8054\u7248\u672c: {as_text(row.get('related_version_id'))}\n"
-                    f"\u6837\u672c: {as_int(row.get('sample_count'))} | \u5df2\u77e5\u653e\u884c {as_int(row.get('known_allow_count'))} | "
-                    f"Replay\u51c0\u503c {as_int(row.get('replay_guard_net')):+d}\n"
+                    f"{metric_line}\n"
                     f"\u8bf4\u660e: {as_text(row.get('description'))}"
                 )
             else:
@@ -6278,7 +6316,14 @@ class SmartMatchDashboard:
         self._strategy_toolbar_button(
             audit_tools,
             "\u6cbb\u7406\u4e8b\u4ef6",
-            lambda review=dashboard.get("policy_effect_review", {}): self.open_policy_governance_event_window(review),
+            lambda review=dashboard.get("policy_effect_review", {}), dg_history=draw_guard_history, dg_tuning=dashboard.get("draw_release_guard_tuning_effect", {}), dg_rollback=dashboard.get("draw_release_guard_rollback_effect", {}), dg_freeze=dashboard.get("draw_release_guard_freeze_override", {}), dg_guard=dashboard.get("draw_release_guard_tuning_guard", {}): self.open_policy_governance_event_window(
+                review,
+                draw_release_guard_policy_history=dg_history,
+                draw_release_guard_tuning_effect_review=dg_tuning,
+                draw_release_guard_rollback_effect_review=dg_rollback,
+                draw_release_guard_freeze_override_status=dg_freeze,
+                draw_release_guard_tuning_guard=dg_guard,
+            ),
         )
         self._strategy_toolbar_button(audit_tools, "\u89e3\u9664\u8c03\u53c2\u51bb\u7ed3", self.apply_strategy_policy_freeze_override)
         self._strategy_toolbar_button(audit_tools, "\u89e3\u9664DrawGuard\u51bb\u7ed3", self.apply_draw_release_guard_freeze_override)
@@ -6477,12 +6522,20 @@ class SmartMatchDashboard:
 
         policy_governance = dashboard.get("policy_governance_event_summary", {}) if isinstance(dashboard.get("policy_governance_event_summary"), dict) else {}
         governance_rows = policy_governance.get("rows", []) if isinstance(policy_governance.get("rows"), list) else []
+        governance_command = lambda review=policy_effect, dg_history=draw_guard_history, dg_tuning=dashboard.get("draw_release_guard_tuning_effect", {}), dg_rollback=dashboard.get("draw_release_guard_rollback_effect", {}), dg_freeze=dashboard.get("draw_release_guard_freeze_override", {}), dg_guard=dashboard.get("draw_release_guard_tuning_guard", {}): self.open_policy_governance_event_window(
+            review,
+            draw_release_guard_policy_history=dg_history,
+            draw_release_guard_tuning_effect_review=dg_tuning,
+            draw_release_guard_rollback_effect_review=dg_rollback,
+            draw_release_guard_freeze_override_status=dg_freeze,
+            draw_release_guard_tuning_guard=dg_guard,
+        )
         self._strategy_section_title(right, "\u7b56\u7565\u6cbb\u7406\u4e8b\u4ef6")
         self._strategy_row(
             right,
             str(policy_governance.get("summary_text") or "-"),
             f"{policy_governance.get('latest_summary', '-')}\n\u70b9\u51fb\u67e5\u770b\u6cbb\u7406\u4e8b\u4ef6\u660e\u7ec6",
-            command=lambda review=policy_effect: self.open_policy_governance_event_window(review),
+            command=governance_command,
         )
         if governance_rows:
             for row in governance_rows[:5]:
@@ -6500,7 +6553,7 @@ class SmartMatchDashboard:
                             f"Replay\u51c0\u503c {replay_net:+d}\n"
                             f"\u8bf4\u660e: {row.get('description', '-')}"
                         ),
-                        command=lambda review=policy_effect: self.open_policy_governance_event_window(review),
+                        command=governance_command,
                     )
         else:
             self._strategy_row(

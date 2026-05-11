@@ -1315,6 +1315,73 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertEqual(dashboard["draw_release_guard_tuning_guard"]["decision"], "freeze")
         self.assertFalse(dashboard["draw_release_guard_tuning_guard"]["allowed"])
         self.assertIn("DrawGuard\u95e8\u63a7", {item["label"] for item in dashboard["metrics"]})
+        self.assertEqual(dashboard["policy_governance_event_summary"]["draw_guard_freeze_count"], 1)
+        self.assertIn("DrawGuard", dashboard["policy_governance_event_summary"]["summary_text"])
+
+    def test_strategy_policy_audit_exports_draw_guard_governance_events(self) -> None:
+        draw_history = [
+            {
+                "version_id": "dg1",
+                "updated_at": "2026-05-01 10:00:00",
+                "source": "manual",
+                "policy": {"enabled": True, "min_score": 0.58, "weak_odds_buckets": {"<=3.00": {"source": "unit"}}},
+                "previous_policy": {"enabled": True, "min_score": 0.58, "weak_odds_buckets": {"<=3.00": {"source": "unit"}}},
+            },
+            {
+                "version_id": "dg2",
+                "updated_at": "2026-05-02 10:00:00",
+                "source": "draw_release_guard_tuning",
+                "policy": {"enabled": True, "min_score": 0.54, "weak_odds_buckets": {"<=3.00": {"source": "unit"}}},
+                "previous_policy": {"enabled": True, "min_score": 0.58, "weak_odds_buckets": {"<=3.00": {"source": "unit"}}},
+            },
+            {
+                "version_id": "dg3",
+                "updated_at": "2026-05-03 10:00:00",
+                "source": "draw_guard_policy_rollback:dg2",
+                "policy": {"enabled": True, "min_score": 0.58, "weak_odds_buckets": {"<=3.00": {"source": "unit"}}},
+                "previous_policy": {"enabled": True, "min_score": 0.54, "weak_odds_buckets": {"<=3.00": {"source": "unit"}}},
+            },
+            {
+                "version_id": "dg4",
+                "updated_at": "2026-05-04 10:00:00",
+                "source": "draw_guard_freeze_override:dg3",
+                "policy": {"enabled": True, "min_score": 0.58, "weak_odds_buckets": {"<=3.00": {"source": "unit"}}},
+                "previous_policy": {"enabled": True, "min_score": 0.58, "weak_odds_buckets": {"<=3.00": {"source": "unit"}}},
+            },
+        ]
+        settlements = [
+            {"timestamp": "2026-05-02 11:00:00", "home_goals": 2, "away_goals": 1, "draw_release_guard_status": "blocked", "draw_release_guard_blocked": True, "draw_release_guard_odds_bucket": "<=3.00"},
+            {"timestamp": "2026-05-02 12:00:00", "home_goals": 1, "away_goals": 0, "draw_release_guard_status": "blocked", "draw_release_guard_blocked": True, "draw_release_guard_odds_bucket": "<=3.00"},
+            {"timestamp": "2026-05-02 13:00:00", "home_goals": 0, "away_goals": 1, "draw_release_guard_status": "blocked", "draw_release_guard_blocked": True, "draw_release_guard_odds_bucket": "<=3.00"},
+            {"timestamp": "2026-05-03 11:00:00", "home_goals": 1, "away_goals": 1, "draw_release_guard_status": "blocked", "draw_release_guard_blocked": True, "draw_release_guard_odds_bucket": "<=3.00"},
+            {"timestamp": "2026-05-03 12:00:00", "home_goals": 0, "away_goals": 0, "draw_release_guard_status": "blocked", "draw_release_guard_blocked": True, "draw_release_guard_odds_bucket": "<=3.00"},
+            {"timestamp": "2026-05-03 13:00:00", "home_goals": 2, "away_goals": 1, "draw_release_guard_status": "blocked", "draw_release_guard_blocked": True, "draw_release_guard_odds_bucket": "<=3.00"},
+        ]
+        dashboard = build_high_accuracy_strategy_dashboard(
+            {"enabled": True},
+            settlements,
+            draw_release_guard_policy_history=draw_history,
+        )
+        review = dashboard["policy_effect_review"]
+        kwargs = {
+            "draw_release_guard_policy_history": draw_history,
+            "draw_release_guard_tuning_effect_review": dashboard["draw_release_guard_tuning_effect"],
+            "draw_release_guard_rollback_effect_review": dashboard["draw_release_guard_rollback_effect"],
+            "draw_release_guard_freeze_override_status": dashboard["draw_release_guard_freeze_override"],
+            "draw_release_guard_tuning_guard": dashboard["draw_release_guard_tuning_guard"],
+        }
+
+        report = "\n".join(build_strategy_policy_audit_report_lines(review, generated_at=datetime(2026, 5, 5, 9, 0, 0), **kwargs))
+        csv_text = build_strategy_policy_audit_csv_text(review, **kwargs)
+
+        self.assertIn("DrawGuard\u56de\u6eda\u4fee\u590d", report)
+        self.assertIn("DrawGuard\u53c2\u6570\u56de\u6eda", report)
+        self.assertIn("DrawGuard\u89e3\u9664\u51bb\u7ed3", report)
+        self.assertIn("draw_guard_policy_rollback:dg2", report)
+        self.assertIn("draw_guard_freeze_override:dg3", report)
+        self.assertIn("draw_guard_rollback", csv_text)
+        self.assertIn("draw_guard_freeze_override", csv_text)
+        self.assertIn(",draw_guard,", csv_text)
 
     def test_high_accuracy_live_feedback_summary_groups_strategy_states(self) -> None:
         status = {

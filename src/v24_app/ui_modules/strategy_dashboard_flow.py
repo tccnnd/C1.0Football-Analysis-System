@@ -4972,8 +4972,118 @@ def _strategy_policy_governance_related_version(source: object) -> str:
     return "-"
 
 
+def _draw_guard_governance_event_type(source: object) -> tuple[str, str, str]:
+    lowered = str(source or "").strip().lower()
+    if lowered.startswith("draw_guard_freeze_override") or lowered.startswith("draw_release_guard_freeze_override"):
+        return "draw_guard_freeze_override", "DrawGuard解除冻结", "人工解除 DrawGuard 调参冻结审计"
+    if "draw_guard_policy_rollback" in lowered or "draw_release_guard_policy_rollback" in lowered:
+        return "draw_guard_rollback", "DrawGuard参数回滚", "回滚 DrawGuard 到上一版或指定版本"
+    if "draw_release_guard_tuning" in lowered:
+        return "draw_guard_tuning", "DrawGuard调参", "平局拦截复盘触发的 DrawGuard 参数调整"
+    return "draw_guard_manual", "DrawGuard手动调整", "DrawGuard 手动或其他来源参数调整"
+
+
+def _draw_guard_governance_related_version(source: object) -> str:
+    rollback_version = _draw_guard_rollback_source_version(source)
+    if rollback_version:
+        return rollback_version
+    override_version = _draw_guard_freeze_override_source_version(source)
+    if override_version:
+        return override_version
+    return "-"
+
+
+def _draw_guard_governance_event_rows(
+    policy_history: Sequence[Mapping[str, object]] | object,
+    *,
+    tuning_effect_review: Mapping[str, object] | object | None = None,
+    rollback_effect_review: Mapping[str, object] | object | None = None,
+    freeze_override_status: Mapping[str, object] | object | None = None,
+    tuning_guard: Mapping[str, object] | object | None = None,
+) -> list[dict[str, object]]:
+    history_items = [item for item in policy_history if isinstance(item, Mapping)] if isinstance(policy_history, Sequence) else []
+    effect = _as_mapping(tuning_effect_review)
+    if not effect and history_items:
+        effect = build_draw_release_guard_tuning_effect_review(history_items, [])
+    rows = [dict(row) for row in (_as_list(effect.get("all_rows")) or _as_list(effect.get("rows"))) if isinstance(row, Mapping)]
+    event_rows: list[dict[str, object]] = []
+    for row in rows:
+        event_type, event_label, description = _draw_guard_governance_event_type(row.get("source"))
+        related_version = _draw_guard_governance_related_version(row.get("source"))
+        effect_status = str(row.get("effect_status") or "")
+        tone = "bad" if event_type == "draw_guard_rollback" and effect_status == "negative" else "warning" if event_type in {"draw_guard_rollback", "draw_guard_freeze_override"} else "neutral"
+        if event_type == "draw_guard_rollback" and effect_status == "effective":
+            tone = "good"
+        avoid_text = _text(row.get("avoid_rate_text"), "-")
+        missed_text = _text(row.get("missed_rate_text"), "-")
+        event_rows.append(
+            {
+                "domain": "draw_guard",
+                "event_type": event_type,
+                "event_label": event_label,
+                "version_id": row.get("version_id", "-"),
+                "updated_at": row.get("updated_at", "-"),
+                "source": row.get("source", "-"),
+                "related_version_id": related_version,
+                "effect_label": row.get("effect_label", "-"),
+                "effect_status": effect_status or "-",
+                "allow_hit_rate_text": f"避 {avoid_text} / 错 {missed_text}",
+                "known_allow_count": 0,
+                "sample_count": _safe_int(row.get("sample_count")),
+                "replay_guard_net": 0,
+                "draw_guard_blocked_count": _safe_int(row.get("blocked_count")),
+                "draw_guard_avoid_rate_text": avoid_text,
+                "draw_guard_missed_rate_text": missed_text,
+                "description": description,
+                "tone": tone,
+                "summary": (
+                    f"{event_label} | 版本 {row.get('version_id', '-')} | "
+                    f"关联 {related_version} | 效果 {row.get('effect_label', '-')} | "
+                    f"避免 {avoid_text} / 错过 {missed_text}"
+                ),
+            }
+        )
+
+    guard = _as_mapping(tuning_guard)
+    rollback_effect = _as_mapping(rollback_effect_review)
+    freeze_override = _as_mapping(freeze_override_status)
+    if bool(guard.get("freeze_active")):
+        latest_version = _text(rollback_effect.get("latest_version_id"), "-")
+        related_version = _text(rollback_effect.get("rolled_back_version_id"), "-")
+        event_rows.append(
+            {
+                "domain": "draw_guard",
+                "event_type": "draw_guard_freeze",
+                "event_label": "DrawGuard调参冻结",
+                "version_id": latest_version,
+                "updated_at": rollback_effect.get("latest_updated_at", "-"),
+                "source": "draw_guard_tuning_guard",
+                "related_version_id": related_version,
+                "effect_label": rollback_effect.get("label", "-"),
+                "effect_status": rollback_effect.get("status", "-"),
+                "allow_hit_rate_text": f"避 {rollback_effect.get('avoid_rate_delta_text', '-')} / 错 {rollback_effect.get('missed_rate_delta_text', '-')}",
+                "known_allow_count": 0,
+                "sample_count": _safe_int(rollback_effect.get("post_blocked_count")),
+                "replay_guard_net": 0,
+                "draw_guard_blocked_count": _safe_int(rollback_effect.get("post_blocked_count")),
+                "draw_guard_avoid_rate_text": _text(rollback_effect.get("avoid_rate_delta_text"), "-"),
+                "draw_guard_missed_rate_text": _text(rollback_effect.get("missed_rate_delta_text"), "-"),
+                "description": "DrawGuard 回滚修复失败后冻结继续调参",
+                "tone": "bad",
+                "summary": f"DrawGuard调参冻结 | 回滚 {latest_version} | 关联 {related_version} | {guard.get('label', '-')}",
+            }
+        )
+    return event_rows
+
+
 def build_strategy_policy_governance_event_summary(
     policy_effect_review: Mapping[str, object] | object,
+    *,
+    draw_release_guard_policy_history: Sequence[Mapping[str, object]] | object | None = None,
+    draw_release_guard_tuning_effect_review: Mapping[str, object] | object | None = None,
+    draw_release_guard_rollback_effect_review: Mapping[str, object] | object | None = None,
+    draw_release_guard_freeze_override_status: Mapping[str, object] | object | None = None,
+    draw_release_guard_tuning_guard: Mapping[str, object] | object | None = None,
 ) -> dict[str, object]:
     review = _as_mapping(policy_effect_review)
     row_source = _as_list(review.get("all_rows")) or _as_list(review.get("rows"))
@@ -4999,6 +5109,7 @@ def build_strategy_policy_governance_event_summary(
         event_rows.append(
             {
                 "event_type": event_type,
+                "domain": "strategy",
                 "event_label": event_label,
                 "version_id": row.get("version_id", "-"),
                 "updated_at": row.get("updated_at", "-"),
@@ -5019,24 +5130,65 @@ def build_strategy_policy_governance_event_summary(
                 ),
             }
         )
+    event_rows.extend(
+        _draw_guard_governance_event_rows(
+            draw_release_guard_policy_history or [],
+            tuning_effect_review=draw_release_guard_tuning_effect_review,
+            rollback_effect_review=draw_release_guard_rollback_effect_review,
+            freeze_override_status=draw_release_guard_freeze_override_status,
+            tuning_guard=draw_release_guard_tuning_guard,
+        )
+    )
+    event_rows.sort(
+        key=lambda row: (
+            _parse_policy_review_time(row.get("updated_at")) or datetime.min,
+            str(row.get("version_id") or ""),
+            str(row.get("event_type") or ""),
+        ),
+        reverse=True,
+    )
+    counts = {}
+    for row in event_rows:
+        key = str(row.get("event_type") or "")
+        counts[key] = counts.get(key, 0) + 1
     governance_count = sum(counts.get(key, 0) for key in ("trend_gate", "allowlist_tuning", "replay_guard_tuning", "rollback", "freeze_override"))
+    draw_guard_governance_count = sum(
+        counts.get(key, 0)
+        for key in (
+            "draw_guard_tuning",
+            "draw_guard_rollback",
+            "draw_guard_freeze",
+            "draw_guard_freeze_override",
+        )
+    )
+    governance_count += draw_guard_governance_count
     rollback_count = counts.get("rollback", 0)
     freeze_override_count = counts.get("freeze_override", 0)
     trend_gate_count = counts.get("trend_gate", 0)
+    draw_guard_rollback_count = counts.get("draw_guard_rollback", 0)
+    draw_guard_freeze_count = counts.get("draw_guard_freeze", 0)
+    draw_guard_freeze_override_count = counts.get("draw_guard_freeze_override", 0)
     latest = event_rows[0] if event_rows else {}
+    summary_text = (
+        f"\u6cbb\u7406\u4e8b\u4ef6 {governance_count} | "
+        f"\u8d8b\u52bf\u95e8\u63a7 {trend_gate_count} | \u56de\u6eda {rollback_count} | \u89e3\u9664\u51bb\u7ed3 {freeze_override_count}"
+    )
+    if draw_guard_governance_count:
+        summary_text = f"{summary_text} | DrawGuard {draw_guard_governance_count}"
     return {
         "event_count": len(event_rows),
         "governance_count": governance_count,
         "rollback_count": rollback_count,
         "freeze_override_count": freeze_override_count,
         "trend_gate_count": trend_gate_count,
+        "draw_guard_governance_count": draw_guard_governance_count,
+        "draw_guard_rollback_count": draw_guard_rollback_count,
+        "draw_guard_freeze_count": draw_guard_freeze_count,
+        "draw_guard_freeze_override_count": draw_guard_freeze_override_count,
         "counts": counts,
         "latest_label": latest.get("event_label", "-") if latest else "-",
         "latest_summary": latest.get("summary", "-") if latest else "-",
-        "summary_text": (
-            f"\u6cbb\u7406\u4e8b\u4ef6 {governance_count} | "
-            f"\u8d8b\u52bf\u95e8\u63a7 {trend_gate_count} | \u56de\u6eda {rollback_count} | \u89e3\u9664\u51bb\u7ed3 {freeze_override_count}"
-        ),
+        "summary_text": summary_text,
         "rows": event_rows,
     }
 
@@ -7569,6 +7721,11 @@ def build_strategy_policy_audit_report_lines(
     policy_effect_review: Mapping[str, object] | object,
     *,
     generated_at: datetime | None = None,
+    draw_release_guard_policy_history: Sequence[Mapping[str, object]] | object | None = None,
+    draw_release_guard_tuning_effect_review: Mapping[str, object] | object | None = None,
+    draw_release_guard_rollback_effect_review: Mapping[str, object] | object | None = None,
+    draw_release_guard_freeze_override_status: Mapping[str, object] | object | None = None,
+    draw_release_guard_tuning_guard: Mapping[str, object] | object | None = None,
 ) -> list[str]:
     review = _as_mapping(policy_effect_review)
     current = generated_at or datetime.now()
@@ -7576,7 +7733,31 @@ def build_strategy_policy_audit_report_lines(
     stability = _as_mapping(review.get("stability_monitor"))
     rollback_effect = build_strategy_policy_rollback_effect_review(review)
     freeze_override = build_strategy_policy_freeze_override_status(_as_list(review.get("all_rows")) or _as_list(review.get("rows")), rollback_effect)
-    governance = build_strategy_policy_governance_event_summary(review)
+    draw_guard_history = draw_release_guard_policy_history or []
+    draw_guard_tuning_effect = _as_mapping(draw_release_guard_tuning_effect_review)
+    if not draw_guard_tuning_effect and draw_guard_history:
+        draw_guard_tuning_effect = build_draw_release_guard_tuning_effect_review(draw_guard_history, [])
+    draw_guard_rollback_effect = _as_mapping(draw_release_guard_rollback_effect_review)
+    if not draw_guard_rollback_effect and draw_guard_history:
+        draw_guard_rollback_effect = build_draw_release_guard_rollback_effect_review(draw_guard_history, [])
+    draw_guard_freeze_override = _as_mapping(draw_release_guard_freeze_override_status)
+    if not draw_guard_freeze_override and draw_guard_history:
+        draw_guard_freeze_override = build_draw_release_guard_freeze_override_status(draw_guard_history, draw_guard_rollback_effect)
+    draw_guard_tuning_guard = _as_mapping(draw_release_guard_tuning_guard)
+    if not draw_guard_tuning_guard and (draw_guard_history or draw_guard_rollback_effect):
+        draw_guard_tuning_guard = build_draw_release_guard_tuning_guard(
+            {},
+            rollback_effect_review=draw_guard_rollback_effect,
+            freeze_override_status=draw_guard_freeze_override,
+        )
+    governance = build_strategy_policy_governance_event_summary(
+        review,
+        draw_release_guard_policy_history=draw_guard_history,
+        draw_release_guard_tuning_effect_review=draw_guard_tuning_effect,
+        draw_release_guard_rollback_effect_review=draw_guard_rollback_effect,
+        draw_release_guard_freeze_override_status=draw_guard_freeze_override,
+        draw_release_guard_tuning_guard=draw_guard_tuning_guard,
+    )
     tuning_guard = build_strategy_policy_tuning_guard(
         stability,
         source="audit",
@@ -7601,6 +7782,9 @@ def build_strategy_policy_audit_report_lines(
         f"- \u56de\u6eda\u4fee\u590d: {rollback_effect.get('summary_text', '-')}",
         f"- \u51bb\u7ed3\u89e3\u9664: {freeze_override.get('summary_text', '-')}",
         f"- \u95e8\u63a7\u72b6\u6001: {tuning_guard.get('label', '-')} / {tuning_guard.get('body', '-')}",
+        f"- DrawGuard\u56de\u6eda\u4fee\u590d: {draw_guard_rollback_effect.get('summary_text', '-') if draw_guard_rollback_effect else '-'}",
+        f"- DrawGuard\u51bb\u7ed3\u89e3\u9664: {draw_guard_freeze_override.get('summary_text', '-') if draw_guard_freeze_override else '-'}",
+        f"- DrawGuard\u95e8\u63a7: {draw_guard_tuning_guard.get('label', '-') if draw_guard_tuning_guard else '-'} / {draw_guard_tuning_guard.get('body', '-') if draw_guard_tuning_guard else '-'}",
         "",
         "| \u65f6\u95f4 | \u7248\u672c | \u4e8b\u4ef6 | \u6765\u6e90 | \u5173\u8054\u7248\u672c | \u6548\u679c | \u653e\u884c\u547d\u4e2d | Replay\u51c0\u503c | \u8bf4\u660e |",
         "| --- | --- | --- | --- | --- | --- | --- | ---: | --- |",
@@ -7770,14 +7954,46 @@ def build_strategy_policy_audit_report_lines(
     return lines
 
 
-def build_strategy_policy_audit_csv_text(policy_effect_review: Mapping[str, object] | object) -> str:
+def build_strategy_policy_audit_csv_text(
+    policy_effect_review: Mapping[str, object] | object,
+    *,
+    draw_release_guard_policy_history: Sequence[Mapping[str, object]] | object | None = None,
+    draw_release_guard_tuning_effect_review: Mapping[str, object] | object | None = None,
+    draw_release_guard_rollback_effect_review: Mapping[str, object] | object | None = None,
+    draw_release_guard_freeze_override_status: Mapping[str, object] | object | None = None,
+    draw_release_guard_tuning_guard: Mapping[str, object] | object | None = None,
+) -> str:
     review = _as_mapping(policy_effect_review)
     rows = [row for row in (_as_list(review.get("all_rows")) or _as_list(review.get("rows"))) if isinstance(row, Mapping)]
-    governance = build_strategy_policy_governance_event_summary(review)
+    draw_guard_history = draw_release_guard_policy_history or []
+    draw_guard_tuning_effect = _as_mapping(draw_release_guard_tuning_effect_review)
+    if not draw_guard_tuning_effect and draw_guard_history:
+        draw_guard_tuning_effect = build_draw_release_guard_tuning_effect_review(draw_guard_history, [])
+    draw_guard_rollback_effect = _as_mapping(draw_release_guard_rollback_effect_review)
+    if not draw_guard_rollback_effect and draw_guard_history:
+        draw_guard_rollback_effect = build_draw_release_guard_rollback_effect_review(draw_guard_history, [])
+    draw_guard_freeze_override = _as_mapping(draw_release_guard_freeze_override_status)
+    if not draw_guard_freeze_override and draw_guard_history:
+        draw_guard_freeze_override = build_draw_release_guard_freeze_override_status(draw_guard_history, draw_guard_rollback_effect)
+    draw_guard_tuning_guard = _as_mapping(draw_release_guard_tuning_guard)
+    if not draw_guard_tuning_guard and (draw_guard_history or draw_guard_rollback_effect):
+        draw_guard_tuning_guard = build_draw_release_guard_tuning_guard(
+            {},
+            rollback_effect_review=draw_guard_rollback_effect,
+            freeze_override_status=draw_guard_freeze_override,
+        )
+    governance = build_strategy_policy_governance_event_summary(
+        review,
+        draw_release_guard_policy_history=draw_guard_history,
+        draw_release_guard_tuning_effect_review=draw_guard_tuning_effect,
+        draw_release_guard_rollback_effect_review=draw_guard_rollback_effect,
+        draw_release_guard_freeze_override_status=draw_guard_freeze_override,
+        draw_release_guard_tuning_guard=draw_guard_tuning_guard,
+    )
     governance_by_version = {
         str(row.get("version_id") or ""): row
         for row in _as_list(governance.get("rows"))
-        if isinstance(row, Mapping)
+        if isinstance(row, Mapping) and str(row.get("domain") or "strategy") == "strategy"
     }
     output = io.StringIO()
     writer = csv.writer(output, lineterminator="\n")
@@ -7791,6 +8007,10 @@ def build_strategy_policy_audit_csv_text(policy_effect_review: Mapping[str, obje
             "event_label",
             "related_version_id",
             "governance_description",
+            "governance_domain",
+            "draw_guard_blocked_count",
+            "draw_guard_avoid_rate",
+            "draw_guard_missed_rate",
             "rollback_recommended",
             "match_id",
             "time",
@@ -7823,6 +8043,10 @@ def build_strategy_policy_audit_csv_text(policy_effect_review: Mapping[str, obje
                     _text(governance_row.get("event_label"), "-"),
                     _text(governance_row.get("related_version_id"), "-"),
                     _text(governance_row.get("description"), "-"),
+                    _text(governance_row.get("domain"), "strategy"),
+                    _safe_int(governance_row.get("draw_guard_blocked_count")),
+                    _text(governance_row.get("draw_guard_avoid_rate_text"), "-"),
+                    _text(governance_row.get("draw_guard_missed_rate_text"), "-"),
                     "YES" if diagnostics.get("rollback_recommended") else "NO",
                     _text(sample.get("match_id"), "-"),
                     _text(sample.get("time"), "-"),
@@ -7837,6 +8061,37 @@ def build_strategy_policy_audit_csv_text(policy_effect_review: Mapping[str, obje
                     _text(sample.get("drag_reason_text"), "-"),
                 ]
             )
+    for event in _as_list(governance.get("rows")):
+        if not isinstance(event, Mapping) or str(event.get("domain") or "") != "draw_guard":
+            continue
+        writer.writerow(
+            [
+                _text(event.get("version_id"), "-"),
+                _text(event.get("updated_at"), "-"),
+                _text(event.get("source"), "-"),
+                _text(event.get("effect_label"), "-"),
+                _text(event.get("event_type"), "-"),
+                _text(event.get("event_label"), "-"),
+                _text(event.get("related_version_id"), "-"),
+                _text(event.get("description"), "-"),
+                _text(event.get("domain"), "draw_guard"),
+                _safe_int(event.get("draw_guard_blocked_count")),
+                _text(event.get("draw_guard_avoid_rate_text"), "-"),
+                _text(event.get("draw_guard_missed_rate_text"), "-"),
+                "YES" if str(event.get("effect_status") or "") == "negative" else "NO",
+                "-",
+                _text(event.get("updated_at"), "-"),
+                _text(event.get("summary"), "-"),
+                "-",
+                "-",
+                "-",
+                "-",
+                "-",
+                0,
+                0,
+                _text(event.get("description"), "-"),
+            ]
+        )
     return output.getvalue()
 
 
@@ -7995,7 +8250,6 @@ def build_high_accuracy_strategy_dashboard(
         historical_replay=historical_replay_summary,
     )
     policy_effect_review = build_strategy_policy_effect_review(policy_history or [], settlement_items)
-    policy_governance_event_summary = build_strategy_policy_governance_event_summary(policy_effect_review)
     policy_stability_monitor = _as_mapping(policy_effect_review.get("stability_monitor"))
     trend_tuning_effect_review = build_strategy_trend_tuning_effect_review(policy_effect_review)
     rollback_effect_review = build_strategy_policy_rollback_effect_review(policy_effect_review)
@@ -8030,6 +8284,14 @@ def build_high_accuracy_strategy_dashboard(
         draw_release_guard_tuning,
         rollback_effect_review=draw_release_guard_rollback_effect,
         freeze_override_status=draw_release_guard_freeze_override,
+    )
+    policy_governance_event_summary = build_strategy_policy_governance_event_summary(
+        policy_effect_review,
+        draw_release_guard_policy_history=draw_release_guard_policy_history or [],
+        draw_release_guard_tuning_effect_review=draw_release_guard_tuning_effect,
+        draw_release_guard_rollback_effect_review=draw_release_guard_rollback_effect,
+        draw_release_guard_freeze_override_status=draw_release_guard_freeze_override,
+        draw_release_guard_tuning_guard=draw_release_guard_tuning_guard,
     )
     jc_bucket_feedback = build_jc_bucket_feedback_summary(resolved, settlement_items)
     live_feedback_loop = build_high_accuracy_live_feedback_summary(resolved)
@@ -8165,6 +8427,9 @@ def build_high_accuracy_strategy_dashboard(
             if _safe_int(policy_governance_event_summary.get("rollback_count"))
             or _safe_int(policy_governance_event_summary.get("freeze_override_count"))
             or _safe_int(policy_governance_event_summary.get("trend_gate_count"))
+            or _safe_int(policy_governance_event_summary.get("draw_guard_freeze_count"))
+            or _safe_int(policy_governance_event_summary.get("draw_guard_freeze_override_count"))
+            or _safe_int(policy_governance_event_summary.get("draw_guard_rollback_count"))
             else "neutral"
             if _safe_int(policy_governance_event_summary.get("event_count"))
             else "good",
