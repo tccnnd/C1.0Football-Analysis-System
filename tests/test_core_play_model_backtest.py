@@ -135,6 +135,105 @@ class PlayModelBacktestTests(unittest.TestCase):
         self.assertTrue(result["score_buckets"])
         self.assertEqual(status["summary"]["sample_count"], 4)
 
+    def test_draw_takeover_guard_blocks_high_score_in_weak_low_odds_bucket(self) -> None:
+        match = core.AppMatch(
+            home_team="H",
+            away_team="A",
+            league="Draw League",
+            match_time="20:00",
+            match_date="2026-05-11",
+            odds_home=2.45,
+            odds_draw=2.95,
+            odds_away=2.80,
+        )
+
+        takeover, guard = core._draw_takeover_decision(
+            match,
+            probabilities={"home": 0.35, "draw": 0.34, "away": 0.31},
+            draw_score=0.76,
+            draw_signals={"market_balance": 0.9, "low_goal": 0.8},
+        )
+
+        self.assertFalse(takeover)
+        self.assertTrue(guard["base_takeover"])
+        self.assertTrue(guard["blocked"])
+        self.assertEqual(guard["reason"], "weak_draw_odds_bucket")
+        self.assertEqual(guard["odds_bucket"], "<=3.00")
+        self.assertEqual(guard["evidence"]["precision"], 0.222222)
+
+    def test_draw_takeover_guard_allows_high_score_in_supported_odds_bucket(self) -> None:
+        match = core.AppMatch(
+            home_team="H",
+            away_team="A",
+            league="Draw League",
+            match_time="20:00",
+            match_date="2026-05-11",
+            odds_home=2.45,
+            odds_draw=3.20,
+            odds_away=2.80,
+        )
+
+        takeover, guard = core._draw_takeover_decision(
+            match,
+            probabilities={"home": 0.35, "draw": 0.34, "away": 0.31},
+            draw_score=0.76,
+            draw_signals={"market_balance": 0.9, "low_goal": 0.8},
+        )
+
+        self.assertTrue(takeover)
+        self.assertFalse(guard["blocked"])
+        self.assertEqual(guard["odds_bucket"], "3.01-3.30")
+
+    def test_draw_takeover_guard_blocks_high_score_in_weak_long_odds_bucket(self) -> None:
+        match = core.AppMatch(
+            home_team="H",
+            away_team="A",
+            league="Draw League",
+            match_time="20:00",
+            match_date="2026-05-11",
+            odds_home=1.80,
+            odds_draw=4.35,
+            odds_away=4.60,
+        )
+
+        takeover, guard = core._draw_takeover_decision(
+            match,
+            probabilities={"home": 0.38, "draw": 0.31, "away": 0.31},
+            draw_score=0.72,
+            draw_signals={"market_balance": 0.9, "low_goal": 0.8},
+        )
+
+        self.assertFalse(takeover)
+        self.assertTrue(guard["base_takeover"])
+        self.assertTrue(guard["blocked"])
+        self.assertEqual(guard["odds_bucket"], ">4.20")
+        self.assertLess(guard["evidence"]["lift"], 0)
+
+    def test_draw_takeover_guard_does_not_mark_blocked_without_base_takeover(self) -> None:
+        match = core.AppMatch(
+            home_team="H",
+            away_team="A",
+            league="Draw League",
+            match_time="20:00",
+            match_date="2026-05-11",
+            odds_home=1.55,
+            odds_draw=4.35,
+            odds_away=6.00,
+        )
+
+        takeover, guard = core._draw_takeover_decision(
+            match,
+            probabilities={"home": 0.63, "draw": 0.20, "away": 0.17},
+            draw_score=0.72,
+            draw_signals={"market_balance": 0.3, "low_goal": 0.8},
+        )
+
+        self.assertFalse(takeover)
+        self.assertFalse(guard["base_takeover"])
+        self.assertTrue(guard["weak_score"])
+        self.assertFalse(guard["blocked"])
+        self.assertEqual(guard["reason"], "ok")
+
     def test_total_goals_takeover_requires_material_calibration_uplift(self) -> None:
         validation_items = []
         for index in range(100):

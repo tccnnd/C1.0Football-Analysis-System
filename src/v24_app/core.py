@@ -171,6 +171,21 @@ PLAY_MODEL_TOTAL_GOALS_MIN_HOLDOUT_UPLIFT = 0.0
 PLAY_MODEL_SCORELINE_MAX_HOLDOUT_REGRESSION = 0.03
 PLAY_MODEL_POLICY_HOLDOUT_RATIO = 0.25
 PLAY_MODEL_POLICY_MIN_HOLDOUT_ROWS = 100
+DRAW_RELEASE_GUARD_MIN_SCORE = 0.58
+DRAW_RELEASE_WEAK_ODDS_BUCKET_EVIDENCE = {
+    "<=3.00": {
+        "precision": 0.222222,
+        "draw_rate": 0.157895,
+        "lift": -0.075439,
+        "source": "draw_specialist_backtest_20260511_112806",
+    },
+    ">4.20": {
+        "precision": None,
+        "draw_rate": 0.149425,
+        "lift": -0.083908,
+        "source": "draw_specialist_backtest_20260511_112806",
+    },
+}
 DEFAULT_BAYES_CALIBRATION = {
     "enabled": True,
     "prior_source": "market",
@@ -8687,6 +8702,48 @@ def _draw_market_balance_bucket(value: object) -> str:
     return "<0.45 倾斜"
 
 
+def _draw_release_guard(match: AppMatch, draw_score: object, *, base_takeover: bool = False) -> dict[str, object]:
+    odds_bucket = _draw_odds_bucket(getattr(match, "odds_draw", 0.0))
+    evidence = DRAW_RELEASE_WEAK_ODDS_BUCKET_EVIDENCE.get(odds_bucket)
+    weak_score = bool(evidence and _safe_float(draw_score, default=0.0) >= DRAW_RELEASE_GUARD_MIN_SCORE)
+    blocked = bool(base_takeover and weak_score)
+    return {
+        "blocked": blocked,
+        "reason": "weak_draw_odds_bucket" if blocked else "ok",
+        "weak_score": weak_score,
+        "base_takeover": bool(base_takeover),
+        "odds_bucket": odds_bucket,
+        "odds_draw": round(_safe_float(getattr(match, "odds_draw", 0.0), default=0.0), 3),
+        "min_score": DRAW_RELEASE_GUARD_MIN_SCORE,
+        "evidence": dict(evidence or {}),
+    }
+
+
+def _draw_takeover_decision(
+    match: AppMatch,
+    *,
+    probabilities: dict[str, float],
+    draw_score: object,
+    draw_signals: dict[str, float],
+) -> tuple[bool, dict[str, object]]:
+    score = _safe_float(draw_score, default=0.0)
+    base_takeover = bool(
+        score >= 0.54
+        and (
+            probabilities["draw"] >= max(probabilities["home"], probabilities["away"]) - 0.08
+            or (
+                probabilities["draw"] >= 0.28
+                and draw_signals.get("market_balance", 0.0) >= 0.72
+                and draw_signals.get("low_goal", 0.0) >= 0.55
+            )
+        )
+    )
+    guard = _draw_release_guard(match, score, base_takeover=base_takeover)
+    if base_takeover and guard.get("blocked"):
+        return False, guard
+    return base_takeover, guard
+
+
 def _draw_bucket_template() -> dict[str, int]:
     return {
         "sample_count": 0,
@@ -9714,16 +9771,11 @@ def _predict_match_with_inputs(
     draw_score = _safe_float(specialist_result.get("draw_score"), default=0.0)
     draw_signals = specialist_result.get("draw_signals", {})
     draw_grade = str(specialist_result.get("draw_grade", "-"))
-    draw_takeover = bool(
-        draw_score >= 0.54
-        and (
-            probabilities["draw"] >= max(probabilities["home"], probabilities["away"]) - 0.08
-            or (
-                probabilities["draw"] >= 0.28
-                and draw_signals.get("market_balance", 0.0) >= 0.72
-                and draw_signals.get("low_goal", 0.0) >= 0.55
-            )
-        )
+    draw_takeover, draw_release_guard = _draw_takeover_decision(
+        match,
+        probabilities=probabilities,
+        draw_score=draw_score,
+        draw_signals=draw_signals,
     )
     recommendation_key = "draw" if draw_takeover else model_top_key
     recommendation = {"home": "主胜", "draw": "平局", "away": "客胜"}[recommendation_key]
@@ -10069,6 +10121,7 @@ def _predict_match_with_inputs(
         "draw_signals": draw_signals,
         "draw_grade": draw_grade,
         "draw_takeover": draw_takeover,
+        "draw_release_guard": draw_release_guard,
         "play_strategy": play_strategy,
         "single_play_recommendations": single_play_recommendations,
         "parlay_eligible_plays": parlay_eligible_plays,
