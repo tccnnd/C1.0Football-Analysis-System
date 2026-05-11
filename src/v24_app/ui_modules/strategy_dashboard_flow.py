@@ -4056,17 +4056,33 @@ def build_strategy_policy_tuning_guard(
     tuning: Mapping[str, object] | object | None = None,
     *,
     source: str = "",
+    trend_tuning_effect_review: Mapping[str, object] | object | None = None,
 ) -> dict[str, object]:
     monitor = _as_mapping(stability_monitor)
     tuning_payload = _as_mapping(tuning)
+    trend_effect = _as_mapping(trend_tuning_effect_review)
     status = str(monitor.get("status") or "none")
+    trend_status = str(trend_effect.get("status") or "")
     action = str(tuning_payload.get("action") or "").strip()
     source_label = {
         "strategy_allowlist_tuning": "\u653e\u884c\u95e8\u69db",
         "release_quality_trend": "\u8d8b\u52bf\u95e8\u63a7",
         "agent_replay_guard_tuning": "Replay Guard",
     }.get(source, "\u7b56\u7565\u8c03\u53c2")
-    if status in {"regression", "volatile"}:
+    if trend_status == "negative":
+        decision = "block"
+        label = "\u95e8\u63a7\u56de\u9000\uff0c\u6682\u505c\u8c03\u53c2"
+        tone = "bad"
+        reasons = [
+            f"\u95e8\u63a7\u751f\u6548\u72b6\u6001: {trend_effect.get('label', '-')}",
+            str(trend_effect.get("summary_text") or "-"),
+            "\u95e8\u63a7\u5e94\u7528\u540e\u547d\u4e2d\u56de\u9000\uff0c\u7ee7\u7eed\u5199\u5165\u65b0\u6536\u7d27\u53c2\u6570\u53ef\u80fd\u653e\u5927\u8bef\u5dee\u3002",
+            f"\u56de\u6eda\u5019\u9009\u7248\u672c: {trend_effect.get('rollback_candidate_version_id', '-')}",
+        ]
+        recommendation = str(trend_effect.get("recommendation_text") or "").strip()
+        if recommendation:
+            reasons.append(recommendation)
+    elif status in {"regression", "volatile"}:
         decision = "block"
         label = "\u6682\u505c\u81ea\u52a8\u8c03\u53c2"
         tone = "bad"
@@ -4075,7 +4091,7 @@ def build_strategy_policy_tuning_guard(
             "\u6700\u65b0\u53c2\u6570\u6548\u679c\u5c1a\u672a\u7a33\u5b9a\uff0c\u7ee7\u7eed\u81ea\u52a8\u5199\u5165\u65b0\u53c2\u6570\u53ef\u80fd\u653e\u5927\u56de\u9000\u3002",
             "\u5efa\u8bae\u5148\u67e5\u770b\u751f\u6548\u8be6\u60c5\uff0c\u590d\u6838\u8d1f\u5411\u6837\u672c\uff0c\u5fc5\u8981\u65f6\u56de\u6eda\u4e0a\u4e00\u7248\u3002",
         ]
-    elif status == "watch":
+    elif status == "watch" or trend_status == "watch":
         decision = "confirm"
         label = "\u9700\u4eba\u5de5\u786e\u8ba4"
         tone = "warning"
@@ -4083,6 +4099,8 @@ def build_strategy_policy_tuning_guard(
             f"\u7248\u672c\u7a33\u5b9a\u72b6\u6001: {monitor.get('label', '-')}",
             "\u5df2\u6709\u8d1f\u5411\u4fe1\u53f7\uff0c\u8c03\u53c2\u524d\u9700\u786e\u8ba4\u6837\u672c\u4e0d\u662f\u77ed\u671f\u566a\u58f0\u3002",
         ]
+        if trend_status == "watch":
+            reasons.append(f"\u95e8\u63a7\u751f\u6548\u72b6\u6001: {trend_effect.get('summary_text', '-')}")
     else:
         decision = "allow"
         label = "\u5141\u8bb8\u8c03\u53c2"
@@ -4100,10 +4118,18 @@ def build_strategy_policy_tuning_guard(
         "source": source,
         "source_label": source_label,
         "status": status,
+        "trend_effect_status": trend_status or "-",
+        "trend_effect_label": str(trend_effect.get("label") or "-"),
+        "trend_effect_summary": str(trend_effect.get("summary_text") or "-"),
+        "rollback_recommended": trend_status == "negative",
+        "rollback_candidate_version_id": str(trend_effect.get("rollback_candidate_version_id") or "-"),
         "action": action or "-",
         "reasons": reasons,
         "body": body,
-        "summary_text": f"{source_label}: {label} | {monitor.get('summary_text', '-')}",
+        "summary_text": (
+            f"{source_label}: {label} | "
+            f"{trend_effect.get('summary_text') if trend_status == 'negative' else monitor.get('summary_text', '-')}"
+        ),
     }
 
 
@@ -4217,6 +4243,7 @@ def build_strategy_policy_effect_review(
     return {
         "history_count": len(parsed_history),
         "rows": rows[: max(0, int(limit))],
+        "all_rows": full_rows,
         "latest_status": latest.get("effect_status", "none") if latest else "none",
         "latest_label": latest.get("effect_label", "\u6682\u65e0\u7248\u672c") if latest else "\u6682\u65e0\u7248\u672c",
         "status_counts": status_counts,
@@ -4282,7 +4309,8 @@ def build_strategy_trend_tuning_effect_review(
     limit: int = 5,
 ) -> dict[str, object]:
     review = _as_mapping(policy_effect_review)
-    rows = [dict(row) for row in _as_list(review.get("rows")) if isinstance(row, Mapping)]
+    row_source = _as_list(review.get("all_rows")) or _as_list(review.get("rows"))
+    rows = [dict(row) for row in row_source if isinstance(row, Mapping)]
     rows.sort(key=lambda row: (_parse_policy_review_time(row.get("updated_at")) or datetime.min, str(row.get("version_id") or "")))
     target_indexes = [
         (index, row)
@@ -4300,6 +4328,8 @@ def build_strategy_trend_tuning_effect_review(
             "latest_version_id": "-",
             "latest_source": "-",
             "latest_updated_at": "-",
+            "rollback_recommended": False,
+            "rollback_candidate_version_id": "-",
             "post_known_count": 0,
             "pre_known_count": 0,
             "post_allow_hit_rate": None,
@@ -4388,6 +4418,8 @@ def build_strategy_trend_tuning_effect_review(
         "latest_source": latest.get("source", "-"),
         "latest_updated_at": latest.get("updated_at", "-"),
         "previous_version_id": previous.get("version_id", "-") if previous else "-",
+        "rollback_recommended": status == "negative",
+        "rollback_candidate_version_id": previous.get("version_id", "-") if status == "negative" and previous else "-",
         "post_known_count": post_known,
         "pre_known_count": pre_known,
         "post_allow_hits": post_hits,
@@ -6480,7 +6512,11 @@ def build_high_accuracy_strategy_dashboard(
     policy_effect_review = build_strategy_policy_effect_review(policy_history or [], settlement_items)
     policy_stability_monitor = _as_mapping(policy_effect_review.get("stability_monitor"))
     trend_tuning_effect_review = build_strategy_trend_tuning_effect_review(policy_effect_review)
-    policy_tuning_guard = build_strategy_policy_tuning_guard(policy_stability_monitor, source="dashboard")
+    policy_tuning_guard = build_strategy_policy_tuning_guard(
+        policy_stability_monitor,
+        source="dashboard",
+        trend_tuning_effect_review=trend_tuning_effect_review,
+    )
     market_entropy_backtest = build_market_entropy_backtest_summary(settlement_items)
     handicap_margin_backtest = build_handicap_margin_backtest_summary(settlement_items)
     jc_bucket_feedback = build_jc_bucket_feedback_summary(resolved, settlement_items)

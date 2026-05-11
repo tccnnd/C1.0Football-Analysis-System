@@ -2882,6 +2882,16 @@ class SmartMatchDashboard:
         recovery_quality_alerts = self._recovery_quality_alerts()
         recovery_trend = build_strategy_release_quality_trend(self._recovery_run_records(limit=80))
         recovery_trend_alerts = build_strategy_release_quality_trend_alerts(recovery_trend)
+        policy_effect_review = build_strategy_policy_effect_review(
+            get_strategy_admission_policy_history(limit=20),
+            list(reversed(get_recent_settlements(limit=200))),
+        )
+        trend_tuning_effect = build_strategy_trend_tuning_effect_review(policy_effect_review)
+        policy_tuning_guard = build_strategy_policy_tuning_guard(
+            policy_effect_review.get("stability_monitor", {}) if isinstance(policy_effect_review.get("stability_monitor"), dict) else {},
+            source="monitor",
+            trend_tuning_effect_review=trend_tuning_effect,
+        )
         shell = self._page_shell(
             "\u76d1\u63a7\u4e2d\u5fc3",
             "\u8fd0\u884c\u65e5\u5fd7\u3001\u5206\u6790\u8017\u65f6\u3001\u6570\u636e\u6e90\u548c\u98ce\u9669\u72b6\u6001",
@@ -3037,6 +3047,8 @@ class SmartMatchDashboard:
             ("\u56de\u6536\u65b0\u7ed3\u7b97", str(recovery_summary.get("latest_new_settled", 0)), "#7aa2ff"),
             ("\u56de\u6536\u544a\u8b66", str(len(recovery_quality_alerts)), RED if any(item.get("severity") == "high" for item in recovery_quality_alerts) else YELLOW if recovery_quality_alerts else GREEN),
             ("\u653e\u884c\u8d8b\u52bf", str(len(recovery_trend_alerts)), RED if any(item.get("severity") == "high" for item in recovery_trend_alerts) else YELLOW if recovery_trend_alerts else GREEN),
+            ("\u95e8\u63a7\u751f\u6548", str(trend_tuning_effect.get("label") or "-"), self._tone_color(str(trend_tuning_effect.get("tone") or "neutral"))),
+            ("\u8c03\u53c2\u95e8\u63a7", str(policy_tuning_guard.get("label") or "-"), self._tone_color(str(policy_tuning_guard.get("tone") or "neutral"))),
             ("\u540e\u53f0\u4efb\u52a1", str(background_task_summary.get("running", 0)), YELLOW if int(background_task_summary.get("running", 0) or 0) else GREEN),
             ("\u591a\u8fdb\u7a0b", str(background_task_summary.get("process_running", 0)), "#7aa2ff"),
             (
@@ -3131,6 +3143,25 @@ class SmartMatchDashboard:
             tk.Label(left, text="\u653e\u884c\u8d8b\u52bf\u544a\u8b66", bg=PANEL, fg=YELLOW, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
             for alert in recovery_trend_alerts[:3]:
                 self._alert_card(left, str(alert.get("title") or "-"), str(alert.get("body") or "-"), tone=str(alert.get("tone") or "warning"))
+
+        if str(trend_tuning_effect.get("status") or "") == "negative" or str(policy_tuning_guard.get("decision") or "") == "block":
+            tk.Label(left, text="\u95e8\u63a7\u8d1f\u53cd\u9988", bg=PANEL, fg=RED, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
+            self._alert_card(
+                left,
+                str(policy_tuning_guard.get("label") or trend_tuning_effect.get("label") or "-"),
+                (
+                    f"{trend_tuning_effect.get('summary_text', '-')}\n"
+                    f"{trend_tuning_effect.get('recommendation_text', '-')}\n"
+                    f"\u56de\u6eda\u5019\u9009\u7248\u672c: {trend_tuning_effect.get('rollback_candidate_version_id', '-')}"
+                ),
+                tone=str(policy_tuning_guard.get("tone") or trend_tuning_effect.get("tone") or "bad"),
+            )
+            self._strategy_row(
+                left,
+                "\u67e5\u770b\u95e8\u63a7\u751f\u6548\u660e\u7ec6",
+                "\u590d\u6838\u5f53\u524d\u8d1f\u5411\u7248\u672c\u3001\u653e\u884c\u9519\u8bef\u6837\u672c\u548c\u53ef\u56de\u6eda\u7248\u672c\u3002",
+                command=lambda review=policy_effect_review: self.open_policy_effect_detail_window(review),
+            )
 
         tk.Label(right, text="\u73a9\u6cd5\u63a5\u7ba1\u7b56\u7565", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
         for row in build_play_model_policy_decision_rows(play_policy_status):
@@ -5253,7 +5284,13 @@ class SmartMatchDashboard:
             get_statsbomb_sandbox_fewshot_memory(),
         )
         monitor = dashboard.get("policy_stability_monitor", {}) if isinstance(dashboard.get("policy_stability_monitor"), dict) else {}
-        return build_strategy_policy_tuning_guard(monitor, tuning if isinstance(tuning, dict) else {}, source=source)
+        trend_effect = dashboard.get("trend_tuning_effect_review", {}) if isinstance(dashboard.get("trend_tuning_effect_review"), dict) else {}
+        return build_strategy_policy_tuning_guard(
+            monitor,
+            tuning if isinstance(tuning, dict) else {},
+            source=source,
+            trend_tuning_effect_review=trend_effect,
+        )
 
     def _block_strategy_policy_tuning_if_needed(self, tuning: dict | object, source: str) -> dict | None:
         guard = self._current_strategy_policy_tuning_guard(tuning, source)

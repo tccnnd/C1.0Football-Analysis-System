@@ -464,6 +464,8 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertEqual(effect["post_allow_hit_rate_text"], "33.3%")
         self.assertEqual(effect["pre_allow_hit_rate_text"], "100.0%")
         self.assertEqual(effect["allow_hit_rate_delta_text"], "-66.7%")
+        self.assertTrue(effect["rollback_recommended"])
+        self.assertEqual(effect["rollback_candidate_version_id"], "v1")
 
     def test_strategy_policy_effect_review_pinpoints_negative_drivers(self) -> None:
         history = [
@@ -592,6 +594,27 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("\u6682\u505c", guard["label"])
         self.assertIn("\u56de\u6eda", guard["body"])
 
+    def test_strategy_policy_tuning_guard_blocks_negative_trend_gate(self) -> None:
+        guard = build_strategy_policy_tuning_guard(
+            {"status": "stable", "label": "\u7a33\u5b9a\u751f\u6548", "summary_text": "\u7a33\u5b9a"},
+            {"action": "tighten", "policy_update": {"min_confidence": 0.72}},
+            source="release_quality_trend",
+            trend_tuning_effect_review={
+                "status": "negative",
+                "label": "\u95e8\u63a7\u540e\u56de\u9000",
+                "summary_text": "\u540e\u7eed 1/3 (33.3%) | \u524d\u5e8f 3/3 (100.0%)",
+                "recommendation_text": "\u5fc5\u8981\u65f6\u56de\u6eda\u4e0a\u4e00\u7248\u3002",
+                "rollback_candidate_version_id": "v1",
+            },
+        )
+
+        self.assertFalse(guard["allowed"])
+        self.assertEqual(guard["decision"], "block")
+        self.assertEqual(guard["rollback_candidate_version_id"], "v1")
+        self.assertTrue(guard["rollback_recommended"])
+        self.assertIn("\u95e8\u63a7\u56de\u9000", guard["label"])
+        self.assertIn("\u56de\u6eda\u5019\u9009\u7248\u672c: v1", guard["body"])
+
     def test_strategy_policy_tuning_guard_requires_confirmation_on_watch(self) -> None:
         guard = build_strategy_policy_tuning_guard(
             {"status": "watch", "label": "\u9700\u89c2\u5bdf", "summary_text": "\u89c2\u5bdf"},
@@ -602,6 +625,22 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertTrue(guard["allowed"])
         self.assertTrue(guard["confirm_required"])
         self.assertEqual(guard["source_label"], "Replay Guard")
+
+    def test_strategy_policy_tuning_guard_requires_confirmation_on_trend_watch(self) -> None:
+        guard = build_strategy_policy_tuning_guard(
+            {"status": "stable", "label": "\u7a33\u5b9a\u751f\u6548", "summary_text": "\u7a33\u5b9a"},
+            {"action": "tighten"},
+            source="release_quality_trend",
+            trend_tuning_effect_review={
+                "status": "watch",
+                "label": "\u95e8\u63a7\u540e\u89c2\u5bdf",
+                "summary_text": "\u547d\u4e2d\u672a\u660e\u663e\u6539\u5584",
+            },
+        )
+
+        self.assertTrue(guard["allowed"])
+        self.assertTrue(guard["confirm_required"])
+        self.assertIn("\u95e8\u63a7\u751f\u6548\u72b6\u6001", guard["body"])
 
     def test_strategy_policy_audit_report_exports_review_and_samples(self) -> None:
         history = [
