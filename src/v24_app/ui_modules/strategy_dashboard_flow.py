@@ -4057,19 +4057,35 @@ def build_strategy_policy_tuning_guard(
     *,
     source: str = "",
     trend_tuning_effect_review: Mapping[str, object] | object | None = None,
+    rollback_effect_review: Mapping[str, object] | object | None = None,
 ) -> dict[str, object]:
     monitor = _as_mapping(stability_monitor)
     tuning_payload = _as_mapping(tuning)
     trend_effect = _as_mapping(trend_tuning_effect_review)
+    rollback_effect = _as_mapping(rollback_effect_review)
     status = str(monitor.get("status") or "none")
     trend_status = str(trend_effect.get("status") or "")
+    rollback_status = str(rollback_effect.get("status") or "")
     action = str(tuning_payload.get("action") or "").strip()
     source_label = {
         "strategy_allowlist_tuning": "\u653e\u884c\u95e8\u69db",
         "release_quality_trend": "\u8d8b\u52bf\u95e8\u63a7",
         "agent_replay_guard_tuning": "Replay Guard",
     }.get(source, "\u7b56\u7565\u8c03\u53c2")
-    if trend_status == "negative":
+    if rollback_status == "negative":
+        decision = "freeze"
+        label = "\u56de\u6eda\u5931\u8d25\uff0c\u51bb\u7ed3\u8c03\u53c2"
+        tone = "bad"
+        reasons = [
+            f"\u56de\u6eda\u4fee\u590d\u72b6\u6001: {rollback_effect.get('label', '-')}",
+            str(rollback_effect.get("summary_text") or "-"),
+            "\u56de\u6eda\u540e\u4ecd\u7136\u56de\u9000\uff0c\u7ee7\u7eed\u5199\u5165\u65b0\u53c2\u6570\u53ef\u80fd\u8ba9\u7b56\u7565\u5f80\u9519\u8bef\u65b9\u5411\u8fed\u4ee3\u3002",
+            "\u5148\u590d\u6838\u56de\u6eda\u540e\u9519\u8bef\u6837\u672c\uff0c\u6216\u7531\u4eba\u5de5\u786e\u8ba4\u89e3\u9664\u51bb\u7ed3\u540e\u518d\u8c03\u53c2\u3002",
+        ]
+        recommendation = str(rollback_effect.get("recommendation_text") or "").strip()
+        if recommendation:
+            reasons.append(recommendation)
+    elif trend_status == "negative":
         decision = "block"
         label = "\u95e8\u63a7\u56de\u9000\uff0c\u6682\u505c\u8c03\u53c2"
         tone = "bad"
@@ -4121,14 +4137,22 @@ def build_strategy_policy_tuning_guard(
         "trend_effect_status": trend_status or "-",
         "trend_effect_label": str(trend_effect.get("label") or "-"),
         "trend_effect_summary": str(trend_effect.get("summary_text") or "-"),
-        "rollback_recommended": trend_status == "negative",
-        "rollback_candidate_version_id": str(trend_effect.get("rollback_candidate_version_id") or "-"),
+        "rollback_effect_status": rollback_status or "-",
+        "rollback_effect_label": str(rollback_effect.get("label") or "-"),
+        "rollback_effect_summary": str(rollback_effect.get("summary_text") or "-"),
+        "rollback_recommended": trend_status == "negative" or rollback_status == "negative",
+        "rollback_candidate_version_id": str(
+            rollback_effect.get("rolled_back_version_id")
+            or trend_effect.get("rollback_candidate_version_id")
+            or "-"
+        ),
+        "freeze_active": decision == "freeze",
         "action": action or "-",
         "reasons": reasons,
         "body": body,
         "summary_text": (
             f"{source_label}: {label} | "
-            f"{trend_effect.get('summary_text') if trend_status == 'negative' else monitor.get('summary_text', '-')}"
+            f"{rollback_effect.get('summary_text') if rollback_status == 'negative' else trend_effect.get('summary_text') if trend_status == 'negative' else monitor.get('summary_text', '-')}"
         ),
     }
 
@@ -6906,6 +6930,7 @@ def build_high_accuracy_strategy_dashboard(
         policy_stability_monitor,
         source="dashboard",
         trend_tuning_effect_review=trend_tuning_effect_review,
+        rollback_effect_review=rollback_effect_review,
     )
     market_entropy_backtest = build_market_entropy_backtest_summary(settlement_items)
     handicap_margin_backtest = build_handicap_margin_backtest_summary(settlement_items)

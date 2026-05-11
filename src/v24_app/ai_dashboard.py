@@ -2894,6 +2894,7 @@ class SmartMatchDashboard:
             policy_effect_review.get("stability_monitor", {}) if isinstance(policy_effect_review.get("stability_monitor"), dict) else {},
             source="monitor",
             trend_tuning_effect_review=trend_tuning_effect,
+            rollback_effect_review=rollback_effect,
         )
         shell = self._page_shell(
             "\u76d1\u63a7\u4e2d\u5fc3",
@@ -3148,22 +3149,20 @@ class SmartMatchDashboard:
             for alert in recovery_trend_alerts[:3]:
                 self._alert_card(left, str(alert.get("title") or "-"), str(alert.get("body") or "-"), tone=str(alert.get("tone") or "warning"))
 
-        if str(trend_tuning_effect.get("status") or "") == "negative" or str(policy_tuning_guard.get("decision") or "") == "block":
-            tk.Label(left, text="\u95e8\u63a7\u8d1f\u53cd\u9988", bg=PANEL, fg=RED, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
+        tuning_decision = str(policy_tuning_guard.get("decision") or "")
+        if str(trend_tuning_effect.get("status") or "") == "negative" or tuning_decision in {"block", "freeze"}:
+            section_title = "\u8c03\u53c2\u51bb\u7ed3" if tuning_decision == "freeze" else "\u95e8\u63a7\u8d1f\u53cd\u9988"
+            tk.Label(left, text=section_title, bg=PANEL, fg=RED, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
             self._alert_card(
                 left,
                 str(policy_tuning_guard.get("label") or trend_tuning_effect.get("label") or "-"),
-                (
-                    f"{trend_tuning_effect.get('summary_text', '-')}\n"
-                    f"{trend_tuning_effect.get('recommendation_text', '-')}\n"
-                    f"\u56de\u6eda\u5019\u9009\u7248\u672c: {trend_tuning_effect.get('rollback_candidate_version_id', '-')}"
-                ),
+                str(policy_tuning_guard.get("body") or trend_tuning_effect.get("summary_text") or "-"),
                 tone=str(policy_tuning_guard.get("tone") or trend_tuning_effect.get("tone") or "bad"),
             )
             self._strategy_row(
                 left,
-                "\u67e5\u770b\u95e8\u63a7\u751f\u6548\u660e\u7ec6",
-                "\u590d\u6838\u5f53\u524d\u8d1f\u5411\u7248\u672c\u3001\u653e\u884c\u9519\u8bef\u6837\u672c\u548c\u53ef\u56de\u6eda\u7248\u672c\u3002",
+                "\u67e5\u770b\u751f\u6548\u660e\u7ec6",
+                "\u590d\u6838\u5f53\u524d\u8d1f\u5411\u7248\u672c\u3001\u56de\u6eda\u4fee\u590d\u72b6\u6001\u548c\u653e\u884c\u9519\u8bef\u6837\u672c\u3002",
                 command=lambda review=policy_effect_review: self.open_policy_effect_detail_window(review),
             )
 
@@ -5316,11 +5315,13 @@ class SmartMatchDashboard:
         )
         monitor = dashboard.get("policy_stability_monitor", {}) if isinstance(dashboard.get("policy_stability_monitor"), dict) else {}
         trend_effect = dashboard.get("trend_tuning_effect_review", {}) if isinstance(dashboard.get("trend_tuning_effect_review"), dict) else {}
+        rollback_effect = dashboard.get("rollback_effect_review", {}) if isinstance(dashboard.get("rollback_effect_review"), dict) else {}
         return build_strategy_policy_tuning_guard(
             monitor,
             tuning if isinstance(tuning, dict) else {},
             source=source,
             trend_tuning_effect_review=trend_effect,
+            rollback_effect_review=rollback_effect,
         )
 
     def _block_strategy_policy_tuning_if_needed(self, tuning: dict | object, source: str) -> dict | None:

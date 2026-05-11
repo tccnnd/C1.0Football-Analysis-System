@@ -617,6 +617,28 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("\u95e8\u63a7\u56de\u9000", guard["label"])
         self.assertIn("\u56de\u6eda\u5019\u9009\u7248\u672c: v1", guard["body"])
 
+    def test_strategy_policy_tuning_guard_freezes_after_failed_rollback(self) -> None:
+        guard = build_strategy_policy_tuning_guard(
+            {"status": "stable", "label": "\u7a33\u5b9a\u751f\u6548", "summary_text": "\u7a33\u5b9a"},
+            {"action": "tighten", "policy_update": {"min_confidence": 0.72}},
+            source="release_quality_trend",
+            rollback_effect_review={
+                "status": "negative",
+                "label": "\u56de\u6eda\u540e\u4ecd\u56de\u9000",
+                "summary_text": "\u56de\u6eda\u540e 1/3 (33.3%) | \u5bf9\u7167 2/3 (66.7%)",
+                "recommendation_text": "\u5148\u590d\u6838\u56de\u6eda\u540e\u9519\u8bef\u6837\u672c\u3002",
+                "rolled_back_version_id": "v2",
+            },
+        )
+
+        self.assertFalse(guard["allowed"])
+        self.assertEqual(guard["decision"], "freeze")
+        self.assertTrue(guard["freeze_active"])
+        self.assertTrue(guard["rollback_recommended"])
+        self.assertEqual(guard["rollback_candidate_version_id"], "v2")
+        self.assertIn("\u51bb\u7ed3\u8c03\u53c2", guard["label"])
+        self.assertIn("\u56de\u6eda\u4fee\u590d\u72b6\u6001", guard["body"])
+
     def test_strategy_policy_tuning_guard_requires_confirmation_on_watch(self) -> None:
         guard = build_strategy_policy_tuning_guard(
             {"status": "watch", "label": "\u9700\u89c2\u5bdf", "summary_text": "\u89c2\u5bdf"},
@@ -759,11 +781,14 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         ]
 
         effect = build_strategy_policy_rollback_effect_review(build_strategy_policy_effect_review(history, settlements, limit=10))
+        dashboard = build_high_accuracy_strategy_dashboard({}, settlements, history)
 
         self.assertEqual(effect["status"], "negative")
         self.assertEqual(effect["post_allow_hit_rate_text"], "33.3%")
         self.assertEqual(effect["rolled_back_allow_hit_rate_text"], "66.7%")
         self.assertEqual(effect["allow_hit_rate_delta_text"], "-33.3%")
+        self.assertEqual(dashboard["policy_tuning_guard"]["decision"], "freeze")
+        self.assertTrue(dashboard["policy_tuning_guard"]["freeze_active"])
 
     def test_strategy_policy_audit_report_exports_review_and_samples(self) -> None:
         history = [
