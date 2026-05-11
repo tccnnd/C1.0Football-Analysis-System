@@ -52,7 +52,7 @@ def build_report_filename(scope_slug: str, generated_at: datetime | None = None)
     return f"recommendation_report_c1_{scope_slug}_{now.strftime('%Y%m%d_%H%M%S')}.md"
 
 
-def resolve_current_filter(filter_var: Any | None, default: str = "全部") -> str:
+def resolve_current_filter(filter_var: Any | None, default: str = "\u5168\u90e8") -> str:
     if filter_var is None:
         return default
     getter = getattr(filter_var, "get", None)
@@ -64,7 +64,7 @@ def resolve_current_filter(filter_var: Any | None, default: str = "全部") -> s
 
 
 def build_export_status_text(report_name: str) -> str:
-    return f"报告已导出 | {report_name}"
+    return f"\u62a5\u544a\u5df2\u5bfc\u51fa | {report_name}"
 
 
 def classify_dashboard_report_file(path: Path) -> str:
@@ -96,5 +96,46 @@ def list_dashboard_report_files(report_dir: Path, *, limit: int = 100) -> list[d
     return rows
 
 
+def summarize_dashboard_report_types(rows: list[Mapping[str, object]] | object) -> dict[str, int]:
+    if not isinstance(rows, list):
+        return {}
+    counts: dict[str, int] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        label = str(row.get("label") or "\u5176\u4ed6\u62a5\u544a").strip() or "\u5176\u4ed6\u62a5\u544a"
+        counts[label] = counts.get(label, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+
+def dashboard_report_type_options(rows: list[Mapping[str, object]] | object) -> list[str]:
+    return ["\u5168\u90e8", *summarize_dashboard_report_types(rows).keys()]
+
+
+def filter_dashboard_report_rows(
+    rows: list[Mapping[str, object]] | object,
+    *,
+    selected_type: object = "\u5168\u90e8",
+    query: object = "",
+) -> list[dict[str, object]]:
+    if not isinstance(rows, list):
+        return []
+    type_text = str(selected_type or "\u5168\u90e8").strip() or "\u5168\u90e8"
+    query_text = str(query or "").strip().lower()
+    filtered: list[dict[str, object]] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        label = str(row.get("label") or "")
+        name = str(row.get("name") or "")
+        path = str(row.get("path") or "")
+        if type_text != "\u5168\u90e8" and label != type_text:
+            continue
+        if query_text and query_text not in name.lower() and query_text not in label.lower() and query_text not in path.lower():
+            continue
+        filtered.append(dict(row))
+    return filtered
+
+
 def build_export_message_text(*, scope_label: str, match_count: int, report_path: Path) -> str:
-    return f"报告已生成\n范围: {scope_label}\n场次: {match_count}\n{report_path}"
+    return f"\u62a5\u544a\u5df2\u751f\u6210\n\u8303\u56f4: {scope_label}\n\u573a\u6b21: {match_count}\n{report_path}"

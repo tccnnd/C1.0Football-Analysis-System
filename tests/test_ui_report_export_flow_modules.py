@@ -22,9 +22,12 @@ from v24_app.ui_modules import (
     build_report_filename,
     classify_dashboard_report_file,
     collect_visible_match_ids,
+    dashboard_report_type_options,
+    filter_dashboard_report_rows,
     list_dashboard_report_files,
     resolve_current_filter,
     select_matches_for_export,
+    summarize_dashboard_report_types,
     should_run_pre_export_analysis,
 )
 
@@ -116,6 +119,23 @@ class UIReportExportFlowModuleTests(unittest.TestCase):
         self.assertEqual(rows[0]["label"], "\u653e\u884c\u95ed\u73af")
         self.assertEqual(rows[1]["label"], "\u5355\u573a\u5206\u6790")
         self.assertEqual(classify_dashboard_report_file(Path("unknown_report.md")), "\u5176\u4ed6\u62a5\u544a")
+
+    def test_dashboard_report_filters_by_type_and_query(self) -> None:
+        rows = [
+            {"name": "ai_match_report_a.md", "label": "\u5355\u573a\u5206\u6790", "path": Path("reports/ai_match_report_a.md")},
+            {"name": "strategy_release_recovery_loop_b.md", "label": "\u653e\u884c\u95ed\u73af", "path": Path("reports/strategy_release_recovery_loop_b.md")},
+            {"name": "strategy_release_recovery_loop_c.md", "label": "\u653e\u884c\u95ed\u73af", "path": Path("reports/strategy_release_recovery_loop_c.md")},
+        ]
+
+        summary = summarize_dashboard_report_types(rows)
+        options = dashboard_report_type_options(rows)
+        filtered = filter_dashboard_report_rows(rows, selected_type="\u653e\u884c\u95ed\u73af", query="loop_c")
+
+        self.assertEqual(summary["\u653e\u884c\u95ed\u73af"], 2)
+        self.assertEqual(options[0], "\u5168\u90e8")
+        self.assertEqual(options[1], "\u653e\u884c\u95ed\u73af")
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(filtered[0]["name"], "strategy_release_recovery_loop_c.md")
 
 
 if __name__ == "__main__":

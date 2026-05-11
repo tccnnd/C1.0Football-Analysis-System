@@ -118,7 +118,10 @@ from .ui_modules import (
     format_strategy_admission_reasons,
     format_strategy_admission_replay_guard,
     format_strategy_admission_thresholds,
+    dashboard_report_type_options,
+    filter_dashboard_report_rows,
     list_dashboard_report_files,
+    summarize_dashboard_report_types,
     select_strategy_allowlist_rows,
 )
 
@@ -2093,7 +2096,6 @@ class SmartMatchDashboard:
         self._refresh_nav_highlight()
         REPORT_DIR.mkdir(parents=True, exist_ok=True)
         report_rows = list_dashboard_report_files(REPORT_DIR, limit=200)
-        files = [row["path"] for row in report_rows if isinstance(row.get("path"), Path)]
 
         shell = self._page_shell("\u5386\u53f2\u62a5\u544a", f"\u62a5\u544a\u76ee\u5f55: {REPORT_DIR}")
 
@@ -2103,6 +2105,31 @@ class SmartMatchDashboard:
         left.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 14))
         right = self._card(body, PANEL)
         right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        filter_box = tk.Frame(left, bg=PANEL)
+        filter_box.pack(fill=tk.X, padx=10, pady=(10, 0))
+        type_var = tk.StringVar(value="\u5168\u90e8")
+        search_var = tk.StringVar(value="")
+        type_options = dashboard_report_type_options(report_rows)
+        ttk.Combobox(
+            filter_box,
+            state="readonly",
+            textvariable=type_var,
+            values=type_options,
+            width=18,
+        ).pack(fill=tk.X, pady=(0, 8))
+        search_entry = tk.Entry(
+            filter_box,
+            textvariable=search_var,
+            bg=PANEL_2,
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10),
+        )
+        search_entry.pack(fill=tk.X)
+        summary_text = tk.StringVar(value="")
+        tk.Label(filter_box, textvariable=summary_text, bg=PANEL, fg=MUTED, font=("Microsoft YaHei UI", 9), justify=tk.LEFT).pack(anchor=tk.W, pady=(8, 0))
 
         listbox = tk.Listbox(
             left,
@@ -2129,11 +2156,14 @@ class SmartMatchDashboard:
             pady=12,
         )
         preview.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+        filtered_rows: list[dict[str, object]] = []
 
         def show_file(index: int) -> None:
-            if index < 0 or index >= len(files):
+            if index < 0 or index >= len(filtered_rows):
                 return
-            path = files[index]
+            path = filtered_rows[index].get("path")
+            if not isinstance(path, Path):
+                return
             try:
                 content = path.read_text(encoding="utf-8")
             except Exception as exc:
@@ -2143,20 +2173,41 @@ class SmartMatchDashboard:
             preview.insert("1.0", content)
             preview.configure(state=tk.DISABLED)
 
-        for row in report_rows:
-            path = row.get("path")
-            if not isinstance(path, Path):
-                continue
-            listbox.insert(tk.END, f"{row.get('updated_at', '-')}  [{row.get('label', '-')}]  {path.name}")
+        def refresh_report_list(_event=None) -> None:
+            nonlocal filtered_rows
+            filtered_rows = filter_dashboard_report_rows(
+                report_rows,
+                selected_type=type_var.get(),
+                query=search_var.get(),
+            )
+            listbox.delete(0, tk.END)
+            preview.configure(state=tk.NORMAL)
+            preview.delete("1.0", tk.END)
+            counts = summarize_dashboard_report_types(filtered_rows)
+            count_text = " / ".join(f"{label}:{count}" for label, count in counts.items()) or "-"
+            summary_text.set(f"\u5339\u914d {len(filtered_rows)}/{len(report_rows)} | {count_text}")
+            for row in filtered_rows:
+                path = row.get("path")
+                if not isinstance(path, Path):
+                    continue
+                listbox.insert(tk.END, f"{row.get('updated_at', '-')}  [{row.get('label', '-')}]  {path.name}")
+            if filtered_rows:
+                listbox.selection_set(0)
+                show_file(0)
+            else:
+                preview.insert("1.0", "\u6682\u65e0\u5339\u914d\u7684\u5386\u53f2\u62a5\u544a\u3002")
+                preview.configure(state=tk.DISABLED)
 
-        if files:
-            listbox.selection_set(0)
-            show_file(0)
+        if report_rows:
+            refresh_report_list()
         else:
+            summary_text.set("\u5339\u914d 0/0 | -")
             preview.insert("1.0", "\u6682\u65e0\u5386\u53f2\u62a5\u544a\u3002")
             preview.configure(state=tk.DISABLED)
 
         listbox.bind("<<ListboxSelect>>", lambda _event: show_file(listbox.curselection()[0] if listbox.curselection() else -1))
+        type_var.trace_add("write", lambda *_args: refresh_report_list())
+        search_var.trace_add("write", lambda *_args: refresh_report_list())
 
     def open_data_center(self) -> None:
         self.current_nav_index = 5
