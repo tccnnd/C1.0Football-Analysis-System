@@ -40,7 +40,7 @@ class CoreModelWarmupTests(unittest.TestCase):
             second = _WarmupModel(model_file)
 
             with patch("v24_app.core._prediction_model_warmup_targets", return_value=[("first", first), ("second", second)]):
-                report = core.warmup_prediction_models()
+                report = core.warmup_prediction_models(include_runtime_caches=False)
 
         self.assertEqual(report["status"], "ready")
         self.assertEqual(report["ready_count"], 2)
@@ -56,13 +56,38 @@ class CoreModelWarmupTests(unittest.TestCase):
             failed = _WarmupModel(model_file, fail=True)
 
             with patch("v24_app.core._prediction_model_warmup_targets", return_value=[("ok", ok), ("failed", failed)]):
-                report = core.warmup_prediction_models()
+                report = core.warmup_prediction_models(include_runtime_caches=False)
 
         self.assertEqual(report["status"], "error")
         self.assertEqual(report["ready_count"], 1)
         failed_item = next(item for item in report["items"] if item["model"] == "failed")
         self.assertEqual(failed_item["status"], "error")
         self.assertIn("load failed", failed_item["error"])
+
+    def test_warmup_prediction_models_can_include_runtime_caches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            model_file = Path(tmp) / "model.json"
+            model_file.write_text("{}", encoding="utf-8")
+            model = _WarmupModel(model_file)
+            calls: list[str] = []
+
+            def runtime_loader() -> dict:
+                calls.append("runtime")
+                return {"item_count": 3}
+
+            with (
+                patch("v24_app.core._prediction_model_warmup_targets", return_value=[("model", model)]),
+                patch("v24_app.core._prediction_runtime_warmup_targets", return_value=[("runtime", runtime_loader)]),
+            ):
+                report = core.warmup_prediction_models()
+
+        self.assertEqual(report["status"], "ready")
+        self.assertEqual(report["ready_count"], 2)
+        self.assertEqual(report["total_count"], 2)
+        self.assertEqual(calls, ["runtime"])
+        runtime_item = next(item for item in report["items"] if item["model"] == "runtime")
+        self.assertEqual(runtime_item["kind"], "runtime_cache")
+        self.assertEqual(runtime_item["summary"], {"item_count": 3})
 
 
 if __name__ == "__main__":

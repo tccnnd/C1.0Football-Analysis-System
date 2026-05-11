@@ -4,6 +4,7 @@ import json
 import hashlib
 import shutil
 import subprocess
+import threading
 import time
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
@@ -190,6 +191,7 @@ _RECENT_FORM_CACHE: dict[str, object] = {
     "team_histories": {},
 }
 _RECENT_FORM_CACHE_VERSION = 1
+_RECENT_FORM_CACHE_LOCK = threading.RLock()
 _RATINGS_CACHE: dict[str, dict[str, object]] = {
     "club": {"signature": None, "ratings": {}},
     "national_team": {"signature": None, "ratings": {}},
@@ -9337,26 +9339,27 @@ def _save_recent_form_team_histories_cache(signature: dict[str, object], team_hi
 
 
 def _recent_form_team_histories() -> dict[str, list[dict]]:
-    signature = _recent_form_state_signature()
-    cached_signature = _RECENT_FORM_CACHE.get("signature")
-    cached_histories = _RECENT_FORM_CACHE.get("team_histories")
-    if cached_signature == signature and isinstance(cached_histories, dict):
-        return cached_histories
+    with _RECENT_FORM_CACHE_LOCK:
+        signature = _recent_form_state_signature()
+        cached_signature = _RECENT_FORM_CACHE.get("signature")
+        cached_histories = _RECENT_FORM_CACHE.get("team_histories")
+        if cached_signature == signature and isinstance(cached_histories, dict):
+            return cached_histories
 
-    cached_file_histories = _load_recent_form_team_histories_cache(signature)
-    if cached_file_histories is not None:
+        cached_file_histories = _load_recent_form_team_histories_cache(signature)
+        if cached_file_histories is not None:
+            _RECENT_FORM_CACHE["signature"] = signature
+            _RECENT_FORM_CACHE["team_histories"] = cached_file_histories
+            return cached_file_histories
+
+        team_histories = build_team_histories_from_state(
+            sample_items=STATE_STORE.load_xgb_samples(),
+            settlement_items=STATE_STORE.load_settlements(),
+        )
+        _save_recent_form_team_histories_cache(signature, team_histories)
         _RECENT_FORM_CACHE["signature"] = signature
-        _RECENT_FORM_CACHE["team_histories"] = cached_file_histories
-        return cached_file_histories
-
-    team_histories = build_team_histories_from_state(
-        sample_items=STATE_STORE.load_xgb_samples(),
-        settlement_items=STATE_STORE.load_settlements(),
-    )
-    _save_recent_form_team_histories_cache(signature, team_histories)
-    _RECENT_FORM_CACHE["signature"] = signature
-    _RECENT_FORM_CACHE["team_histories"] = team_histories
-    return team_histories
+        _RECENT_FORM_CACHE["team_histories"] = team_histories
+        return team_histories
 
 
 def _recent_form_features_for_match(match: AppMatch) -> dict[str, float]:
@@ -11796,7 +11799,47 @@ def _prediction_model_warmup_targets() -> list[tuple[str, object]]:
     ]
 
 
-def warmup_prediction_models() -> dict:
+def _warmup_recent_form_cache() -> dict:
+    histories = _recent_form_team_histories()
+    return {
+        "team_count": len(histories),
+        "history_entry_count": sum(len(entries) for entries in histories.values() if isinstance(entries, list)),
+    }
+
+
+def _warmup_dynamic_play_thresholds() -> dict:
+    thresholds, meta = _runtime_dynamic_play_thresholds(_current_play_thresholds())
+    return {
+        "threshold_count": len(thresholds),
+        "adjustment_reason": meta.get("reason") if isinstance(meta, dict) else "",
+    }
+
+
+def _warmup_market_snapshot_cache() -> dict:
+    signature = _state_store_path_signature("market_snapshots_file")
+    if signature is not None and _MARKET_SNAPSHOT_RECORD_CACHE.get("signature") == signature:
+        items = _MARKET_SNAPSHOT_RECORD_CACHE.get("items", {})
+    else:
+        items = STATE_STORE.load_market_snapshots()
+        _MARKET_SNAPSHOT_RECORD_CACHE["signature"] = signature
+        _MARKET_SNAPSHOT_RECORD_CACHE["items"] = items
+    return {"snapshot_count": len(items) if isinstance(items, dict) else 0}
+
+
+def _prediction_runtime_warmup_targets() -> list[tuple[str, object]]:
+    return [
+        ("recent_form", _warmup_recent_form_cache),
+        ("market_snapshots", _warmup_market_snapshot_cache),
+        ("play_thresholds", get_play_threshold_status),
+        ("dynamic_play_thresholds", _warmup_dynamic_play_thresholds),
+        ("bayes_calibration", get_bayes_calibration_status),
+        ("play_model_policy", get_play_model_policy_status),
+        ("strategy_admission_policy", get_strategy_admission_policy_status),
+        ("high_accuracy_strategy", get_high_accuracy_strategy_status),
+    ]
+
+
+def warmup_prediction_models(*, include_runtime_caches: bool = True) -> dict:
     started = time.perf_counter()
     items: list[dict] = []
     ready_count = 0
@@ -11823,7 +11866,31 @@ def warmup_prediction_models() -> dict:
             item["status"] = "error"
             item["error"] = str(exc)
         item["elapsed_seconds"] = round(time.perf_counter() - item_started, 4)
+        item["kind"] = "model"
         items.append(item)
+
+    if include_runtime_caches:
+        for name, loader in _prediction_runtime_warmup_targets():
+            item_started = time.perf_counter()
+            item = {
+                "model": name,
+                "kind": "runtime_cache",
+                "model_exists": True,
+                "ready": False,
+                "status": "pending",
+            }
+            try:
+                payload = loader() if callable(loader) else {}
+                item["ready"] = True
+                item["status"] = "ready"
+                if isinstance(payload, dict):
+                    item["summary"] = payload
+                ready_count += 1
+            except Exception as exc:
+                item["status"] = "error"
+                item["error"] = str(exc)
+            item["elapsed_seconds"] = round(time.perf_counter() - item_started, 4)
+            items.append(item)
 
     total = len(items)
     if ready_count == total and total > 0:
