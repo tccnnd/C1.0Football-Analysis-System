@@ -229,14 +229,14 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
         }
 
         status_text = build_draw_specialist_backtest_status_text(result)
-        self.assertIn("Draw release guard: active=True", status_text)
+        self.assertIn("Draw release guard (watch-only): active=True", status_text)
         self.assertIn("blocked_odds=<=3.00, >4.20", status_text)
         self.assertIn("平局专项诊断", status_text)
         self.assertIn("精确率 40.0%", status_text)
         self.assertIn("报告: draw.md", status_text)
         self.assertIn("平局专项回测完成", build_draw_specialist_backtest_apply_status_text(result))
         rows = build_draw_specialist_backtest_card_rows(result)
-        self.assertEqual(rows[2]["title"], "Draw release guard")
+        self.assertEqual(rows[2]["title"], "Draw release guard (watch-only)")
         self.assertIn("score_floor=0.58", rows[2]["body"])
         self.assertEqual(rows[0]["tone"], "good")
         self.assertIn("精确 40.0%", rows[0]["title"])

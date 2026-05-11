@@ -289,13 +289,13 @@ def _build_draw_release_guard_block(prediction: Mapping[str, object]) -> str:
         f"source={evidence.get('source', '-')} | precision={_pct_text(evidence.get('precision'))} | "
         f"draw_rate={_pct_text(evidence.get('draw_rate'))} | lift={_pct_text(evidence.get('lift'))}"
         if evidence
-        else "no weak-bucket evidence"
+        else "no blocked-odds evidence"
     )
     return (
         "\n\nDraw Release Guard"
-        + f"\n- status={status} | reason={guard.get('reason', '-')}"
-        + f"\n- odds_bucket={guard.get('odds_bucket', '-')} | draw_odds={_float_value(guard.get('odds_draw')):.3f} | min_score={_pct_text(guard.get('min_score'))}"
-        + f"\n- base_takeover={bool(guard.get('base_takeover'))} | weak_score={bool(guard.get('weak_score'))} | blocked={bool(guard.get('blocked'))}"
+        + f"\n- release={status} | reason={guard.get('reason', '-')}"
+        + f"\n- blocked_odds={guard.get('odds_bucket', '-')} | draw_odds={_float_value(guard.get('odds_draw')):.3f} | score_floor={_pct_text(guard.get('min_score'))}"
+        + f"\n- raw_takeover={bool(guard.get('base_takeover'))} | watch_score={bool(guard.get('weak_score'))} | blocked={bool(guard.get('blocked'))}"
         + f"\n- evidence: {evidence_text}"
     )
 
