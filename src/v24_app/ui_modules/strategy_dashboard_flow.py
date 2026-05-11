@@ -304,6 +304,105 @@ def format_strategy_admission_replay_guard(admission: Mapping[str, object] | obj
     return "；".join(parts)
 
 
+def _high_strategy_count(high_strategy: Mapping[str, object], field: str, items: list[object]) -> int:
+    if items:
+        return len(items)
+    return _safe_int(high_strategy.get(field))
+
+
+def _high_strategy_feedback_text(item: Mapping[str, object]) -> str:
+    feedback = _as_mapping(item.get("jc_live_feedback"))
+    if feedback:
+        live_count = _safe_int(feedback.get("live_count"))
+        hit_count = _safe_int(feedback.get("live_hit_count"))
+        rate = feedback.get("live_hit_rate")
+        status = _text(feedback.get("status"))
+        recovery = _text(feedback.get("recovery_status"), "")
+        suffix = f" | 恢复 {recovery}" if recovery else ""
+        if live_count:
+            return f"实盘 {status} {hit_count}/{live_count} ({_pct(rate)}){suffix}"
+        return f"实盘 {status}{suffix}"
+
+    breaker = _as_mapping(item.get("breaker"))
+    known_count = _safe_int(breaker.get("known_count"))
+    if known_count:
+        hit_count = _safe_int(breaker.get("hit_count"))
+        return f"实盘反馈 {hit_count}/{known_count} ({_pct(breaker.get('recent_hit_rate'))})"
+    return "实盘待反馈"
+
+
+def _high_strategy_breaker_text(item: Mapping[str, object]) -> str:
+    breaker = _as_mapping(item.get("breaker"))
+    if not breaker:
+        return "断路 -"
+    status = _text(breaker.get("status"))
+    miss = _safe_int(breaker.get("miss_streak"))
+    threshold = _safe_int(breaker.get("threshold"), 3)
+    recovery = _safe_int(breaker.get("recovery_streak"))
+    recovery_required = _safe_int(breaker.get("recovery_hits_required"), 2)
+    return f"断路 {status} | 连错 {miss}/{threshold} | 恢复 {recovery}/{recovery_required}"
+
+
+def _format_high_strategy_item(item: Mapping[str, object], *, label: str, index: int) -> str:
+    play = _label(PLAY_LABELS, item.get("play_type"))
+    pick = _text(item.get("pick"))
+    confidence = _pct(item.get("confidence"))
+    min_confidence = _pct(item.get("min_confidence"))
+    accuracy = item.get("backtest_accuracy", item.get("accuracy"))
+    hit_count = _safe_int(item.get("backtest_hits", item.get("hit_count")))
+    sample_count = _safe_int(item.get("backtest_samples", item.get("sample_count")))
+    layer = _as_mapping(item.get("layer"))
+    data_layer = _label(DATA_LAYER_LABELS, item.get("data_layer") or layer.get("data_layer"))
+    role = _label(ROLE_LABELS, item.get("effective_role") or item.get("role"))
+    return (
+        f"{index}. {label}/{role} {play} {pick} | "
+        f"置信 {confidence}/{min_confidence} | "
+        f"回测 {_pct(accuracy)} ({hit_count}/{sample_count}) | "
+        f"{data_layer} | {_high_strategy_breaker_text(item)} | {_high_strategy_feedback_text(item)}"
+    )
+
+
+def format_high_accuracy_strategy_release_explanation(
+    high_strategy: Mapping[str, object] | object,
+    admission: Mapping[str, object] | object = None,
+    *,
+    limit: int = 3,
+) -> str:
+    resolved = _as_mapping(high_strategy)
+    if not resolved or not _safe_bool(resolved.get("enabled")):
+        return "-"
+
+    admission_payload = _as_mapping(admission)
+    active_items = [item for item in _as_list(resolved.get("active_matches")) if isinstance(item, Mapping)]
+    shadow_items = [item for item in _as_list(resolved.get("shadow_matches")) if isinstance(item, Mapping)]
+    active_count = _high_strategy_count(resolved, "active_count", active_items)
+    shadow_count = _high_strategy_count(resolved, "shadow_count", shadow_items)
+    summary = _text(resolved.get("summary"))
+    decision = _admission_label(admission_payload) if admission_payload else ("正式放行" if active_count else "观察")
+    release_state = "可放行" if _safe_bool(admission_payload.get("release_allowed")) else "不可放行" if admission_payload else ("可放行" if active_count else "不可放行")
+
+    lines = [
+        f"状态: {decision} / {release_state} | 正式 {active_count} / 观察 {shadow_count} | {summary}",
+    ]
+    if admission_payload:
+        lines.append(f"候选: {format_strategy_admission_pick(admission_payload)}")
+
+    evidence: list[tuple[str, Mapping[str, object]]] = [("正式", item) for item in active_items]
+    evidence.extend(("观察", item) for item in shadow_items)
+    if not evidence and resolved.get("play_type"):
+        evidence.append(("候选", resolved))
+
+    try:
+        item_limit = max(0, int(limit))
+    except (TypeError, ValueError):
+        item_limit = 3
+    for index, (label, item) in enumerate(evidence[:item_limit], start=1):
+        lines.append(_format_high_strategy_item(item, label=label, index=index))
+    if len(evidence) > item_limit:
+        lines.append(f"... 另有 {len(evidence) - item_limit} 条策略证据")
+    return "\n".join(lines)
+
+
 def compute_strategy_admission_counts(rows: Sequence[object] | object) -> dict[str, int]:
     counts = {"all": 0, "allow": 0, "observe": 0, "block": 0}
     if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):

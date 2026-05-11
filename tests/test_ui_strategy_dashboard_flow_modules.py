@@ -79,6 +79,7 @@ from v24_app.ui_modules import (
     build_strategy_release_pool_rows,
     compute_strategy_admission_counts,
     filter_strategy_admission_rows,
+    format_high_accuracy_strategy_release_explanation,
     format_strategy_admission_label,
     format_strategy_admission_pick,
     format_strategy_admission_reasons,
@@ -121,6 +122,57 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("让球历史失误 67.0%", format_strategy_admission_replay_guard(admission))
         self.assertIn("\u9ad8\u51c6 1/2", format_strategy_admission_thresholds(admission))
         self.assertIn("\u4e2d\u98ce\u9669\u89c2\u5bdf", format_strategy_admission_thresholds(admission))
+
+    def test_high_accuracy_release_explanation_includes_feedback_and_breaker_state(self) -> None:
+        admission = {
+            "label": "正式放行",
+            "release_allowed": True,
+            "top_play": "market_1x2",
+            "top_pick": "HOME",
+            "top_confidence": 0.72,
+        }
+        high_strategy = {
+            "enabled": True,
+            "summary": "market_1x2 HOME",
+            "active_matches": [
+                {
+                    "role": "primary",
+                    "play_type": "market_1x2",
+                    "pick": "HOME",
+                    "confidence": 0.72,
+                    "min_confidence": 0.70,
+                    "backtest_accuracy": 0.84,
+                    "backtest_hits": 84,
+                    "backtest_samples": 100,
+                    "layer": {"data_layer": "historical_market"},
+                    "breaker": {"status": "pending", "known_count": 0, "miss_streak": 0, "threshold": 3},
+                }
+            ],
+            "shadow_matches": [
+                {
+                    "role": "observe",
+                    "play_type": "handicap",
+                    "pick": "HOME -0.5",
+                    "confidence": 0.69,
+                    "min_confidence": 0.68,
+                    "backtest_accuracy": 0.71,
+                    "backtest_hits": 71,
+                    "backtest_samples": 100,
+                    "layer": {"data_layer": "jc_stratified_market"},
+                    "breaker": {"status": "paused", "known_count": 3, "hit_count": 0, "recent_hit_rate": 0.0, "miss_streak": 3, "threshold": 3},
+                    "jc_live_feedback": {"status": "downgraded", "live_count": 10, "live_hit_count": 4, "live_hit_rate": 0.4, "recovery_status": "blocked"},
+                }
+            ],
+        }
+
+        text = format_high_accuracy_strategy_release_explanation(high_strategy, admission, limit=2)
+
+        self.assertIn("正式放行 / 可放行", text)
+        self.assertIn("正式 1 / 观察 1", text)
+        self.assertIn("市场胜平负 HOME", text)
+        self.assertIn("实盘待反馈", text)
+        self.assertIn("实盘 downgraded 4/10 (40.0%)", text)
+        self.assertIn("断路 paused", text)
 
     def test_strategy_admission_counts_and_filters_rows(self) -> None:
         rows = [

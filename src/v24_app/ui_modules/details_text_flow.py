@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Callable, Mapping
 
 from .strategy_dashboard_flow import (
+    format_high_accuracy_strategy_release_explanation,
     format_strategy_admission_pick,
     format_strategy_admission_reasons,
     format_strategy_admission_replay_guard,
@@ -379,6 +380,7 @@ def build_match_details_text(
     if high_strategy.get("enabled"):
         active_items = high_strategy.get("active_matches", [])
         active_count = len(active_items) if isinstance(active_items, list) else int(high_strategy.get("active_count", 0) or 0)
+        release_explanation = format_high_accuracy_strategy_release_explanation(high_strategy, admission, limit=3)
         high_strategy_block = (
             "\n\n高准确率策略\n"
             + f"- 当前命中: {'是' if active_count > 0 else '否'} | 命中策略数 {active_count}\n"
@@ -386,7 +388,9 @@ def build_match_details_text(
             + f"- 置信度: {float(high_strategy.get('confidence', 0) or 0):.1%} / 门槛 {float(high_strategy.get('min_confidence', 0) or 0):.1%}\n"
             + f"- 历史命中: {float(high_strategy.get('backtest_accuracy', 0) or 0):.1%} ({int(high_strategy.get('backtest_hits', 0) or 0)}/{int(high_strategy.get('backtest_samples', 0) or 0)})\n"
             + f"- 策略摘要: {high_strategy.get('summary', '-')}\n"
-            + f"- 原因: {high_strategy.get('reason', '-')}"
+            + f"- 原因: {high_strategy.get('reason', '-')}\n"
+            + "- 放行解释:\n"
+            + release_explanation
         )
     if high_strategy.get("enabled"):
         evidence_source = active_items[0] if isinstance(active_items, list) and active_items else high_strategy

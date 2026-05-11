@@ -122,6 +122,7 @@ from .ui_modules import (
     build_strategy_release_pool_rows,
     compute_strategy_admission_counts,
     filter_strategy_admission_rows,
+    format_high_accuracy_strategy_release_explanation,
     format_strategy_admission_pick,
     format_strategy_admission_reasons,
     format_strategy_admission_replay_guard,
@@ -6348,11 +6349,17 @@ class SmartMatchDashboard:
             threshold_text = format_strategy_admission_thresholds(admission)
             pick_text = format_strategy_admission_pick(admission)
             replay_guard_text = format_strategy_admission_replay_guard(admission)
+            high_explanation = format_high_accuracy_strategy_release_explanation(
+                row.prediction.get("high_accuracy_strategy", {}),
+                admission,
+                limit=2,
+            )
             title = f"{_admission_text(row.prediction)} | {row.match.league} | {row.match.home_team} vs {row.match.away_team}"
             body = (
                 f"推荐: {_strategy_text(row.prediction)} | 风险 {_risk_label(row.prediction.get('risk_level'))} | 置信 {_pct1(row.prediction.get('confidence'))}\n"
                 f"高准正式/观察: {int(admission.get('active_count', 0) or 0)} / {int(admission.get('shadow_count', 0) or 0)} | "
                 f"候选 {pick_text}\n"
+                f"高准解释: {high_explanation}\n"
                 f"原因: {reason_text}\n"
                 f"门槛: {threshold_text}"
             )

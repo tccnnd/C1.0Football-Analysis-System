@@ -294,6 +294,8 @@ class UIDetailsTextFlowModuleTests(unittest.TestCase):
         self.assertIn("C1 放行门控", text)
         self.assertIn("策略准入白名单", text)
         self.assertIn("正式放行", text)
+        self.assertIn("放行解释", text)
+        self.assertIn("实盘待反馈", text)
         self.assertIn("\u547d\u4e2d\u6b63\u5f0f\u9ad8\u51c6\u7b56\u7565", text)
         self.assertIn("\u51c6\u5165\u95e8\u69db", text)
         self.assertIn("Agent Replay", text)
