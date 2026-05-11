@@ -80,6 +80,7 @@ class XGBoostProbabilityModel:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.model_dir.mkdir(parents=True, exist_ok=True)
         self.samples_file = self.state_dir / "xgb_training_samples.json"
+        self.samples_summary_file = self.state_dir / "xgb_training_samples_summary.json"
         self.model_file = self.model_dir / "xgb_v0_match_outcome.json"
         self.meta_file = self.model_dir / "xgb_v0_match_outcome.meta.json"
 
@@ -204,6 +205,54 @@ class XGBoostProbabilityModel:
             return []
         items = payload.get("items", [])
         return items if isinstance(items, list) else []
+
+    def _samples_signature(self) -> dict[str, int]:
+        try:
+            stat = self.samples_file.stat()
+        except OSError:
+            return {"mtime_ns": 0, "size_bytes": 0}
+        return {"mtime_ns": int(stat.st_mtime_ns), "size_bytes": int(stat.st_size)}
+
+    def _sample_summary_from_samples(self, samples: list[dict]) -> dict[str, Any]:
+        valid_feature_count = 0
+        label_counts = {0: 0, 1: 0, 2: 0}
+        for item in samples:
+            if not isinstance(item, dict):
+                continue
+            if isinstance(item.get("features"), dict):
+                valid_feature_count += 1
+            try:
+                label = int(item.get("label"))
+            except Exception:
+                continue
+            if label in label_counts:
+                label_counts[label] += 1
+        return {
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "source_file": str(self.samples_file),
+            "source_signature": self._samples_signature(),
+            "sample_count": len(samples),
+            "valid_feature_count": valid_feature_count,
+            "label_counts": {str(key): value for key, value in label_counts.items()},
+        }
+
+    def _load_sample_summary(self) -> dict[str, Any]:
+        summary: dict[str, Any] = {}
+        if self.samples_summary_file.exists():
+            try:
+                payload = json.loads(self.samples_summary_file.read_text(encoding="utf-8"))
+                summary = payload if isinstance(payload, dict) else {}
+            except Exception:
+                summary = {}
+        if summary.get("source_signature") == self._samples_signature():
+            return summary
+        samples = self._load_samples()
+        summary = self._sample_summary_from_samples(samples)
+        try:
+            self.samples_summary_file.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+        return summary
 
     def _samples_to_xy(self, samples: list[dict]) -> tuple[Any, Any]:
         if np is None:
@@ -349,27 +398,15 @@ class XGBoostProbabilityModel:
         return self._normalize_probs((home, draw, away))
 
     def get_training_status(self) -> dict[str, Any]:
-        samples = self._load_samples()
-        valid_feature_count = 0
-        label_counts = {0: 0, 1: 0, 2: 0}
-        for item in samples:
-            if not isinstance(item, dict):
-                continue
-            if isinstance(item.get("features"), dict):
-                valid_feature_count += 1
-            try:
-                label = int(item.get("label"))
-            except Exception:
-                continue
-            if label in label_counts:
-                label_counts[label] += 1
-
+        summary = self._load_sample_summary()
+        label_payload = summary.get("label_counts", {}) if isinstance(summary.get("label_counts"), dict) else {}
+        label_counts = {key: int(label_payload.get(str(key), label_payload.get(key, 0)) or 0) for key in (0, 1, 2)}
         meta = self._load_meta()
         model_compatible = self._is_model_compatible(meta) if meta else (not self.model_file.exists())
 
         return {
-            "sample_count": len(samples),
-            "valid_feature_count": valid_feature_count,
+            "sample_count": int(summary.get("sample_count", 0) or 0),
+            "valid_feature_count": int(summary.get("valid_feature_count", 0) or 0),
             "label_counts": label_counts,
             "min_train_samples": self.min_train_samples,
             "model_exists": self.model_file.exists(),

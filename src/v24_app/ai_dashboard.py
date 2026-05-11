@@ -35,7 +35,7 @@ from .core import (
     get_strategy_admission_policy_history,
     invalidate_statsbomb_state_cache,
     mark_strategy_allowlist_snapshots,
-    persist_prediction_snapshot,
+    persist_prediction_snapshots,
     predict_match,
     record_result_recovery_run,
     rollback_strategy_admission_policy,
@@ -327,17 +327,20 @@ def _cache_status_rows(load_report: dict[str, object] | None) -> list[tuple[str,
 def _build_dashboard_rows(matches: list[AppMatch]) -> tuple[list[DashboardRow], list[dict[str, str]]]:
     rows: list[DashboardRow] = []
     failures: list[dict[str, str]] = []
+    snapshot_items: list[tuple[AppMatch, dict]] = []
     for match in matches:
         try:
             prediction = predict_match(match)
         except Exception as exc:
             failures.append(_match_load_failure(match, "predict", exc))
             continue
-        try:
-            persist_prediction_snapshot(match, prediction)
-        except Exception as exc:
-            failures.append(_match_load_failure(match, "snapshot", exc))
+        snapshot_items.append((match, prediction))
         rows.append(DashboardRow(match, prediction))
+    if snapshot_items:
+        try:
+            persist_prediction_snapshots(snapshot_items)
+        except Exception as exc:
+            failures.append(_match_load_failure(snapshot_items[0][0], "snapshot", exc))
     return rows, failures
 
 

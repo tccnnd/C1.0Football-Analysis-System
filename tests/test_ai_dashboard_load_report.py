@@ -62,13 +62,13 @@ class AIDashboardLoadReportTests(unittest.TestCase):
                 raise RuntimeError("model failed")
             return {"risk_level": "low", "home": match.home_team}
 
-        def fake_persist(match: AppMatch, prediction: dict) -> None:
-            if match.home_team == "C":
-                raise ValueError("snapshot failed")
+        def fake_persist(items: list[tuple[AppMatch, dict]]) -> None:
+            self.assertEqual([match.home_team for match, _prediction in items], ["C", "E"])
+            raise ValueError("snapshot failed")
 
         with (
             patch("v24_app.ai_dashboard.predict_match", side_effect=fake_predict),
-            patch("v24_app.ai_dashboard.persist_prediction_snapshot", side_effect=fake_persist),
+            patch("v24_app.ai_dashboard.persist_prediction_snapshots", side_effect=fake_persist),
         ):
             rows, failures = _build_dashboard_rows(matches)
 

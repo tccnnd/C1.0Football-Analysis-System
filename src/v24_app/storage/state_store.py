@@ -15,6 +15,7 @@ class StateStore:
         self.settlements_file = self.state_dir / "settlements.json"
         self.parlay_tickets_file = self.state_dir / "parlay_tickets.json"
         self.xgb_samples_file = self.state_dir / "xgb_training_samples.json"
+        self.xgb_samples_summary_file = self.state_dir / "xgb_training_samples_summary.json"
         self.analysis_history_file = self.state_dir / "analysis_history.json"
         self.prediction_snapshots_file = self.state_dir / "prediction_snapshots.json"
         self.market_snapshots_file = self.state_dir / "market_snapshots.json"
@@ -108,11 +109,84 @@ class StateStore:
             "items": normalized,
         }
         self.xgb_samples_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.save_xgb_samples_summary(normalized, updated_at=payload["updated_at"])
 
     def append_xgb_sample(self, sample: dict, limit: int | None = None) -> None:
         current = self.load_xgb_samples()
         current.append(sample)
         self.save_xgb_samples(current, limit=limit)
+
+    def _xgb_samples_signature(self) -> dict[str, int]:
+        try:
+            stat = self.xgb_samples_file.stat()
+        except OSError:
+            return {"mtime_ns": 0, "size_bytes": 0}
+        return {"mtime_ns": int(stat.st_mtime_ns), "size_bytes": int(stat.st_size)}
+
+    def _build_xgb_samples_summary(self, items: list[dict], *, updated_at: str | None = None) -> dict:
+        valid_feature_count = 0
+        label_counts: dict[str, int] = {}
+        dates: list[str] = []
+        leagues: set[str] = set()
+        sources: dict[str, int] = {}
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            features = item.get("features")
+            if isinstance(features, dict):
+                valid_feature_count += 1
+            try:
+                label = str(int(item.get("label")))
+                label_counts[label] = label_counts.get(label, 0) + 1
+            except Exception:
+                pass
+            meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+            if not isinstance(meta, dict):
+                continue
+            date_text = str(meta.get("match_date") or "").strip()
+            if date_text:
+                dates.append(date_text)
+            league = str(meta.get("league") or "").strip()
+            if league:
+                leagues.add(league)
+            source = str(meta.get("source") or "").strip() or "unknown"
+            sources[source] = sources.get(source, 0) + 1
+        league_examples = sorted(leagues)[:12]
+        source_counts = dict(sorted(sources.items(), key=lambda row: (-row[1], row[0]))[:12])
+        return {
+            "updated_at": updated_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "source_file": str(self.xgb_samples_file),
+            "source_signature": self._xgb_samples_signature(),
+            "sample_count": len(items),
+            "valid_feature_count": valid_feature_count,
+            "label_counts": label_counts,
+            "date_start": min(dates) if dates else None,
+            "date_end": max(dates) if dates else None,
+            "league_count": len(leagues),
+            "league_examples": league_examples,
+            "source_counts": source_counts,
+        }
+
+    def save_xgb_samples_summary(self, items: list[dict], *, updated_at: str | None = None) -> dict:
+        summary = self._build_xgb_samples_summary(items, updated_at=updated_at)
+        self.xgb_samples_summary_file.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        return summary
+
+    def load_xgb_samples_summary(self, *, rebuild_if_stale: bool = True) -> dict:
+        summary: dict = {}
+        if self.xgb_samples_summary_file.exists():
+            try:
+                payload = json.loads(self.xgb_samples_summary_file.read_text(encoding="utf-8"))
+                summary = payload if isinstance(payload, dict) else {}
+            except Exception:
+                summary = {}
+        current_signature = self._xgb_samples_signature()
+        if summary.get("source_signature") == current_signature:
+            return summary
+        if not rebuild_if_stale:
+            return summary if summary else {"source_signature": current_signature, "sample_count": 0, "valid_feature_count": 0}
+        samples = self.load_xgb_samples()
+        return self.save_xgb_samples_summary(samples)
 
     def load_analysis_history(self) -> dict[str, dict]:
         if not self.analysis_history_file.exists():

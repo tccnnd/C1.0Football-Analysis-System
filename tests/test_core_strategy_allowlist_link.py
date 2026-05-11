@@ -23,9 +23,30 @@ class _FakeStateStore:
         self.snapshots = dict(snapshots or {})
         self.history: dict[str, dict] = {}
         self.market: dict[str, dict] = {}
+        self.snapshot_save_count = 0
+        self.history_save_count = 0
+        self.market_save_count = 0
 
     def load_prediction_snapshots(self) -> dict[str, dict]:
         return dict(self.snapshots)
+
+    def load_analysis_history(self) -> dict[str, dict]:
+        return dict(self.history)
+
+    def load_market_snapshots(self) -> dict[str, dict]:
+        return dict(self.market)
+
+    def save_prediction_snapshots(self, items: dict[str, dict]) -> None:
+        self.snapshots = dict(items)
+        self.snapshot_save_count += 1
+
+    def save_analysis_history(self, items: dict[str, dict]) -> None:
+        self.history = dict(items)
+        self.history_save_count += 1
+
+    def save_market_snapshots(self, items: dict[str, dict]) -> None:
+        self.market = dict(items)
+        self.market_save_count += 1
 
     def upsert_prediction_snapshot(self, match_id: str, record: dict, limit: int = 3000) -> None:
         self.snapshots[match_id] = record
@@ -107,6 +128,46 @@ class CoreStrategyAllowlistLinkTests(unittest.TestCase):
         self.assertEqual(stored["strategy_allowlist"]["file"], marker["file"])
         self.assertEqual(stored["prediction"]["strategy_allowlist"]["decision"], "allow")
         self.assertEqual(prediction["strategy_allowlist"]["exported_at"], marker["exported_at"])
+
+    def test_persist_prediction_snapshots_batches_state_writes(self) -> None:
+        first = self._match()
+        second = core.AppMatch(
+            home_team="C",
+            away_team="D",
+            league="L1",
+            match_time="20:00",
+            match_date="2026-05-09",
+            odds_home=2.1,
+            odds_draw=3.0,
+            odds_away=3.4,
+            source="live:titan",
+            source_id="m2",
+        )
+        marker = {
+            "status": "pending_settlement",
+            "decision": "allow",
+            "label": "\u6b63\u5f0f\u653e\u884c",
+            "file": "strategy_allowlist_20260509_173045.md",
+        }
+        fake_store = _FakeStateStore({first.match_id: {"strategy_allowlist": marker}})
+        first_prediction = {"recommendation": "home", "confidence": 0.66}
+        second_prediction = {"recommendation": "away", "confidence": 0.61}
+
+        with patch("v24_app.core.STATE_STORE", fake_store):
+            summary = core.persist_prediction_snapshots(
+                [(first, first_prediction), (second, second_prediction)]
+            )
+
+        self.assertEqual(summary["snapshot_count"], 2)
+        self.assertEqual(summary["analysis_count"], 2)
+        self.assertEqual(summary["market_snapshot_count"], 6)
+        self.assertEqual(fake_store.snapshot_save_count, 1)
+        self.assertEqual(fake_store.history_save_count, 1)
+        self.assertEqual(fake_store.market_save_count, 1)
+        self.assertEqual(fake_store.snapshots[first.match_id]["strategy_allowlist"]["file"], marker["file"])
+        self.assertEqual(first_prediction["strategy_allowlist"]["decision"], "allow")
+        self.assertIn(first.match_id, fake_store.history)
+        self.assertEqual(len(fake_store.market), 6)
 
     def test_strategy_allowlist_settlement_fields_marks_settled_source(self) -> None:
         fields = core._strategy_allowlist_settlement_fields(

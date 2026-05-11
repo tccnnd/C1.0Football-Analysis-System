@@ -789,11 +789,99 @@ def persist_market_snapshot(match: AppMatch) -> int:
 
 
 def persist_market_snapshots(matches: Iterable[AppMatch]) -> int:
+    rows = [match for match in matches if isinstance(match, AppMatch) and _has_market_snapshot_fields(match)]
+    if not rows:
+        return 0
+    try:
+        items = STATE_STORE.load_market_snapshots()
+    except Exception:
+        items = {}
+    if not isinstance(items, dict):
+        items = {}
+    saved_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     total = 0
-    for match in matches:
-        if isinstance(match, AppMatch):
-            total += persist_market_snapshot(match)
+    for match in rows:
+        record = _market_snapshot_record_for_match(match, saved_at=saved_at)
+        for snapshot_id in _market_snapshot_keys_for_match(match):
+            merged = _merge_market_snapshot_record(items.get(snapshot_id), record)
+            _ordered_upsert(items, snapshot_id, merged, limit=5000)
+            total += 1
+    if total:
+        STATE_STORE.save_market_snapshots(items)
+        _MARKET_SNAPSHOT_RECORD_CACHE["signature"] = _state_store_path_signature("market_snapshots_file")
+        _MARKET_SNAPSHOT_RECORD_CACHE["items"] = items
     return total
+
+
+def _ordered_upsert(items: dict[str, dict], key: str, record: dict, *, limit: int) -> None:
+    if key in items:
+        del items[key]
+    items[key] = record
+    if len(items) > limit:
+        overflow = len(items) - limit
+        stale_keys = list(items.keys())[:overflow]
+        for stale_key in stale_keys:
+            items.pop(stale_key, None)
+
+
+def _market_snapshot_record_for_match(match: AppMatch, *, saved_at: str) -> dict:
+    return {
+        "saved_at": saved_at,
+        "match": {
+            "match_id": match.match_id,
+            "source_id": normalize_text(match.source_id),
+            "match_date": match.match_date,
+            "match_time": match.match_time,
+            "league": match.league,
+            "home_team": match.home_team,
+            "away_team": match.away_team,
+            "source": match.source,
+        },
+        "market": _market_snapshot_fields_from_match(match),
+    }
+
+
+def _merge_market_snapshot_record(existing: dict | None, record: dict) -> dict:
+    history: list[dict] = []
+    if isinstance(existing, dict):
+        existing_history = existing.get("history")
+        if isinstance(existing_history, list):
+            history.extend(item for item in existing_history if isinstance(item, dict))
+        else:
+            existing_market = existing.get("market")
+            if isinstance(existing_market, dict):
+                history.append(
+                    {
+                        "saved_at": str(existing.get("saved_at") or ""),
+                        "market": dict(existing_market),
+                    }
+                )
+    market = record.get("market")
+    if isinstance(market, dict):
+        history.append(
+            {
+                "saved_at": str(record.get("saved_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                "market": dict(market),
+            }
+        )
+    deduped: dict[str, dict] = {}
+    for item in history:
+        key = f"{item.get('saved_at', '')}|{json.dumps(item.get('market', {}), sort_keys=True, ensure_ascii=False)}"
+        deduped[key] = item
+    merged = dict(record)
+    merged["history"] = list(deduped.values())[-48:]
+    return merged
+
+
+def _market_snapshot_keys_for_match(match: AppMatch) -> list[str]:
+    keys = [
+        _market_snapshot_exact_key(match.match_date, match.league, match.home_team, match.away_team),
+        _market_snapshot_team_key(match.match_date, match.home_team, match.away_team),
+    ]
+    source_id = normalize_text(match.source_id)
+    if source_id:
+        keys.insert(0, _market_snapshot_source_key(source_id))
+    return keys
 
 
 def enrich_match_from_market_snapshot_store(match: AppMatch) -> bool:
@@ -3980,35 +4068,92 @@ def _history_date_range(items: list[dict], date_key: str) -> tuple[str | None, s
     return (min(dates), max(dates)) if dates else (None, None)
 
 
+def _state_file_signature(path: Path) -> dict[str, int]:
+    try:
+        stat = path.stat()
+    except OSError:
+        return {"mtime_ns": 0, "size_bytes": 0}
+    return {"mtime_ns": int(stat.st_mtime_ns), "size_bytes": int(stat.st_size)}
+
+
+def _state_summary_path(path: Path) -> Path:
+    return path.with_name(f"{path.stem}_summary.json")
+
+
+def _load_state_items_summary(filename: str, *, date_key: str, year_key: str | None = None) -> dict:
+    path = PROJECT_DIR / "data" / "state" / filename
+    current_signature = _state_file_signature(path)
+    summary_path = _state_summary_path(path)
+    if summary_path.exists():
+        try:
+            payload = json.loads(summary_path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict) and payload.get("source_signature") == current_signature:
+                return payload
+        except Exception:
+            pass
+
+    payload = _load_state_payload(filename)
+    items = _state_payload_items(payload)
+    date_start, date_end = _history_date_range(items, date_key)
+    years: list[int] = []
+    if year_key:
+        years = sorted(
+            {
+                int(item.get(year_key))
+                for item in items
+                if isinstance(item.get(year_key), int) or str(item.get(year_key, "")).isdigit()
+            }
+        )
+    summary = {
+        "updated_at": payload.get("updated_at"),
+        "source": payload.get("source"),
+        "source_file": str(path),
+        "source_signature": current_signature,
+        "item_count": len(items),
+        "date_start": date_start,
+        "date_end": date_end,
+    }
+    if year_key:
+        summary.update(
+            {
+                "year_start": min(years) if years else None,
+                "year_end": max(years) if years else None,
+                "year_count": len(years),
+            }
+        )
+    try:
+        summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+    return summary
+
+
 def get_training_data_coverage_status() -> dict:
-    samples = STATE_STORE.load_xgb_samples()
-    valid_samples = [item for item in samples if isinstance(item, dict) and isinstance(item.get("features"), dict)]
-    sample_meta = [item.get("meta", {}) for item in valid_samples if isinstance(item.get("meta"), dict)]
-    sample_dates = [normalize_text(meta.get("match_date", "")) for meta in sample_meta if normalize_text(meta.get("match_date", ""))]
-    sample_leagues = sorted({normalize_text(meta.get("league", "")) for meta in sample_meta if normalize_text(meta.get("league", ""))})
-
-    club_payload = _load_state_payload("club_match_history.json")
-    club_items = _state_payload_items(club_payload)
-    club_start, club_end = _history_date_range(club_items, "match_date")
-
-    world_cup_payload = _load_state_payload("world_cup_history.json")
-    world_cup_items = _state_payload_items(world_cup_payload)
-    world_cup_start, world_cup_end = _history_date_range(world_cup_items, "date")
-    world_cup_years = sorted(
-        {
-            int(item.get("year"))
-            for item in world_cup_items
-            if isinstance(item.get("year"), int) or str(item.get("year", "")).isdigit()
+    try:
+        xgb_summary = STATE_STORE.load_xgb_samples_summary()
+    except Exception:
+        samples = STATE_STORE.load_xgb_samples()
+        valid_samples = [item for item in samples if isinstance(item, dict) and isinstance(item.get("features"), dict)]
+        sample_meta = [item.get("meta", {}) for item in valid_samples if isinstance(item.get("meta"), dict)]
+        sample_dates = [normalize_text(meta.get("match_date", "")) for meta in sample_meta if normalize_text(meta.get("match_date", ""))]
+        sample_leagues = sorted({normalize_text(meta.get("league", "")) for meta in sample_meta if normalize_text(meta.get("league", ""))})
+        xgb_summary = {
+            "sample_count": len(samples),
+            "valid_feature_count": len(valid_samples),
+            "date_start": min(sample_dates) if sample_dates else None,
+            "date_end": max(sample_dates) if sample_dates else None,
+            "league_count": len(sample_leagues),
+            "league_examples": sample_leagues[:8],
         }
-    )
+
+    club_summary = _load_state_items_summary("club_match_history.json", date_key="match_date")
+    world_cup_summary = _load_state_items_summary("world_cup_history.json", date_key="date", year_key="year")
 
     league_profile_payload = _load_state_payload("league_profiles.json")
     league_profiles = league_profile_payload.get("leagues", {})
     league_profile_count = len(league_profiles) if isinstance(league_profiles, dict) else 0
 
-    statsbomb_payload = _load_state_payload("statsbomb_event_summaries.json")
-    statsbomb_items = _state_payload_items(statsbomb_payload)
-    statsbomb_start, statsbomb_end = _history_date_range(statsbomb_items, "match_date")
+    statsbomb_summary = _load_state_items_summary("statsbomb_event_summaries.json", date_key="match_date")
     statsbomb_review_payload = _load_state_payload("statsbomb_review_training_samples.json")
     statsbomb_review_items = _state_payload_items(statsbomb_review_payload)
     statsbomb_review_summary = statsbomb_review_payload.get("summary", {}) if isinstance(statsbomb_review_payload.get("summary"), dict) else {}
@@ -4017,40 +4162,44 @@ def get_training_data_coverage_status() -> dict:
     national_team_ratings = STATE_STORE.load_national_team_ratings()
     return {
         "xgb_samples": {
-            "sample_count": len(samples),
-            "valid_feature_count": len(valid_samples),
-            "date_start": min(sample_dates) if sample_dates else None,
-            "date_end": max(sample_dates) if sample_dates else None,
-            "league_count": len(sample_leagues),
-            "league_examples": sample_leagues[:8],
+            "sample_count": int(xgb_summary.get("sample_count", 0) or 0),
+            "valid_feature_count": int(xgb_summary.get("valid_feature_count", 0) or 0),
+            "date_start": xgb_summary.get("date_start"),
+            "date_end": xgb_summary.get("date_end"),
+            "league_count": int(xgb_summary.get("league_count", 0) or 0),
+            "league_examples": xgb_summary.get("league_examples", [])[:8] if isinstance(xgb_summary.get("league_examples"), list) else [],
+            "summary_source": str(getattr(STATE_STORE, "xgb_samples_summary_file", "")),
         },
         "club_history": {
-            "match_count": len(club_items),
-            "date_start": club_start,
-            "date_end": club_end,
-            "updated_at": club_payload.get("updated_at"),
-            "source": club_payload.get("source"),
+            "match_count": int(club_summary.get("item_count", 0) or 0),
+            "date_start": club_summary.get("date_start"),
+            "date_end": club_summary.get("date_end"),
+            "updated_at": club_summary.get("updated_at"),
+            "source": club_summary.get("source"),
             "league_profile_count": league_profile_count,
+            "summary_source": str(_state_summary_path(PROJECT_DIR / "data" / "state" / "club_match_history.json")),
         },
         "world_cup_history": {
-            "match_count": len(world_cup_items),
-            "date_start": world_cup_start,
-            "date_end": world_cup_end,
-            "updated_at": world_cup_payload.get("updated_at"),
-            "source": world_cup_payload.get("source"),
-            "year_start": min(world_cup_years) if world_cup_years else None,
-            "year_end": max(world_cup_years) if world_cup_years else None,
-            "year_count": len(world_cup_years),
+            "match_count": int(world_cup_summary.get("item_count", 0) or 0),
+            "date_start": world_cup_summary.get("date_start"),
+            "date_end": world_cup_summary.get("date_end"),
+            "updated_at": world_cup_summary.get("updated_at"),
+            "source": world_cup_summary.get("source"),
+            "year_start": world_cup_summary.get("year_start"),
+            "year_end": world_cup_summary.get("year_end"),
+            "year_count": int(world_cup_summary.get("year_count", 0) or 0),
+            "summary_source": str(_state_summary_path(PROJECT_DIR / "data" / "state" / "world_cup_history.json")),
         },
         "statsbomb_events": {
-            "match_count": len(statsbomb_items),
-            "date_start": statsbomb_start,
-            "date_end": statsbomb_end,
-            "updated_at": statsbomb_payload.get("updated_at"),
-            "source": statsbomb_payload.get("source"),
+            "match_count": int(statsbomb_summary.get("item_count", 0) or 0),
+            "date_start": statsbomb_summary.get("date_start"),
+            "date_end": statsbomb_summary.get("date_end"),
+            "updated_at": statsbomb_summary.get("updated_at"),
+            "source": statsbomb_summary.get("source"),
             "review_sample_count": len(statsbomb_review_items),
             "review_updated_at": statsbomb_review_payload.get("updated_at"),
             "review_feature_count": len(statsbomb_review_summary.get("feature_order", [])) if isinstance(statsbomb_review_summary.get("feature_order"), list) else 0,
+            "summary_source": str(_state_summary_path(PROJECT_DIR / "data" / "state" / "statsbomb_event_summaries.json")),
         },
         "rating_pools": {
             "club_team_count": len(club_ratings),
@@ -10040,6 +10189,71 @@ def persist_prediction_snapshot(match: AppMatch, prediction: dict) -> None:
     STATE_STORE.upsert_prediction_snapshot(match.match_id, record)
     STATE_STORE.upsert_analysis_history(match.match_id, record)
     persist_market_snapshot(match)
+
+
+def persist_prediction_snapshots(items: Iterable[tuple[AppMatch, dict]]) -> dict[str, int]:
+    pairs = [
+        (match, prediction)
+        for match, prediction in items
+        if isinstance(match, AppMatch) and isinstance(prediction, dict)
+    ]
+    if not pairs:
+        return {"snapshot_count": 0, "analysis_count": 0, "market_snapshot_count": 0}
+
+    snapshots = STATE_STORE.load_prediction_snapshots()
+    if not isinstance(snapshots, dict):
+        snapshots = {}
+    history = STATE_STORE.load_analysis_history()
+    if not isinstance(history, dict):
+        history = {}
+    market_snapshots = STATE_STORE.load_market_snapshots()
+    if not isinstance(market_snapshots, dict):
+        market_snapshots = {}
+
+    saved_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    snapshot_count = 0
+    analysis_count = 0
+    market_snapshot_count = 0
+
+    for match, prediction in pairs:
+        existing = snapshots.get(match.match_id) if isinstance(snapshots, dict) else None
+        marker = _existing_strategy_allowlist_marker(existing)
+        stored_prediction = dict(prediction)
+        if marker:
+            stored_prediction["strategy_allowlist"] = dict(marker)
+            prediction["strategy_allowlist"] = dict(marker)
+        record = {
+            "saved_at": saved_at,
+            "match": serialize_match(match),
+            "prediction": stored_prediction,
+            "market_snapshot": _market_snapshot_fields_from_match(match),
+        }
+        record = _attach_strategy_allowlist_marker(record, marker)
+        _ordered_upsert(snapshots, match.match_id, record, limit=3000)
+        _ordered_upsert(history, match.match_id, record, limit=5000)
+        snapshot_count += 1
+        analysis_count += 1
+
+        if not _has_market_snapshot_fields(match):
+            continue
+        market_record = _market_snapshot_record_for_match(match, saved_at=saved_at)
+        for snapshot_id in _market_snapshot_keys_for_match(match):
+            merged_market_record = _merge_market_snapshot_record(market_snapshots.get(snapshot_id), market_record)
+            _ordered_upsert(market_snapshots, snapshot_id, merged_market_record, limit=5000)
+            market_snapshot_count += 1
+
+    STATE_STORE.save_prediction_snapshots(snapshots)
+    STATE_STORE.save_analysis_history(history)
+    if market_snapshot_count:
+        STATE_STORE.save_market_snapshots(market_snapshots)
+        _MARKET_SNAPSHOT_RECORD_CACHE["signature"] = _state_store_path_signature("market_snapshots_file")
+        _MARKET_SNAPSHOT_RECORD_CACHE["items"] = market_snapshots
+
+    return {
+        "snapshot_count": snapshot_count,
+        "analysis_count": analysis_count,
+        "market_snapshot_count": market_snapshot_count,
+    }
 
 
 def backfill_analysis_history_from_prediction_snapshots(max_backfilled: int = 5000) -> dict:

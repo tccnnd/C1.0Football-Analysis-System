@@ -38,6 +38,7 @@ class BasePlayXGBoostModel:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.model_dir.mkdir(parents=True, exist_ok=True)
         self.samples_file = self.state_dir / "xgb_training_samples.json"
+        self.samples_summary_file = self.state_dir / "xgb_training_samples_summary.json"
         self.model_file = self.model_dir / f"{self.model_slug}.json"
         self.meta_file = self.model_dir / f"{self.model_slug}.meta.json"
         self._model: Any = None
@@ -83,6 +84,25 @@ class BasePlayXGBoostModel:
             return []
         items = payload.get("items", [])
         return items if isinstance(items, list) else []
+
+    def _samples_signature(self) -> dict[str, int]:
+        try:
+            stat = self.samples_file.stat()
+        except OSError:
+            return {"mtime_ns": 0, "size_bytes": 0}
+        return {"mtime_ns": int(stat.st_mtime_ns), "size_bytes": int(stat.st_size)}
+
+    def _load_sample_count(self) -> int:
+        summary: dict[str, Any] = {}
+        if self.samples_summary_file.exists():
+            try:
+                payload = json.loads(self.samples_summary_file.read_text(encoding="utf-8"))
+                summary = payload if isinstance(payload, dict) else {}
+            except Exception:
+                summary = {}
+        if summary.get("source_signature") == self._samples_signature():
+            return int(summary.get("sample_count", 0) or 0)
+        return len(self._load_samples())
 
     def _feature_vector(self, feature_map: dict[str, float]) -> list[float]:
         return [self._safe_float(feature_map.get(name, 0.0), default=0.0) for name in self.FEATURE_ORDER]
@@ -251,11 +271,11 @@ class BasePlayXGBoostModel:
         return self._predict_from_features(feature_map)
 
     def get_training_status(self) -> dict[str, Any]:
-        samples = self._load_samples()
+        sample_count = self._load_sample_count()
         meta = self._load_meta()
         compatible = self._is_model_compatible(meta) if meta else (not self.model_file.exists())
         return {
-            "sample_count": len(samples),
+            "sample_count": sample_count,
             "min_train_samples": self.min_train_samples,
             "model_exists": self.model_file.exists(),
             "model_ready": bool((self._model_ready or self.model_file.exists()) and compatible),
