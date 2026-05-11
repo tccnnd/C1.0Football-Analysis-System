@@ -30,6 +30,26 @@ def _safe_float(value: object, default: float = 0.0) -> float:
         return default
 
 
+def _pct_text_to_float(value: object) -> float | None:
+    if isinstance(value, (int, float)):
+        number = float(value)
+        return number / 100.0 if number > 1 else number
+    text = str(value or "").strip()
+    if not text or text == "-":
+        return None
+    try:
+        if text.endswith("%"):
+            return float(text[:-1].strip()) / 100.0
+        number = float(text)
+        return number / 100.0 if number > 1 else number
+    except ValueError:
+        return None
+
+
+def _pct_text(value: float | None) -> str:
+    return f"{value:.1%}" if value is not None else "-"
+
+
 def _status_label(status: object) -> str:
     key = str(status or "").strip().lower()
     return STATUS_LABELS.get(key, key or "-")
@@ -354,6 +374,154 @@ def build_result_recovery_run_summary(records: Sequence[Mapping[str, object]] | 
         "latest_finished_at": str(latest.get("finished_at") or "-") if latest else "-",
         "latest_new_settled": _safe_int(latest.get("new_settled"), 0) if latest else 0,
         "latest_error": str(latest.get("error") or "-") if latest else "-",
+    }
+
+
+def build_strategy_release_quality_trend(
+    records: Sequence[Mapping[str, object]] | object,
+    *,
+    limit: int = 12,
+) -> dict[str, object]:
+    rows = _run_items(records)
+    successful = [item for item in rows if str(item.get("status") or "").lower() == "success"]
+    recent = successful[-max(1, int(limit)) :]
+    trend_rows: list[dict[str, object]] = []
+    release_rates: list[float] = []
+    verified_count = 0
+    no_feedback_count = 0
+    total_new_settled = 0
+    total_pending_reduced = 0
+    total_feedback_known_delta = 0
+    total_hit_delta = 0
+    total_paused_delta = 0
+    total_recovering_delta = 0
+
+    for item in recent:
+        validation = _as_mapping(item.get("live_feedback_validation"))
+        validation_status = str(validation.get("status") or "-")
+        if validation_status == "verified":
+            verified_count += 1
+        if validation_status == "no_strategy_feedback":
+            no_feedback_count += 1
+        hit_rate_text = str(item.get("strategy_release_loop_hit_rate_text") or "-")
+        hit_rate = _pct_text_to_float(hit_rate_text)
+        if hit_rate is not None:
+            release_rates.append(hit_rate)
+        new_settled = _safe_int(item.get("new_settled"))
+        pending_reduced = max(0, _safe_int(validation.get("pending_reduced")))
+        feedback_known_delta = _safe_int(validation.get("feedback_known_delta"))
+        hit_delta = _safe_int(validation.get("hit_delta"))
+        paused_delta = _safe_int(validation.get("paused_delta"))
+        recovering_delta = _safe_int(validation.get("recovering_delta"))
+        total_new_settled += new_settled
+        total_pending_reduced += pending_reduced
+        total_feedback_known_delta += max(0, feedback_known_delta)
+        total_hit_delta += max(0, hit_delta)
+        total_paused_delta += paused_delta
+        total_recovering_delta += recovering_delta
+        pending_count = _safe_int(item.get("strategy_release_loop_pending_count"))
+        missing_snapshot_count = _safe_int(item.get("strategy_release_loop_missing_snapshot_count"))
+        stale_pending_count = _safe_int(item.get("strategy_release_loop_stale_pending_count"))
+        trend_rows.append(
+            {
+                "title": f"{item.get('started_at') or '-'} | 新结算 {new_settled} | 放行命中 {hit_rate_text}",
+                "body": (
+                    f"实盘反馈: {validation.get('summary_text') or '-'} | "
+                    f"待回收 {pending_count} | 缺快照 {missing_snapshot_count} | 超期 {stale_pending_count}"
+                ),
+                "started_at": item.get("started_at") or "-",
+                "new_settled": new_settled,
+                "release_hit_rate_text": hit_rate_text,
+                "release_hit_rate": hit_rate,
+                "live_feedback_status": validation_status,
+                "pending_reduced": pending_reduced,
+                "feedback_known_delta": feedback_known_delta,
+                "hit_delta": hit_delta,
+                "paused_delta": paused_delta,
+                "recovering_delta": recovering_delta,
+                "pending_count": pending_count,
+                "missing_snapshot_count": missing_snapshot_count,
+                "stale_pending_count": stale_pending_count,
+            }
+        )
+
+    latest_row = trend_rows[-1] if trend_rows else {}
+    first_rate = release_rates[0] if release_rates else None
+    latest_rate = release_rates[-1] if release_rates else None
+    avg_rate = sum(release_rates) / len(release_rates) if release_rates else None
+    rate_delta = latest_rate - first_rate if first_rate is not None and latest_rate is not None and len(release_rates) >= 2 else None
+    if not recent:
+        status = "collecting"
+        tone = "neutral"
+        label = "暂无趋势"
+    elif len(recent) < 2:
+        status = "collecting"
+        tone = "neutral"
+        label = "样本积累中"
+    elif rate_delta is not None and rate_delta <= -0.05:
+        status = "watch"
+        tone = "warning"
+        label = "放行命中走弱"
+    elif no_feedback_count >= 2 and total_new_settled > 0:
+        status = "watch"
+        tone = "warning"
+        label = "反馈未同步"
+    elif rate_delta is not None and rate_delta >= 0.05 and verified_count:
+        status = "improving"
+        tone = "good"
+        label = "趋势改善"
+    elif verified_count:
+        status = "stable"
+        tone = "good"
+        label = "反馈稳定"
+    else:
+        status = "stable"
+        tone = "neutral"
+        label = "趋势平稳"
+    summary_text = (
+        f"{label} | 最近 {len(recent)} 次 | 新结算 {total_new_settled} | "
+        f"放行均值 {_pct_text(avg_rate)} | 变化 {_pct_text(rate_delta) if rate_delta is not None else '-'} | "
+        f"待反馈减少 {total_pending_reduced} | 实盘样本 +{total_feedback_known_delta}"
+    )
+    metrics = [
+        {"label": "趋势状态", "value": label, "tone": tone},
+        {"label": "趋势样本", "value": str(len(recent)), "tone": "info" if recent else "neutral"},
+        {"label": "放行均值", "value": _pct_text(avg_rate), "tone": "good" if avg_rate is not None and avg_rate >= 0.6 else "warning" if avg_rate is not None else "neutral"},
+        {"label": "最近放行", "value": _pct_text(latest_rate), "tone": "good" if latest_rate is not None and latest_rate >= 0.6 else "warning" if latest_rate is not None else "neutral"},
+        {"label": "命中变化", "value": _pct_text(rate_delta) if rate_delta is not None else "-", "tone": "good" if rate_delta is not None and rate_delta >= 0 else "warning" if rate_delta is not None else "neutral"},
+        {"label": "新增结算", "value": str(total_new_settled), "tone": "info"},
+        {"label": "反馈验证", "value": f"{verified_count}/{len(recent)}", "tone": "good" if verified_count else "warning" if recent else "neutral"},
+        {"label": "待反馈减少", "value": str(total_pending_reduced), "tone": "good" if total_pending_reduced else "neutral"},
+        {"label": "实盘样本+", "value": str(total_feedback_known_delta), "tone": "good" if total_feedback_known_delta else "neutral"},
+        {"label": "暂停变化", "value": f"{total_paused_delta:+d}", "tone": "bad" if total_paused_delta > 0 else "good" if total_paused_delta < 0 else "neutral"},
+        {"label": "恢复变化", "value": f"{total_recovering_delta:+d}", "tone": "good" if total_recovering_delta > 0 else "neutral"},
+        {"label": "当前待回收", "value": str(latest_row.get("pending_count", 0) if latest_row else 0), "tone": "warning" if _safe_int(latest_row.get("pending_count") if latest_row else 0) else "good"},
+    ]
+    return {
+        "status": status,
+        "tone": tone,
+        "label": label,
+        "sample_count": len(recent),
+        "total_new_settled": total_new_settled,
+        "avg_release_hit_rate": avg_rate,
+        "avg_release_hit_rate_text": _pct_text(avg_rate),
+        "latest_release_hit_rate": latest_rate,
+        "latest_release_hit_rate_text": _pct_text(latest_rate),
+        "release_hit_rate_delta": rate_delta,
+        "release_hit_rate_delta_text": _pct_text(rate_delta) if rate_delta is not None else "-",
+        "verified_count": verified_count,
+        "no_feedback_count": no_feedback_count,
+        "total_pending_reduced": total_pending_reduced,
+        "total_feedback_known_delta": total_feedback_known_delta,
+        "total_hit_delta": total_hit_delta,
+        "total_paused_delta": total_paused_delta,
+        "total_recovering_delta": total_recovering_delta,
+        "latest_pending_count": _safe_int(latest_row.get("pending_count") if latest_row else 0),
+        "latest_missing_snapshot_count": _safe_int(latest_row.get("missing_snapshot_count") if latest_row else 0),
+        "latest_stale_pending_count": _safe_int(latest_row.get("stale_pending_count") if latest_row else 0),
+        "summary_text": summary_text,
+        "metrics": metrics,
+        "rows": list(reversed(trend_rows)),
     }
 
 

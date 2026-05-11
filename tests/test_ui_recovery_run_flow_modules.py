@@ -20,6 +20,7 @@ from v24_app.ui_modules import (
     build_result_recovery_run_rows,
     build_result_recovery_run_summary,
     build_result_recovery_strategy_adjustment,
+    build_strategy_release_quality_trend,
     mark_stale_result_recovery_runs,
 )
 
@@ -101,6 +102,86 @@ class UIRecoveryRunFlowModuleTests(unittest.TestCase):
         self.assertEqual(summary["recent_success_rate_text"], "50%")
         self.assertEqual(summary["avg_elapsed_text"], "3.00s")
         self.assertEqual(summary["latest_status_label"], "运行中")
+
+    def test_strategy_release_quality_trend_tracks_feedback_and_release_hit_rate(self) -> None:
+        records = [
+            {
+                "run_id": "1",
+                "status": "success",
+                "started_at": "2026-05-08 20:00:00",
+                "new_settled": 1,
+                "strategy_release_loop_hit_rate_text": "50.0%",
+                "strategy_release_loop_pending_count": 4,
+                "strategy_release_loop_missing_snapshot_count": 1,
+                "strategy_release_loop_stale_pending_count": 1,
+                "live_feedback_validation": {
+                    "status": "waiting",
+                    "summary_text": "本轮暂无新增结算，高准策略实盘反馈等待后续赛果",
+                    "pending_reduced": 0,
+                    "feedback_known_delta": 0,
+                    "hit_delta": 0,
+                },
+            },
+            {"run_id": "failed", "status": "failed", "started_at": "2026-05-08 21:00:00", "new_settled": 0},
+            {
+                "run_id": "2",
+                "status": "success",
+                "started_at": "2026-05-09 20:00:00",
+                "new_settled": 2,
+                "strategy_release_loop_hit_rate_text": "60.0%",
+                "strategy_release_loop_pending_count": 2,
+                "strategy_release_loop_missing_snapshot_count": 0,
+                "strategy_release_loop_stale_pending_count": 0,
+                "live_feedback_validation": {
+                    "status": "verified",
+                    "summary_text": "已验证 | 待反馈减少 1 | 实盘样本 +2 | 命中 +1",
+                    "pending_reduced": 1,
+                    "feedback_known_delta": 2,
+                    "hit_delta": 1,
+                    "paused_delta": -1,
+                    "recovering_delta": 0,
+                },
+            },
+            {
+                "run_id": "3",
+                "status": "success",
+                "started_at": "2026-05-10 20:00:00",
+                "new_settled": 3,
+                "strategy_release_loop_hit_rate_text": "70.0%",
+                "strategy_release_loop_pending_count": 1,
+                "strategy_release_loop_missing_snapshot_count": 0,
+                "strategy_release_loop_stale_pending_count": 0,
+                "live_feedback_validation": {
+                    "status": "verified",
+                    "summary_text": "已验证 | 待反馈减少 2 | 实盘样本 +3 | 命中 +2",
+                    "pending_reduced": 2,
+                    "feedback_known_delta": 3,
+                    "hit_delta": 2,
+                    "paused_delta": 0,
+                    "recovering_delta": 1,
+                },
+            },
+        ]
+
+        trend = build_strategy_release_quality_trend(records)
+
+        self.assertEqual(trend["status"], "improving")
+        self.assertEqual(trend["sample_count"], 3)
+        self.assertEqual(trend["total_new_settled"], 6)
+        self.assertEqual(trend["avg_release_hit_rate_text"], "60.0%")
+        self.assertEqual(trend["latest_release_hit_rate_text"], "70.0%")
+        self.assertEqual(trend["release_hit_rate_delta_text"], "20.0%")
+        self.assertEqual(trend["verified_count"], 2)
+        self.assertEqual(trend["total_pending_reduced"], 3)
+        self.assertEqual(trend["total_feedback_known_delta"], 5)
+        self.assertEqual(trend["total_hit_delta"], 3)
+        self.assertEqual(trend["total_paused_delta"], -1)
+        self.assertEqual(trend["total_recovering_delta"], 1)
+        self.assertIn("趋势改善", trend["summary_text"])
+        self.assertIn("2026-05-10", trend["rows"][0]["title"])
+        metric_values = {item["label"]: item["value"] for item in trend["metrics"]}
+        self.assertEqual(metric_values["趋势状态"], "趋势改善")
+        self.assertEqual(metric_values["实盘样本+"], "5")
 
     def test_rows_and_detail_include_recovery_metrics(self) -> None:
         records = [

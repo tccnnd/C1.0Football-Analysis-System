@@ -72,6 +72,7 @@ from .ui_modules import (
     build_result_recovery_run_rows,
     build_result_recovery_run_summary,
     build_result_recovery_strategy_adjustment,
+    build_strategy_release_quality_trend,
     build_agent_trace_nodes,
     mark_stale_result_recovery_runs,
     format_agent_trace_detail,
@@ -3482,6 +3483,7 @@ class SmartMatchDashboard:
         summary = build_result_recovery_run_summary(records)
         quality_alerts = build_result_recovery_quality_alerts(records)
         run_rows = build_result_recovery_run_rows(records, limit=50)
+        quality_trend = build_strategy_release_quality_trend(records)
         latest_status = str(summary.get("latest_status") or "")
         lookback_days = self._recovery_lookback_days()
         snapshot_audit = self._result_recovery_snapshot_audit(lookback_days=lookback_days)
@@ -3562,6 +3564,44 @@ class SmartMatchDashboard:
         audit_frame.pack(fill=tk.X, pady=(0, 16))
         for label, value, color in self._snapshot_audit_metrics(snapshot_audit):
             self._detail_metric(audit_frame, label, value, color)
+
+        trend_metrics = quality_trend.get("metrics", []) if isinstance(quality_trend.get("metrics"), list) else []
+        trend_metric_frame = tk.Frame(shell, bg=BG)
+        trend_metric_frame.pack(fill=tk.X, pady=(0, 12))
+        for metric in trend_metrics[:6]:
+            if isinstance(metric, dict):
+                self._detail_metric(
+                    trend_metric_frame,
+                    str(metric.get("label") or "-"),
+                    str(metric.get("value") or "-"),
+                    self._tone_color(str(metric.get("tone") or "neutral")),
+                )
+
+        trend_rows = quality_trend.get("rows", []) if isinstance(quality_trend.get("rows"), list) else []
+        trend_card = self._card(shell, PANEL)
+        trend_card.pack(fill=tk.X, pady=(0, 16))
+        tk.Label(
+            trend_card,
+            text="\u7b56\u7565\u653e\u884c\u8d28\u91cf\u8d8b\u52bf",
+            bg=PANEL,
+            fg=TEXT,
+            font=("Microsoft YaHei UI", 13, "bold"),
+        ).pack(anchor=tk.W, padx=18, pady=(16, 6))
+        tk.Label(
+            trend_card,
+            text=str(quality_trend.get("summary_text") or "-"),
+            bg=PANEL,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 10),
+            wraplength=980,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, padx=18, pady=(0, 8))
+        if trend_rows:
+            for row in trend_rows[:3]:
+                if isinstance(row, dict):
+                    self._strategy_row(trend_card, str(row.get("title") or "-"), str(row.get("body") or "-"))
+        else:
+            self._strategy_row(trend_card, "\u6682\u65e0\u8d8b\u52bf\u6837\u672c", "\u5b8c\u6210\u591a\u6b21\u8d5b\u679c\u56de\u6536\u540e\uff0c\u8fd9\u91cc\u4f1a\u5c55\u793a\u653e\u884c\u547d\u4e2d\u3001\u5b9e\u76d8\u53cd\u9988\u548c\u65ad\u8def\u6062\u590d\u8d8b\u52bf\u3002")
 
         body = tk.Frame(shell, bg=BG)
         body.pack(fill=tk.BOTH, expand=True)
