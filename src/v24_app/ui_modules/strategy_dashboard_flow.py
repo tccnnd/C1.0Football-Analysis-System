@@ -4058,21 +4058,34 @@ def build_strategy_policy_tuning_guard(
     source: str = "",
     trend_tuning_effect_review: Mapping[str, object] | object | None = None,
     rollback_effect_review: Mapping[str, object] | object | None = None,
+    freeze_override_status: Mapping[str, object] | object | None = None,
 ) -> dict[str, object]:
     monitor = _as_mapping(stability_monitor)
     tuning_payload = _as_mapping(tuning)
     trend_effect = _as_mapping(trend_tuning_effect_review)
     rollback_effect = _as_mapping(rollback_effect_review)
+    freeze_override = _as_mapping(freeze_override_status)
     status = str(monitor.get("status") or "none")
     trend_status = str(trend_effect.get("status") or "")
     rollback_status = str(rollback_effect.get("status") or "")
+    override_status = str(freeze_override.get("status") or "")
     action = str(tuning_payload.get("action") or "").strip()
     source_label = {
         "strategy_allowlist_tuning": "\u653e\u884c\u95e8\u69db",
         "release_quality_trend": "\u8d8b\u52bf\u95e8\u63a7",
         "agent_replay_guard_tuning": "Replay Guard",
     }.get(source, "\u7b56\u7565\u8c03\u53c2")
-    if rollback_status == "negative":
+    if rollback_status == "negative" and override_status == "overridden":
+        decision = "confirm"
+        label = "\u51bb\u7ed3\u5df2\u4eba\u5de5\u89e3\u9664"
+        tone = "warning"
+        reasons = [
+            f"\u56de\u6eda\u4fee\u590d\u72b6\u6001: {rollback_effect.get('label', '-')}",
+            str(rollback_effect.get("summary_text") or "-"),
+            f"\u89e3\u9664\u51bb\u7ed3\u5ba1\u8ba1: {freeze_override.get('summary_text', '-')}",
+            "\u56de\u6eda\u5931\u8d25\u4fe1\u53f7\u4ecd\u5b58\u5728\uff0c\u8c03\u53c2\u524d\u9700\u518d\u6b21\u4eba\u5de5\u786e\u8ba4\u3002",
+        ]
+    elif rollback_status == "negative":
         decision = "freeze"
         label = "\u56de\u6eda\u5931\u8d25\uff0c\u51bb\u7ed3\u8c03\u53c2"
         tone = "bad"
@@ -4140,6 +4153,9 @@ def build_strategy_policy_tuning_guard(
         "rollback_effect_status": rollback_status or "-",
         "rollback_effect_label": str(rollback_effect.get("label") or "-"),
         "rollback_effect_summary": str(rollback_effect.get("summary_text") or "-"),
+        "freeze_override_status": override_status or "-",
+        "freeze_override_label": str(freeze_override.get("label") or "-"),
+        "freeze_override_summary": str(freeze_override.get("summary_text") or "-"),
         "rollback_recommended": trend_status == "negative" or rollback_status == "negative",
         "rollback_candidate_version_id": str(
             rollback_effect.get("rolled_back_version_id")
@@ -4147,6 +4163,7 @@ def build_strategy_policy_tuning_guard(
             or "-"
         ),
         "freeze_active": decision == "freeze",
+        "freeze_override_active": override_status == "overridden",
         "action": action or "-",
         "reasons": reasons,
         "body": body,
@@ -4688,6 +4705,80 @@ def _policy_rollback_source_version(source: object) -> str:
     if text.lower().startswith(prefix):
         return text[len(prefix) :].strip()
     return ""
+
+
+def _policy_freeze_override_source_version(source: object) -> str:
+    text = _text(source, "").strip()
+    if not text:
+        return ""
+    prefix = "policy_freeze_override:"
+    if text.lower().startswith(prefix):
+        return text[len(prefix) :].strip()
+    return ""
+
+
+def build_strategy_policy_freeze_override_status(
+    policy_history: Sequence[Mapping[str, object]] | object,
+    rollback_effect_review: Mapping[str, object] | object,
+) -> dict[str, object]:
+    rollback_effect = _as_mapping(rollback_effect_review)
+    rollback_status = str(rollback_effect.get("status") or "")
+    rollback_version = _text(rollback_effect.get("latest_version_id"), "")
+    rollback_updated_at = _parse_policy_review_time(rollback_effect.get("latest_updated_at")) or datetime.min
+    if rollback_status != "negative":
+        return {
+            "status": "inactive",
+            "label": "\u65e0\u9700\u89e3\u9664\u51bb\u7ed3",
+            "tone": "neutral",
+            "override_active": False,
+            "rollback_version_id": rollback_version or "-",
+            "override_version_id": "-",
+            "summary_text": "\u5f53\u524d\u6ca1\u6709\u56de\u6eda\u5931\u8d25\u5bfc\u81f4\u7684\u8c03\u53c2\u51bb\u7ed3\u3002",
+        }
+
+    history_items = [dict(item) for item in policy_history if isinstance(item, Mapping)] if isinstance(policy_history, Sequence) else []
+    overrides: list[dict[str, object]] = []
+    for item in history_items:
+        source = str(item.get("source") or "")
+        if not source.lower().startswith("policy_freeze_override"):
+            continue
+        source_version = _policy_freeze_override_source_version(source)
+        updated_at = _parse_policy_review_time(item.get("updated_at")) or datetime.min
+        if source_version and rollback_version and source_version != rollback_version:
+            continue
+        if updated_at < rollback_updated_at:
+            continue
+        overrides.append({**item, "_updated_dt": updated_at, "_source_version": source_version})
+    overrides.sort(key=lambda item: (_parse_policy_review_time(item.get("updated_at")) or datetime.min, str(item.get("version_id") or "")), reverse=True)
+    if overrides:
+        latest = overrides[0]
+        label = "\u51bb\u7ed3\u5df2\u4eba\u5de5\u89e3\u9664"
+        summary_text = (
+            f"{label} | \u56de\u6eda {rollback_version or '-'} | "
+            f"\u5ba1\u8ba1 {latest.get('version_id', '-')} | {latest.get('updated_at', '-')}"
+        )
+        return {
+            "status": "overridden",
+            "label": label,
+            "tone": "warning",
+            "override_active": True,
+            "rollback_version_id": rollback_version or "-",
+            "override_version_id": latest.get("version_id", "-"),
+            "override_source": latest.get("source", "-"),
+            "override_updated_at": latest.get("updated_at", "-"),
+            "summary_text": summary_text,
+        }
+
+    label = "\u8c03\u53c2\u51bb\u7ed3\u4e2d"
+    return {
+        "status": "frozen",
+        "label": label,
+        "tone": "bad",
+        "override_active": False,
+        "rollback_version_id": rollback_version or "-",
+        "override_version_id": "-",
+        "summary_text": f"{label} | \u56de\u6eda {rollback_version or '-'} \u4fee\u590d\u5931\u8d25\uff0c\u9700\u4eba\u5de5\u590d\u6838\u540e\u89e3\u9664\u3002",
+    }
 
 
 def _policy_rollback_effect_label(status: str) -> str:
@@ -6926,11 +7017,13 @@ def build_high_accuracy_strategy_dashboard(
     policy_stability_monitor = _as_mapping(policy_effect_review.get("stability_monitor"))
     trend_tuning_effect_review = build_strategy_trend_tuning_effect_review(policy_effect_review)
     rollback_effect_review = build_strategy_policy_rollback_effect_review(policy_effect_review)
+    freeze_override_status = build_strategy_policy_freeze_override_status(policy_history or [], rollback_effect_review)
     policy_tuning_guard = build_strategy_policy_tuning_guard(
         policy_stability_monitor,
         source="dashboard",
         trend_tuning_effect_review=trend_tuning_effect_review,
         rollback_effect_review=rollback_effect_review,
+        freeze_override_status=freeze_override_status,
     )
     market_entropy_backtest = build_market_entropy_backtest_summary(settlement_items)
     handicap_margin_backtest = build_handicap_margin_backtest_summary(settlement_items)
@@ -7070,6 +7163,11 @@ def build_high_accuracy_strategy_dashboard(
             "label": "\u56de\u6eda\u4fee\u590d",
             "value": str(rollback_effect_review.get("label") or "-"),
             "tone": str(rollback_effect_review.get("tone") or "neutral"),
+        },
+        {
+            "label": "\u51bb\u7ed3\u89e3\u9664",
+            "value": str(freeze_override_status.get("label") or "-"),
+            "tone": str(freeze_override_status.get("tone") or "neutral"),
         },
         {
             "label": "\u7248\u672c\u7a33\u5b9a",
@@ -7237,6 +7335,7 @@ def build_high_accuracy_strategy_dashboard(
         "policy_effect_review": policy_effect_review,
         "trend_tuning_effect_review": trend_tuning_effect_review,
         "rollback_effect_review": rollback_effect_review,
+        "freeze_override_status": freeze_override_status,
         "policy_stability_monitor": policy_stability_monitor,
         "policy_tuning_guard": policy_tuning_guard,
         "market_entropy_backtest": market_entropy_backtest,

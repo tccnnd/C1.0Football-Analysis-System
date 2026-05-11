@@ -26,6 +26,7 @@ from v24_app.ui_modules import (
     build_strategy_policy_effect_review,
     build_strategy_trend_tuning_effect_review,
     build_strategy_policy_rollback_effect_review,
+    build_strategy_policy_freeze_override_status,
     build_strategy_policy_rollback_preview,
     build_strategy_policy_stability_monitor,
     build_strategy_policy_tuning_guard,
@@ -639,6 +640,30 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("\u51bb\u7ed3\u8c03\u53c2", guard["label"])
         self.assertIn("\u56de\u6eda\u4fee\u590d\u72b6\u6001", guard["body"])
 
+    def test_strategy_policy_tuning_guard_allows_manual_freeze_override_with_confirm(self) -> None:
+        guard = build_strategy_policy_tuning_guard(
+            {"status": "stable", "label": "\u7a33\u5b9a\u751f\u6548", "summary_text": "\u7a33\u5b9a"},
+            {"action": "tighten", "policy_update": {"min_confidence": 0.72}},
+            source="release_quality_trend",
+            rollback_effect_review={
+                "status": "negative",
+                "label": "\u56de\u6eda\u540e\u4ecd\u56de\u9000",
+                "summary_text": "\u56de\u6eda\u540e 1/3 (33.3%) | \u5bf9\u7167 2/3 (66.7%)",
+                "rolled_back_version_id": "v2",
+            },
+            freeze_override_status={
+                "status": "overridden",
+                "label": "\u51bb\u7ed3\u5df2\u4eba\u5de5\u89e3\u9664",
+                "summary_text": "\u51bb\u7ed3\u5df2\u4eba\u5de5\u89e3\u9664 | \u5ba1\u8ba1 v4",
+            },
+        )
+
+        self.assertTrue(guard["allowed"])
+        self.assertEqual(guard["decision"], "confirm")
+        self.assertFalse(guard["freeze_active"])
+        self.assertTrue(guard["freeze_override_active"])
+        self.assertIn("\u4eba\u5de5\u89e3\u9664", guard["label"])
+
     def test_strategy_policy_tuning_guard_requires_confirmation_on_watch(self) -> None:
         guard = build_strategy_policy_tuning_guard(
             {"status": "watch", "label": "\u9700\u89c2\u5bdf", "summary_text": "\u89c2\u5bdf"},
@@ -789,6 +814,64 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertEqual(effect["allow_hit_rate_delta_text"], "-33.3%")
         self.assertEqual(dashboard["policy_tuning_guard"]["decision"], "freeze")
         self.assertTrue(dashboard["policy_tuning_guard"]["freeze_active"])
+
+    def test_strategy_policy_freeze_override_status_tracks_audit_entry(self) -> None:
+        rollback_effect = {
+            "status": "negative",
+            "latest_version_id": "v3",
+            "latest_updated_at": "2026-05-03 10:00:00",
+            "summary_text": "\u56de\u6eda\u540e\u4ecd\u56de\u9000",
+        }
+        history = [
+            {"version_id": "v3", "updated_at": "2026-05-03 10:00:00", "source": "policy_rollback:v2"},
+            {"version_id": "v4", "updated_at": "2026-05-04 10:00:00", "source": "policy_freeze_override:v3"},
+        ]
+
+        status = build_strategy_policy_freeze_override_status(history, rollback_effect)
+
+        self.assertEqual(status["status"], "overridden")
+        self.assertTrue(status["override_active"])
+        self.assertEqual(status["rollback_version_id"], "v3")
+        self.assertEqual(status["override_version_id"], "v4")
+
+    def test_strategy_policy_freeze_override_status_waits_for_manual_review(self) -> None:
+        rollback_effect = {
+            "status": "negative",
+            "latest_version_id": "v3",
+            "latest_updated_at": "2026-05-03 10:00:00",
+        }
+
+        status = build_strategy_policy_freeze_override_status([], rollback_effect)
+
+        self.assertEqual(status["status"], "frozen")
+        self.assertFalse(status["override_active"])
+        self.assertIn("\u51bb\u7ed3", status["label"])
+
+    def test_strategy_dashboard_uses_freeze_override_to_require_confirmation(self) -> None:
+        history = [
+            {"version_id": "v1", "updated_at": "2026-05-01 10:00:00", "source": "manual"},
+            {"version_id": "v2", "updated_at": "2026-05-02 10:00:00", "source": "release_quality_trend"},
+            {"version_id": "v3", "updated_at": "2026-05-03 10:00:00", "source": "policy_rollback:v2"},
+            {"version_id": "v4", "updated_at": "2026-05-04 10:00:00", "source": "policy_freeze_override:v3"},
+        ]
+        settlements = [
+            {"timestamp": "2026-05-01 11:00:00", "strategy_admission_decision": "allow", "is_correct": True},
+            {"timestamp": "2026-05-01 12:00:00", "strategy_admission_decision": "allow", "is_correct": True},
+            {"timestamp": "2026-05-01 13:00:00", "strategy_admission_decision": "allow", "is_correct": True},
+            {"timestamp": "2026-05-02 11:00:00", "strategy_admission_decision": "allow", "is_correct": True},
+            {"timestamp": "2026-05-02 12:00:00", "strategy_admission_decision": "allow", "is_correct": False},
+            {"timestamp": "2026-05-02 13:00:00", "strategy_admission_decision": "allow", "is_correct": True},
+            {"timestamp": "2026-05-03 11:00:00", "strategy_admission_decision": "allow", "is_correct": False},
+            {"timestamp": "2026-05-03 12:00:00", "strategy_admission_decision": "allow", "is_correct": False},
+            {"timestamp": "2026-05-03 13:00:00", "strategy_admission_decision": "allow", "is_correct": True},
+        ]
+
+        dashboard = build_high_accuracy_strategy_dashboard({}, settlements, history)
+
+        self.assertEqual(dashboard["freeze_override_status"]["status"], "overridden")
+        self.assertEqual(dashboard["policy_tuning_guard"]["decision"], "confirm")
+        self.assertTrue(dashboard["policy_tuning_guard"]["freeze_override_active"])
+        self.assertFalse(dashboard["policy_tuning_guard"]["freeze_active"])
 
     def test_strategy_policy_audit_report_exports_review_and_samples(self) -> None:
         history = [

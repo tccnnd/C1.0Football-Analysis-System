@@ -120,6 +120,7 @@ from .ui_modules import (
     build_strategy_policy_audit_report_filename,
     build_strategy_policy_audit_report_lines,
     build_strategy_policy_effect_review,
+    build_strategy_policy_freeze_override_status,
     build_strategy_policy_rollback_effect_review,
     build_strategy_policy_rollback_preview,
     build_strategy_trend_tuning_effect_review,
@@ -2884,17 +2885,20 @@ class SmartMatchDashboard:
         recovery_quality_alerts = self._recovery_quality_alerts()
         recovery_trend = build_strategy_release_quality_trend(self._recovery_run_records(limit=80))
         recovery_trend_alerts = build_strategy_release_quality_trend_alerts(recovery_trend)
+        policy_history = get_strategy_admission_policy_history(limit=20)
         policy_effect_review = build_strategy_policy_effect_review(
-            get_strategy_admission_policy_history(limit=20),
+            policy_history,
             list(reversed(get_recent_settlements(limit=200))),
         )
         trend_tuning_effect = build_strategy_trend_tuning_effect_review(policy_effect_review)
         rollback_effect = build_strategy_policy_rollback_effect_review(policy_effect_review)
+        freeze_override = build_strategy_policy_freeze_override_status(policy_history, rollback_effect)
         policy_tuning_guard = build_strategy_policy_tuning_guard(
             policy_effect_review.get("stability_monitor", {}) if isinstance(policy_effect_review.get("stability_monitor"), dict) else {},
             source="monitor",
             trend_tuning_effect_review=trend_tuning_effect,
             rollback_effect_review=rollback_effect,
+            freeze_override_status=freeze_override,
         )
         shell = self._page_shell(
             "\u76d1\u63a7\u4e2d\u5fc3",
@@ -3053,6 +3057,7 @@ class SmartMatchDashboard:
             ("\u653e\u884c\u8d8b\u52bf", str(len(recovery_trend_alerts)), RED if any(item.get("severity") == "high" for item in recovery_trend_alerts) else YELLOW if recovery_trend_alerts else GREEN),
             ("\u95e8\u63a7\u751f\u6548", str(trend_tuning_effect.get("label") or "-"), self._tone_color(str(trend_tuning_effect.get("tone") or "neutral"))),
             ("\u56de\u6eda\u4fee\u590d", str(rollback_effect.get("label") or "-"), self._tone_color(str(rollback_effect.get("tone") or "neutral"))),
+            ("\u51bb\u7ed3\u89e3\u9664", str(freeze_override.get("label") or "-"), self._tone_color(str(freeze_override.get("tone") or "neutral"))),
             ("\u8c03\u53c2\u95e8\u63a7", str(policy_tuning_guard.get("label") or "-"), self._tone_color(str(policy_tuning_guard.get("tone") or "neutral"))),
             ("\u540e\u53f0\u4efb\u52a1", str(background_task_summary.get("running", 0)), YELLOW if int(background_task_summary.get("running", 0) or 0) else GREEN),
             ("\u591a\u8fdb\u7a0b", str(background_task_summary.get("process_running", 0)), "#7aa2ff"),
@@ -3183,6 +3188,13 @@ class SmartMatchDashboard:
                 "\u5bf9\u6bd4\u56de\u6eda\u540e\u7248\u672c\u548c\u88ab\u56de\u6eda\u7248\u672c\u7684\u653e\u884c\u547d\u4e2d\u4e0e Replay \u51c0\u503c\u3002",
                 command=lambda review=policy_effect_review: self.open_policy_effect_detail_window(review),
             )
+            if str(freeze_override.get("status") or "") == "frozen":
+                self._strategy_row(
+                    left,
+                    "\u4eba\u5de5\u89e3\u9664\u8c03\u53c2\u51bb\u7ed3",
+                    str(freeze_override.get("summary_text") or "-"),
+                    command=lambda rollback=rollback_effect, override=freeze_override: self.apply_strategy_policy_freeze_override(rollback, override),
+                )
 
         tk.Label(right, text="\u73a9\u6cd5\u63a5\u7ba1\u7b56\u7565", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
         for row in build_play_model_policy_decision_rows(play_policy_status):
@@ -5316,12 +5328,14 @@ class SmartMatchDashboard:
         monitor = dashboard.get("policy_stability_monitor", {}) if isinstance(dashboard.get("policy_stability_monitor"), dict) else {}
         trend_effect = dashboard.get("trend_tuning_effect_review", {}) if isinstance(dashboard.get("trend_tuning_effect_review"), dict) else {}
         rollback_effect = dashboard.get("rollback_effect_review", {}) if isinstance(dashboard.get("rollback_effect_review"), dict) else {}
+        freeze_override = dashboard.get("freeze_override_status", {}) if isinstance(dashboard.get("freeze_override_status"), dict) else {}
         return build_strategy_policy_tuning_guard(
             monitor,
             tuning if isinstance(tuning, dict) else {},
             source=source,
             trend_tuning_effect_review=trend_effect,
             rollback_effect_review=rollback_effect,
+            freeze_override_status=freeze_override,
         )
 
     def _block_strategy_policy_tuning_if_needed(self, tuning: dict | object, source: str) -> dict | None:
@@ -5334,6 +5348,39 @@ class SmartMatchDashboard:
             self.status_var.set(str(guard.get("summary_text") or guard.get("label") or "\u8c03\u53c2\u5df2\u6682\u505c"))
             return None
         return guard
+
+    def apply_strategy_policy_freeze_override(self, rollback_effect: dict | object | None = None, freeze_override: dict | object | None = None) -> None:
+        rollback = rollback_effect if isinstance(rollback_effect, dict) else {}
+        override = freeze_override if isinstance(freeze_override, dict) else {}
+        if not rollback:
+            policy_history = get_strategy_admission_policy_history(limit=20)
+            settlements = list(reversed(get_recent_settlements(limit=200)))
+            review = build_strategy_policy_effect_review(policy_history, settlements)
+            rollback = build_strategy_policy_rollback_effect_review(review)
+            override = build_strategy_policy_freeze_override_status(policy_history, rollback)
+        if str(rollback.get("status") or "") != "negative":
+            messagebox.showinfo("\u8c03\u53c2\u51bb\u7ed3", "\u5f53\u524d\u6ca1\u6709\u56de\u6eda\u5931\u8d25\u5bfc\u81f4\u7684\u8c03\u53c2\u51bb\u7ed3\u3002")
+            return
+        if str(override.get("status") or "") == "overridden":
+            messagebox.showinfo("\u8c03\u53c2\u51bb\u7ed3", f"\u51bb\u7ed3\u5df2\u89e3\u9664:\n{override.get('summary_text', '-')}")
+            return
+        rollback_version = str(rollback.get("latest_version_id") or "-")
+        confirm = messagebox.askyesno(
+            "\u4eba\u5de5\u89e3\u9664\u8c03\u53c2\u51bb\u7ed3",
+            (
+                f"\u5c06\u5199\u5165\u4e00\u6761\u5ba1\u8ba1\u8bb0\u5f55\uff0c\u8868\u793a\u5df2\u4eba\u5de5\u590d\u6838\u56de\u6eda\u5931\u8d25\u6837\u672c\u5e76\u5141\u8bb8\u6062\u590d\u8c03\u53c2:\n\n"
+                f"{rollback.get('summary_text', '-')}\n\n"
+                "\u8fd9\u4e0d\u4f1a\u6539\u53d8\u5f53\u524d\u95e8\u69db\u53c2\u6570\uff0c\u53ea\u4f1a\u5199\u5165 policy_freeze_override \u5ba1\u8ba1\u7248\u672c\u3002\n"
+                "\u540e\u7eed\u8c03\u53c2\u4ecd\u9700\u8981\u4eba\u5de5\u786e\u8ba4\u3002"
+            ),
+        )
+        if not confirm:
+            return
+        status = apply_strategy_admission_policy_update({}, source=f"policy_freeze_override:{rollback_version}")
+        version_id = str(status.get("version_id") or "-")
+        self.status_var.set(f"\u8c03\u53c2\u51bb\u7ed3\u5df2\u4eba\u5de5\u89e3\u9664: {version_id}")
+        messagebox.showinfo("\u8c03\u53c2\u51bb\u7ed3", "\u5df2\u5199\u5165\u89e3\u9664\u51bb\u7ed3\u5ba1\u8ba1\u8bb0\u5f55\uff0c\u540e\u7eed\u8c03\u53c2\u5c06\u8f6c\u4e3a\u4eba\u5de5\u786e\u8ba4\u3002")
+        self.open_strategy_library()
 
     def apply_strategy_allowlist_tuning(self, tuning: dict | object) -> None:
         if not isinstance(tuning, dict):
@@ -5874,6 +5921,7 @@ class SmartMatchDashboard:
         audit_tools.pack(fill=tk.X, pady=(0, 12))
         self._strategy_toolbar_button(audit_tools, "\u5ba1\u8ba1\u5386\u53f2", self.open_strategy_policy_audit_history)
         self._strategy_toolbar_button(audit_tools, "\u5bfc\u51fa\u8c03\u53c2\u5ba1\u8ba1", self.export_strategy_policy_audit_report)
+        self._strategy_toolbar_button(audit_tools, "\u89e3\u9664\u8c03\u53c2\u51bb\u7ed3", self.apply_strategy_policy_freeze_override)
         self._strategy_toolbar_button(audit_tools, "StatsBomb\u8865\u6837", self.export_statsbomb_fewshot_backfill_report)
         self._strategy_toolbar_button(audit_tools, "StatsBomb\u8349\u7a3f", self.export_statsbomb_fewshot_draft)
         self._strategy_toolbar_button(audit_tools, "StatsBomb\u9884\u89c8", self.preview_statsbomb_fewshot_merge_bundle)
@@ -6105,6 +6153,14 @@ class SmartMatchDashboard:
                     str(row.get("body") or "-"),
                     command=lambda review=policy_effect: self.open_policy_effect_detail_window(review),
                 )
+        freeze_override = dashboard.get("freeze_override_status", {}) if isinstance(dashboard.get("freeze_override_status"), dict) else {}
+        if str(freeze_override.get("status") or "") in {"frozen", "overridden"}:
+            self._strategy_row(
+                right,
+                str(freeze_override.get("label") or "-"),
+                str(freeze_override.get("summary_text") or "-"),
+                command=lambda rollback=rollback_effect, override=freeze_override: self.apply_strategy_policy_freeze_override(rollback, override),
+            )
 
         stability_monitor = dashboard.get("policy_stability_monitor", {}) if isinstance(dashboard.get("policy_stability_monitor"), dict) else {}
         self._strategy_section_title(right, "\u7248\u672c\u7a33\u5b9a\u76d1\u63a7")
