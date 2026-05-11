@@ -16,6 +16,7 @@ if str(SRC_ROOT) not in sys.path:
 from v24_app.core import AppMatch
 from v24_app.ui_modules import (
     build_high_accuracy_strategy_dashboard,
+    build_high_accuracy_live_feedback_summary,
     build_high_accuracy_strategy_pool_rows,
     build_high_accuracy_strategy_settlement_summary,
     build_agent_trace_replay_summary,
@@ -581,6 +582,100 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertEqual(high_row["miss_count"], 2)
         self.assertIn("handicap_direction_mismatch", {row["top_signal"] for row in summary["rows"]})
 
+    def test_high_accuracy_live_feedback_summary_groups_strategy_states(self) -> None:
+        status = {
+            "enabled": True,
+            "runtime_active_count": 2,
+            "strategy_pool": [
+                {
+                    "role": "primary",
+                    "scope": "league",
+                    "scope_value": "La Liga",
+                    "play_type": "market_1x2",
+                    "layer": {"data_layer": "historical_market"},
+                    "min_confidence": 0.70,
+                    "sample_count": 100,
+                    "hit_count": 80,
+                    "accuracy": 0.80,
+                    "wilson_lower": 0.72,
+                    "breaker": {"breaker_on": False, "status": "pending", "known_count": 0, "hit_count": 0, "miss_streak": 0, "threshold": 3},
+                },
+                {
+                    "role": "backup",
+                    "scope": "global",
+                    "scope_value": "all",
+                    "play_type": "handicap",
+                    "layer": {"data_layer": "app_settlement"},
+                    "min_confidence": 0.75,
+                    "sample_count": 40,
+                    "hit_count": 25,
+                    "accuracy": 0.625,
+                    "wilson_lower": 0.50,
+                    "breaker": {"breaker_on": False, "status": "active", "known_count": 5, "hit_count": 4, "miss_streak": 2, "threshold": 3},
+                },
+                {
+                    "role": "primary",
+                    "effective_role": "observe",
+                    "scope": "jc_bucket",
+                    "scope_value": "L1 | >=0.65",
+                    "play_type": "market_1x2",
+                    "layer": {"data_layer": "jc_stratified_market"},
+                    "min_confidence": 0.65,
+                    "sample_count": 206,
+                    "hit_count": 164,
+                    "accuracy": 0.796117,
+                    "wilson_lower": 0.757916,
+                    "breaker": {"breaker_on": True, "status": "paused", "known_count": 3, "hit_count": 1, "miss_streak": 3, "threshold": 3},
+                    "jc_live_feedback": {"status": "downgraded", "live_count": 3, "live_hit_count": 1, "live_hit_rate": 0.333333, "deviation": -0.25},
+                },
+                {
+                    "role": "primary",
+                    "effective_role": "observe",
+                    "scope": "league",
+                    "scope_value": "Serie A",
+                    "play_type": "ou",
+                    "layer": {"data_layer": "historical_market"},
+                    "min_confidence": 0.68,
+                    "sample_count": 60,
+                    "hit_count": 39,
+                    "accuracy": 0.65,
+                    "wilson_lower": 0.52,
+                    "breaker": {
+                        "breaker_on": True,
+                        "status": "recovering",
+                        "known_count": 2,
+                        "hit_count": 1,
+                        "miss_streak": 0,
+                        "threshold": 3,
+                        "recovery_streak": 1,
+                        "recovery_hits_required": 2,
+                    },
+                },
+            ],
+        }
+
+        summary = build_high_accuracy_live_feedback_summary(status)
+
+        self.assertEqual(summary["strategy_count"], 4)
+        self.assertEqual(summary["runtime_active_count"], 2)
+        self.assertEqual(summary["pending_count"], 1)
+        self.assertEqual(summary["known_count"], 3)
+        self.assertEqual(summary["paused_count"], 1)
+        self.assertEqual(summary["recovering_count"], 1)
+        self.assertEqual(summary["hit_count"], 6)
+        self.assertEqual(summary["feedback_known_count"], 10)
+        self.assertIn("待反馈 1", summary["summary_text"])
+        self.assertIn("命中 6/10", summary["summary_text"])
+        titles = "\n".join(row["title"] for row in summary["rows"])
+        bodies = "\n".join(row["body"] for row in summary["rows"])
+        self.assertIn("待反馈", titles)
+        self.assertIn("实盘反馈", titles)
+        self.assertIn("暂停/观察", titles)
+        self.assertIn("恢复中", titles)
+        self.assertIn("接近断路", bodies)
+        self.assertIn("接近恢复", bodies)
+        self.assertIn("JC实盘", bodies)
+
     def test_strategy_dashboard_summarizes_pool_and_settlements(self) -> None:
         status = {
             "enabled": True,
@@ -686,6 +781,8 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertEqual(metrics["\u7b56\u7565\u6c60"], "2")
         self.assertEqual(metrics["\u7a33\u5b9a\u7b56\u7565"], "2/2")
         self.assertEqual(metrics["\u65ad\u8def\u6682\u505c"], "1")
+        self.assertIn("\u5b9e\u76d8\u53cd\u9988", metrics)
+        self.assertIn("\u5df2\u53cd\u9988 2", metrics["\u5b9e\u76d8\u53cd\u9988"])
         self.assertEqual(metrics["\u771f\u5b9e\u547d\u4e2d"], "50.0%")
         self.assertIn("Handicap Margin", metrics)
         self.assertIn("Agent Replay", metrics)
@@ -698,6 +795,7 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("policy_effect_review", dashboard)
         self.assertIn("policy_stability_monitor", dashboard)
         self.assertIn("policy_tuning_guard", dashboard)
+        self.assertEqual(dashboard["live_feedback_loop"]["paused_count"], 1)
         self.assertIn("APP 40", dashboard["validation_rows"][0][1])
         self.assertEqual(len(dashboard["pool_rows"]), 2)
         self.assertIn("\u89c2\u5bdf(\u539f\u4e3b\u7b56\u7565)", dashboard["pool_rows"][0]["title"])

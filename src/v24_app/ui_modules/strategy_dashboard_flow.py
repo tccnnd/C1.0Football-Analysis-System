@@ -4559,6 +4559,150 @@ def build_high_accuracy_strategy_pool_rows(status: Mapping[str, object] | object
     return rows
 
 
+def build_high_accuracy_live_feedback_summary(status: Mapping[str, object] | object) -> dict[str, object]:
+    resolved = _as_mapping(status)
+    pool = _strategy_pool(resolved)
+    rows: list[dict[str, str]] = []
+    pending_count = 0
+    known_strategy_count = 0
+    paused_count = 0
+    recovering_count = 0
+    recovered_count = 0
+    feedback_hit_count = 0
+    feedback_known_count = 0
+    computed_active_count = 0
+
+    for index, item in enumerate(pool, start=1):
+        layer = _strategy_layer(item)
+        breaker = _as_mapping(item.get("breaker"))
+        jc_feedback = _as_mapping(item.get("jc_live_feedback"))
+        role = _label(ROLE_LABELS, item.get("effective_role") or item.get("role"))
+        play = _label(PLAY_LABELS, item.get("play_type"))
+        scope = _label(SCOPE_LABELS, item.get("scope"))
+        data_layer = _label(DATA_LAYER_LABELS, layer.get("data_layer") or item.get("data_layer"))
+        breaker_status = str(breaker.get("status") or "pending").strip().lower()
+        jc_status = str(jc_feedback.get("status") or "").strip().lower()
+        recovery_status = str(jc_feedback.get("recovery_status") or breaker.get("recovery_status") or "").strip().lower()
+        breaker_on = _safe_bool(breaker.get("breaker_on"))
+        breaker_known_count = _safe_int(breaker.get("known_count"))
+        jc_known_count = _safe_int(jc_feedback.get("live_count"))
+        feedback_known = max(breaker_known_count, jc_known_count)
+        feedback_hits = (
+            _safe_int(jc_feedback.get("live_hit_count"))
+            if jc_known_count > breaker_known_count
+            else _safe_int(breaker.get("hit_count"))
+        )
+        if feedback_known <= 0 and _safe_int(jc_feedback.get("live_hit_count")):
+            feedback_hits = _safe_int(jc_feedback.get("live_hit_count"))
+        feedback_hit_rate = feedback_hits / feedback_known if feedback_known else None
+        feedback_hit_rate_text = _pct(feedback_hit_rate) if feedback_hit_rate is not None else "-"
+        miss_streak = _safe_int(breaker.get("miss_streak") or jc_feedback.get("miss_streak"))
+        breaker_threshold = _safe_int(breaker.get("threshold"), 3)
+        recovery_streak = _safe_int(breaker.get("recovery_streak") or jc_feedback.get("recovery_streak"))
+        recovery_required = _safe_int(breaker.get("recovery_hits_required") or jc_feedback.get("recovery_hits_required"), 2)
+
+        if breaker_on and (breaker_status == "recovering" or recovery_status in {"in_progress", "recovering"}):
+            state = "recovering"
+        elif breaker_on or breaker_status in {"paused", "blocked"} or jc_status in {"downgraded", "blocked"}:
+            state = "paused"
+        elif feedback_known <= 0:
+            state = "pending"
+        elif breaker_status == "recovered" or recovery_status in {"eligible", "recovered"}:
+            state = "recovered"
+        else:
+            state = "known"
+
+        if state == "pending":
+            pending_count += 1
+        else:
+            known_strategy_count += 1
+        if state == "paused":
+            paused_count += 1
+        if state == "recovering":
+            recovering_count += 1
+        if state == "recovered":
+            recovered_count += 1
+        if state not in {"paused", "recovering"}:
+            computed_active_count += 1
+        feedback_hit_count += feedback_hits
+        feedback_known_count += feedback_known
+
+        state_label = {
+            "pending": "待反馈",
+            "known": "实盘反馈",
+            "paused": "暂停/观察",
+            "recovering": "恢复中",
+            "recovered": "已恢复",
+        }.get(state, "实盘反馈")
+        hints: list[str] = []
+        if state == "pending":
+            hints.append("等待赛果回收")
+        if not breaker_on and breaker_threshold and miss_streak >= max(1, breaker_threshold - 1):
+            hints.append("接近断路")
+        if breaker_on and recovery_required and recovery_streak >= max(1, recovery_required - 1):
+            hints.append("接近恢复")
+        if breaker_on and not hints:
+            hints.append("断路观察")
+        hint_text = " / ".join(hints) if hints else "正常跟踪"
+        jc_live_line = ""
+        if jc_feedback:
+            jc_live_rate = jc_feedback.get("live_hit_rate")
+            if jc_live_rate in (None, "") and jc_known_count:
+                jc_live_rate = _safe_int(jc_feedback.get("live_hit_count")) / jc_known_count
+            jc_live_line = (
+                f"\nJC实盘: {_safe_int(jc_feedback.get('live_hit_count'))}/{jc_known_count}"
+                f" ({_pct(jc_live_rate)}) | 偏差 {_pct(jc_feedback.get('deviation'))} | 状态 {jc_status.upper() or '-'}"
+            )
+        body = (
+            f"范围: {scope} / {item.get('scope_value') or '-'} | 数据层: {data_layer}\n"
+            f"门槛: {_safe_float(item.get('min_confidence')):.2f} | 回测: {_pct(item.get('accuracy'))}"
+            f" ({_safe_int(item.get('hit_count'))}/{_safe_int(item.get('sample_count'))}) | Wilson {_pct(item.get('wilson_lower'))}\n"
+            f"实盘反馈: 命中 {feedback_hits}/{feedback_known} ({feedback_hit_rate_text}) | 状态 {breaker_status.upper()}"
+            f" | {hint_text}\n"
+            f"断路计数: 连错 {miss_streak}/{breaker_threshold} | 恢复 {recovery_streak}/{recovery_required}"
+            f"{jc_live_line}"
+        )
+        rows.append({"title": f"{index}. {state_label} | {role} | {play}", "body": body})
+
+    runtime_source = resolved.get("runtime_active_count")
+    runtime_active_count = _safe_int(runtime_source) if runtime_source not in (None, "") else computed_active_count
+    hit_rate = feedback_hit_count / feedback_known_count if feedback_known_count else None
+    summary_parts = [
+        f"可用 {runtime_active_count}/{len(pool)}",
+        f"待反馈 {pending_count}",
+        f"已反馈 {known_strategy_count}",
+        f"命中 {feedback_hit_count}/{feedback_known_count}",
+        f"暂停 {paused_count}",
+    ]
+    if recovering_count:
+        summary_parts.append(f"恢复中 {recovering_count}")
+    tone = "neutral"
+    if pool:
+        if paused_count and runtime_active_count <= 0:
+            tone = "bad"
+        elif paused_count or recovering_count or pending_count:
+            tone = "warning"
+        else:
+            tone = "good"
+    return {
+        "strategy_count": len(pool),
+        "runtime_active_count": runtime_active_count,
+        "pending_count": pending_count,
+        "known_count": known_strategy_count,
+        "feedback_strategy_count": known_strategy_count,
+        "paused_count": paused_count,
+        "recovering_count": recovering_count,
+        "recovered_count": recovered_count,
+        "hit_count": feedback_hit_count,
+        "feedback_known_count": feedback_known_count,
+        "hit_rate": hit_rate,
+        "hit_rate_text": _pct(hit_rate) if hit_rate is not None else "-",
+        "summary_text": " | ".join(summary_parts),
+        "tone": tone,
+        "rows": rows,
+    }
+
+
 def build_high_accuracy_strategy_settlement_rows(
     settlements: Sequence[Mapping[str, object]],
     *,
@@ -6065,6 +6209,7 @@ def build_high_accuracy_strategy_dashboard(
     market_entropy_backtest = build_market_entropy_backtest_summary(settlement_items)
     handicap_margin_backtest = build_handicap_margin_backtest_summary(settlement_items)
     jc_bucket_feedback = build_jc_bucket_feedback_summary(resolved, settlement_items)
+    live_feedback_loop = build_high_accuracy_live_feedback_summary(resolved)
     statsbomb_event_review = build_statsbomb_event_review_summary(settlement_items, statsbomb_event_baseline or {})
     evaluation_agent = build_strategy_evaluation_agent_summary(
         resolved,
@@ -6133,6 +6278,11 @@ def build_high_accuracy_strategy_dashboard(
         {"label": "\u7b56\u7565\u6c60", "value": str(len(pool)), "tone": "info"},
         {"label": "\u7a33\u5b9a\u7b56\u7565", "value": f"{stable_count}/{len(pool)}", "tone": "good" if stable_count else "warning"},
         {"label": "\u65ad\u8def\u6682\u505c", "value": str(paused_count), "tone": "bad" if paused_count else "good"},
+        {
+            "label": "\u5b9e\u76d8\u53cd\u9988",
+            "value": str(live_feedback_loop.get("summary_text") or "-"),
+            "tone": str(live_feedback_loop.get("tone") or "neutral"),
+        },
         {
             "label": "\u56de\u6d4b\u8bb0\u5f55",
             "value": str(_safe_int(validation.get("record_count"))),
@@ -6327,6 +6477,7 @@ def build_high_accuracy_strategy_dashboard(
         "reason": resolved.get("reason") or "-",
         "metrics": metrics,
         "pool_rows": build_high_accuracy_strategy_pool_rows(resolved),
+        "live_feedback_loop": live_feedback_loop,
         "settlement_rows": build_high_accuracy_strategy_settlement_rows(settlement_items),
         "error_attribution": error_attribution,
         "historical_strategy_replay": dict(historical_replay_summary),

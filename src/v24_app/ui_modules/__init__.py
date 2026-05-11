@@ -186,6 +186,7 @@ from .coverage_guardrail_flow import (
 )
 from .strategy_dashboard_flow import (
     build_high_accuracy_strategy_dashboard,
+    build_high_accuracy_live_feedback_summary,
     build_high_accuracy_strategy_pool_rows,
     build_high_accuracy_strategy_settlement_rows,
     build_high_accuracy_strategy_settlement_summary,
@@ -412,6 +413,7 @@ __all__ = [
     "build_coverage_guardrail_apply_message",
     "build_coverage_guardrail_apply_status_text",
     "build_high_accuracy_strategy_dashboard",
+    "build_high_accuracy_live_feedback_summary",
     "build_high_accuracy_strategy_pool_rows",
     "build_high_accuracy_strategy_settlement_rows",
     "build_high_accuracy_strategy_settlement_summary",

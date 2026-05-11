@@ -5700,6 +5700,20 @@ class SmartMatchDashboard:
         else:
             self._strategy_row(left, "\u6682\u65e0\u53ef\u7528\u7b56\u7565", "\u8bf7\u5148\u6267\u884c\u9ad8\u51c6\u7b56\u7565\u56de\u6d4b\uff0c\u8ba9\u7cfb\u7edf\u4ece\u5386\u53f2\u6837\u672c\u4e2d\u751f\u6210\u7b56\u7565\u6c60\u3002")
 
+        live_feedback_loop = dashboard.get("live_feedback_loop", {}) if isinstance(dashboard.get("live_feedback_loop"), dict) else {}
+        self._strategy_section_title(left, "\u9ad8\u51c6\u7b56\u7565\u5b9e\u76d8\u53cd\u9988\u95ed\u73af")
+        feedback_rows = live_feedback_loop.get("rows", []) if isinstance(live_feedback_loop.get("rows"), list) else []
+        if feedback_rows:
+            for row in feedback_rows:
+                if isinstance(row, dict):
+                    self._strategy_row(left, str(row.get("title") or "-"), str(row.get("body") or "-"))
+        else:
+            self._strategy_row(
+                left,
+                "\u6682\u65e0\u5b9e\u76d8\u53cd\u9988\u72b6\u6001",
+                "\u7b56\u7565\u6c60\u751f\u6210\u540e\uff0c\u8fd9\u91cc\u4f1a\u8ddf\u8e2a\u5f85\u56de\u6536\u3001\u5df2\u53cd\u9988\u3001\u6682\u505c\u548c\u6062\u590d\u4e2d\u7b56\u7565\u3002",
+            )
+
         jc_feedback = dashboard.get("jc_bucket_feedback", {}) if isinstance(dashboard.get("jc_bucket_feedback"), dict) else {}
         self._strategy_section_title(left, "JC\u7a33\u5b9a\u6876\u5b9e\u76d8\u6392\u540d")
         jc_rows = jc_feedback.get("rows", []) if isinstance(jc_feedback.get("rows"), list) else []
