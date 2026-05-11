@@ -300,6 +300,39 @@ class CoreStrategyAllowlistLinkTests(unittest.TestCase):
                 core._STRATEGY_ADMISSION_POLICY_CACHE.clear()
                 core._STRATEGY_ADMISSION_POLICY_CACHE.update(cache_backup)
 
+    def test_apply_draw_release_guard_policy_update_writes_local_policy(self) -> None:
+        cache_backup = dict(core._DRAW_RELEASE_GUARD_POLICY_CACHE)
+        with tempfile.TemporaryDirectory() as tmp:
+            policy_path = Path(tmp) / "draw_release_guard_policy_v1.json"
+            history_path = Path(tmp) / "draw_release_guard_policy_history_v1.json"
+            try:
+                core._DRAW_RELEASE_GUARD_POLICY_CACHE.update({"mtime": object(), "policy": {}, "report": {}})
+                with patch("v24_app.core.DRAW_RELEASE_GUARD_POLICY_FILE", policy_path), patch(
+                    "v24_app.core.DRAW_RELEASE_GUARD_POLICY_HISTORY_FILE",
+                    history_path,
+                ):
+                    status = core.apply_draw_release_guard_policy_update(
+                        {
+                            "enabled": True,
+                            "min_score": 0.91,
+                            "weak_odds_buckets": {"<=3.00": {"source": "unit"}},
+                        },
+                        source="unit_draw_guard",
+                    )
+
+                    self.assertTrue(policy_path.exists())
+                    policy = status["policy"]
+                    self.assertEqual(policy["min_score"], 0.85)
+                    self.assertEqual(sorted(policy["weak_odds_buckets"]), ["<=3.00"])
+                    self.assertEqual(status["reason"], "unit_draw_guard")
+                    history = core.get_draw_release_guard_policy_history(limit=5)
+                    self.assertEqual(len(history), 1)
+                    self.assertEqual(history[0]["source"], "unit_draw_guard")
+                    self.assertEqual(history[0]["policy"]["min_score"], 0.85)
+            finally:
+                core._DRAW_RELEASE_GUARD_POLICY_CACHE.clear()
+                core._DRAW_RELEASE_GUARD_POLICY_CACHE.update(cache_backup)
+
 
 if __name__ == "__main__":
     unittest.main()

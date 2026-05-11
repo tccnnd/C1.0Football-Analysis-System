@@ -6221,6 +6221,117 @@ def build_draw_release_guard_review_summary(settlements: Sequence[Mapping[str, o
     }
 
 
+def _draw_guard_policy_from_status(policy_status: Mapping[str, object] | object | None) -> dict[str, object]:
+    status = _as_mapping(policy_status)
+    policy = _as_mapping(status.get("policy"))
+    if not policy and status:
+        policy = status
+    weak_buckets = policy.get("weak_odds_buckets") if isinstance(policy.get("weak_odds_buckets"), Mapping) else {}
+    return {
+        "enabled": bool(policy.get("enabled", True)),
+        "min_score": round(_safe_float(policy.get("min_score"), 0.58), 2),
+        "weak_odds_buckets": {str(key): dict(value) for key, value in weak_buckets.items() if isinstance(value, Mapping)},
+    }
+
+
+def build_draw_release_guard_policy_tuning_recommendation(
+    settlements: Sequence[Mapping[str, object]] | object,
+    policy_status: Mapping[str, object] | object | None = None,
+) -> dict[str, object]:
+    review = build_draw_release_guard_review_summary(settlements)
+    current_policy = _draw_guard_policy_from_status(policy_status)
+    current_min_score = _safe_float(current_policy.get("min_score"), 0.58)
+    current_buckets = current_policy.get("weak_odds_buckets") if isinstance(current_policy.get("weak_odds_buckets"), dict) else {}
+    next_buckets = {str(key): dict(value) for key, value in current_buckets.items() if isinstance(value, Mapping)}
+    next_min_score = current_min_score
+    reasons: list[str] = []
+    removed_buckets: list[str] = []
+    action = "collect"
+    label = "\u7ee7\u7eed\u79ef\u7d2f\u6837\u672c"
+    tone = "neutral"
+
+    sample_count = _safe_int(review.get("sample_count"))
+    blocked_count = _safe_int(review.get("blocked_count"))
+    avoid_rate = review.get("avoid_rate")
+    missed_rate = review.get("missed_rate")
+    avoid_value = _safe_float(avoid_rate, -1.0) if avoid_rate is not None else None
+    missed_value = _safe_float(missed_rate, -1.0) if missed_rate is not None else None
+    rows = [row for row in review.get("rows", []) if isinstance(row, Mapping)] if isinstance(review.get("rows"), list) else []
+
+    if sample_count < 5 or blocked_count < 2:
+        reasons.append(f"\u5e73\u5c40\u62e6\u622a\u53ef\u590d\u76d8\u6837\u672c {sample_count} \u573a\uff0c\u62e6\u622a {blocked_count} \u573a\uff0c\u6682\u4e0d\u81ea\u52a8\u6539\u53c2\u3002")
+    else:
+        for row in rows:
+            bucket = str(row.get("bucket") or "")
+            row_blocked = _safe_int(row.get("blocked_count"))
+            row_avoid = row.get("avoid_rate")
+            row_missed = row.get("missed_rate")
+            row_avoid_value = _safe_float(row_avoid, -1.0) if row_avoid is not None else None
+            row_missed_value = _safe_float(row_missed, -1.0) if row_missed is not None else None
+            if (
+                bucket in next_buckets
+                and row_blocked >= 3
+                and row_missed_value is not None
+                and row_missed_value >= 0.34
+                and (row_avoid_value is None or row_avoid_value < 0.67)
+            ):
+                removed_buckets.append(bucket)
+        if removed_buckets:
+            action = "loosen_guard"
+            label = "\u79fb\u9664\u9ad8\u4ee3\u4ef7\u5f31\u8d54\u7387\u6876"
+            tone = "warning"
+            for bucket in removed_buckets:
+                next_buckets.pop(bucket, None)
+            reasons.append(f"\u4ee5\u4e0b\u8d54\u7387\u6876\u62e6\u622a\u540e\u771f\u5e73\u5c40\u6210\u672c\u504f\u9ad8\uff0c\u5efa\u8bae\u79fb\u9664\uff1a{', '.join(removed_buckets)}\u3002")
+        elif missed_value is not None and missed_value >= 0.34:
+            action = "loosen_guard"
+            label = "\u62ac\u9ad8\u62e6\u622a\u5206\u6570\u7ebf"
+            tone = "warning"
+            next_min_score = round(min(0.72, current_min_score + 0.04), 2)
+            reasons.append(f"\u88ab\u62e6\u622a\u573a\u6b21\u4e2d\u771f\u5e73\u5c40\u5360\u6bd4 {review.get('missed_rate_text', '-')}\uff0c\u5efa\u8bae\u63d0\u9ad8\u62e6\u622a\u5206\u6570\u7ebf\u3002")
+        elif blocked_count >= 5 and avoid_value is not None and missed_value is not None and avoid_value >= 0.75 and missed_value <= 0.10:
+            action = "tighten_guard"
+            label = "\u5c0f\u5e45\u964d\u4f4e\u62e6\u622a\u5206\u6570\u7ebf"
+            tone = "good"
+            next_min_score = round(max(0.54, current_min_score - 0.02), 2)
+            reasons.append(f"\u62e6\u622a\u907f\u514d\u5047\u9633\u7387 {review.get('avoid_rate_text', '-')}\uff0c\u4e14\u9519\u8fc7\u771f\u5e73 {review.get('missed_rate_text', '-')}\uff0c\u53ef\u5c0f\u5e45\u52a0\u5f3a\u62e6\u622a\u3002")
+        else:
+            action = "hold"
+            label = "\u4fdd\u6301\u5f53\u524d\u7b56\u7565"
+            tone = "good" if str(review.get("recommendation") or "") == "keep_draw_guard" else "neutral"
+            reasons.append("\u5f53\u524d\u590d\u76d8\u4e0d\u652f\u6301\u8fdb\u4e00\u6b65\u6536\u7d27\u6216\u653e\u5bbd\uff0c\u5148\u7ef4\u6301\u73b0\u6709\u7b56\u7565\u3002")
+
+    next_policy = {
+        "enabled": bool(current_policy.get("enabled", True)),
+        "min_score": round(next_min_score, 2),
+        "weak_odds_buckets": next_buckets,
+    }
+    changed = round(next_min_score, 2) != round(current_min_score, 2) or sorted(next_buckets.keys()) != sorted(current_buckets.keys())
+    policy_update = next_policy if action in {"loosen_guard", "tighten_guard"} and changed else {}
+    rows_out = [
+        ("\u52a8\u4f5c", label),
+        ("\u6837\u672c", f"{sample_count} \u573a | \u62e6\u622a {blocked_count} | \u907f\u514d {review.get('avoid_rate_text', '-')} | \u9519\u8fc7 {review.get('missed_rate_text', '-')}"),
+        ("\u5206\u6570\u7ebf", f"{current_min_score:.2f} -> {next_min_score:.2f}"),
+        ("\u5f31\u8d54\u7387\u6876", f"{', '.join(sorted(current_buckets)) or '-'} -> {', '.join(sorted(next_buckets)) or '-'}"),
+        ("\u79fb\u9664\u6876", ", ".join(removed_buckets) or "-"),
+        ("\u539f\u56e0", "\n".join(reasons) if reasons else "-"),
+    ]
+    return {
+        "source": "draw_release_guard_tuning",
+        "action": action,
+        "label": label,
+        "tone": tone,
+        "current_policy": current_policy,
+        "next_policy": next_policy,
+        "policy_update": policy_update,
+        "changed": bool(policy_update),
+        "reasons": reasons,
+        "rows": rows_out,
+        "review": review,
+        "summary_text": f"{label} | {review.get('summary_text', '-')}",
+    }
+
+
 def build_handicap_margin_backtest_summary(settlements: Sequence[Mapping[str, object]] | object) -> dict[str, object]:
     settlement_items = [item for item in settlements if isinstance(item, Mapping)] if isinstance(settlements, Sequence) else []
     known = [
@@ -7307,6 +7418,7 @@ def build_high_accuracy_strategy_dashboard(
     statsbomb_event_baseline: Mapping[str, object] | object | None = None,
     statsbomb_fewshot_memory: Mapping[str, object] | object | None = None,
     historical_replay: Mapping[str, object] | object | None = None,
+    draw_release_guard_policy_status: Mapping[str, object] | object | None = None,
     *,
     include_statsbomb_backfill_candidates: bool = False,
 ) -> dict[str, object]:
@@ -7349,6 +7461,10 @@ def build_high_accuracy_strategy_dashboard(
     market_entropy_backtest = build_market_entropy_backtest_summary(settlement_items)
     handicap_margin_backtest = build_handicap_margin_backtest_summary(settlement_items)
     draw_release_guard_review = build_draw_release_guard_review_summary(settlement_items)
+    draw_release_guard_tuning = build_draw_release_guard_policy_tuning_recommendation(
+        settlement_items,
+        draw_release_guard_policy_status,
+    )
     jc_bucket_feedback = build_jc_bucket_feedback_summary(resolved, settlement_items)
     live_feedback_loop = build_high_accuracy_live_feedback_summary(resolved)
     statsbomb_event_review = build_statsbomb_event_review_summary(settlement_items, statsbomb_event_baseline or {})
@@ -7599,6 +7715,11 @@ def build_high_accuracy_strategy_dashboard(
             if str(draw_release_guard_review.get("recommendation") or "") == "collecting"
             else "neutral",
         },
+        {
+            "label": "\u5e73\u5c40\u8c03\u53c2",
+            "value": str(draw_release_guard_tuning.get("label") or "-"),
+            "tone": str(draw_release_guard_tuning.get("tone") or "neutral"),
+        },
     ]
     validation_rows = [
         (
@@ -7686,4 +7807,5 @@ def build_high_accuracy_strategy_dashboard(
         "market_entropy_backtest": market_entropy_backtest,
         "handicap_margin_backtest": handicap_margin_backtest,
         "draw_release_guard_review": draw_release_guard_review,
+        "draw_release_guard_tuning": draw_release_guard_tuning,
     }

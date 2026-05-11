@@ -16,6 +16,7 @@ from tkinter import filedialog, messagebox, ttk
 from .background_tasks import BackgroundTaskCenter, BackgroundTaskRecord
 from .core import (
     AppMatch,
+    apply_draw_release_guard_policy_update,
     apply_strategy_admission_policy_update,
     auto_settle_finished_matches,
     build_historical_strategy_replay_samples,
@@ -24,6 +25,7 @@ from .core import (
     extract_video_review_frames_now,
     fetch_matches_v24,
     get_draw_specialist_backtest_status,
+    get_draw_release_guard_policy_status,
     get_play_model_policy_status,
     get_play_model_training_status,
     get_high_accuracy_strategy_status,
@@ -5489,6 +5491,43 @@ class SmartMatchDashboard:
         messagebox.showinfo("\u653e\u884c\u95e8\u69db", "\u95e8\u69db\u5df2\u5199\u5165\u672c\u5730\u914d\u7f6e\uff0c\u540e\u7eed\u5206\u6790\u5c06\u6309\u65b0\u51c6\u5165\u7b56\u7565\u6267\u884c\u3002")
         self.open_strategy_library()
 
+    def apply_draw_release_guard_tuning(self, tuning: dict | object) -> None:
+        if not isinstance(tuning, dict):
+            messagebox.showinfo("\u5e73\u5c40\u8c03\u53c2", "\u5f53\u524d\u6ca1\u6709\u53ef\u5e94\u7528\u7684\u5e73\u5c40\u62e6\u622a\u5efa\u8bae\u3002")
+            return
+        if str(tuning.get("action") or "") not in {"loosen_guard", "tighten_guard"}:
+            messagebox.showinfo("\u5e73\u5c40\u8c03\u53c2", f"\u5f53\u524d\u5efa\u8bae\u4e3a: {tuning.get('label', '-')}\n\u4e0d\u9700\u8981\u5199\u5165\u65b0\u53c2\u6570\u3002")
+            return
+        update = tuning.get("policy_update") if isinstance(tuning.get("policy_update"), dict) else {}
+        if not update:
+            messagebox.showinfo("\u5e73\u5c40\u8c03\u53c2", "\u5efa\u8bae\u4e2d\u6ca1\u6709\u53ef\u5199\u5165\u7684\u5e73\u5c40\u62e6\u622a\u53c2\u6570\u3002")
+            return
+        current = get_draw_release_guard_policy_status().get("policy", {})
+        current = current if isinstance(current, dict) else {}
+        next_buckets = update.get("weak_odds_buckets") if isinstance(update.get("weak_odds_buckets"), dict) else {}
+        current_buckets = current.get("weak_odds_buckets") if isinstance(current.get("weak_odds_buckets"), dict) else {}
+        reason_text = "\n".join(str(item) for item in tuning.get("reasons", []) if item) if isinstance(tuning.get("reasons"), list) else "-"
+        confirm = messagebox.askyesno(
+            "\u5e94\u7528\u5e73\u5c40\u62e6\u622a\u8c03\u53c2",
+            (
+                f"\u5c06\u5199\u5165\u672c\u5730\u5e73\u5c40\u62e6\u622a\u7b56\u7565:\n\n"
+                f"\u62e6\u622a\u5206\u6570\u7ebf: {float(current.get('min_score', 0.58) or 0.58):.2f} -> {float(update.get('min_score', 0.58) or 0.58):.2f}\n"
+                f"\u5f31\u8d54\u7387\u6876: {', '.join(sorted(str(key) for key in current_buckets)) or '-'} -> {', '.join(sorted(str(key) for key in next_buckets)) or '-'}\n\n"
+                f"\u539f\u56e0:\n{reason_text}\n\n"
+                f"\u786e\u8ba4\u540e\uff0c\u540e\u7eed\u5206\u6790\u4f1a\u6309\u65b0 DrawGuard \u53c2\u6570\u5224\u5b9a\u662f\u5426\u62e6\u622a\u5e73\u5c40\u63a5\u7ba1\u3002"
+            ),
+        )
+        if not confirm:
+            return
+        status = apply_draw_release_guard_policy_update(update, source=str(tuning.get("source") or "draw_release_guard_tuning"))
+        policy = status.get("policy", {}) if isinstance(status.get("policy"), dict) else {}
+        buckets = policy.get("weak_odds_buckets") if isinstance(policy.get("weak_odds_buckets"), dict) else {}
+        self.status_var.set(
+            f"\u5e73\u5c40\u62e6\u622a\u53c2\u6570\u5df2\u5e94\u7528: score_floor={float(policy.get('min_score', 0) or 0):.2f}, buckets={', '.join(sorted(str(key) for key in buckets)) or '-'}"
+        )
+        messagebox.showinfo("\u5e73\u5c40\u8c03\u53c2", "\u5e73\u5c40\u62e6\u622a\u53c2\u6570\u5df2\u5199\u5165\u672c\u5730\u914d\u7f6e\uff0c\u540e\u7eed\u5206\u6790\u5c06\u6309\u65b0\u7b56\u7565\u6267\u884c\u3002")
+        self.open_strategy_library()
+
     def apply_agent_replay_guard_tuning(self, tuning: dict | object) -> None:
         if not isinstance(tuning, dict):
             messagebox.showinfo("Replay Guard", "\u5f53\u524d\u6ca1\u6709\u53ef\u5e94\u7528\u7684 Replay Guard \u5efa\u8bae\u3002")
@@ -6067,7 +6106,9 @@ class SmartMatchDashboard:
         self._refresh_nav_highlight()
         status = get_high_accuracy_strategy_status()
         admission_status = get_strategy_admission_policy_status()
+        draw_guard_status = get_draw_release_guard_policy_status()
         admission_policy = admission_status.get("policy", {}) if isinstance(admission_status.get("policy"), dict) else {}
+        draw_guard_policy = draw_guard_status.get("policy", {}) if isinstance(draw_guard_status.get("policy"), dict) else {}
         settlements = list(reversed(get_recent_settlements(limit=200)))
         policy_history = get_strategy_admission_policy_history(limit=20)
         release_loop = self._strategy_release_recovery_loop(settlements)
@@ -6079,6 +6120,7 @@ class SmartMatchDashboard:
             get_statsbomb_event_baseline(),
             get_statsbomb_sandbox_fewshot_memory(),
             historical_replay,
+            draw_guard_status,
         )
         release_pool_rows = self._strategy_release_pool_rows(settlements, release_loop=release_loop)
         shell = self._page_shell(
@@ -6097,7 +6139,8 @@ class SmartMatchDashboard:
                 f"\u4e2d\u98ce\u9669 {'ON' if admission_policy.get('medium_risk_allowed', True) else 'OFF'} / "
                 f"Replay {int(admission_policy.get('agent_replay_min_samples', 5) or 5)}@"
                 f"{float(admission_policy.get('agent_replay_prediction_miss_threshold', 0.55) or 0.55):.2f}/"
-                f"{float(admission_policy.get('agent_replay_handicap_miss_threshold', 0.60) or 0.60):.2f}"
+                f"{float(admission_policy.get('agent_replay_handicap_miss_threshold', 0.60) or 0.60):.2f} / "
+                f"DrawGuard {float(draw_guard_policy.get('min_score', 0.58) or 0.58):.2f}"
             ),
             bg=BG,
             fg=MUTED,
@@ -6119,6 +6162,11 @@ class SmartMatchDashboard:
             primary_tools,
             "\u5e94\u7528\u95e8\u69db\u5efa\u8bae",
             lambda tuning=dashboard.get("allowlist_tuning", {}): self.apply_strategy_allowlist_tuning(tuning),
+        )
+        self._strategy_toolbar_button(
+            primary_tools,
+            "\u5e94\u7528\u5e73\u5c40\u8c03\u53c2",
+            lambda tuning=dashboard.get("draw_release_guard_tuning", {}): self.apply_draw_release_guard_tuning(tuning),
         )
 
         audit_tools = tk.Frame(shell, bg=BG)
@@ -6484,6 +6532,17 @@ class SmartMatchDashboard:
                         f"\u5e73\u5c40\u5206 {row.get('avg_draw_score_text', '-')} | \u4e3b\u56e0 {row.get('top_reason', '-')}"
                     ),
                 )
+
+        draw_guard_tuning = dashboard.get("draw_release_guard_tuning", {}) if isinstance(dashboard.get("draw_release_guard_tuning"), dict) else {}
+        tuning_rows = draw_guard_tuning.get("rows", []) if isinstance(draw_guard_tuning.get("rows"), list) else []
+        if tuning_rows:
+            tuning_body = "\n".join(f"{label}: {value}" for label, value in tuning_rows if isinstance(label, str))
+            self._strategy_row(
+                right,
+                f"\u5e73\u5c40\u62e6\u622a\u8c03\u53c2: {draw_guard_tuning.get('label', '-')}",
+                tuning_body,
+                command=lambda tuning=draw_guard_tuning: self.apply_draw_release_guard_tuning(tuning),
+            )
 
         statsbomb_review = dashboard.get("statsbomb_event_review", {}) if isinstance(dashboard.get("statsbomb_event_review"), dict) else {}
         self._strategy_section_title(right, "StatsBomb \u8d5b\u540e\u4e8b\u4ef6")

@@ -63,6 +63,7 @@ PLAY_MODEL_POLICY_FILE = PROJECT_DIR / "data" / "models" / "play_model_policy_v1
 PLAY_MODEL_POLICY_HISTORY_FILE = PROJECT_DIR / "data" / "models" / "play_model_policy_history_v1.json"
 DRAW_SPECIALIST_BACKTEST_FILE = PROJECT_DIR / "data" / "models" / "draw_specialist_backtest_v1.json"
 DRAW_RELEASE_GUARD_POLICY_FILE = PROJECT_DIR / "data" / "models" / "draw_release_guard_policy_v1.json"
+DRAW_RELEASE_GUARD_POLICY_HISTORY_FILE = PROJECT_DIR / "data" / "models" / "draw_release_guard_policy_history_v1.json"
 BAYES_CALIBRATION_FILE = PROJECT_DIR / "data" / "models" / "bayes_calibration_v1.json"
 HIGH_ACCURACY_STRATEGY_FILE = PROJECT_DIR / "data" / "models" / "high_accuracy_strategy_v1.json"
 JC_STRATIFIED_STRATEGY_FILE = PROJECT_DIR / "data" / "models" / "jc_stratified_strategy_backtest_v1.json"
@@ -8711,6 +8712,25 @@ def _draw_market_balance_bucket(value: object) -> str:
     return "<0.45 倾斜"
 
 
+def _normalize_draw_release_guard_policy(policy: dict | None) -> dict[str, object]:
+    raw = policy if isinstance(policy, dict) else {}
+    normalized = json.loads(json.dumps(DEFAULT_DRAW_RELEASE_GUARD_POLICY))
+    if "enabled" in raw:
+        normalized["enabled"] = bool(raw.get("enabled"))
+    if raw.get("min_score") is not None:
+        normalized["min_score"] = round(min(0.85, max(0.50, _safe_float(raw.get("min_score"), default=0.58))), 2)
+    if isinstance(raw.get("weak_odds_buckets"), dict):
+        buckets: dict[str, dict[str, object]] = {}
+        for bucket, evidence in raw.get("weak_odds_buckets", {}).items():
+            if not isinstance(evidence, dict):
+                continue
+            key = normalize_text(bucket)
+            if key:
+                buckets[key] = dict(evidence)
+        normalized["weak_odds_buckets"] = buckets
+    return normalized
+
+
 def _current_draw_release_guard_policy() -> dict[str, object]:
     try:
         mtime = DRAW_RELEASE_GUARD_POLICY_FILE.stat().st_mtime
@@ -8735,20 +8755,104 @@ def _current_draw_release_guard_policy() -> dict[str, object]:
     if isinstance(raw, dict):
         raw_policy = raw.get("policy") if isinstance(raw.get("policy"), dict) else raw
         if isinstance(raw_policy, dict):
-            if "enabled" in raw_policy:
-                policy["enabled"] = bool(raw_policy.get("enabled"))
-            if raw_policy.get("min_score") is not None:
-                policy["min_score"] = _safe_float(raw_policy.get("min_score"), policy["min_score"])
-            if isinstance(raw_policy.get("weak_odds_buckets"), dict):
-                policy["weak_odds_buckets"] = {
-                    str(bucket): dict(evidence)
-                    for bucket, evidence in raw_policy.get("weak_odds_buckets", {}).items()
-                    if isinstance(evidence, dict)
-                }
+            policy = _normalize_draw_release_guard_policy(raw_policy)
     _DRAW_RELEASE_GUARD_POLICY_CACHE["mtime"] = mtime
     _DRAW_RELEASE_GUARD_POLICY_CACHE["policy"] = json.loads(json.dumps(policy))
     _DRAW_RELEASE_GUARD_POLICY_CACHE["report"] = raw if isinstance(raw, dict) else {}
     return policy
+
+
+def get_draw_release_guard_policy_status() -> dict:
+    policy = _current_draw_release_guard_policy()
+    report = _DRAW_RELEASE_GUARD_POLICY_CACHE.get("report")
+    report = report if isinstance(report, dict) else {}
+    return {
+        "enabled": bool(policy.get("enabled", True)),
+        "active": bool(policy.get("enabled", True)),
+        "status": "active" if bool(policy.get("enabled", True)) else "disabled",
+        "mode": str(report.get("mode") or ("file" if DRAW_RELEASE_GUARD_POLICY_FILE.exists() else "default")),
+        "updated_at": report.get("updated_at"),
+        "version_id": report.get("version_id"),
+        "reason": report.get("reason") or report.get("source") or "-",
+        "source": str(DRAW_RELEASE_GUARD_POLICY_FILE),
+        "policy": json.loads(json.dumps(policy)),
+        "previous_policy": report.get("previous_policy", {}) if isinstance(report.get("previous_policy"), dict) else {},
+    }
+
+
+def _load_draw_release_guard_policy_history_entries() -> list[dict]:
+    if not DRAW_RELEASE_GUARD_POLICY_HISTORY_FILE.exists():
+        return []
+    try:
+        data = json.loads(DRAW_RELEASE_GUARD_POLICY_HISTORY_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    items = data.get("items") if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        return []
+    return [dict(item) for item in items if isinstance(item, dict)]
+
+
+def _write_draw_release_guard_policy_history_entries(items: list[dict]) -> None:
+    DRAW_RELEASE_GUARD_POLICY_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "items": items[-200:],
+    }
+    DRAW_RELEASE_GUARD_POLICY_HISTORY_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def get_draw_release_guard_policy_history(*, limit: int = 20) -> list[dict]:
+    items = _load_draw_release_guard_policy_history_entries()
+    items.sort(key=lambda item: (str(item.get("updated_at") or ""), str(item.get("version_id") or "")), reverse=True)
+    if limit <= 0:
+        return items
+    return items[: max(0, int(limit))]
+
+
+def apply_draw_release_guard_policy_update(update: dict, *, source: str = "draw_release_guard_tuning") -> dict:
+    current = get_draw_release_guard_policy_status()
+    policy = dict(current.get("policy") if isinstance(current.get("policy"), dict) else DEFAULT_DRAW_RELEASE_GUARD_POLICY)
+    raw_update = update.get("policy") if isinstance(update, dict) and isinstance(update.get("policy"), dict) else update
+    if isinstance(raw_update, dict):
+        policy.update(raw_update)
+    normalized = _normalize_draw_release_guard_policy(policy)
+    updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    history_items = _load_draw_release_guard_policy_history_entries()
+    version_id = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{len(history_items) + 1:04d}"
+    report = {
+        "enabled": True,
+        "active": bool(normalized.get("enabled", True)),
+        "status": "active" if bool(normalized.get("enabled", True)) else "disabled",
+        "mode": "manual",
+        "updated_at": updated_at,
+        "version_id": version_id,
+        "reason": str(source or "draw_release_guard_tuning"),
+        "source": str(source or "draw_release_guard_tuning"),
+        "policy": normalized,
+        "previous_policy": current.get("policy", {}),
+        "update": dict(raw_update) if isinstance(raw_update, dict) else {},
+    }
+    DRAW_RELEASE_GUARD_POLICY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    DRAW_RELEASE_GUARD_POLICY_FILE.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    history_items.append(
+        {
+            "version_id": version_id,
+            "updated_at": updated_at,
+            "source": str(source or "draw_release_guard_tuning"),
+            "policy": normalized,
+            "previous_policy": current.get("policy", {}),
+            "update": dict(raw_update) if isinstance(raw_update, dict) else {},
+        }
+    )
+    _write_draw_release_guard_policy_history_entries(history_items)
+    try:
+        _DRAW_RELEASE_GUARD_POLICY_CACHE["mtime"] = DRAW_RELEASE_GUARD_POLICY_FILE.stat().st_mtime
+    except OSError:
+        _DRAW_RELEASE_GUARD_POLICY_CACHE["mtime"] = None
+    _DRAW_RELEASE_GUARD_POLICY_CACHE["policy"] = json.loads(json.dumps(normalized))
+    _DRAW_RELEASE_GUARD_POLICY_CACHE["report"] = dict(report)
+    return get_draw_release_guard_policy_status()
 
 
 def _draw_release_guard(match: AppMatch, draw_score: object, *, base_takeover: bool = False) -> dict[str, object]:
