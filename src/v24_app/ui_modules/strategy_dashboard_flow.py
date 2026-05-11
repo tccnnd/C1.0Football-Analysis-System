@@ -4133,6 +4133,226 @@ def build_strategy_policy_tuning_guard(
     }
 
 
+POLICY_ROLLBACK_FIELD_LABELS: tuple[tuple[str, str, str], ...] = (
+    ("min_confidence", "\u6700\u4f4e\u7f6e\u4fe1", "float"),
+    ("block_confidence", "\u963b\u65ad\u7f6e\u4fe1", "float"),
+    ("active_strategy_min", "\u9ad8\u51c6\u7b56\u7565\u6570", "int"),
+    ("medium_risk_allowed", "\u4e2d\u98ce\u9669\u653e\u884c", "bool"),
+    ("high_risk_allowed", "\u9ad8\u98ce\u9669\u653e\u884c", "bool"),
+    ("agent_replay_guard_enabled", "Replay Guard", "bool"),
+    ("agent_replay_min_samples", "Replay\u6700\u5c0f\u6837\u672c", "int"),
+    ("agent_replay_prediction_miss_threshold", "Replay 1X2\u5931\u8bef\u7ebf", "float"),
+    ("agent_replay_handicap_miss_threshold", "Replay\u8ba9\u7403\u5931\u8bef\u7ebf", "float"),
+)
+
+
+def _policy_value_text(value: object, value_type: str) -> str:
+    if value_type == "bool":
+        return "ON" if bool(value) else "OFF"
+    if value_type == "float":
+        return f"{_safe_float(value):.2f}"
+    if value_type == "int":
+        return str(_safe_int(value))
+    return _text(value, "-")
+
+
+def _policy_values_equal(left: object, right: object, value_type: str) -> bool:
+    if value_type == "bool":
+        return bool(left) == bool(right)
+    if value_type == "float":
+        return round(_safe_float(left), 4) == round(_safe_float(right), 4)
+    if value_type == "int":
+        return _safe_int(left) == _safe_int(right)
+    return _text(left, "") == _text(right, "")
+
+
+def _policy_direction_text(key: str, current: object, target: object, value_type: str) -> str:
+    if _policy_values_equal(current, target, value_type):
+        return "\u4e0d\u53d8"
+    if value_type == "bool":
+        if bool(target):
+            return "\u653e\u5bbd"
+        return "\u6536\u7d27"
+    current_value = _safe_float(current)
+    target_value = _safe_float(target)
+    stricter_when_higher = {
+        "min_confidence",
+        "active_strategy_min",
+        "agent_replay_min_samples",
+    }
+    stricter_when_lower = {
+        "block_confidence",
+        "agent_replay_prediction_miss_threshold",
+        "agent_replay_handicap_miss_threshold",
+    }
+    if key in stricter_when_higher:
+        return "\u6536\u7d27" if target_value > current_value else "\u653e\u5bbd"
+    if key in stricter_when_lower:
+        return "\u6536\u7d27" if target_value < current_value else "\u653e\u5bbd"
+    return "\u8c03\u6574"
+
+
+def _policy_effect_row_by_version(policy_effect_review: Mapping[str, object], version_id: object) -> dict[str, object]:
+    key = _text(version_id, "")
+    if not key:
+        return {}
+    for row in _as_list(policy_effect_review.get("all_rows")) or _as_list(policy_effect_review.get("rows")):
+        if isinstance(row, Mapping) and _text(row.get("version_id"), "") == key:
+            return dict(row)
+    return {}
+
+
+def _previous_policy_effect_row(policy_effect_review: Mapping[str, object], latest_version_id: object) -> dict[str, object]:
+    rows = [dict(row) for row in (_as_list(policy_effect_review.get("all_rows")) or _as_list(policy_effect_review.get("rows"))) if isinstance(row, Mapping)]
+    rows.sort(key=lambda row: (_parse_policy_review_time(row.get("updated_at")) or datetime.min, str(row.get("version_id") or "")), reverse=True)
+    key = _text(latest_version_id, "")
+    for index, row in enumerate(rows):
+        if _text(row.get("version_id"), "") == key:
+            if index + 1 < len(rows):
+                return rows[index + 1]
+            return {}
+    return rows[1] if len(rows) > 1 else {}
+
+
+def _policy_effect_summary_for_preview(row: Mapping[str, object]) -> dict[str, object]:
+    if not row:
+        return {
+            "version_id": "-",
+            "effect_label": "-",
+            "allow_hit_rate_text": "-",
+            "known_allow_count": 0,
+            "sample_count": 0,
+            "replay_guard_net": 0,
+            "summary_text": "-",
+        }
+    return {
+        "version_id": row.get("version_id", "-"),
+        "effect_label": row.get("effect_label", "-"),
+        "allow_hit_rate_text": row.get("allow_hit_rate_text", "-"),
+        "known_allow_count": _safe_int(row.get("known_allow_count")),
+        "sample_count": _safe_int(row.get("sample_count")),
+        "replay_guard_net": _safe_int(row.get("replay_guard_net")),
+        "summary_text": str(row.get("body") or "-"),
+    }
+
+
+def build_strategy_policy_rollback_preview(
+    latest_history: Mapping[str, object] | object,
+    current_policy: Mapping[str, object] | object | None = None,
+    policy_effect_review: Mapping[str, object] | object | None = None,
+) -> dict[str, object]:
+    latest = _as_mapping(latest_history)
+    current = _as_mapping(current_policy) or _as_mapping(latest.get("policy"))
+    target = _as_mapping(latest.get("previous_policy"))
+    if not latest:
+        return {
+            "available": False,
+            "reason": "\u5c1a\u65e0\u53ef\u56de\u6eda\u7684\u53c2\u6570\u7248\u672c\u3002",
+            "summary_text": "\u5c1a\u65e0\u53ef\u56de\u6eda\u7684\u53c2\u6570\u7248\u672c\u3002",
+            "rows": [],
+            "effect_rows": [],
+            "confirm_text": "\u5c1a\u65e0\u53ef\u56de\u6eda\u7684\u53c2\u6570\u7248\u672c\u3002",
+        }
+    if not target:
+        return {
+            "available": False,
+            "reason": "\u6700\u8fd1\u4e00\u6b21\u8c03\u53c2\u6ca1\u6709\u53ef\u6062\u590d\u7684\u4e0a\u4e00\u7248\u53c2\u6570\u3002",
+            "summary_text": "\u6700\u8fd1\u4e00\u6b21\u8c03\u53c2\u6ca1\u6709\u53ef\u6062\u590d\u7684\u4e0a\u4e00\u7248\u53c2\u6570\u3002",
+            "rows": [],
+            "effect_rows": [],
+            "confirm_text": "\u6700\u8fd1\u4e00\u6b21\u8c03\u53c2\u6ca1\u6709\u53ef\u6062\u590d\u7684\u4e0a\u4e00\u7248\u53c2\u6570\u3002",
+        }
+
+    rows: list[dict[str, object]] = []
+    changed_count = 0
+    loosen_count = 0
+    tighten_count = 0
+    for key, label, value_type in POLICY_ROLLBACK_FIELD_LABELS:
+        current_value = current.get(key)
+        target_value = target.get(key)
+        changed = not _policy_values_equal(current_value, target_value, value_type)
+        direction = _policy_direction_text(key, current_value, target_value, value_type)
+        if changed:
+            changed_count += 1
+            if direction == "\u653e\u5bbd":
+                loosen_count += 1
+            elif direction == "\u6536\u7d27":
+                tighten_count += 1
+        rows.append(
+            {
+                "key": key,
+                "label": label,
+                "current_value": current_value,
+                "target_value": target_value,
+                "current_text": _policy_value_text(current_value, value_type),
+                "target_text": _policy_value_text(target_value, value_type),
+                "changed": changed,
+                "direction": direction,
+                "summary": f"{label}: {_policy_value_text(current_value, value_type)} -> {_policy_value_text(target_value, value_type)} ({direction})",
+            }
+        )
+
+    review = _as_mapping(policy_effect_review)
+    latest_effect = _policy_effect_summary_for_preview(_policy_effect_row_by_version(review, latest.get("version_id")))
+    previous_effect = _policy_effect_summary_for_preview(_previous_policy_effect_row(review, latest.get("version_id")))
+    effect_rows = [
+        {
+            "label": "\u5f53\u524d\u7248\u672c\u751f\u6548",
+            "version_id": latest_effect.get("version_id", "-"),
+            "summary": (
+                f"{latest_effect.get('effect_label', '-')} | \u653e\u884c\u547d\u4e2d {latest_effect.get('allow_hit_rate_text', '-')} | "
+                f"\u6837\u672c {latest_effect.get('known_allow_count', 0)}/{latest_effect.get('sample_count', 0)} | "
+                f"Replay {int(latest_effect.get('replay_guard_net', 0) or 0):+d}"
+            ),
+        },
+        {
+            "label": "\u56de\u6eda\u5019\u9009\u53c2\u7167",
+            "version_id": previous_effect.get("version_id", "-"),
+            "summary": (
+                f"{previous_effect.get('effect_label', '-')} | \u653e\u884c\u547d\u4e2d {previous_effect.get('allow_hit_rate_text', '-')} | "
+                f"\u6837\u672c {previous_effect.get('known_allow_count', 0)}/{previous_effect.get('sample_count', 0)} | "
+                f"Replay {int(previous_effect.get('replay_guard_net', 0) or 0):+d}"
+            ),
+        },
+    ]
+    impact_text = (
+        f"\u53d8\u66f4 {changed_count} \u9879 | \u56de\u6eda\u540e\u653e\u5bbd {loosen_count} \u9879 / \u6536\u7d27 {tighten_count} \u9879"
+    )
+    summary_text = (
+        f"\u56de\u6eda\u9884\u89c8 | \u5f53\u524d {latest.get('version_id', '-')} | "
+        f"\u6765\u6e90 {latest.get('source', '-')} | {impact_text}"
+    )
+    changed_lines = [str(row.get("summary") or "-") for row in rows if bool(row.get("changed"))]
+    if not changed_lines:
+        changed_lines = ["\u76ee\u6807\u53c2\u6570\u4e0e\u5f53\u524d\u53c2\u6570\u4e00\u81f4\uff0c\u56de\u6eda\u4e0d\u4f1a\u4ea7\u751f\u95e8\u69db\u53d8\u5316\u3002"]
+    effect_lines = [f"{row.get('label')}: {row.get('summary')}" for row in effect_rows]
+    confirm_text = (
+        f"\u5c06\u56de\u6eda\u6700\u8fd1\u4e00\u6b21\u8c03\u53c2:\n\n"
+        f"\u7248\u672c: {latest.get('version_id', '-')}\n"
+        f"\u6765\u6e90: {latest.get('source', '-')}\n"
+        f"\u65f6\u95f4: {latest.get('updated_at', '-')}\n\n"
+        f"\u53c2\u6570\u5dee\u5f02:\n" + "\n".join(changed_lines[:9]) + "\n\n"
+        f"\u751f\u6548\u5bf9\u6bd4:\n" + "\n".join(effect_lines) + "\n\n"
+        f"\u5f71\u54cd\u8303\u56f4: {impact_text}\n\n"
+        "\u786e\u8ba4\u540e\uff0c\u540e\u7eed\u5206\u6790\u4f1a\u6062\u590d\u4e3a\u8be5\u6b21\u8c03\u53c2\u524d\u7684\u51c6\u5165\u53c2\u6570\u3002"
+    )
+    return {
+        "available": True,
+        "reason": "ok",
+        "version_id": latest.get("version_id", "-"),
+        "source": latest.get("source", "-"),
+        "updated_at": latest.get("updated_at", "-"),
+        "changed_count": changed_count,
+        "loosen_count": loosen_count,
+        "tighten_count": tighten_count,
+        "impact_text": impact_text,
+        "summary_text": summary_text,
+        "rows": rows,
+        "effect_rows": effect_rows,
+        "confirm_text": confirm_text,
+    }
+
+
 def build_strategy_policy_effect_review(
     policy_history: Sequence[Mapping[str, object]] | object,
     settlements: Sequence[Mapping[str, object]] | object,

@@ -120,6 +120,7 @@ from .ui_modules import (
     build_strategy_policy_audit_report_filename,
     build_strategy_policy_audit_report_lines,
     build_strategy_policy_effect_review,
+    build_strategy_policy_rollback_preview,
     build_strategy_trend_tuning_effect_review,
     build_strategy_policy_tuning_guard,
     build_strategy_release_recovery_loop_report_filename,
@@ -5393,15 +5394,21 @@ class SmartMatchDashboard:
         if not previous:
             messagebox.showinfo("\u7b56\u7565\u53c2\u6570\u56de\u6eda", "\u6700\u8fd1\u4e00\u6b21\u8c03\u53c2\u6ca1\u6709\u53ef\u6062\u590d\u7684\u4e0a\u4e00\u7248\u53c2\u6570\u3002")
             return
+        policy_effect_review = build_strategy_policy_effect_review(
+            get_strategy_admission_policy_history(limit=20),
+            list(reversed(get_recent_settlements(limit=200))),
+        )
+        rollback_preview = build_strategy_policy_rollback_preview(
+            latest,
+            get_strategy_admission_policy_status().get("policy", {}),
+            policy_effect_review,
+        )
+        if not bool(rollback_preview.get("available")):
+            messagebox.showinfo("\u7b56\u7565\u53c2\u6570\u56de\u6eda", str(rollback_preview.get("reason") or "-"))
+            return
         confirm = messagebox.askyesno(
             "\u56de\u6eda\u4e0a\u4e00\u7248\u7b56\u7565\u53c2\u6570",
-            (
-                f"\u5c06\u56de\u6eda\u6700\u8fd1\u4e00\u6b21\u8c03\u53c2:\n\n"
-                f"\u7248\u672c: {latest.get('version_id', '-')}\n"
-                f"\u6765\u6e90: {latest.get('source', '-')}\n"
-                f"\u65f6\u95f4: {latest.get('updated_at', '-')}\n\n"
-                "\u786e\u8ba4\u540e\uff0c\u540e\u7eed\u5206\u6790\u4f1a\u6062\u590d\u4e3a\u8be5\u6b21\u8c03\u53c2\u524d\u7684\u51c6\u5165\u53c2\u6570\u3002"
-            ),
+            str(rollback_preview.get("confirm_text") or "-"),
         )
         if not confirm:
             return

@@ -25,6 +25,7 @@ from v24_app.ui_modules import (
     build_agent_replay_guard_tuning_recommendation,
     build_strategy_policy_effect_review,
     build_strategy_trend_tuning_effect_review,
+    build_strategy_policy_rollback_preview,
     build_strategy_policy_stability_monitor,
     build_strategy_policy_tuning_guard,
     build_handicap_margin_backtest_summary,
@@ -641,6 +642,62 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertTrue(guard["allowed"])
         self.assertTrue(guard["confirm_required"])
         self.assertIn("\u95e8\u63a7\u751f\u6548\u72b6\u6001", guard["body"])
+
+    def test_strategy_policy_rollback_preview_compares_policy_and_effect(self) -> None:
+        history = [
+            {"version_id": "v1", "updated_at": "2026-05-01 10:00:00", "source": "manual"},
+            {"version_id": "v2", "updated_at": "2026-05-02 10:00:00", "source": "release_quality_trend"},
+        ]
+        settlements = [
+            {"timestamp": "2026-05-01 11:00:00", "strategy_admission_decision": "allow", "is_correct": True},
+            {"timestamp": "2026-05-01 12:00:00", "strategy_admission_decision": "allow", "is_correct": True},
+            {"timestamp": "2026-05-01 13:00:00", "strategy_admission_decision": "allow", "is_correct": True},
+            {"timestamp": "2026-05-02 11:00:00", "strategy_admission_decision": "allow", "is_correct": False},
+            {"timestamp": "2026-05-02 12:00:00", "strategy_admission_decision": "allow", "is_correct": False},
+            {"timestamp": "2026-05-02 13:00:00", "strategy_admission_decision": "allow", "is_correct": True},
+        ]
+        latest = {
+            "version_id": "v2",
+            "updated_at": "2026-05-02 10:00:00",
+            "source": "release_quality_trend",
+            "policy": {
+                "min_confidence": 0.70,
+                "active_strategy_min": 2,
+                "medium_risk_allowed": False,
+                "high_risk_allowed": False,
+                "agent_replay_min_samples": 6,
+            },
+            "previous_policy": {
+                "min_confidence": 0.58,
+                "active_strategy_min": 1,
+                "medium_risk_allowed": True,
+                "high_risk_allowed": False,
+                "agent_replay_min_samples": 5,
+            },
+        }
+        review = build_strategy_policy_effect_review(history, settlements)
+
+        preview = build_strategy_policy_rollback_preview(latest, latest["policy"], review)
+
+        self.assertTrue(preview["available"])
+        self.assertEqual(preview["changed_count"], 4)
+        self.assertEqual(preview["loosen_count"], 4)
+        self.assertEqual(preview["tighten_count"], 0)
+        self.assertIn("\u53d8\u66f4 4 \u9879", preview["impact_text"])
+        rows = {row["key"]: row for row in preview["rows"]}
+        self.assertEqual(rows["min_confidence"]["summary"], "\u6700\u4f4e\u7f6e\u4fe1: 0.70 -> 0.58 (\u653e\u5bbd)")
+        self.assertEqual(preview["effect_rows"][0]["version_id"], "v2")
+        self.assertIn("33.3%", preview["effect_rows"][0]["summary"])
+        self.assertEqual(preview["effect_rows"][1]["version_id"], "v1")
+        self.assertIn("100.0%", preview["effect_rows"][1]["summary"])
+        self.assertIn("\u53c2\u6570\u5dee\u5f02", preview["confirm_text"])
+        self.assertIn("\u751f\u6548\u5bf9\u6bd4", preview["confirm_text"])
+
+    def test_strategy_policy_rollback_preview_handles_missing_previous_policy(self) -> None:
+        preview = build_strategy_policy_rollback_preview({"version_id": "v1", "policy": {"min_confidence": 0.6}})
+
+        self.assertFalse(preview["available"])
+        self.assertIn("\u6ca1\u6709\u53ef\u6062\u590d", preview["reason"])
 
     def test_strategy_policy_audit_report_exports_review_and_samples(self) -> None:
         history = [
