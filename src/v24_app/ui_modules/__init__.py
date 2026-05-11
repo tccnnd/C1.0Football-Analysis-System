@@ -137,6 +137,7 @@ from .recovery_run_flow import (
     build_result_recovery_run_summary,
     build_result_recovery_strategy_adjustment,
     build_strategy_release_quality_trend,
+    build_strategy_release_quality_trend_alerts,
     mark_stale_result_recovery_runs,
 )
 from .settlement_view import (
@@ -383,6 +384,7 @@ __all__ = [
     "build_result_recovery_run_summary",
     "build_result_recovery_strategy_adjustment",
     "build_strategy_release_quality_trend",
+    "build_strategy_release_quality_trend_alerts",
     "mark_stale_result_recovery_runs",
     "build_gate_summary_text",
     "build_parlay_settlement_row",

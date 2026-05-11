@@ -73,6 +73,7 @@ from .ui_modules import (
     build_result_recovery_run_summary,
     build_result_recovery_strategy_adjustment,
     build_strategy_release_quality_trend,
+    build_strategy_release_quality_trend_alerts,
     build_agent_trace_nodes,
     mark_stale_result_recovery_runs,
     format_agent_trace_detail,
@@ -2876,6 +2877,8 @@ class SmartMatchDashboard:
         release_alert_count = int(release_alerts.get("count", 0) or 0)
         recovery_summary = self._recovery_run_summary()
         recovery_quality_alerts = self._recovery_quality_alerts()
+        recovery_trend = build_strategy_release_quality_trend(self._recovery_run_records(limit=80))
+        recovery_trend_alerts = build_strategy_release_quality_trend_alerts(recovery_trend)
         shell = self._page_shell(
             "\u76d1\u63a7\u4e2d\u5fc3",
             "\u8fd0\u884c\u65e5\u5fd7\u3001\u5206\u6790\u8017\u65f6\u3001\u6570\u636e\u6e90\u548c\u98ce\u9669\u72b6\u6001",
@@ -3030,6 +3033,7 @@ class SmartMatchDashboard:
             ("\u6700\u8fd1\u56de\u6536", str(recovery_summary.get("latest_status_label") or "-"), GREEN if recovery_summary.get("latest_status") == "success" else RED if recovery_summary.get("latest_status") == "failed" else YELLOW),
             ("\u56de\u6536\u65b0\u7ed3\u7b97", str(recovery_summary.get("latest_new_settled", 0)), "#7aa2ff"),
             ("\u56de\u6536\u544a\u8b66", str(len(recovery_quality_alerts)), RED if any(item.get("severity") == "high" for item in recovery_quality_alerts) else YELLOW if recovery_quality_alerts else GREEN),
+            ("\u653e\u884c\u8d8b\u52bf", str(len(recovery_trend_alerts)), RED if any(item.get("severity") == "high" for item in recovery_trend_alerts) else YELLOW if recovery_trend_alerts else GREEN),
             ("\u540e\u53f0\u4efb\u52a1", str(background_task_summary.get("running", 0)), YELLOW if int(background_task_summary.get("running", 0) or 0) else GREEN),
             ("\u591a\u8fdb\u7a0b", str(background_task_summary.get("process_running", 0)), "#7aa2ff"),
             (
@@ -3118,6 +3122,11 @@ class SmartMatchDashboard:
         if recovery_quality_alerts:
             tk.Label(left, text="\u56de\u6536\u8d28\u91cf\u544a\u8b66", bg=PANEL, fg=YELLOW, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
             for alert in recovery_quality_alerts[:3]:
+                self._alert_card(left, str(alert.get("title") or "-"), str(alert.get("body") or "-"), tone=str(alert.get("tone") or "warning"))
+
+        if recovery_trend_alerts:
+            tk.Label(left, text="\u653e\u884c\u8d8b\u52bf\u544a\u8b66", bg=PANEL, fg=YELLOW, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
+            for alert in recovery_trend_alerts[:3]:
                 self._alert_card(left, str(alert.get("title") or "-"), str(alert.get("body") or "-"), tone=str(alert.get("tone") or "warning"))
 
         tk.Label(right, text="\u73a9\u6cd5\u63a5\u7ba1\u7b56\u7565", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
@@ -3484,6 +3493,7 @@ class SmartMatchDashboard:
         quality_alerts = build_result_recovery_quality_alerts(records)
         run_rows = build_result_recovery_run_rows(records, limit=50)
         quality_trend = build_strategy_release_quality_trend(records)
+        trend_alerts = build_strategy_release_quality_trend_alerts(quality_trend)
         latest_status = str(summary.get("latest_status") or "")
         lookback_days = self._recovery_lookback_days()
         snapshot_audit = self._result_recovery_snapshot_audit(lookback_days=lookback_days)
@@ -3557,6 +3567,7 @@ class SmartMatchDashboard:
             ("\u7d2f\u8ba1\u65b0\u7ed3\u7b97", str(summary.get("total_new_settled", 0)), "#7aa2ff"),
             ("\u5931\u8d25\u6b21\u6570", str(summary.get("failed_count", 0)), RED if int(summary.get("failed_count", 0) or 0) else GREEN),
             ("\u8d28\u91cf\u544a\u8b66", str(len(quality_alerts)), RED if any(item.get("severity") == "high" for item in quality_alerts) else YELLOW if quality_alerts else GREEN),
+            ("\u8d8b\u52bf\u544a\u8b66", str(len(trend_alerts)), RED if any(item.get("severity") == "high" for item in trend_alerts) else YELLOW if trend_alerts else GREEN),
         ]:
             self._detail_metric(top, label, value, color)
 
@@ -3596,6 +3607,14 @@ class SmartMatchDashboard:
             wraplength=980,
             justify=tk.LEFT,
         ).pack(anchor=tk.W, padx=18, pady=(0, 8))
+        if trend_alerts:
+            for alert in trend_alerts[:4]:
+                self._alert_card(
+                    trend_card,
+                    str(alert.get("title") or "-"),
+                    str(alert.get("body") or "-"),
+                    tone=str(alert.get("tone") or "warning"),
+                )
         if trend_rows:
             for row in trend_rows[:3]:
                 if isinstance(row, dict):

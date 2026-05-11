@@ -21,6 +21,7 @@ from v24_app.ui_modules import (
     build_result_recovery_run_summary,
     build_result_recovery_strategy_adjustment,
     build_strategy_release_quality_trend,
+    build_strategy_release_quality_trend_alerts,
     mark_stale_result_recovery_runs,
 )
 
@@ -182,6 +183,36 @@ class UIRecoveryRunFlowModuleTests(unittest.TestCase):
         metric_values = {item["label"]: item["value"] for item in trend["metrics"]}
         self.assertEqual(metric_values["趋势状态"], "趋势改善")
         self.assertEqual(metric_values["实盘样本+"], "5")
+
+    def test_strategy_release_quality_trend_alerts_flag_decline_and_backlog(self) -> None:
+        trend = {
+            "sample_count": 4,
+            "release_hit_rate_delta": -0.12,
+            "latest_release_hit_rate": 0.48,
+            "avg_release_hit_rate": 0.58,
+            "no_feedback_count": 2,
+            "verified_count": 0,
+            "total_new_settled": 5,
+            "total_feedback_known_delta": 0,
+            "latest_pending_count": 4,
+            "latest_missing_snapshot_count": 1,
+            "latest_stale_pending_count": 2,
+            "total_paused_delta": 1,
+        }
+
+        alerts = build_strategy_release_quality_trend_alerts(trend, pending_threshold=3)
+
+        titles = {item["title"] for item in alerts}
+        self.assertIn("放行命中趋势走弱", titles)
+        self.assertIn("最近放行命中低于观察线", titles)
+        self.assertIn("实盘反馈未同步", titles)
+        self.assertIn("缺少有效实盘反馈验证", titles)
+        self.assertIn("放行赛果回收超期", titles)
+        self.assertIn("待回收放行积压", titles)
+        self.assertIn("放行快照缺失", titles)
+        self.assertIn("暂停策略增加", titles)
+        self.assertTrue(any(item["severity"] == "high" for item in alerts))
+        self.assertEqual(build_strategy_release_quality_trend_alerts({"sample_count": 0}), [])
 
     def test_rows_and_detail_include_recovery_metrics(self) -> None:
         records = [

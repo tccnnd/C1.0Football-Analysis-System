@@ -525,6 +525,111 @@ def build_strategy_release_quality_trend(
     }
 
 
+def build_strategy_release_quality_trend_alerts(
+    trend: Mapping[str, object] | object,
+    *,
+    min_decline: float = 0.05,
+    pending_threshold: int = 3,
+) -> list[dict[str, str]]:
+    item = _as_mapping(trend)
+    alerts: list[dict[str, str]] = []
+    sample_count = _safe_int(item.get("sample_count"))
+    if sample_count <= 0:
+        return alerts
+
+    delta = item.get("release_hit_rate_delta")
+    decline = _safe_float(delta, default=0.0) if delta is not None else 0.0
+    latest_rate = item.get("latest_release_hit_rate")
+    latest_rate_value = _safe_float(latest_rate, default=-1.0) if latest_rate is not None else -1.0
+    avg_rate = item.get("avg_release_hit_rate")
+    avg_rate_value = _safe_float(avg_rate, default=-1.0) if avg_rate is not None else -1.0
+    no_feedback_count = _safe_int(item.get("no_feedback_count"))
+    verified_count = _safe_int(item.get("verified_count"))
+    total_new_settled = _safe_int(item.get("total_new_settled"))
+    latest_pending_count = _safe_int(item.get("latest_pending_count"))
+    latest_missing_snapshot_count = _safe_int(item.get("latest_missing_snapshot_count"))
+    latest_stale_pending_count = _safe_int(item.get("latest_stale_pending_count"))
+    total_paused_delta = _safe_int(item.get("total_paused_delta"))
+    total_feedback_known_delta = _safe_int(item.get("total_feedback_known_delta"))
+
+    if delta is not None and decline <= -abs(float(min_decline)):
+        alerts.append(
+            {
+                "severity": "high" if decline <= -0.10 else "medium",
+                "title": "放行命中趋势走弱",
+                "body": (
+                    f"最近 {sample_count} 次放行命中从首期到最近变化 {_pct_text(decline)}，"
+                    f"最近命中 {_pct_text(latest_rate_value if latest_rate_value >= 0 else None)}，建议复核放行门槛和高风险过滤。"
+                ),
+                "tone": "bad" if decline <= -0.10 else "warning",
+            }
+        )
+    if latest_rate_value >= 0 and latest_rate_value < 0.55 and avg_rate_value >= 0:
+        alerts.append(
+            {
+                "severity": "medium",
+                "title": "最近放行命中低于观察线",
+                "body": f"最近放行命中 {_pct_text(latest_rate_value)}，趋势均值 {_pct_text(avg_rate_value)}。短期不要扩大放行覆盖。",
+                "tone": "warning",
+            }
+        )
+    if no_feedback_count >= 2 and total_new_settled > 0:
+        alerts.append(
+            {
+                "severity": "medium",
+                "title": "实盘反馈未同步",
+                "body": f"最近趋势中有 {no_feedback_count} 次新增结算未推动高准策略反馈变化，需检查策略匹配键、赛果回收和高准策略记录字段。",
+                "tone": "warning",
+            }
+        )
+    if total_new_settled > 0 and verified_count == 0 and total_feedback_known_delta <= 0:
+        alerts.append(
+            {
+                "severity": "medium",
+                "title": "缺少有效实盘反馈验证",
+                "body": f"最近 {sample_count} 次回收累计新增结算 {total_new_settled} 场，但未出现已验证的高准策略反馈变化。",
+                "tone": "warning",
+            }
+        )
+    if latest_stale_pending_count > 0:
+        alerts.append(
+            {
+                "severity": "high",
+                "title": "放行赛果回收超期",
+                "body": f"当前仍有 {latest_stale_pending_count} 场放行记录超期待回收，放行命中率会滞后，优先执行赛果回收。",
+                "tone": "bad",
+            }
+        )
+    if latest_pending_count >= max(1, int(pending_threshold)):
+        alerts.append(
+            {
+                "severity": "medium",
+                "title": "待回收放行积压",
+                "body": f"当前待回收放行 {latest_pending_count} 场，达到阈值 {max(1, int(pending_threshold))}。建议先处理回收再调整策略。",
+                "tone": "warning",
+            }
+        )
+    if latest_missing_snapshot_count > 0:
+        alerts.append(
+            {
+                "severity": "medium",
+                "title": "放行快照缺失",
+                "body": f"当前有 {latest_missing_snapshot_count} 场放行记录缺少赛前快照，后续无法完成标准复盘闭环。",
+                "tone": "warning",
+            }
+        )
+    if total_paused_delta > 0:
+        alerts.append(
+            {
+                "severity": "high",
+                "title": "暂停策略增加",
+                "body": f"最近趋势中暂停策略净增加 {total_paused_delta} 条，说明断路器压力上升，应优先复核错因和盘口过滤。",
+                "tone": "bad",
+            }
+        )
+    return alerts
+
+
 def build_result_recovery_quality_alerts(
     records: Sequence[Mapping[str, object]] | object,
     *,
