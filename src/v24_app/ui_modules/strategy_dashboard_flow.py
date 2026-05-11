@@ -6000,6 +6000,14 @@ def build_high_accuracy_strategy_dashboard(
     primary_count = sum(1 for item in pool if str(item.get("role") or "") == "primary")
     backup_count = sum(1 for item in pool if str(item.get("role") or "") == "backup")
     paused_count = _safe_int(breaker.get("paused_count"))
+    runtime_active_count = _safe_int(resolved.get("runtime_active_count") or breaker.get("runtime_active_count"))
+    live_feedback_active_count = _safe_int(resolved.get("live_feedback_active_count") or breaker.get("active_count"))
+    live_feedback_pending_count = _safe_int(resolved.get("live_feedback_pending_count") or breaker.get("pending_count"))
+    breaker_status = str(resolved.get("breaker_status") or breaker.get("status") or "-")
+    recovery_status = str(resolved.get("recovery_status") or breaker.get("recovery_status") or "-")
+    status_text = (
+        f"{breaker_status} | 可用 {runtime_active_count}/{len(pool)} | 反馈 {live_feedback_active_count} / 待反馈 {live_feedback_pending_count}"
+    )
     known_count = _safe_int(settlement_summary.get("known_count"))
     hit_rate = settlement_summary.get("hit_rate")
     hit_tone = "neutral"
@@ -6007,6 +6015,22 @@ def build_high_accuracy_strategy_dashboard(
         hit_tone = "good" if _safe_float(hit_rate) >= 0.6 else "warning"
 
     metrics = [
+        {
+            "label": "\u7b56\u7565\u72b6\u6001",
+            "value": status_text,
+            "tone": "bad"
+            if paused_count and runtime_active_count <= 0
+            else "warning"
+            if breaker_status in {"pending_live_feedback", "partial_paused", "recovering"}
+            else "good"
+            if bool(resolved.get("active"))
+            else "neutral",
+        },
+        {
+            "label": "\u6062\u590d\u72b6\u6001",
+            "value": recovery_status,
+            "tone": "warning" if recovery_status in {"in_progress", "pending_live_feedback", "watch"} else "bad" if recovery_status == "blocked" else "good",
+        },
         {"label": "\u7b56\u7565\u6c60", "value": str(len(pool)), "tone": "info"},
         {"label": "\u7a33\u5b9a\u7b56\u7565", "value": f"{stable_count}/{len(pool)}", "tone": "good" if stable_count else "warning"},
         {"label": "\u65ad\u8def\u6682\u505c", "value": str(paused_count), "tone": "bad" if paused_count else "good"},

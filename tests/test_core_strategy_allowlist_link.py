@@ -244,11 +244,37 @@ class CoreStrategyAllowlistLinkTests(unittest.TestCase):
                     self.assertEqual(policy["agent_replay_min_samples"], 20)
                     self.assertEqual(policy["agent_replay_prediction_miss_threshold"], 0.45)
                     self.assertEqual(policy["agent_replay_handicap_miss_threshold"], 0.85)
+                    self.assertTrue(status["enabled"])
+                    self.assertTrue(status["active"])
+                    self.assertEqual(status["status"], "active")
                     self.assertEqual(status["reason"], "unit_test")
                     history = core.get_strategy_admission_policy_history(limit=5)
                     self.assertEqual(len(history), 1)
                     self.assertEqual(history[0]["source"], "unit_test")
                     self.assertEqual(history[0]["policy"]["min_confidence"], 0.59)
+            finally:
+                core._STRATEGY_ADMISSION_POLICY_CACHE.clear()
+                core._STRATEGY_ADMISSION_POLICY_CACHE.update(cache_backup)
+
+    def test_strategy_admission_default_policy_reports_explicit_active_state(self) -> None:
+        cache_backup = dict(core._STRATEGY_ADMISSION_POLICY_CACHE)
+        with tempfile.TemporaryDirectory() as tmp:
+            policy_path = Path(tmp) / "strategy_admission_policy_v1.json"
+            history_path = Path(tmp) / "strategy_admission_policy_history_v1.json"
+            try:
+                core._STRATEGY_ADMISSION_POLICY_CACHE.update({"mtime": None, "policy": {}, "report": {}})
+                with patch("v24_app.core.STRATEGY_ADMISSION_POLICY_FILE", policy_path), patch(
+                    "v24_app.core.STRATEGY_ADMISSION_POLICY_HISTORY_FILE",
+                    history_path,
+                ):
+                    status = core.get_strategy_admission_policy_status()
+
+                    self.assertTrue(status["enabled"])
+                    self.assertTrue(status["active"])
+                    self.assertEqual(status["status"], "active")
+                    self.assertEqual(status["mode"], "default")
+                    self.assertEqual(status["reason"], "default_policy")
+                    self.assertEqual(status["policy"]["active_strategy_min"], 1)
             finally:
                 core._STRATEGY_ADMISSION_POLICY_CACHE.clear()
                 core._STRATEGY_ADMISSION_POLICY_CACHE.update(cache_backup)

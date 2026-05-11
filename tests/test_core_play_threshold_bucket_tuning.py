@@ -314,6 +314,32 @@ class CorePlayThresholdBucketTuningTests(unittest.TestCase):
         self.assertEqual(item["breaker"]["status"], "paused")
         self.assertEqual(item["effective_role"], "observe")
         self.assertEqual(status["breaker"]["paused_count"], 1)
+        self.assertFalse(status["active"])
+        self.assertEqual(status["breaker_status"], "paused")
+        self.assertEqual(status["recovery_status"], "blocked")
+
+    def test_high_accuracy_strategy_status_reports_pending_live_feedback(self) -> None:
+        strategy = {
+            "role": "primary",
+            "scope": "global",
+            "scope_value": "all",
+            "play_type": "market_1x2",
+            "min_confidence": 0.70,
+            "layer": {"data_layer": "historical_market"},
+        }
+
+        status = core._apply_high_accuracy_strategy_breakers(
+            {"enabled": True, "strategy": strategy, "strategy_pool": [strategy]},
+            [],
+        )
+
+        self.assertTrue(status["active"])
+        self.assertEqual(status["strategy_count"], 1)
+        self.assertEqual(status["runtime_active_count"], 1)
+        self.assertEqual(status["live_feedback_active_count"], 0)
+        self.assertEqual(status["live_feedback_pending_count"], 1)
+        self.assertEqual(status["breaker_status"], "pending_live_feedback")
+        self.assertEqual(status["recovery_status"], "pending_live_feedback")
 
     def test_high_accuracy_strategy_breaker_requires_recovery_hits(self) -> None:
         strategy = {
@@ -366,9 +392,15 @@ class CorePlayThresholdBucketTuningTests(unittest.TestCase):
         self.assertTrue(recovering["strategy_pool"][0]["breaker"]["breaker_on"])
         self.assertEqual(recovering["strategy_pool"][0]["breaker"]["status"], "recovering")
         self.assertEqual(recovering["strategy_pool"][0]["breaker"]["recovery_streak"], 1)
+        self.assertFalse(recovering["active"])
+        self.assertEqual(recovering["breaker_status"], "recovering")
+        self.assertEqual(recovering["recovery_status"], "in_progress")
         self.assertFalse(recovered["strategy_pool"][0]["breaker"]["breaker_on"])
         self.assertEqual(recovered["strategy_pool"][0]["breaker"]["status"], "recovered")
         self.assertEqual(recovered["strategy_pool"][0]["effective_role"], "primary")
+        self.assertTrue(recovered["active"])
+        self.assertEqual(recovered["breaker_status"], "active")
+        self.assertEqual(recovered["recovery_status"], "recovered")
 
     def test_high_accuracy_strategy_match_respects_breaker(self) -> None:
         strategy = {

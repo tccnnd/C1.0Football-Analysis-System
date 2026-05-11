@@ -5679,7 +5679,7 @@ def _load_strategy_admission_policy_report() -> dict:
     mtime = _strategy_admission_policy_mtime()
     if _STRATEGY_ADMISSION_POLICY_CACHE.get("mtime") == mtime:
         cached = _STRATEGY_ADMISSION_POLICY_CACHE.get("report")
-        if isinstance(cached, dict):
+        if isinstance(cached, dict) and cached:
             return dict(cached)
     if not STRATEGY_ADMISSION_POLICY_FILE.exists():
         report = {
@@ -5700,6 +5700,12 @@ def _load_strategy_admission_policy_report() -> dict:
             }
     if not isinstance(report, dict):
         report = {"mode": "default", "updated_at": "-", "policy": dict(DEFAULT_STRATEGY_ADMISSION_POLICY)}
+    report["enabled"] = bool(report.get("enabled", True))
+    report["active"] = bool(report["enabled"])
+    report["status"] = "active" if report["enabled"] else "disabled"
+    reason_text = normalize_text(report.get("reason", ""))
+    if not reason_text or reason_text == "-":
+        report["reason"] = "default_policy" if normalize_text(report.get("mode", "")) == "default" else "ok"
     report["policy"] = _normalize_strategy_admission_policy(report.get("policy") if isinstance(report.get("policy"), dict) else {})
     _STRATEGY_ADMISSION_POLICY_CACHE["mtime"] = mtime
     _STRATEGY_ADMISSION_POLICY_CACHE["policy"] = dict(report["policy"])
@@ -5709,7 +5715,11 @@ def _load_strategy_admission_policy_report() -> dict:
 
 def get_strategy_admission_policy_status() -> dict:
     report = _load_strategy_admission_policy_report()
+    enabled = bool(report.get("enabled", True))
     return {
+        "enabled": enabled,
+        "active": bool(enabled),
+        "status": str(report.get("status") or ("active" if enabled else "disabled")),
         "mode": report.get("mode", "default"),
         "updated_at": report.get("updated_at", "-"),
         "version_id": report.get("version_id", "-"),
@@ -5764,6 +5774,9 @@ def apply_strategy_admission_policy_update(update: dict, *, source: str = "manua
     history_items = _load_strategy_admission_policy_history_entries()
     version_id = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{len(history_items) + 1:04d}"
     report = {
+        "enabled": True,
+        "active": True,
+        "status": "active",
         "mode": "manual",
         "updated_at": updated_at,
         "version_id": version_id,
@@ -6184,8 +6197,10 @@ def _apply_high_accuracy_strategy_breakers(status: dict, settlements: list[dict]
 
     augmented_pool: list[dict] = []
     paused_count = 0
-    active_count = 0
+    live_feedback_active_count = 0
     pending_count = 0
+    recovering_count = 0
+    recovered_count = 0
     for item in pool:
         if not isinstance(item, dict):
             continue
@@ -6198,11 +6213,43 @@ def _apply_high_accuracy_strategy_breakers(status: dict, settlements: list[dict]
         augmented["breaker"] = breaker
         if breaker.get("breaker_on"):
             paused_count += 1
+            if str(breaker.get("status") or "") == "recovering":
+                recovering_count += 1
         elif int(breaker.get("known_count", 0) or 0) <= 0:
             pending_count += 1
         else:
-            active_count += 1
+            live_feedback_active_count += 1
+            if str(breaker.get("status") or "") == "recovered":
+                recovered_count += 1
         augmented_pool.append(augmented)
+
+    strategy_count = len(augmented_pool)
+    enabled = bool(resolved.get("enabled"))
+    runtime_active_count = max(0, strategy_count - paused_count) if enabled else 0
+    if not enabled:
+        breaker_status = "disabled"
+        recovery_status = "disabled"
+    elif strategy_count <= 0:
+        breaker_status = "empty"
+        recovery_status = "not_needed"
+    elif recovering_count:
+        breaker_status = "recovering"
+        recovery_status = "in_progress"
+    elif paused_count >= strategy_count:
+        breaker_status = "paused"
+        recovery_status = "blocked"
+    elif paused_count:
+        breaker_status = "partial_paused"
+        recovery_status = "in_progress" if recovering_count else "watch"
+    elif live_feedback_active_count:
+        breaker_status = "active"
+        recovery_status = "recovered" if recovered_count else "not_needed"
+    elif pending_count:
+        breaker_status = "pending_live_feedback"
+        recovery_status = "pending_live_feedback"
+    else:
+        breaker_status = "active"
+        recovery_status = "not_needed"
 
     if strategy:
         strategy_key = _high_accuracy_strategy_identity(strategy)
@@ -6214,13 +6261,64 @@ def _apply_high_accuracy_strategy_breakers(status: dict, settlements: list[dict]
     resolved["breaker"] = {
         "threshold": HIGH_ACCURACY_STRATEGY_BREAKER_THRESHOLD,
         "window": HIGH_ACCURACY_STRATEGY_BREAKER_WINDOW,
-        "strategy_count": len(augmented_pool),
-        "active_count": active_count,
+        "strategy_count": strategy_count,
+        "active_count": live_feedback_active_count,
+        "runtime_active_count": runtime_active_count,
         "pending_count": pending_count,
         "paused_count": paused_count,
+        "recovering_count": recovering_count,
+        "recovered_count": recovered_count,
         "breaker_on": paused_count > 0,
+        "status": breaker_status,
+        "recovery_status": recovery_status,
     }
+    resolved["active"] = bool(enabled and runtime_active_count > 0)
+    resolved["status"] = "active" if resolved["active"] else breaker_status
+    resolved["strategy_count"] = strategy_count
+    resolved["runtime_active_count"] = runtime_active_count
+    resolved["live_feedback_active_count"] = live_feedback_active_count
+    resolved["live_feedback_pending_count"] = pending_count
+    resolved["paused_count"] = paused_count
+    resolved["breaker_status"] = breaker_status
+    resolved["breaker_on"] = bool(paused_count > 0)
+    resolved["recovery_status"] = recovery_status
     return resolved
+
+
+def _empty_high_accuracy_strategy_status(reason: str, *, updated_at: object = None) -> dict:
+    return {
+        "enabled": False,
+        "active": False,
+        "status": "disabled",
+        "updated_at": updated_at,
+        "strategy": {},
+        "strategy_pool": [],
+        "validation": {},
+        "top_candidates": [],
+        "reason": reason,
+        "strategy_count": 0,
+        "runtime_active_count": 0,
+        "live_feedback_active_count": 0,
+        "live_feedback_pending_count": 0,
+        "paused_count": 0,
+        "breaker_status": "disabled",
+        "breaker_on": False,
+        "recovery_status": "disabled",
+        "breaker": {
+            "threshold": HIGH_ACCURACY_STRATEGY_BREAKER_THRESHOLD,
+            "window": HIGH_ACCURACY_STRATEGY_BREAKER_WINDOW,
+            "strategy_count": 0,
+            "active_count": 0,
+            "runtime_active_count": 0,
+            "pending_count": 0,
+            "paused_count": 0,
+            "recovering_count": 0,
+            "recovered_count": 0,
+            "breaker_on": False,
+            "status": "disabled",
+            "recovery_status": "disabled",
+        },
+    }
 
 
 def get_high_accuracy_strategy_status() -> dict:
@@ -6234,23 +6332,11 @@ def get_high_accuracy_strategy_status() -> dict:
         if isinstance(cached_status, dict):
             return dict(cached_status)
     if not HIGH_ACCURACY_STRATEGY_FILE.exists():
-        return {
-            "enabled": False,
-            "updated_at": None,
-            "strategy": {},
-            "validation": {},
-            "reason": "not_calibrated",
-        }
+        return _empty_high_accuracy_strategy_status("not_calibrated")
     try:
         payload = json.loads(HIGH_ACCURACY_STRATEGY_FILE.read_text(encoding="utf-8"))
     except Exception:
-        return {
-            "enabled": False,
-            "updated_at": None,
-            "strategy": {},
-            "validation": {},
-            "reason": "invalid_report",
-        }
+        return _empty_high_accuracy_strategy_status("invalid_report")
     if not isinstance(payload, dict):
         payload = {}
     status = {

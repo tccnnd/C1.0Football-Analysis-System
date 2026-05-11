@@ -532,6 +532,12 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
     def test_strategy_dashboard_summarizes_pool_and_settlements(self) -> None:
         status = {
             "enabled": True,
+            "active": True,
+            "breaker_status": "partial_paused",
+            "recovery_status": "watch",
+            "runtime_active_count": 1,
+            "live_feedback_active_count": 1,
+            "live_feedback_pending_count": 0,
             "updated_at": "2026-05-09 17:24:22",
             "validation": {
                 "record_count": 1200,
@@ -623,6 +629,8 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
 
         self.assertTrue(dashboard["enabled"])
         metrics = {item["label"]: item["value"] for item in dashboard["metrics"]}
+        self.assertIn("partial_paused", metrics["\u7b56\u7565\u72b6\u6001"])
+        self.assertEqual(metrics["\u6062\u590d\u72b6\u6001"], "watch")
         self.assertEqual(metrics["\u7b56\u7565\u6c60"], "2")
         self.assertEqual(metrics["\u7a33\u5b9a\u7b56\u7565"], "2/2")
         self.assertEqual(metrics["\u65ad\u8def\u6682\u505c"], "1")
@@ -719,7 +727,8 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertEqual(build_high_accuracy_strategy_pool_rows({}), [])
         dashboard = build_high_accuracy_strategy_dashboard({"enabled": False, "reason": "not_calibrated"}, [])
         self.assertFalse(dashboard["enabled"])
-        self.assertEqual(dashboard["metrics"][0]["value"], "0")
+        metrics = {item["label"]: item["value"] for item in dashboard["metrics"]}
+        self.assertEqual(metrics["\u7b56\u7565\u6c60"], "0")
         self.assertIn("\u672a\u542f\u7528", dashboard["guidance_rows"][0]["title"])
 
     def test_strategy_pool_rows_show_jc_bucket_evidence(self) -> None:
