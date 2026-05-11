@@ -6389,6 +6389,17 @@ def _draw_guard_rollback_source_version(source: object) -> str:
     return ""
 
 
+def _draw_guard_freeze_override_source_version(source: object) -> str:
+    text = _text(source, "").strip()
+    if not text:
+        return ""
+    lowered = text.lower()
+    for prefix in ("draw_guard_freeze_override:", "draw_release_guard_freeze_override:"):
+        if lowered.startswith(prefix):
+            return text[len(prefix) :].strip()
+    return ""
+
+
 def _draw_guard_is_rollback_source(source: object) -> bool:
     lowered = _text(source, "").strip().lower()
     return "draw_guard_policy_rollback" in lowered or "draw_release_guard_policy_rollback" in lowered
@@ -6726,6 +6737,146 @@ def build_draw_release_guard_rollback_effect_review(
         "min_blocked_samples": sample_floor,
         "metrics": metrics,
         "rows": detail_rows,
+    }
+
+
+def build_draw_release_guard_freeze_override_status(
+    policy_history: Sequence[Mapping[str, object]] | object,
+    rollback_effect_review: Mapping[str, object] | object,
+) -> dict[str, object]:
+    rollback_effect = _as_mapping(rollback_effect_review)
+    rollback_status = str(rollback_effect.get("status") or "")
+    rollback_version = _text(rollback_effect.get("latest_version_id"), "")
+    rollback_updated_at = _parse_policy_review_time(rollback_effect.get("latest_updated_at")) or datetime.min
+    if rollback_status != "negative":
+        return {
+            "status": "inactive",
+            "label": "无需解除DrawGuard冻结",
+            "tone": "neutral",
+            "override_active": False,
+            "rollback_version_id": rollback_version or "-",
+            "override_version_id": "-",
+            "summary_text": "当前没有 DrawGuard 回滚失败导致的调参冻结。",
+        }
+
+    history_items = [dict(item) for item in policy_history if isinstance(item, Mapping)] if isinstance(policy_history, Sequence) else []
+    overrides: list[dict[str, object]] = []
+    for item in history_items:
+        source = str(item.get("source") or "")
+        source_lower = source.lower()
+        if not (source_lower.startswith("draw_guard_freeze_override") or source_lower.startswith("draw_release_guard_freeze_override")):
+            continue
+        source_version = _draw_guard_freeze_override_source_version(source)
+        updated_at = _parse_policy_review_time(item.get("updated_at")) or datetime.min
+        if source_version and rollback_version and source_version != rollback_version:
+            continue
+        if updated_at < rollback_updated_at:
+            continue
+        overrides.append({**item, "_updated_dt": updated_at, "_source_version": source_version})
+    overrides.sort(key=lambda item: (_parse_policy_review_time(item.get("updated_at")) or datetime.min, str(item.get("version_id") or "")), reverse=True)
+    if overrides:
+        latest = overrides[0]
+        label = "DrawGuard冻结已人工解除"
+        return {
+            "status": "overridden",
+            "label": label,
+            "tone": "warning",
+            "override_active": True,
+            "rollback_version_id": rollback_version or "-",
+            "override_version_id": latest.get("version_id", "-"),
+            "override_source": latest.get("source", "-"),
+            "override_updated_at": latest.get("updated_at", "-"),
+            "summary_text": f"{label} | 回滚 {rollback_version or '-'} | 审计 {latest.get('version_id', '-')} | {latest.get('updated_at', '-')}",
+        }
+
+    label = "DrawGuard调参冻结中"
+    return {
+        "status": "frozen",
+        "label": label,
+        "tone": "bad",
+        "override_active": False,
+        "rollback_version_id": rollback_version or "-",
+        "override_version_id": "-",
+        "summary_text": f"{label} | 回滚 {rollback_version or '-'} 修复失败，需人工复核后解除。",
+    }
+
+
+def build_draw_release_guard_tuning_guard(
+    tuning: Mapping[str, object] | object | None = None,
+    *,
+    rollback_effect_review: Mapping[str, object] | object | None = None,
+    freeze_override_status: Mapping[str, object] | object | None = None,
+) -> dict[str, object]:
+    tuning_payload = _as_mapping(tuning)
+    rollback_effect = _as_mapping(rollback_effect_review)
+    freeze_override = _as_mapping(freeze_override_status)
+    rollback_status = str(rollback_effect.get("status") or "")
+    override_status = str(freeze_override.get("status") or "")
+    action = str(tuning_payload.get("action") or "").strip()
+
+    if rollback_status == "negative" and override_status == "overridden":
+        decision = "confirm"
+        label = "DrawGuard冻结已人工解除"
+        tone = "warning"
+        reasons = [
+            f"回滚修复状态: {rollback_effect.get('label', '-')}",
+            str(rollback_effect.get("summary_text") or "-"),
+            f"解除冻结审计: {freeze_override.get('summary_text', '-')}",
+            "回滚失败信号仍存在，继续应用 DrawGuard 调参前需要再次人工确认。",
+        ]
+    elif rollback_status == "negative":
+        decision = "freeze"
+        label = "DrawGuard回滚失败，冻结调参"
+        tone = "bad"
+        reasons = [
+            f"回滚修复状态: {rollback_effect.get('label', '-')}",
+            str(rollback_effect.get("summary_text") or "-"),
+            "回滚后错过真平或避免假阳仍在恶化，继续写入新 DrawGuard 参数可能放大错误方向。",
+            "先复核回滚后的赔率桶和错过真平样本，或由人工解除冻结后再调参。",
+        ]
+        recommendation = str(rollback_effect.get("recommendation_text") or "").strip()
+        if recommendation:
+            reasons.append(recommendation)
+    elif rollback_status == "watch":
+        decision = "confirm"
+        label = "DrawGuard回滚后需确认"
+        tone = "warning"
+        reasons = [
+            f"回滚修复状态: {rollback_effect.get('label', '-')}",
+            str(rollback_effect.get("summary_text") or "-"),
+            "回滚后还没有形成明确修复结论，应用新调参前需确认不是短期噪声。",
+        ]
+    else:
+        decision = "allow"
+        label = "允许DrawGuard调参"
+        tone = "good" if rollback_status == "effective" else "neutral"
+        reasons = [f"回滚修复状态: {rollback_effect.get('label', '暂无回滚风险')}"]
+
+    if action:
+        reasons.append(f"待应用动作: {action}")
+    body = "\n".join(str(item) for item in reasons if item)
+    return {
+        "decision": decision,
+        "allowed": decision in {"allow", "confirm"},
+        "confirm_required": decision == "confirm",
+        "label": label,
+        "tone": tone,
+        "source": "draw_release_guard_tuning",
+        "source_label": "DrawGuard调参",
+        "rollback_effect_status": rollback_status or "-",
+        "rollback_effect_label": str(rollback_effect.get("label") or "-"),
+        "rollback_effect_summary": str(rollback_effect.get("summary_text") or "-"),
+        "freeze_override_status": override_status or "-",
+        "freeze_override_label": str(freeze_override.get("label") or "-"),
+        "freeze_override_summary": str(freeze_override.get("summary_text") or "-"),
+        "rollback_recommended": rollback_status == "negative",
+        "rollback_candidate_version_id": str(rollback_effect.get("rolled_back_version_id") or "-"),
+        "freeze_active": decision == "freeze",
+        "freeze_override_active": override_status == "overridden",
+        "action": action or "-",
+        "reasons": reasons,
+        "body": body,
+        "summary_text": f"DrawGuard调参: {label} | {rollback_effect.get('summary_text', '-')}",
     }
 
 
@@ -7871,6 +8022,15 @@ def build_high_accuracy_strategy_dashboard(
         draw_release_guard_policy_history or [],
         settlement_items,
     )
+    draw_release_guard_freeze_override = build_draw_release_guard_freeze_override_status(
+        draw_release_guard_policy_history or [],
+        draw_release_guard_rollback_effect,
+    )
+    draw_release_guard_tuning_guard = build_draw_release_guard_tuning_guard(
+        draw_release_guard_tuning,
+        rollback_effect_review=draw_release_guard_rollback_effect,
+        freeze_override_status=draw_release_guard_freeze_override,
+    )
     jc_bucket_feedback = build_jc_bucket_feedback_summary(resolved, settlement_items)
     live_feedback_loop = build_high_accuracy_live_feedback_summary(resolved)
     statsbomb_event_review = build_statsbomb_event_review_summary(settlement_items, statsbomb_event_baseline or {})
@@ -8136,6 +8296,11 @@ def build_high_accuracy_strategy_dashboard(
             "value": str(draw_release_guard_rollback_effect.get("label") or "-"),
             "tone": str(draw_release_guard_rollback_effect.get("tone") or "neutral"),
         },
+        {
+            "label": "DrawGuard\u95e8\u63a7",
+            "value": str(draw_release_guard_tuning_guard.get("label") or "-"),
+            "tone": str(draw_release_guard_tuning_guard.get("tone") or "neutral"),
+        },
     ]
     validation_rows = [
         (
@@ -8226,4 +8391,6 @@ def build_high_accuracy_strategy_dashboard(
         "draw_release_guard_tuning": draw_release_guard_tuning,
         "draw_release_guard_tuning_effect": draw_release_guard_tuning_effect,
         "draw_release_guard_rollback_effect": draw_release_guard_rollback_effect,
+        "draw_release_guard_freeze_override": draw_release_guard_freeze_override,
+        "draw_release_guard_tuning_guard": draw_release_guard_tuning_guard,
     }

@@ -130,6 +130,9 @@ from .ui_modules import (
     build_strategy_policy_rollback_preview,
     build_strategy_trend_tuning_effect_review,
     build_strategy_policy_tuning_guard,
+    build_draw_release_guard_rollback_effect_review,
+    build_draw_release_guard_freeze_override_status,
+    build_draw_release_guard_tuning_guard,
     build_strategy_release_recovery_loop_report_filename,
     build_strategy_release_recovery_loop_report_lines,
     build_strategy_release_recovery_alerts,
@@ -5421,6 +5424,28 @@ class SmartMatchDashboard:
             return None
         return guard
 
+    def _current_draw_release_guard_tuning_guard(self, tuning: dict | object) -> dict:
+        draw_guard_history = get_draw_release_guard_policy_history(limit=20)
+        settlements = list(reversed(get_recent_settlements(limit=200)))
+        rollback_effect = build_draw_release_guard_rollback_effect_review(draw_guard_history, settlements)
+        freeze_override = build_draw_release_guard_freeze_override_status(draw_guard_history, rollback_effect)
+        return build_draw_release_guard_tuning_guard(
+            tuning if isinstance(tuning, dict) else {},
+            rollback_effect_review=rollback_effect,
+            freeze_override_status=freeze_override,
+        )
+
+    def _block_draw_release_guard_tuning_if_needed(self, tuning: dict | object) -> dict | None:
+        guard = self._current_draw_release_guard_tuning_guard(tuning)
+        if not bool(guard.get("allowed")):
+            messagebox.showwarning(
+                str(guard.get("source_label") or "DrawGuard\u8c03\u53c2"),
+                f"{guard.get('label', '-')}\n\n{guard.get('body', '-')}",
+            )
+            self.status_var.set(str(guard.get("summary_text") or guard.get("label") or "DrawGuard\u8c03\u53c2\u5df2\u51bb\u7ed3"))
+            return None
+        return guard
+
     def apply_strategy_policy_freeze_override(self, rollback_effect: dict | object | None = None, freeze_override: dict | object | None = None) -> None:
         rollback = rollback_effect if isinstance(rollback_effect, dict) else {}
         override = freeze_override if isinstance(freeze_override, dict) else {}
@@ -5452,6 +5477,38 @@ class SmartMatchDashboard:
         version_id = str(status.get("version_id") or "-")
         self.status_var.set(f"\u8c03\u53c2\u51bb\u7ed3\u5df2\u4eba\u5de5\u89e3\u9664: {version_id}")
         messagebox.showinfo("\u8c03\u53c2\u51bb\u7ed3", "\u5df2\u5199\u5165\u89e3\u9664\u51bb\u7ed3\u5ba1\u8ba1\u8bb0\u5f55\uff0c\u540e\u7eed\u8c03\u53c2\u5c06\u8f6c\u4e3a\u4eba\u5de5\u786e\u8ba4\u3002")
+        self.open_strategy_library()
+
+    def apply_draw_release_guard_freeze_override(self, rollback_effect: dict | object | None = None, freeze_override: dict | object | None = None) -> None:
+        rollback = rollback_effect if isinstance(rollback_effect, dict) else {}
+        override = freeze_override if isinstance(freeze_override, dict) else {}
+        if not rollback:
+            draw_guard_history = get_draw_release_guard_policy_history(limit=20)
+            settlements = list(reversed(get_recent_settlements(limit=200)))
+            rollback = build_draw_release_guard_rollback_effect_review(draw_guard_history, settlements)
+            override = build_draw_release_guard_freeze_override_status(draw_guard_history, rollback)
+        if str(rollback.get("status") or "") != "negative":
+            messagebox.showinfo("DrawGuard\u51bb\u7ed3", "\u5f53\u524d\u6ca1\u6709 DrawGuard \u56de\u6eda\u5931\u8d25\u5bfc\u81f4\u7684\u8c03\u53c2\u51bb\u7ed3\u3002")
+            return
+        if str(override.get("status") or "") == "overridden":
+            messagebox.showinfo("DrawGuard\u51bb\u7ed3", f"\u51bb\u7ed3\u5df2\u89e3\u9664:\n{override.get('summary_text', '-')}")
+            return
+        rollback_version = str(rollback.get("latest_version_id") or "-")
+        confirm = messagebox.askyesno(
+            "\u4eba\u5de5\u89e3\u9664DrawGuard\u51bb\u7ed3",
+            (
+                f"\u5c06\u5199\u5165\u4e00\u6761 DrawGuard \u5ba1\u8ba1\u8bb0\u5f55\uff0c\u8868\u793a\u5df2\u4eba\u5de5\u590d\u6838\u56de\u6eda\u5931\u8d25\u6837\u672c\u5e76\u5141\u8bb8\u6062\u590d\u8c03\u53c2:\n\n"
+                f"{rollback.get('summary_text', '-')}\n\n"
+                "\u8fd9\u4e0d\u4f1a\u6539\u53d8\u5f53\u524d DrawGuard \u53c2\u6570\uff0c\u53ea\u4f1a\u5199\u5165 draw_guard_freeze_override \u5ba1\u8ba1\u7248\u672c\u3002\n"
+                "\u540e\u7eed DrawGuard \u8c03\u53c2\u4ecd\u9700\u8981\u4eba\u5de5\u786e\u8ba4\u3002"
+            ),
+        )
+        if not confirm:
+            return
+        status = apply_draw_release_guard_policy_update({}, source=f"draw_guard_freeze_override:{rollback_version}")
+        version_id = str(status.get("version_id") or "-")
+        self.status_var.set(f"DrawGuard\u8c03\u53c2\u51bb\u7ed3\u5df2\u4eba\u5de5\u89e3\u9664: {version_id}")
+        messagebox.showinfo("DrawGuard\u51bb\u7ed3", "\u5df2\u5199\u5165 DrawGuard \u89e3\u9664\u51bb\u7ed3\u5ba1\u8ba1\u8bb0\u5f55\uff0c\u540e\u7eed\u8c03\u53c2\u5c06\u8f6c\u4e3a\u4eba\u5de5\u786e\u8ba4\u3002")
         self.open_strategy_library()
 
     def apply_strategy_allowlist_tuning(self, tuning: dict | object) -> None:
@@ -5504,11 +5561,15 @@ class SmartMatchDashboard:
         if not update:
             messagebox.showinfo("\u5e73\u5c40\u8c03\u53c2", "\u5efa\u8bae\u4e2d\u6ca1\u6709\u53ef\u5199\u5165\u7684\u5e73\u5c40\u62e6\u622a\u53c2\u6570\u3002")
             return
+        guard = self._block_draw_release_guard_tuning_if_needed(tuning)
+        if guard is None:
+            return
         current = get_draw_release_guard_policy_status().get("policy", {})
         current = current if isinstance(current, dict) else {}
         next_buckets = update.get("weak_odds_buckets") if isinstance(update.get("weak_odds_buckets"), dict) else {}
         current_buckets = current.get("weak_odds_buckets") if isinstance(current.get("weak_odds_buckets"), dict) else {}
         reason_text = "\n".join(str(item) for item in tuning.get("reasons", []) if item) if isinstance(tuning.get("reasons"), list) else "-"
+        guard_text = f"\n\nDrawGuard\u8c03\u53c2\u95e8\u63a7:\n{guard.get('body', '-')}" if bool(guard.get("confirm_required")) else ""
         confirm = messagebox.askyesno(
             "\u5e94\u7528\u5e73\u5c40\u62e6\u622a\u8c03\u53c2",
             (
@@ -5517,6 +5578,7 @@ class SmartMatchDashboard:
                 f"\u5f31\u8d54\u7387\u6876: {', '.join(sorted(str(key) for key in current_buckets)) or '-'} -> {', '.join(sorted(str(key) for key in next_buckets)) or '-'}\n\n"
                 f"\u539f\u56e0:\n{reason_text}\n\n"
                 f"\u786e\u8ba4\u540e\uff0c\u540e\u7eed\u5206\u6790\u4f1a\u6309\u65b0 DrawGuard \u53c2\u6570\u5224\u5b9a\u662f\u5426\u62e6\u622a\u5e73\u5c40\u63a5\u7ba1\u3002"
+                f"{guard_text}"
             ),
         )
         if not confirm:
@@ -6219,6 +6281,7 @@ class SmartMatchDashboard:
             lambda review=dashboard.get("policy_effect_review", {}): self.open_policy_governance_event_window(review),
         )
         self._strategy_toolbar_button(audit_tools, "\u89e3\u9664\u8c03\u53c2\u51bb\u7ed3", self.apply_strategy_policy_freeze_override)
+        self._strategy_toolbar_button(audit_tools, "\u89e3\u9664DrawGuard\u51bb\u7ed3", self.apply_draw_release_guard_freeze_override)
         self._strategy_toolbar_button(audit_tools, "StatsBomb\u8865\u6837", self.export_statsbomb_fewshot_backfill_report)
         self._strategy_toolbar_button(audit_tools, "StatsBomb\u8349\u7a3f", self.export_statsbomb_fewshot_draft)
         self._strategy_toolbar_button(audit_tools, "StatsBomb\u9884\u89c8", self.preview_statsbomb_fewshot_merge_bundle)
@@ -6612,6 +6675,26 @@ class SmartMatchDashboard:
         for row in draw_guard_rollback.get("rows", []) if isinstance(draw_guard_rollback.get("rows"), list) else []:
             if isinstance(row, dict):
                 self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
+
+        draw_guard_freeze = dashboard.get("draw_release_guard_freeze_override", {}) if isinstance(dashboard.get("draw_release_guard_freeze_override"), dict) else {}
+        draw_guard_tuning_guard = dashboard.get("draw_release_guard_tuning_guard", {}) if isinstance(dashboard.get("draw_release_guard_tuning_guard"), dict) else {}
+        self._strategy_row(
+            right,
+            f"DrawGuard\u8c03\u53c2\u95e8\u63a7: {draw_guard_tuning_guard.get('label', '-')}",
+            str(draw_guard_tuning_guard.get("body") or "-"),
+            command=(
+                (lambda rollback=draw_guard_rollback, override=draw_guard_freeze: self.apply_draw_release_guard_freeze_override(rollback, override))
+                if str(draw_guard_freeze.get("status") or "") == "frozen"
+                else None
+            ),
+        )
+        if str(draw_guard_freeze.get("status") or "") in {"frozen", "overridden"}:
+            self._strategy_row(
+                right,
+                str(draw_guard_freeze.get("label") or "-"),
+                str(draw_guard_freeze.get("summary_text") or "-"),
+                command=lambda rollback=draw_guard_rollback, override=draw_guard_freeze: self.apply_draw_release_guard_freeze_override(rollback, override),
+            )
 
         statsbomb_review = dashboard.get("statsbomb_event_review", {}) if isinstance(dashboard.get("statsbomb_event_review"), dict) else {}
         self._strategy_section_title(right, "StatsBomb \u8d5b\u540e\u4e8b\u4ef6")

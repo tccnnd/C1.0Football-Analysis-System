@@ -34,6 +34,8 @@ from v24_app.ui_modules import (
     build_draw_release_guard_policy_tuning_recommendation,
     build_draw_release_guard_tuning_effect_review,
     build_draw_release_guard_rollback_effect_review,
+    build_draw_release_guard_freeze_override_status,
+    build_draw_release_guard_tuning_guard,
     build_draw_release_guard_review_summary,
     build_handicap_margin_backtest_summary,
     build_market_entropy_backtest_summary,
@@ -1218,6 +1220,101 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertEqual(effect["status"], "collecting")
         self.assertEqual(effect["latest_version_id"], "-")
         self.assertEqual(effect["rows"], [])
+
+    def test_draw_release_guard_tuning_guard_freezes_after_failed_rollback(self) -> None:
+        rollback_effect = {
+            "status": "negative",
+            "label": "DrawGuard回滚后仍回退",
+            "summary_text": "错过变化 +66.7%",
+            "recommendation_text": "先复核回滚后错误样本。",
+            "latest_version_id": "dg3",
+            "rolled_back_version_id": "dg2",
+        }
+
+        guard = build_draw_release_guard_tuning_guard(
+            {"action": "loosen_guard", "policy_update": {"min_score": 0.62}},
+            rollback_effect_review=rollback_effect,
+        )
+
+        self.assertFalse(guard["allowed"])
+        self.assertEqual(guard["decision"], "freeze")
+        self.assertTrue(guard["freeze_active"])
+        self.assertEqual(guard["rollback_candidate_version_id"], "dg2")
+        self.assertIn("DrawGuard回滚失败", guard["label"])
+        self.assertIn("回滚修复状态", guard["body"])
+
+    def test_draw_release_guard_freeze_override_allows_confirm_after_failed_rollback(self) -> None:
+        rollback_effect = {
+            "status": "negative",
+            "label": "DrawGuard回滚后仍回退",
+            "summary_text": "错过变化 +66.7%",
+            "latest_version_id": "dg3",
+            "latest_updated_at": "2026-05-03 10:00:00",
+            "rolled_back_version_id": "dg2",
+        }
+        history = [
+            {"version_id": "dg4", "updated_at": "2026-05-04 10:00:00", "source": "draw_guard_freeze_override:dg3"},
+            {"version_id": "dg3", "updated_at": "2026-05-03 10:00:00", "source": "draw_guard_policy_rollback:dg2"},
+        ]
+
+        override = build_draw_release_guard_freeze_override_status(history, rollback_effect)
+        guard = build_draw_release_guard_tuning_guard(
+            {"action": "tighten_guard", "policy_update": {"min_score": 0.54}},
+            rollback_effect_review=rollback_effect,
+            freeze_override_status=override,
+        )
+
+        self.assertEqual(override["status"], "overridden")
+        self.assertEqual(override["override_version_id"], "dg4")
+        self.assertTrue(guard["allowed"])
+        self.assertEqual(guard["decision"], "confirm")
+        self.assertTrue(guard["confirm_required"])
+        self.assertFalse(guard["freeze_active"])
+
+    def test_strategy_dashboard_freezes_draw_guard_tuning_after_failed_rollback(self) -> None:
+        history = [
+            {
+                "version_id": "dg1",
+                "updated_at": "2026-05-01 10:00:00",
+                "source": "manual",
+                "policy": {"enabled": True, "min_score": 0.58, "weak_odds_buckets": {"<=3.00": {"source": "unit"}}},
+                "previous_policy": {"enabled": True, "min_score": 0.58, "weak_odds_buckets": {"<=3.00": {"source": "unit"}}},
+            },
+            {
+                "version_id": "dg2",
+                "updated_at": "2026-05-02 10:00:00",
+                "source": "draw_release_guard_tuning",
+                "policy": {"enabled": True, "min_score": 0.54, "weak_odds_buckets": {"<=3.00": {"source": "unit"}}},
+                "previous_policy": {"enabled": True, "min_score": 0.58, "weak_odds_buckets": {"<=3.00": {"source": "unit"}}},
+            },
+            {
+                "version_id": "dg3",
+                "updated_at": "2026-05-03 10:00:00",
+                "source": "draw_guard_policy_rollback:dg2",
+                "policy": {"enabled": True, "min_score": 0.58, "weak_odds_buckets": {"<=3.00": {"source": "unit"}}},
+                "previous_policy": {"enabled": True, "min_score": 0.54, "weak_odds_buckets": {"<=3.00": {"source": "unit"}}},
+            },
+        ]
+        settlements = [
+            {"timestamp": "2026-05-02 11:00:00", "home_goals": 2, "away_goals": 1, "draw_release_guard_status": "blocked", "draw_release_guard_blocked": True, "draw_release_guard_odds_bucket": "<=3.00"},
+            {"timestamp": "2026-05-02 12:00:00", "home_goals": 1, "away_goals": 0, "draw_release_guard_status": "blocked", "draw_release_guard_blocked": True, "draw_release_guard_odds_bucket": "<=3.00"},
+            {"timestamp": "2026-05-02 13:00:00", "home_goals": 0, "away_goals": 1, "draw_release_guard_status": "blocked", "draw_release_guard_blocked": True, "draw_release_guard_odds_bucket": "<=3.00"},
+            {"timestamp": "2026-05-03 11:00:00", "home_goals": 1, "away_goals": 1, "draw_release_guard_status": "blocked", "draw_release_guard_blocked": True, "draw_release_guard_odds_bucket": "<=3.00"},
+            {"timestamp": "2026-05-03 12:00:00", "home_goals": 0, "away_goals": 0, "draw_release_guard_status": "blocked", "draw_release_guard_blocked": True, "draw_release_guard_odds_bucket": "<=3.00"},
+            {"timestamp": "2026-05-03 13:00:00", "home_goals": 2, "away_goals": 1, "draw_release_guard_status": "blocked", "draw_release_guard_blocked": True, "draw_release_guard_odds_bucket": "<=3.00"},
+        ]
+
+        dashboard = build_high_accuracy_strategy_dashboard(
+            {"enabled": True},
+            settlements,
+            draw_release_guard_policy_history=history,
+        )
+
+        self.assertEqual(dashboard["draw_release_guard_rollback_effect"]["status"], "negative")
+        self.assertEqual(dashboard["draw_release_guard_freeze_override"]["status"], "frozen")
+        self.assertEqual(dashboard["draw_release_guard_tuning_guard"]["decision"], "freeze")
+        self.assertFalse(dashboard["draw_release_guard_tuning_guard"]["allowed"])
+        self.assertIn("DrawGuard\u95e8\u63a7", {item["label"] for item in dashboard["metrics"]})
 
     def test_high_accuracy_live_feedback_summary_groups_strategy_states(self) -> None:
         status = {
