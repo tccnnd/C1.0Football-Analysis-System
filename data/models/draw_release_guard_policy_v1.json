@@ -1,0 +1,22 @@
+{
+  "updated_at": "2026-05-11 23:25:45",
+  "source": "reports/draw_specialist_backtest_20260511_232545.md",
+  "policy": {
+    "enabled": true,
+    "min_score": 0.58,
+    "weak_odds_buckets": {
+      "<=3.00": {
+        "precision": 0.222222,
+        "draw_rate": 0.157895,
+        "lift": -0.075439,
+        "source": "draw_specialist_backtest_20260511_112806"
+      },
+      ">4.20": {
+        "precision": null,
+        "draw_rate": 0.149425,
+        "lift": -0.083908,
+        "source": "draw_specialist_backtest_20260511_112806"
+      }
+    }
+  }
+}
