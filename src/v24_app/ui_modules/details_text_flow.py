@@ -279,6 +279,27 @@ def _build_handicap_margin_block(prediction: Mapping[str, object]) -> str:
     )
 
 
+def _build_draw_release_guard_block(prediction: Mapping[str, object]) -> str:
+    guard = prediction.get("draw_release_guard")
+    if not isinstance(guard, Mapping):
+        return ""
+    evidence = guard.get("evidence") if isinstance(guard.get("evidence"), Mapping) else {}
+    status = "blocked" if bool(guard.get("blocked")) else "allowed" if bool(guard.get("base_takeover")) else "watch" if bool(guard.get("weak_score")) else "idle"
+    evidence_text = (
+        f"source={evidence.get('source', '-')} | precision={_pct_text(evidence.get('precision'))} | "
+        f"draw_rate={_pct_text(evidence.get('draw_rate'))} | lift={_pct_text(evidence.get('lift'))}"
+        if evidence
+        else "no weak-bucket evidence"
+    )
+    return (
+        "\n\nDraw Release Guard"
+        + f"\n- status={status} | reason={guard.get('reason', '-')}"
+        + f"\n- odds_bucket={guard.get('odds_bucket', '-')} | draw_odds={_float_value(guard.get('odds_draw')):.3f} | min_score={_pct_text(guard.get('min_score'))}"
+        + f"\n- base_takeover={bool(guard.get('base_takeover'))} | weak_score={bool(guard.get('weak_score'))} | blocked={bool(guard.get('blocked'))}"
+        + f"\n- evidence: {evidence_text}"
+    )
+
+
 def _build_supervisor_block(prediction: Mapping[str, object]) -> str:
     supervisor = prediction.get("supervisor")
     if not isinstance(supervisor, Mapping):
@@ -415,6 +436,7 @@ def build_match_details_text(
         )
     confidence_block = _build_confidence_calibration_block(prediction)
     runtime_threshold_block = _build_runtime_threshold_block(prediction)
+    draw_release_guard_block = _build_draw_release_guard_block(prediction)
     market_entropy_block = _build_market_entropy_block(prediction)
     handicap_margin_block = _build_handicap_margin_block(prediction)
     supervisor_block = _build_supervisor_block(prediction)
@@ -463,6 +485,8 @@ def build_match_details_text(
         + f"- 主胜: {probs['home']:.1%}\n"
         + f"- 平局: {probs['draw']:.1%}\n"
         + f"- 客胜: {probs['away']:.1%}\n\n"
+        + draw_release_guard_block
+        + ("\n" if draw_release_guard_block else "")
         + market_entropy_block
         + ("\n" if market_entropy_block else "")
         + handicap_margin_block

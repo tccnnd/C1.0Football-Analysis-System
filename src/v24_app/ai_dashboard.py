@@ -452,6 +452,63 @@ def _rating_pool_label(prediction: dict) -> str:
     return "\u4ff1\u4e50\u90e8 ELO"
 
 
+def _draw_release_guard_summary(prediction: dict) -> tuple[str, str, str]:
+    guard = prediction.get("draw_release_guard") if isinstance(prediction.get("draw_release_guard"), dict) else {}
+    if not guard:
+        return "\u672a\u63a5\u5165", "\u5f53\u524d\u9884\u6d4b\u6ca1\u6709\u5e73\u5c40\u63a5\u7ba1\u62e6\u622a\u4fe1\u606f\u3002", "neutral"
+    odds_bucket = str(guard.get("odds_bucket") or "-")
+    reason = str(guard.get("reason") or "-")
+    evidence = guard.get("evidence") if isinstance(guard.get("evidence"), dict) else {}
+    source = str(evidence.get("source") or "-")
+    precision = evidence.get("precision")
+    draw_rate = evidence.get("draw_rate")
+    lift = evidence.get("lift")
+    evidence_text = (
+        f"\u5386\u53f2\u8bc1\u636e {source} | precision {_pct1(precision)} | "
+        f"draw_rate {_pct1(draw_rate)} | lift {_pct1(lift)}"
+        if evidence
+        else "\u8be5\u5e73\u8d54\u6876\u6682\u65e0\u5f31\u8bc1\u636e"
+    )
+    body = (
+        f"\u5e73\u8d54\u6876 {odds_bucket} | \u539f\u59cb\u63a5\u7ba1 {'YES' if guard.get('base_takeover') else 'NO'} | "
+        f"\u5f31\u6876\u9ad8\u5206 {'YES' if guard.get('weak_score') else 'NO'} | reason {reason}\n"
+        f"{evidence_text}"
+    )
+    if guard.get("blocked"):
+        return "\u5df2\u62e6\u622a", body, "bad"
+    if guard.get("base_takeover"):
+        return "\u5141\u8bb8\u63a5\u7ba1", body, "good"
+    if guard.get("weak_score"):
+        return "\u5f31\u6876\u89c2\u5bdf", body, "warning"
+    return "\u672a\u89e6\u53d1", body, "neutral"
+
+
+def _draw_release_guard_markdown(prediction: dict) -> str:
+    guard = prediction.get("draw_release_guard") if isinstance(prediction.get("draw_release_guard"), dict) else {}
+    if not guard:
+        return "## Draw Release Guard\n\nNo draw takeover guard data.\n\n"
+    label, body, _tone = _draw_release_guard_summary(prediction)
+    evidence = guard.get("evidence") if isinstance(guard.get("evidence"), dict) else {}
+    return (
+        "## Draw Release Guard\n\n"
+        "| Item | Value |\n"
+        "|---|---|\n"
+        f"| Status | {_md_cell(label)} |\n"
+        f"| Reason | {_md_cell(guard.get('reason', '-'))} |\n"
+        f"| Odds bucket | {_md_cell(guard.get('odds_bucket', '-'))} |\n"
+        f"| Draw odds | {_num(guard.get('odds_draw'), 3)} |\n"
+        f"| Base takeover | {_md_cell('yes' if guard.get('base_takeover') else 'no')} |\n"
+        f"| Weak score | {_md_cell('yes' if guard.get('weak_score') else 'no')} |\n"
+        f"| Blocked | {_md_cell('yes' if guard.get('blocked') else 'no')} |\n"
+        f"| Min score | {_pct1(guard.get('min_score'))} |\n"
+        f"| Evidence source | {_md_cell(evidence.get('source', '-'))} |\n"
+        f"| Evidence precision | {_pct1(evidence.get('precision'))} |\n"
+        f"| Evidence draw rate | {_pct1(evidence.get('draw_rate'))} |\n"
+        f"| Evidence lift | {_pct1(evidence.get('lift'))} |\n\n"
+        f"{_md_cell(body)}\n\n"
+    )
+
+
 def _world_cup_notice(prediction: dict) -> str:
     payload = prediction.get("world_cup_mode")
     if not isinstance(payload, dict) or not payload.get("enabled"):
@@ -507,6 +564,8 @@ def _analysis_report(row: DashboardRow) -> str:
     admission_threshold_text = format_strategy_admission_thresholds(admission)
     admission_replay_text = format_strategy_admission_replay_guard(admission)
     admission_replay_line = f"- Agent Replay\uff1a{admission_replay_text}\n" if admission_replay_text != "-" else ""
+    draw_guard_label, draw_guard_body, _draw_guard_tone = _draw_release_guard_summary(pred)
+    draw_guard_line = f"- \u5e73\u5c40\u63a5\u7ba1\uff1a{draw_guard_label} | {draw_guard_body}\n"
 
     risk_reason = {
         "high": "\u51b7\u95e8\u6307\u6570\u504f\u9ad8\uff0c\u5e02\u573a\u4e0e\u6a21\u578b\u53ef\u80fd\u5b58\u5728\u660e\u663e\u5206\u6b67\u3002",
@@ -531,6 +590,7 @@ def _analysis_report(row: DashboardRow) -> str:
         f"- \u51c6\u5165\u539f\u56e0\uff1a{admission_reason_text}\n"
         f"- \u51c6\u5165\u95e8\u69db\uff1a{admission_threshold_text}\n"
         f"{admission_replay_line}"
+        f"{draw_guard_line}"
         f"- \u98ce\u9669\u7b49\u7ea7\uff1a{_risk_label(pred.get('risk_level'))}\n"
         f"- \u7efc\u5408\u7f6e\u4fe1\u5ea6\uff1a{_pct1(pred.get('confidence'))}\n"
         f"- \u9884\u8ba1\u603b\u8fdb\u7403\uff1a{_num(pred.get('expected_goals'))}\n\n"
@@ -711,6 +771,7 @@ def _markdown_report(row: DashboardRow, generated_at: datetime | None = None) ->
     ou_probs = pred.get("ou_probabilities", {}) if isinstance(pred.get("ou_probabilities"), dict) else {}
     indices = pred.get("indices", {}) if isinstance(pred.get("indices"), dict) else {}
     admission = _admission_payload(pred)
+    draw_guard_section = _draw_release_guard_markdown(pred)
     market_entropy_section = _market_entropy_markdown(pred)
     handicap_margin_section = _handicap_margin_markdown(pred)
     supervisor_section = _supervisor_markdown(pred)
@@ -732,6 +793,7 @@ def _markdown_report(row: DashboardRow, generated_at: datetime | None = None) ->
         f"| \u51c6\u5165\u539f\u56e0 | {_md_cell(format_strategy_admission_reasons(admission, limit=6))} |\n"
         f"| \u51c6\u5165\u95e8\u69db | {_md_cell(format_strategy_admission_thresholds(admission))} |\n"
         f"| Agent Replay | {_md_cell(format_strategy_admission_replay_guard(admission))} |\n"
+        f"| Draw Guard | {_md_cell(_draw_release_guard_summary(pred)[0])} |\n"
         f"| 风险等级 | {_md_cell(_risk_label(pred.get('risk_level')))} |\n"
         f"| 综合置信度 | {_pct1(pred.get('confidence'))} |\n"
         f"| 预计总进球 | {_num(pred.get('expected_goals'))} |\n"
@@ -767,6 +829,7 @@ def _markdown_report(row: DashboardRow, generated_at: datetime | None = None) ->
         f"| Kelly 平局 | {_num(match.kelly_draw, 3)} |\n"
         f"| Kelly 客胜 | {_num(match.kelly_away, 3)} |\n\n"
         "## 7. AI 分析摘要\n\n"
+        f"{draw_guard_section}"
         f"{market_entropy_section}"
         f"{handicap_margin_section}"
         f"{supervisor_section}"
@@ -2008,11 +2071,13 @@ class SmartMatchDashboard:
         summary = tk.Frame(shell, bg=BG)
         summary.pack(fill=tk.X, pady=(0, 16))
         pred = row.prediction
+        draw_guard_label, _draw_guard_body, draw_guard_tone = _draw_release_guard_summary(pred)
         for label, value, color in [
             ("\u98ce\u9669\u7b49\u7ea7", _risk_label(pred.get("risk_level")), _risk_color(pred.get("risk_level"))),
             ("策略准入", _admission_text(pred), _admission_color(pred)),
             ("\u63a8\u8350\u7b56\u7565", _strategy_text(pred), TEXT),
             ("\u7f6e\u4fe1\u5ea6", _pct1(pred.get("confidence")), "#7aa2ff"),
+            ("\u5e73\u5c40\u63a5\u7ba1", draw_guard_label, self._tone_color(draw_guard_tone)),
             ("\u8d5b\u4e8b\u6a21\u5f0f", _competition_mode_label(pred), YELLOW if pred.get("competition_mode") == "world_cup" else TEXT),
             ("\u8bc4\u5206\u6c60", _rating_pool_label(pred), YELLOW if pred.get("rating_pool") == "national_team" else TEXT),
         ]:
@@ -4392,6 +4457,7 @@ class SmartMatchDashboard:
         probs = prediction.get("probabilities", {}) if isinstance(prediction.get("probabilities"), dict) else {}
         indices = prediction.get("indices", {}) if isinstance(prediction.get("indices"), dict) else {}
         admission = _admission_payload(prediction)
+        draw_guard_label, draw_guard_body, _draw_guard_tone = _draw_release_guard_summary(prediction)
         allowlist = item.get("strategy_allowlist", {}) if isinstance(item.get("strategy_allowlist"), dict) else {}
         admission_text = ""
         if admission:
@@ -4422,6 +4488,7 @@ class SmartMatchDashboard:
             f"\u63a8\u8350: {_strategy_text(prediction)}\n"
             f"\u98ce\u9669: {_risk_label(prediction.get('risk_level'))}\n"
             f"\u7f6e\u4fe1\u5ea6: {_pct1(prediction.get('confidence'))}\n"
+            f"\u5e73\u5c40\u63a5\u7ba1: {draw_guard_label} | {draw_guard_body.splitlines()[0]}\n"
             f"\u9884\u8ba1\u603b\u8fdb\u7403: {_num(prediction.get('expected_goals'))}\n\n"
             f"{admission_text}"
             f"\u6982\u7387: {_prob_text(probs, 'home')} / {_prob_text(probs, 'draw')} / {_prob_text(probs, 'away')}\n"
@@ -7027,11 +7094,13 @@ class SmartMatchDashboard:
 
         plays = tk.Frame(parent, bg=PANEL)
         plays.pack(fill=tk.X, padx=18, pady=(18, 8))
+        draw_guard_label, draw_guard_body, _draw_guard_tone = _draw_release_guard_summary(pred)
         for label, value in [
             ("\u5927\u5c0f\u7403", f"{pred.get('ou_recommendation', '-')}  {_pct1(pred.get('ou_confidence'))}"),
             ("\u8ba9\u7403", f"{pred.get('handicap_recommendation', '-')}  {_pct1(pred.get('handicap_confidence'))}"),
             ("\u53ef\u80fd\u6bd4\u5206", f"{pred.get('score_recommendation', '-')}  {_pct1(pred.get('score_confidence'))}"),
             ("\u534a\u5168\u573a", f"{pred.get('htft_recommendation', '-')}  {_pct1(pred.get('htft_confidence'))}"),
+            ("\u5e73\u5c40\u63a5\u7ba1", f"{draw_guard_label}  {draw_guard_body.splitlines()[0]}"),
         ]:
             line = tk.Frame(plays, bg=PANEL)
             line.pack(fill=tk.X, pady=5)

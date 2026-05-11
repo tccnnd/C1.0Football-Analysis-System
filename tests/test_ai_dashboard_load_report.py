@@ -188,6 +188,21 @@ class AIDashboardLoadReportTests(unittest.TestCase):
                 "pick_kelly_gap": 0.08,
             },
             "market_entropy_risk": {"applied": True, "reason": "market_entropy_high"},
+            "draw_release_guard": {
+                "blocked": True,
+                "reason": "weak_draw_odds_bucket",
+                "weak_score": True,
+                "base_takeover": True,
+                "odds_bucket": "<=3.00",
+                "odds_draw": 2.95,
+                "min_score": 0.58,
+                "evidence": {
+                    "precision": 0.222222,
+                    "draw_rate": 0.157895,
+                    "lift": -0.075439,
+                    "source": "draw_specialist_backtest",
+                },
+            },
             "handicap_margin_consistency": {
                 "level": "HIGH",
                 "score": 0.82,
@@ -237,6 +252,9 @@ class AIDashboardLoadReportTests(unittest.TestCase):
         report = _markdown_report(DashboardRow(match=match, prediction=prediction))
 
         self.assertIn("MarketEntropy 盘口异常识别", report)
+        self.assertIn("Draw Release Guard", report)
+        self.assertIn("weak_draw_odds_bucket", report)
+        self.assertIn("draw_specialist_backtest", report)
         self.assertIn("kelly_against_pick", report)
         self.assertIn("Handicap Margin Consistency", report)
         self.assertIn("handicap_direction_mismatch", report)

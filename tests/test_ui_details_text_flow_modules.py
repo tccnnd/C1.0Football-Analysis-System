@@ -187,6 +187,21 @@ class UIDetailsTextFlowModuleTests(unittest.TestCase):
             },
             "draw_score": 0.34,
             "draw_grade": "B",
+            "draw_release_guard": {
+                "blocked": True,
+                "reason": "weak_draw_odds_bucket",
+                "weak_score": True,
+                "base_takeover": True,
+                "odds_bucket": "<=3.00",
+                "odds_draw": 2.95,
+                "min_score": 0.58,
+                "evidence": {
+                    "precision": 0.222222,
+                    "draw_rate": 0.157895,
+                    "lift": -0.075439,
+                    "source": "draw_specialist_backtest",
+                },
+            },
             "play_strategy": {
                 "single": [{"play_type": "1x2", "pick": "主胜", "confidence": 0.62}],
                 "parlay": [{"play_type": "totals", "pick": "2球", "confidence": 0.55}],
@@ -303,6 +318,9 @@ class UIDetailsTextFlowModuleTests(unittest.TestCase):
         self.assertIn("\u9ad8\u51c6 1/1", text)
         self.assertIn("Confidence Calibration", text)
         self.assertIn("Runtime Threshold Guard", text)
+        self.assertIn("Draw Release Guard", text)
+        self.assertIn("weak_draw_odds_bucket", text)
+        self.assertIn("draw_specialist_backtest", text)
         self.assertIn("MarketEntropy", text)
         self.assertIn("Kelly", text)
         self.assertIn("sequence", text)
