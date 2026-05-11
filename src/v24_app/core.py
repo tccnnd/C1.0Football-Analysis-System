@@ -718,6 +718,18 @@ def _snapshot_lookup_team_key(match_date: str, home_team: str, away_team: str) -
     )
 
 
+def _snapshot_result_schedule_id(source: object, source_id: object) -> str:
+    resolved_source = normalize_text(source).lower()
+    resolved_id = normalize_text(source_id)
+    if not resolved_id:
+        return ""
+    if "titan" in resolved_source:
+        return resolved_id
+    if resolved_source in {"cache", "cache_stale"} and resolved_id.isdigit() and len(resolved_id) >= 5:
+        return resolved_id
+    return ""
+
+
 def _market_snapshot_exact_key(match_date: str, league: str, home_team: str, away_team: str) -> str:
     return "exact|" + "|".join(
         [
@@ -10496,7 +10508,9 @@ def build_result_recovery_snapshot_audit(
         "out_of_window": 0,
         "future": 0,
         "invalid": 0,
+        "recoverable_schedule_id": 0,
         "recoverable_titan": 0,
+        "recoverable_cache_source": 0,
         "missing_source_id": 0,
         "non_titan_source": 0,
         "missing_prediction": 0,
@@ -10539,15 +10553,22 @@ def build_result_recovery_snapshot_audit(
             audit["missing_prediction"] = int(audit["missing_prediction"]) + 1
         source = normalize_text(match_payload.get("source", ""))
         source_id = normalize_text(match_payload.get("source_id", ""))
-        if "titan" not in source.lower():
-            audit["non_titan_source"] = int(audit["non_titan_source"]) + 1
-            status = "non_titan_source"
-        elif not source_id:
+        schedule_id = _snapshot_result_schedule_id(source, source_id)
+        source_key = source.lower()
+        if not source_id:
             audit["missing_source_id"] = int(audit["missing_source_id"]) + 1
             status = "missing_source_id"
+        elif schedule_id:
+            audit["recoverable_schedule_id"] = int(audit["recoverable_schedule_id"]) + 1
+            if "titan" in source_key:
+                audit["recoverable_titan"] = int(audit["recoverable_titan"]) + 1
+                status = "recoverable_titan"
+            else:
+                audit["recoverable_cache_source"] = int(audit["recoverable_cache_source"]) + 1
+                status = "recoverable_cache_schedule"
         else:
-            audit["recoverable_titan"] = int(audit["recoverable_titan"]) + 1
-            status = "recoverable_titan"
+            audit["non_titan_source"] = int(audit["non_titan_source"]) + 1
+            status = "non_titan_source"
         if len(items) < max(0, int(item_limit)):
             items.append(
                 {
@@ -11609,7 +11630,9 @@ def auto_settle_finished_matches(
         lookback_days=lookback_days,
     )
     summary["snapshot_audit"] = snapshot_audit
-    summary["snapshot_recoverable"] = int(snapshot_audit.get("recoverable_titan", 0) or 0)
+    summary["snapshot_recoverable"] = int(snapshot_audit.get("recoverable_schedule_id", 0) or 0)
+    summary["snapshot_recoverable_titan"] = int(snapshot_audit.get("recoverable_titan", 0) or 0)
+    summary["snapshot_recoverable_cache_source"] = int(snapshot_audit.get("recoverable_cache_source", 0) or 0)
     summary["snapshot_missing_source_id"] = int(snapshot_audit.get("missing_source_id", 0) or 0)
     summary["snapshot_out_of_window"] = int(snapshot_audit.get("out_of_window", 0) or 0)
     summary["snapshot_non_titan_source"] = int(snapshot_audit.get("non_titan_source", 0) or 0)
@@ -11680,9 +11703,10 @@ def auto_settle_finished_matches(
         if app_match is None or not in_lookback_window(app_match.match_date):
             continue
         snapshot_source = normalize_text(snapshot_match.get("source", "") if isinstance(snapshot_match, dict) else "")
-        if "titan" not in snapshot_source.lower():
-            continue
-        schedule_id = normalize_text(snapshot_match.get("source_id", "") if isinstance(snapshot_match, dict) else "")
+        schedule_id = _snapshot_result_schedule_id(
+            snapshot_source,
+            snapshot_match.get("source_id", "") if isinstance(snapshot_match, dict) else "",
+        )
         if not schedule_id or not hasattr(fetcher, "get_result_by_schedule_id"):
             continue
         summary["snapshot_checked"] += 1
@@ -11711,7 +11735,11 @@ def auto_settle_finished_matches(
                     }
                 )
             continue
-        app_match.source = "snapshot:titan:analysisheader"
+        app_match.source = (
+            "snapshot:titan:analysisheader"
+            if "titan" in snapshot_source.lower()
+            else "snapshot:cache:analysisheader"
+        )
         app_match.source_id = schedule_id
         append_candidate(app_match, lookup.get("home_goals"), lookup.get("away_goals"), snapshot_record)
         summary["snapshot_result_hits"] += 1
@@ -11725,9 +11753,9 @@ def auto_settle_finished_matches(
             f"最近 {lookback_days} 天未发现可自动结算的新完场比赛（修复快照 {summary['restored_snapshots']} 场，快照回查 {summary['snapshot_checked']} 场，命中 {summary['snapshot_result_hits']} 场）。"
         )
         summary["messages"].append(
-            "快照审计: 待回收 {pending} 场，可自动回查 {recoverable} 场，缺 source_id {missing} 场，非 Titan {non_titan} 场，超出窗口 {out_window} 场。".format(
+            "快照审计: 待回收 {pending} 场，可自动回查 {recoverable} 场，缺 source_id {missing} 场，不可回查来源 {non_titan} 场，超出窗口 {out_window} 场。".format(
                 pending=int(snapshot_audit.get("pending", 0) or 0),
-                recoverable=int(snapshot_audit.get("recoverable_titan", 0) or 0),
+                recoverable=int(snapshot_audit.get("recoverable_schedule_id", 0) or 0),
                 missing=int(snapshot_audit.get("missing_source_id", 0) or 0),
                 non_titan=int(snapshot_audit.get("non_titan_source", 0) or 0),
                 out_window=int(snapshot_audit.get("out_of_window", 0) or 0),
@@ -11771,9 +11799,9 @@ def auto_settle_finished_matches(
         f"自动回收完成(近{lookback_days}天): 主源完场 {summary['fetched_finished']} 场, 修复快照 {summary['restored_snapshots']} 场, 快照回查命中 {summary['snapshot_result_hits']} 场, 新增单场结算 {summary['new_settled']} 场, 新增二串一结算 {summary['new_parlay_settled']} 场, 预测快照命中 {summary['snapshot_predictions']} 场。"
     )
     summary["messages"].append(
-        "快照审计: 待回收 {pending} 场，可自动回查 {recoverable} 场，缺 source_id {missing} 场，非 Titan {non_titan} 场，超出窗口 {out_window} 场。".format(
+        "快照审计: 待回收 {pending} 场，可自动回查 {recoverable} 场，缺 source_id {missing} 场，不可回查来源 {non_titan} 场，超出窗口 {out_window} 场。".format(
             pending=int(snapshot_audit.get("pending", 0) or 0),
-            recoverable=int(snapshot_audit.get("recoverable_titan", 0) or 0),
+            recoverable=int(snapshot_audit.get("recoverable_schedule_id", 0) or 0),
             missing=int(snapshot_audit.get("missing_source_id", 0) or 0),
             non_titan=int(snapshot_audit.get("non_titan_source", 0) or 0),
             out_window=int(snapshot_audit.get("out_of_window", 0) or 0),

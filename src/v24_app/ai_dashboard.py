@@ -1364,7 +1364,7 @@ class SmartMatchDashboard:
 
     def _snapshot_audit_metrics(self, audit: dict[str, object]) -> list[tuple[str, str, str]]:
         pending = int(audit.get("pending", 0) or 0)
-        recoverable = int(audit.get("recoverable_titan", 0) or 0)
+        recoverable = int(audit.get("recoverable_schedule_id", audit.get("recoverable_titan", 0)) or 0)
         missing_source = int(audit.get("missing_source_id", 0) or 0)
         non_titan = int(audit.get("non_titan_source", 0) or 0)
         out_window = int(audit.get("out_of_window", 0) or 0)
@@ -1373,7 +1373,7 @@ class SmartMatchDashboard:
             ("\u5f85\u56de\u6536\u5feb\u7167", str(pending), TEXT),
             ("\u53ef\u81ea\u52a8\u56de\u67e5", str(recoverable), GREEN if recoverable else YELLOW),
             ("\u7f3a source_id", str(missing_source), RED if missing_source else GREEN),
-            ("\u975e Titan \u5feb\u7167", str(non_titan), YELLOW if non_titan else GREEN),
+            ("\u4e0d\u53ef\u56de\u67e5\u6765\u6e90", str(non_titan), YELLOW if non_titan else GREEN),
             ("\u8d85\u51fa\u56de\u770b", str(out_window), YELLOW if out_window else TEXT),
             ("\u5feb\u7167\u603b\u6570", str(total), "#7aa2ff"),
         ]
