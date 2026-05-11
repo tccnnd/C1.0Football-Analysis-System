@@ -24,6 +24,7 @@ from v24_app.ui_modules import (
     build_agent_replay_downgrade_backtest_summary,
     build_agent_replay_guard_tuning_recommendation,
     build_strategy_policy_effect_review,
+    build_strategy_policy_governance_event_summary,
     build_strategy_trend_tuning_effect_review,
     build_strategy_policy_rollback_effect_review,
     build_strategy_policy_freeze_override_status,
@@ -873,6 +874,31 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertTrue(dashboard["policy_tuning_guard"]["freeze_override_active"])
         self.assertFalse(dashboard["policy_tuning_guard"]["freeze_active"])
 
+    def test_strategy_dashboard_surfaces_policy_governance_events(self) -> None:
+        history = [
+            {"version_id": "v1", "updated_at": "2026-05-01 10:00:00", "source": "manual"},
+            {"version_id": "v2", "updated_at": "2026-05-02 10:00:00", "source": "release_quality_trend"},
+            {"version_id": "v3", "updated_at": "2026-05-03 10:00:00", "source": "policy_rollback:v2"},
+            {"version_id": "v4", "updated_at": "2026-05-04 10:00:00", "source": "policy_freeze_override:v3"},
+        ]
+        settlements = [
+            {"timestamp": "2026-05-02 11:00:00", "strategy_admission_decision": "allow", "is_correct": True},
+            {"timestamp": "2026-05-03 11:00:00", "strategy_admission_decision": "allow", "is_correct": False},
+        ]
+
+        dashboard = build_high_accuracy_strategy_dashboard({}, settlements, history)
+        governance = dashboard["policy_governance_event_summary"]
+        direct = build_strategy_policy_governance_event_summary(dashboard["policy_effect_review"])
+        metrics = {item["label"]: item["value"] for item in dashboard["metrics"]}
+
+        self.assertEqual(governance["summary_text"], direct["summary_text"])
+        self.assertEqual(governance["trend_gate_count"], 1)
+        self.assertEqual(governance["rollback_count"], 1)
+        self.assertEqual(governance["freeze_override_count"], 1)
+        self.assertIn("\u56de\u6eda 1", metrics["\u6cbb\u7406\u4e8b\u4ef6"])
+        self.assertEqual(governance["rows"][0]["event_type"], "freeze_override")
+        self.assertEqual(governance["rows"][0]["related_version_id"], "v3")
+
     def test_strategy_policy_audit_report_exports_review_and_samples(self) -> None:
         history = [
             {"version_id": "v1", "updated_at": "2026-05-01 10:00:00", "source": "strategy_allowlist_tuning"},
@@ -1227,10 +1253,12 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("Replay Guard", metrics)
         self.assertIn("Replay Tuning", metrics)
         self.assertIn("\u8c03\u53c2\u751f\u6548", metrics)
+        self.assertIn("\u6cbb\u7406\u4e8b\u4ef6", metrics)
         self.assertIn("\u7248\u672c\u7a33\u5b9a", metrics)
         self.assertIn("\u8c03\u53c2\u95e8\u63a7", metrics)
         self.assertIn("agent_replay_guard_tuning", dashboard)
         self.assertIn("policy_effect_review", dashboard)
+        self.assertIn("policy_governance_event_summary", dashboard)
         self.assertIn("policy_stability_monitor", dashboard)
         self.assertIn("policy_tuning_guard", dashboard)
         self.assertEqual(dashboard["live_feedback_loop"]["paused_count"], 1)

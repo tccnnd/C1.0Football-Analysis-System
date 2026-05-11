@@ -121,6 +121,7 @@ from .ui_modules import (
     build_strategy_policy_audit_report_lines,
     build_strategy_policy_effect_review,
     build_strategy_policy_freeze_override_status,
+    build_strategy_policy_governance_event_summary,
     build_strategy_policy_rollback_effect_review,
     build_strategy_policy_rollback_preview,
     build_strategy_trend_tuning_effect_review,
@@ -5667,6 +5668,142 @@ class SmartMatchDashboard:
             version_tree.selection_set(children[0])
             show_samples(row_by_iid.get(children[0]))
 
+    def open_policy_governance_event_window(self, policy_effect: dict | object) -> None:
+        review = policy_effect if isinstance(policy_effect, dict) else {}
+        governance = build_strategy_policy_governance_event_summary(review)
+        rows = [row for row in governance.get("rows", []) if isinstance(row, dict)] if isinstance(governance.get("rows"), list) else []
+
+        def as_text(value: object, default: str = "-") -> str:
+            text = str(value if value is not None else "").strip()
+            return text or default
+
+        def as_int(value: object) -> int:
+            try:
+                return int(value or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        window = tk.Toplevel(self.root)
+        window.title("\u7b56\u7565\u6cbb\u7406\u4e8b\u4ef6")
+        window.configure(bg=BG)
+        window.geometry("1120x640")
+        window.minsize(980, 540)
+
+        header = tk.Frame(window, bg=BG)
+        header.pack(fill=tk.X, padx=16, pady=(14, 8))
+        tk.Label(
+            header,
+            text=f"\u7b56\u7565\u6cbb\u7406\u4e8b\u4ef6 | {governance.get('summary_text', '-')}",
+            bg=BG,
+            fg=TEXT,
+            font=("Microsoft YaHei UI", 14, "bold"),
+        ).pack(anchor=tk.W)
+        tk.Label(
+            header,
+            text=str(governance.get("latest_summary") or "\u6682\u65e0\u6cbb\u7406\u4e8b\u4ef6"),
+            bg=BG,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 10),
+            wraplength=1040,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(4, 0))
+
+        body = tk.PanedWindow(window, orient=tk.VERTICAL, bg=BG, sashwidth=5, bd=0)
+        body.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 16))
+        table_frame = tk.Frame(body, bg=BG)
+        detail_frame = tk.Frame(body, bg=BG)
+        body.add(table_frame, minsize=250)
+        body.add(detail_frame, minsize=160)
+
+        self._configure_dark_tree_style("PolicyGovernance.Treeview", master=window, rowheight=28)
+        columns = ("time", "version", "event", "source", "related", "effect", "allow", "replay")
+        tree = ttk.Treeview(table_frame, columns=columns, show="headings", style="PolicyGovernance.Treeview", height=10)
+        headings = {
+            "time": "\u65f6\u95f4",
+            "version": "\u7248\u672c",
+            "event": "\u4e8b\u4ef6",
+            "source": "\u6765\u6e90",
+            "related": "\u5173\u8054\u7248\u672c",
+            "effect": "\u6548\u679c",
+            "allow": "\u653e\u884c\u547d\u4e2d",
+            "replay": "Replay\u51c0\u503c",
+        }
+        widths = {"time": 145, "version": 110, "event": 110, "source": 190, "related": 105, "effect": 125, "allow": 105, "replay": 85}
+        for col in columns:
+            tree.heading(col, text=headings[col])
+            tree.column(col, width=widths[col], anchor=tk.W, stretch=True)
+        scroll = tk.Scrollbar(table_frame, orient=tk.VERTICAL, command=tree.yview)
+        tree.configure(yscrollcommand=scroll.set)
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        detail = tk.Text(
+            detail_frame,
+            bg=PANEL,
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief=tk.FLAT,
+            wrap=tk.WORD,
+            font=("Microsoft YaHei UI", 10),
+            height=7,
+            padx=12,
+            pady=10,
+        )
+        detail_scroll = tk.Scrollbar(detail_frame, orient=tk.VERTICAL, command=detail.yview)
+        detail.configure(yscrollcommand=detail_scroll.set)
+        detail.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        detail_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        row_by_iid: dict[str, dict] = {}
+        for index, row in enumerate(rows):
+            iid = str(index)
+            row_by_iid[iid] = row
+            tree.insert(
+                "",
+                tk.END,
+                iid=iid,
+                values=(
+                    as_text(row.get("updated_at")),
+                    as_text(row.get("version_id")),
+                    as_text(row.get("event_label")),
+                    as_text(row.get("source")),
+                    as_text(row.get("related_version_id")),
+                    as_text(row.get("effect_label")),
+                    as_text(row.get("allow_hit_rate_text")),
+                    f"{as_int(row.get('replay_guard_net')):+d}",
+                ),
+            )
+
+        def show_detail(row: dict | None) -> None:
+            if isinstance(row, dict):
+                content = (
+                    f"{as_text(row.get('summary'))}\n\n"
+                    f"\u4e8b\u4ef6\u7c7b\u578b: {as_text(row.get('event_type'))}\n"
+                    f"\u6765\u6e90: {as_text(row.get('source'))}\n"
+                    f"\u5173\u8054\u7248\u672c: {as_text(row.get('related_version_id'))}\n"
+                    f"\u6837\u672c: {as_int(row.get('sample_count'))} | \u5df2\u77e5\u653e\u884c {as_int(row.get('known_allow_count'))} | "
+                    f"Replay\u51c0\u503c {as_int(row.get('replay_guard_net')):+d}\n"
+                    f"\u8bf4\u660e: {as_text(row.get('description'))}"
+                )
+            else:
+                content = "\u6682\u65e0\u7b56\u7565\u6cbb\u7406\u4e8b\u4ef6\u3002"
+            detail.configure(state=tk.NORMAL)
+            detail.delete("1.0", tk.END)
+            detail.insert("1.0", content)
+            detail.configure(state=tk.DISABLED)
+
+        def on_select(_event=None) -> None:
+            selected = tree.selection()
+            show_detail(row_by_iid.get(selected[0]) if selected else None)
+
+        tree.bind("<<TreeviewSelect>>", on_select)
+        children = tree.get_children()
+        if children:
+            tree.selection_set(children[0])
+            show_detail(row_by_iid.get(children[0]))
+        else:
+            show_detail(None)
+
     def open_statsbomb_event_sandbox_window(self) -> None:
         baseline = get_statsbomb_event_baseline()
         sandbox = build_statsbomb_event_sandbox_summary(baseline, limit=60)
@@ -5921,6 +6058,11 @@ class SmartMatchDashboard:
         audit_tools.pack(fill=tk.X, pady=(0, 12))
         self._strategy_toolbar_button(audit_tools, "\u5ba1\u8ba1\u5386\u53f2", self.open_strategy_policy_audit_history)
         self._strategy_toolbar_button(audit_tools, "\u5bfc\u51fa\u8c03\u53c2\u5ba1\u8ba1", self.export_strategy_policy_audit_report)
+        self._strategy_toolbar_button(
+            audit_tools,
+            "\u6cbb\u7406\u4e8b\u4ef6",
+            lambda review=dashboard.get("policy_effect_review", {}): self.open_policy_governance_event_window(review),
+        )
         self._strategy_toolbar_button(audit_tools, "\u89e3\u9664\u8c03\u53c2\u51bb\u7ed3", self.apply_strategy_policy_freeze_override)
         self._strategy_toolbar_button(audit_tools, "StatsBomb\u8865\u6837", self.export_statsbomb_fewshot_backfill_report)
         self._strategy_toolbar_button(audit_tools, "StatsBomb\u8349\u7a3f", self.export_statsbomb_fewshot_draft)
@@ -6113,6 +6255,40 @@ class SmartMatchDashboard:
                     f"{row.get('body', '-')}\n\u70b9\u51fb\u67e5\u770b\u8be5\u7248\u672c\u6837\u672c",
                     command=lambda review=policy_effect: self.open_policy_effect_detail_window(review),
                 )
+
+        policy_governance = dashboard.get("policy_governance_event_summary", {}) if isinstance(dashboard.get("policy_governance_event_summary"), dict) else {}
+        governance_rows = policy_governance.get("rows", []) if isinstance(policy_governance.get("rows"), list) else []
+        self._strategy_section_title(right, "\u7b56\u7565\u6cbb\u7406\u4e8b\u4ef6")
+        self._strategy_row(
+            right,
+            str(policy_governance.get("summary_text") or "-"),
+            f"{policy_governance.get('latest_summary', '-')}\n\u70b9\u51fb\u67e5\u770b\u6cbb\u7406\u4e8b\u4ef6\u660e\u7ec6",
+            command=lambda review=policy_effect: self.open_policy_governance_event_window(review),
+        )
+        if governance_rows:
+            for row in governance_rows[:5]:
+                if isinstance(row, dict):
+                    try:
+                        replay_net = int(row.get("replay_guard_net", 0) or 0)
+                    except (TypeError, ValueError):
+                        replay_net = 0
+                    self._strategy_row(
+                        right,
+                        f"{row.get('event_label', '-')} | \u7248\u672c {row.get('version_id', '-')}",
+                        (
+                            f"\u6765\u6e90: {row.get('source', '-')} | \u5173\u8054 {row.get('related_version_id', '-')}\n"
+                            f"\u6548\u679c: {row.get('effect_label', '-')} | \u653e\u884c\u547d\u4e2d {row.get('allow_hit_rate_text', '-')} | "
+                            f"Replay\u51c0\u503c {replay_net:+d}\n"
+                            f"\u8bf4\u660e: {row.get('description', '-')}"
+                        ),
+                        command=lambda review=policy_effect: self.open_policy_governance_event_window(review),
+                    )
+        else:
+            self._strategy_row(
+                right,
+                "\u6682\u65e0\u6cbb\u7406\u4e8b\u4ef6",
+                "\u8d8b\u52bf\u95e8\u63a7\u3001\u53c2\u6570\u56de\u6eda\u548c\u89e3\u9664\u51bb\u7ed3\u5ba1\u8ba1\u4f1a\u5728\u8fd9\u91cc\u663e\u793a\u3002",
+            )
 
         trend_tuning_effect = dashboard.get("trend_tuning_effect_review", {}) if isinstance(dashboard.get("trend_tuning_effect_review"), dict) else {}
         self._strategy_section_title(right, "\u95e8\u63a7\u5efa\u8bae\u751f\u6548\u8ddf\u8e2a")

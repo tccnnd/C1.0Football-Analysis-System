@@ -7180,6 +7180,7 @@ def build_high_accuracy_strategy_dashboard(
         historical_replay=historical_replay_summary,
     )
     policy_effect_review = build_strategy_policy_effect_review(policy_history or [], settlement_items)
+    policy_governance_event_summary = build_strategy_policy_governance_event_summary(policy_effect_review)
     policy_stability_monitor = _as_mapping(policy_effect_review.get("stability_monitor"))
     trend_tuning_effect_review = build_strategy_trend_tuning_effect_review(policy_effect_review)
     rollback_effect_review = build_strategy_policy_rollback_effect_review(policy_effect_review)
@@ -7319,6 +7320,17 @@ def build_high_accuracy_strategy_dashboard(
             else "bad"
             if str(policy_effect_review.get("latest_status") or "") == "negative"
             else "neutral",
+        },
+        {
+            "label": "\u6cbb\u7406\u4e8b\u4ef6",
+            "value": str(policy_governance_event_summary.get("summary_text") or "-"),
+            "tone": "warning"
+            if _safe_int(policy_governance_event_summary.get("rollback_count"))
+            or _safe_int(policy_governance_event_summary.get("freeze_override_count"))
+            or _safe_int(policy_governance_event_summary.get("trend_gate_count"))
+            else "neutral"
+            if _safe_int(policy_governance_event_summary.get("event_count"))
+            else "good",
         },
         {
             "label": "\u95e8\u63a7\u751f\u6548",
@@ -7499,6 +7511,7 @@ def build_high_accuracy_strategy_dashboard(
         "allowlist_settlement_summary": allowlist_summary,
         "allowlist_tuning": allowlist_tuning,
         "policy_effect_review": policy_effect_review,
+        "policy_governance_event_summary": policy_governance_event_summary,
         "trend_tuning_effect_review": trend_tuning_effect_review,
         "rollback_effect_review": rollback_effect_review,
         "freeze_override_status": freeze_override_status,
