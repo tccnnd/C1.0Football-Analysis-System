@@ -87,6 +87,8 @@ class XGBoostProbabilityModel:
         self._model: Any = None
         self._model_ready = False
         self._last_train_attempt: datetime | None = None
+        self._meta_cache_signature: dict[str, int] | None = None
+        self._meta_cache: dict[str, Any] = {}
 
     @staticmethod
     def build_estimator() -> Any:
@@ -180,13 +182,30 @@ class XGBoostProbabilityModel:
         return feature_map
 
     def _load_meta(self) -> dict[str, Any]:
-        if not self.meta_file.exists():
+        signature = self._meta_signature()
+        if signature["mtime_ns"] <= 0 or signature["size_bytes"] <= 0:
+            self._meta_cache_signature = signature
+            self._meta_cache = {}
             return {}
+        if self._meta_cache_signature == signature:
+            return dict(self._meta_cache)
         try:
             payload = json.loads(self.meta_file.read_text(encoding="utf-8"))
         except Exception:
+            self._meta_cache_signature = signature
+            self._meta_cache = {}
             return {}
-        return payload if isinstance(payload, dict) else {}
+        meta = payload if isinstance(payload, dict) else {}
+        self._meta_cache_signature = signature
+        self._meta_cache = dict(meta)
+        return dict(meta)
+
+    def _meta_signature(self) -> dict[str, int]:
+        try:
+            stat = self.meta_file.stat()
+        except OSError:
+            return {"mtime_ns": 0, "size_bytes": 0}
+        return {"mtime_ns": int(stat.st_mtime_ns), "size_bytes": int(stat.st_size)}
 
     def _is_model_compatible(self, meta: dict[str, Any] | None = None) -> bool:
         payload = meta if isinstance(meta, dict) else self._load_meta()
@@ -318,20 +337,16 @@ class XGBoostProbabilityModel:
         model.fit(x_matrix, y_vector)
         label_counts = self._label_counter(y_vector)
         model.save_model(str(self.model_file))
-        self.meta_file.write_text(
-            json.dumps(
-                {
-                    "updated_at": now.strftime("%Y-%m-%d %H:%M:%S"),
-                    "sample_count": len(samples),
-                    "label_counts": label_counts,
-                    "feature_order": self.FEATURE_ORDER,
-                    "model": "xgb_v0_match_outcome",
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
+        meta_payload = {
+            "updated_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+            "sample_count": len(samples),
+            "label_counts": label_counts,
+            "feature_order": self.FEATURE_ORDER,
+            "model": "xgb_v0_match_outcome",
+        }
+        self.meta_file.write_text(json.dumps(meta_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._meta_cache_signature = self._meta_signature()
+        self._meta_cache = dict(meta_payload)
         self._model = model
         self._model_ready = True
         return {

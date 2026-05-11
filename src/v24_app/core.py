@@ -189,6 +189,10 @@ _RECENT_FORM_CACHE: dict[str, object] = {
     "team_histories": {},
 }
 _RECENT_FORM_CACHE_VERSION = 1
+_RATINGS_CACHE: dict[str, dict[str, object]] = {
+    "club": {"signature": None, "ratings": {}},
+    "national_team": {"signature": None, "ratings": {}},
+}
 _ENSEMBLE_WEIGHT_CACHE: dict[str, object] = {
     "mtime": None,
     "weights": dict(DEFAULT_ENSEMBLE_WEIGHTS),
@@ -389,17 +393,53 @@ def is_world_cup_match(match: AppMatch) -> bool:
     return any(keyword in league for keyword in WORLD_CUP_LEAGUE_KEYWORDS)
 
 
+def _rating_pool_file_signature(pool: str) -> dict[str, object]:
+    attribute = "national_team_ratings_file" if pool == "national_team" else "ratings_file"
+    path = getattr(STATE_STORE, attribute, None)
+    if path is None:
+        return {"source_file": "", "mtime_ns": 0, "size_bytes": 0}
+    if isinstance(path, Path):
+        signature = _state_file_signature(path)
+        return {"source_file": str(path), **signature}
+    try:
+        resolved_path = Path(str(path))
+        signature = _state_file_signature(resolved_path)
+        return {"source_file": str(resolved_path), **signature}
+    except Exception:
+        return {"source_file": str(path), "mtime_ns": 0, "size_bytes": 0}
+
+
+def _load_ratings_for_pool(pool: str) -> dict[str, float]:
+    cache = _RATINGS_CACHE.setdefault(pool, {"signature": None, "ratings": {}})
+    signature = _rating_pool_file_signature(pool)
+    cached_ratings = cache.get("ratings")
+    if cache.get("signature") == signature and isinstance(cached_ratings, dict):
+        return {str(team): float(value) for team, value in cached_ratings.items()}
+
+    ratings = STATE_STORE.load_national_team_ratings() if pool == "national_team" else STATE_STORE.load_ratings()
+    normalized = {str(team): float(value) for team, value in ratings.items()}
+    cache["signature"] = signature
+    cache["ratings"] = dict(normalized)
+    return dict(normalized)
+
+
+def _save_ratings_for_pool(pool: str, ratings: dict[str, float]) -> None:
+    normalized = {str(team): float(value) for team, value in ratings.items()}
+    if pool == "national_team":
+        STATE_STORE.save_national_team_ratings(normalized)
+    else:
+        STATE_STORE.save_ratings(normalized)
+    cache = _RATINGS_CACHE.setdefault(pool, {"signature": None, "ratings": {}})
+    cache["signature"] = _rating_pool_file_signature(pool)
+    cache["ratings"] = dict(normalized)
+
+
 def _load_match_ratings(match: AppMatch) -> dict[str, float]:
-    if is_world_cup_match(match):
-        return STATE_STORE.load_national_team_ratings()
-    return STATE_STORE.load_ratings()
+    return _load_ratings_for_pool(_rating_pool_name(match))
 
 
 def _save_match_ratings(match: AppMatch, ratings: dict[str, float]) -> None:
-    if is_world_cup_match(match):
-        STATE_STORE.save_national_team_ratings(ratings)
-        return
-    STATE_STORE.save_ratings(ratings)
+    _save_ratings_for_pool(_rating_pool_name(match), ratings)
 
 
 def _rating_pool_name(match: AppMatch) -> str:
