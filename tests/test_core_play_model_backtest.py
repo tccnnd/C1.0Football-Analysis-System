@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -19,6 +20,14 @@ class PlayModelBacktestTests(unittest.TestCase):
     def tearDown(self) -> None:
         core._PLAY_MODEL_POLICY_CACHE.clear()
         core._PLAY_MODEL_POLICY_CACHE.update({"mtime": None, "policy": None, "report": {}})
+        core._DRAW_RELEASE_GUARD_POLICY_CACHE.clear()
+        core._DRAW_RELEASE_GUARD_POLICY_CACHE.update(
+            {
+                "mtime": None,
+                "policy": json.loads(json.dumps(core.DEFAULT_DRAW_RELEASE_GUARD_POLICY)),
+                "report": {},
+            }
+        )
 
     def test_run_play_model_backtest_truncates_large_validation_set(self) -> None:
         validation_items = [
@@ -233,6 +242,62 @@ class PlayModelBacktestTests(unittest.TestCase):
         self.assertTrue(guard["weak_score"])
         self.assertFalse(guard["blocked"])
         self.assertEqual(guard["reason"], "ok")
+
+    def test_draw_takeover_guard_reads_policy_file_threshold_and_evidence(self) -> None:
+        match = core.AppMatch(
+            home_team="H",
+            away_team="A",
+            league="Draw League",
+            match_time="20:00",
+            match_date="2026-05-11",
+            odds_home=2.45,
+            odds_draw=2.95,
+            odds_away=2.80,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            policy_file = Path(tmp_dir) / "draw_release_guard_policy_v1.json"
+            policy_file.write_text(
+                json.dumps(
+                    {
+                        "policy": {
+                            "enabled": True,
+                            "min_score": 0.80,
+                            "weak_odds_buckets": {
+                                "<=3.00": {
+                                    "precision": 0.111111,
+                                    "draw_rate": 0.12,
+                                    "lift": -0.10,
+                                    "source": "unit_policy",
+                                }
+                            },
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.object(core, "DRAW_RELEASE_GUARD_POLICY_FILE", policy_file):
+                takeover, guard = core._draw_takeover_decision(
+                    match,
+                    probabilities={"home": 0.35, "draw": 0.34, "away": 0.31},
+                    draw_score=0.76,
+                    draw_signals={"market_balance": 0.9, "low_goal": 0.8},
+                )
+                self.assertTrue(takeover)
+                self.assertFalse(guard["weak_score"])
+                self.assertEqual(guard["min_score"], 0.80)
+
+                takeover, guard = core._draw_takeover_decision(
+                    match,
+                    probabilities={"home": 0.35, "draw": 0.34, "away": 0.31},
+                    draw_score=0.82,
+                    draw_signals={"market_balance": 0.9, "low_goal": 0.8},
+                )
+
+        self.assertFalse(takeover)
+        self.assertTrue(guard["blocked"])
+        self.assertEqual(guard["evidence"]["precision"], 0.111111)
+        self.assertEqual(guard["evidence"]["source"], "unit_policy")
 
     def test_total_goals_takeover_requires_material_calibration_uplift(self) -> None:
         validation_items = []

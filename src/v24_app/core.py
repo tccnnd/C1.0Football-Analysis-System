@@ -62,6 +62,7 @@ PLAY_THRESHOLDS_FILE = PROJECT_DIR / "data" / "models" / "play_thresholds_v1.jso
 PLAY_MODEL_POLICY_FILE = PROJECT_DIR / "data" / "models" / "play_model_policy_v1.json"
 PLAY_MODEL_POLICY_HISTORY_FILE = PROJECT_DIR / "data" / "models" / "play_model_policy_history_v1.json"
 DRAW_SPECIALIST_BACKTEST_FILE = PROJECT_DIR / "data" / "models" / "draw_specialist_backtest_v1.json"
+DRAW_RELEASE_GUARD_POLICY_FILE = PROJECT_DIR / "data" / "models" / "draw_release_guard_policy_v1.json"
 BAYES_CALIBRATION_FILE = PROJECT_DIR / "data" / "models" / "bayes_calibration_v1.json"
 HIGH_ACCURACY_STRATEGY_FILE = PROJECT_DIR / "data" / "models" / "high_accuracy_strategy_v1.json"
 JC_STRATIFIED_STRATEGY_FILE = PROJECT_DIR / "data" / "models" / "jc_stratified_strategy_backtest_v1.json"
@@ -171,19 +172,22 @@ PLAY_MODEL_TOTAL_GOALS_MIN_HOLDOUT_UPLIFT = 0.0
 PLAY_MODEL_SCORELINE_MAX_HOLDOUT_REGRESSION = 0.03
 PLAY_MODEL_POLICY_HOLDOUT_RATIO = 0.25
 PLAY_MODEL_POLICY_MIN_HOLDOUT_ROWS = 100
-DRAW_RELEASE_GUARD_MIN_SCORE = 0.58
-DRAW_RELEASE_WEAK_ODDS_BUCKET_EVIDENCE = {
-    "<=3.00": {
-        "precision": 0.222222,
-        "draw_rate": 0.157895,
-        "lift": -0.075439,
-        "source": "draw_specialist_backtest_20260511_112806",
-    },
-    ">4.20": {
-        "precision": None,
-        "draw_rate": 0.149425,
-        "lift": -0.083908,
-        "source": "draw_specialist_backtest_20260511_112806",
+DEFAULT_DRAW_RELEASE_GUARD_POLICY = {
+    "enabled": True,
+    "min_score": 0.58,
+    "weak_odds_buckets": {
+        "<=3.00": {
+            "precision": 0.222222,
+            "draw_rate": 0.157895,
+            "lift": -0.075439,
+            "source": "draw_specialist_backtest_20260511_112806",
+        },
+        ">4.20": {
+            "precision": None,
+            "draw_rate": 0.149425,
+            "lift": -0.083908,
+            "source": "draw_specialist_backtest_20260511_112806",
+        },
     },
 }
 DEFAULT_BAYES_CALIBRATION = {
@@ -224,6 +228,11 @@ _PLAY_THRESHOLD_CACHE: dict[str, object] = {
 _PLAY_MODEL_POLICY_CACHE: dict[str, object] = {
     "mtime": None,
     "policy": json.loads(json.dumps(DEFAULT_PLAY_MODEL_POLICY)),
+    "report": {},
+}
+_DRAW_RELEASE_GUARD_POLICY_CACHE: dict[str, object] = {
+    "mtime": None,
+    "policy": json.loads(json.dumps(DEFAULT_DRAW_RELEASE_GUARD_POLICY)),
     "report": {},
 }
 _BAYES_CALIBRATION_CACHE: dict[str, object] = {
@@ -8702,10 +8711,54 @@ def _draw_market_balance_bucket(value: object) -> str:
     return "<0.45 倾斜"
 
 
+def _current_draw_release_guard_policy() -> dict[str, object]:
+    try:
+        mtime = DRAW_RELEASE_GUARD_POLICY_FILE.stat().st_mtime
+    except FileNotFoundError:
+        _DRAW_RELEASE_GUARD_POLICY_CACHE["mtime"] = None
+        _DRAW_RELEASE_GUARD_POLICY_CACHE["policy"] = json.loads(json.dumps(DEFAULT_DRAW_RELEASE_GUARD_POLICY))
+        _DRAW_RELEASE_GUARD_POLICY_CACHE["report"] = {"mode": "default", "reason": "missing_policy_file"}
+        return json.loads(json.dumps(DEFAULT_DRAW_RELEASE_GUARD_POLICY))
+    except OSError as exc:
+        _DRAW_RELEASE_GUARD_POLICY_CACHE["report"] = {"mode": "default", "reason": str(exc)}
+        return json.loads(json.dumps(DEFAULT_DRAW_RELEASE_GUARD_POLICY))
+    if _DRAW_RELEASE_GUARD_POLICY_CACHE.get("mtime") == mtime:
+        return json.loads(json.dumps(_DRAW_RELEASE_GUARD_POLICY_CACHE.get("policy") or DEFAULT_DRAW_RELEASE_GUARD_POLICY))
+    try:
+        raw = json.loads(DRAW_RELEASE_GUARD_POLICY_FILE.read_text(encoding="utf-8"))
+    except Exception as exc:
+        _DRAW_RELEASE_GUARD_POLICY_CACHE["mtime"] = mtime
+        _DRAW_RELEASE_GUARD_POLICY_CACHE["policy"] = json.loads(json.dumps(DEFAULT_DRAW_RELEASE_GUARD_POLICY))
+        _DRAW_RELEASE_GUARD_POLICY_CACHE["report"] = {"mode": "default", "reason": str(exc)}
+        return json.loads(json.dumps(DEFAULT_DRAW_RELEASE_GUARD_POLICY))
+    policy = json.loads(json.dumps(DEFAULT_DRAW_RELEASE_GUARD_POLICY))
+    if isinstance(raw, dict):
+        raw_policy = raw.get("policy") if isinstance(raw.get("policy"), dict) else raw
+        if isinstance(raw_policy, dict):
+            if "enabled" in raw_policy:
+                policy["enabled"] = bool(raw_policy.get("enabled"))
+            if raw_policy.get("min_score") is not None:
+                policy["min_score"] = _safe_float(raw_policy.get("min_score"), policy["min_score"])
+            if isinstance(raw_policy.get("weak_odds_buckets"), dict):
+                policy["weak_odds_buckets"] = {
+                    str(bucket): dict(evidence)
+                    for bucket, evidence in raw_policy.get("weak_odds_buckets", {}).items()
+                    if isinstance(evidence, dict)
+                }
+    _DRAW_RELEASE_GUARD_POLICY_CACHE["mtime"] = mtime
+    _DRAW_RELEASE_GUARD_POLICY_CACHE["policy"] = json.loads(json.dumps(policy))
+    _DRAW_RELEASE_GUARD_POLICY_CACHE["report"] = raw if isinstance(raw, dict) else {}
+    return policy
+
+
 def _draw_release_guard(match: AppMatch, draw_score: object, *, base_takeover: bool = False) -> dict[str, object]:
+    policy = _current_draw_release_guard_policy()
+    min_score = _safe_float(policy.get("min_score"), default=0.58)
+    weak_odds_buckets = policy.get("weak_odds_buckets") if isinstance(policy.get("weak_odds_buckets"), dict) else {}
     odds_bucket = _draw_odds_bucket(getattr(match, "odds_draw", 0.0))
-    evidence = DRAW_RELEASE_WEAK_ODDS_BUCKET_EVIDENCE.get(odds_bucket)
-    weak_score = bool(evidence and _safe_float(draw_score, default=0.0) >= DRAW_RELEASE_GUARD_MIN_SCORE)
+    evidence = weak_odds_buckets.get(odds_bucket) if bool(policy.get("enabled", True)) else None
+    evidence = evidence if isinstance(evidence, dict) else {}
+    weak_score = bool(evidence and _safe_float(draw_score, default=0.0) >= min_score)
     blocked = bool(base_takeover and weak_score)
     return {
         "blocked": blocked,
@@ -8714,7 +8767,7 @@ def _draw_release_guard(match: AppMatch, draw_score: object, *, base_takeover: b
         "base_takeover": bool(base_takeover),
         "odds_bucket": odds_bucket,
         "odds_draw": round(_safe_float(getattr(match, "odds_draw", 0.0), default=0.0), 3),
-        "min_score": DRAW_RELEASE_GUARD_MIN_SCORE,
+        "min_score": min_score,
         "evidence": dict(evidence or {}),
     }
 
@@ -10391,6 +10444,43 @@ def _handicap_margin_settlement_fields(prediction: dict | None) -> dict:
     }
 
 
+def _draw_release_guard_settlement_fields(prediction: dict | None) -> dict:
+    guard = prediction.get("draw_release_guard") if isinstance(prediction, dict) else {}
+    if not isinstance(guard, dict):
+        guard = {}
+    evidence = guard.get("evidence") if isinstance(guard.get("evidence"), dict) else {}
+    blocked = bool(guard.get("blocked"))
+    base_takeover = bool(guard.get("base_takeover"))
+    weak_score = bool(guard.get("weak_score"))
+    if blocked:
+        status = "blocked"
+    elif base_takeover:
+        status = "allowed"
+    elif weak_score:
+        status = "watch"
+    elif guard:
+        status = "idle"
+    else:
+        status = ""
+    return {
+        "draw_score": round(_safe_float(prediction.get("draw_score"), 0.0), 4) if isinstance(prediction, dict) and prediction.get("draw_score") is not None else None,
+        "draw_grade": str(prediction.get("draw_grade") or "") if isinstance(prediction, dict) else "",
+        "draw_takeover": bool(prediction.get("draw_takeover")) if isinstance(prediction, dict) and "draw_takeover" in prediction else None,
+        "draw_release_guard_status": status,
+        "draw_release_guard_blocked": blocked if guard else False,
+        "draw_release_guard_reason": str(guard.get("reason") or ""),
+        "draw_release_guard_odds_bucket": str(guard.get("odds_bucket") or ""),
+        "draw_release_guard_odds_draw": round(_safe_float(guard.get("odds_draw"), 0.0), 4) if guard.get("odds_draw") is not None else None,
+        "draw_release_guard_min_score": round(_safe_float(guard.get("min_score"), 0.0), 4) if guard.get("min_score") is not None else None,
+        "draw_release_guard_base_takeover": base_takeover if guard else False,
+        "draw_release_guard_weak_score": weak_score if guard else False,
+        "draw_release_guard_evidence_source": str(evidence.get("source") or ""),
+        "draw_release_guard_evidence_precision": round(_safe_float(evidence.get("precision"), 0.0), 6) if evidence.get("precision") is not None else None,
+        "draw_release_guard_evidence_draw_rate": round(_safe_float(evidence.get("draw_rate"), 0.0), 6) if evidence.get("draw_rate") is not None else None,
+        "draw_release_guard_evidence_lift": round(_safe_float(evidence.get("lift"), 0.0), 6) if evidence.get("lift") is not None else None,
+    }
+
+
 def _agent_trace_settlement_fields(prediction: dict | None) -> dict:
     supervisor = prediction.get("supervisor") if isinstance(prediction, dict) else {}
     if not isinstance(supervisor, dict):
@@ -11492,6 +11582,7 @@ def settle_match_result(
         **_strategy_admission_settlement_fields(prediction),
         **_market_entropy_settlement_fields(prediction),
         **_handicap_margin_settlement_fields(prediction),
+        **_draw_release_guard_settlement_fields(prediction),
         **_agent_trace_settlement_fields(prediction),
         "opening_odds_home": round(_safe_float(match.opening_odds_home, 0.0), 4),
         "opening_odds_draw": round(_safe_float(match.opening_odds_draw, 0.0), 4),
@@ -11634,6 +11725,10 @@ def get_recent_settlements(limit: int = 20) -> list[dict]:
                 if record.get("handicap_margin_score") is None:
                     for key, value in _handicap_margin_settlement_fields(prediction).items():
                         if record.get(key) in (None, "", []):
+                            record[key] = value
+                if record.get("draw_release_guard_status") in (None, ""):
+                    for key, value in _draw_release_guard_settlement_fields(prediction).items():
+                        if record.get(key) in (None, "", [], {}):
                             record[key] = value
                 if record.get("strategy_admission_decision") in (None, ""):
                     for key, value in _strategy_admission_settlement_fields(prediction).items():

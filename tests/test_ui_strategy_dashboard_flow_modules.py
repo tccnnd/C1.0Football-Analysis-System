@@ -31,6 +31,7 @@ from v24_app.ui_modules import (
     build_strategy_policy_rollback_preview,
     build_strategy_policy_stability_monitor,
     build_strategy_policy_tuning_guard,
+    build_draw_release_guard_review_summary,
     build_handicap_margin_backtest_summary,
     build_market_entropy_backtest_summary,
     build_strategy_evaluation_agent_summary,
@@ -1007,6 +1008,31 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertEqual(high_row["count"], 3)
         self.assertEqual(high_row["miss_count"], 2)
         self.assertIn("handicap_direction_mismatch", {row["top_signal"] for row in summary["rows"]})
+
+    def test_draw_release_guard_review_tracks_avoided_false_positive(self) -> None:
+        settlements = [
+            {"home_goals": 2, "away_goals": 1, "draw_score": 0.61, "draw_release_guard_status": "blocked", "draw_release_guard_blocked": True, "draw_release_guard_odds_bucket": "<=3.00", "draw_release_guard_reason": "weak_draw_odds_bucket"},
+            {"home_goals": 0, "away_goals": 1, "draw_score": 0.60, "draw_release_guard_status": "blocked", "draw_release_guard_blocked": True, "draw_release_guard_odds_bucket": "<=3.00", "draw_release_guard_reason": "weak_draw_odds_bucket"},
+            {"home_goals": 3, "away_goals": 1, "draw_score": 0.59, "draw_release_guard_status": "blocked", "draw_release_guard_blocked": True, "draw_release_guard_odds_bucket": "<=3.00", "draw_release_guard_reason": "weak_draw_odds_bucket"},
+            {"home_goals": 1, "away_goals": 0, "draw_score": 0.64, "draw_release_guard_status": "blocked", "draw_release_guard_blocked": True, "draw_release_guard_odds_bucket": "3.01-3.30", "draw_release_guard_reason": "weak_draw_odds_bucket"},
+            {"home_goals": 1, "away_goals": 1, "draw_score": 0.62, "draw_release_guard_status": "blocked", "draw_release_guard_blocked": True, "draw_release_guard_odds_bucket": "<=3.00", "draw_release_guard_reason": "weak_draw_odds_bucket"},
+            {"home_goals": 0, "away_goals": 0, "draw_score": 0.72, "draw_release_guard_status": "allowed", "draw_release_guard_blocked": False, "draw_release_guard_odds_bucket": "3.31-3.60"},
+        ]
+
+        summary = build_draw_release_guard_review_summary(settlements)
+        dashboard = build_high_accuracy_strategy_dashboard({"enabled": True}, settlements)
+
+        self.assertEqual(summary["sample_count"], 6)
+        self.assertEqual(summary["blocked_count"], 5)
+        self.assertEqual(summary["avoided_false_positive"], 4)
+        self.assertEqual(summary["missed_draw_hit"], 1)
+        self.assertEqual(summary["allowed_draw_hits"], 1)
+        self.assertEqual(summary["recommendation"], "keep_draw_guard")
+        weak_bucket = next(row for row in summary["rows"] if row["bucket"] == "<=3.00")
+        self.assertEqual(weak_bucket["avoid_count"], 3)
+        self.assertEqual(weak_bucket["missed_count"], 1)
+        self.assertEqual(dashboard["draw_release_guard_review"]["avoided_false_positive"], 4)
+        self.assertIn("\u5e73\u5c40\u62e6\u622a", {item["label"] for item in dashboard["metrics"]})
 
     def test_high_accuracy_live_feedback_summary_groups_strategy_states(self) -> None:
         status = {

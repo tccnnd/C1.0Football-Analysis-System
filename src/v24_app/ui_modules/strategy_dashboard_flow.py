@@ -6067,6 +6067,160 @@ def _handicap_margin_bucket(item: Mapping[str, object]) -> str:
     return "low"
 
 
+def _draw_guard_actual_is_draw(item: Mapping[str, object]) -> bool | None:
+    home_goals = item.get("home_goals")
+    away_goals = item.get("away_goals")
+    if home_goals not in (None, "") and away_goals not in (None, ""):
+        try:
+            return int(home_goals) == int(away_goals)
+        except (TypeError, ValueError):
+            pass
+    side = _actual_side(item.get("result"))
+    if side:
+        return side == "draw"
+    return None
+
+
+def _draw_guard_bucket_label(bucket: object) -> str:
+    text = _text(bucket, "")
+    return text or "unknown"
+
+
+def build_draw_release_guard_review_summary(settlements: Sequence[Mapping[str, object]] | object) -> dict[str, object]:
+    settlement_items = [item for item in settlements if isinstance(item, Mapping)] if isinstance(settlements, Sequence) else []
+    known: list[Mapping[str, object]] = []
+    for item in settlement_items:
+        if item.get("draw_release_guard_status") in (None, "") and item.get("draw_release_guard_blocked") is None:
+            continue
+        if _draw_guard_actual_is_draw(item) is None:
+            continue
+        known.append(item)
+
+    bucket_rows: dict[str, dict[str, object]] = {}
+    blocked_count = 0
+    avoid_count = 0
+    missed_count = 0
+    allowed_draw_hits = 0
+    score_sum = 0.0
+    score_count = 0
+    reason_counts: dict[str, int] = {}
+
+    for item in known:
+        bucket = _draw_guard_bucket_label(item.get("draw_release_guard_odds_bucket"))
+        row = bucket_rows.setdefault(
+            bucket,
+            {
+                "bucket": bucket,
+                "label": bucket,
+                "count": 0,
+                "blocked_count": 0,
+                "avoid_count": 0,
+                "missed_count": 0,
+                "allowed_draw_hits": 0,
+                "score_sum": 0.0,
+                "score_count": 0,
+                "reasons": {},
+            },
+        )
+        row["count"] = _safe_int(row.get("count")) + 1
+        draw_score = item.get("draw_score")
+        if draw_score not in (None, ""):
+            row["score_sum"] = _safe_float(row.get("score_sum")) + _safe_float(draw_score)
+            row["score_count"] = _safe_int(row.get("score_count")) + 1
+            score_sum += _safe_float(draw_score)
+            score_count += 1
+        is_blocked = _safe_bool(item.get("draw_release_guard_blocked")) or _text(item.get("draw_release_guard_status"), "").lower() == "blocked"
+        actual_draw = bool(_draw_guard_actual_is_draw(item))
+        if is_blocked:
+            blocked_count += 1
+            row["blocked_count"] = _safe_int(row.get("blocked_count")) + 1
+            reason = _text(item.get("draw_release_guard_reason"), "")
+            if reason:
+                reason_counts[reason] = _safe_int(reason_counts.get(reason)) + 1
+                reasons = row.get("reasons") if isinstance(row.get("reasons"), dict) else {}
+                reasons[reason] = _safe_int(reasons.get(reason)) + 1
+                row["reasons"] = reasons
+            if actual_draw:
+                missed_count += 1
+                row["missed_count"] = _safe_int(row.get("missed_count")) + 1
+            else:
+                avoid_count += 1
+                row["avoid_count"] = _safe_int(row.get("avoid_count")) + 1
+        elif actual_draw:
+            allowed_draw_hits += 1
+            row["allowed_draw_hits"] = _safe_int(row.get("allowed_draw_hits")) + 1
+
+    rows: list[dict[str, object]] = []
+    for bucket in sorted(bucket_rows):
+        row = bucket_rows[bucket]
+        row_blocked = _safe_int(row.get("blocked_count"))
+        row_avoid = _safe_int(row.get("avoid_count"))
+        row_missed = _safe_int(row.get("missed_count"))
+        row_score_count = _safe_int(row.get("score_count"))
+        reasons = row.get("reasons") if isinstance(row.get("reasons"), dict) else {}
+        top_reason = "-"
+        if reasons:
+            top_reason = sorted(reasons.items(), key=lambda item: (-_safe_int(item[1]), str(item[0])))[0][0]
+        avoid_rate = row_avoid / row_blocked if row_blocked else None
+        missed_rate = row_missed / row_blocked if row_blocked else None
+        rows.append(
+            {
+                "bucket": bucket,
+                "label": row.get("label") or bucket,
+                "count": _safe_int(row.get("count")),
+                "blocked_count": row_blocked,
+                "avoid_count": row_avoid,
+                "missed_count": row_missed,
+                "allowed_draw_hits": _safe_int(row.get("allowed_draw_hits")),
+                "avoid_rate": avoid_rate,
+                "avoid_rate_text": _pct(avoid_rate) if avoid_rate is not None else "-",
+                "missed_rate": missed_rate,
+                "missed_rate_text": _pct(missed_rate) if missed_rate is not None else "-",
+                "avg_draw_score": _safe_float(row.get("score_sum")) / row_score_count if row_score_count else None,
+                "avg_draw_score_text": _pct(_safe_float(row.get("score_sum")) / row_score_count) if row_score_count else "-",
+                "top_reason": top_reason,
+            }
+        )
+
+    total = len(known)
+    avoid_rate = avoid_count / blocked_count if blocked_count else None
+    missed_rate = missed_count / blocked_count if blocked_count else None
+    avg_draw_score = score_sum / score_count if score_count else None
+    if total < 5 or blocked_count < 2:
+        recommendation = "collecting"
+        recommendation_text = "\u6837\u672c\u4e0d\u8db3\uff0c\u7ee7\u7eed\u89c2\u5bdf\u5e73\u5c40\u62e6\u622a\u540e\u7684\u8d5b\u679c\u56de\u6536\u6548\u679c\u3002"
+    elif avoid_rate is not None and avoid_rate >= 0.67 and (missed_rate or 0.0) <= 0.20:
+        recommendation = "keep_draw_guard"
+        recommendation_text = "\u62e6\u622a\u5e73\u5c40\u63a5\u7ba1\u540e\u8f83\u591a\u907f\u514d\u5047\u9633\u6027\uff0c\u5efa\u8bae\u7ee7\u7eed\u4fdd\u7559\u5f53\u524d\u95e8\u69db\u3002"
+    elif missed_rate is not None and missed_rate >= 0.34:
+        recommendation = "loosen_draw_guard"
+        recommendation_text = "\u88ab\u62e6\u622a\u573a\u6b21\u4e2d\u771f\u5e73\u5c40\u5360\u6bd4\u504f\u9ad8\uff0c\u5efa\u8bae\u653e\u5bbd\u5f31\u8d54\u7387\u6876\u95e8\u69db\u6216\u8f6c\u4eba\u5de5\u590d\u6838\u3002"
+    else:
+        recommendation = "monitor"
+        recommendation_text = "\u6682\u672a\u8bc1\u660e\u9700\u8981\u8c03\u6574\u5e73\u5c40\u62e6\u622a\u95e8\u69db\uff0c\u7ee7\u7eed\u8ffd\u8e2a\u3002"
+    return {
+        "sample_count": total,
+        "blocked_count": blocked_count,
+        "avoided_false_positive": avoid_count,
+        "missed_draw_hit": missed_count,
+        "allowed_draw_hits": allowed_draw_hits,
+        "avoid_rate": avoid_rate,
+        "avoid_rate_text": _pct(avoid_rate) if avoid_rate is not None else "-",
+        "missed_rate": missed_rate,
+        "missed_rate_text": _pct(missed_rate) if missed_rate is not None else "-",
+        "avg_draw_score": avg_draw_score,
+        "avg_draw_score_text": _pct(avg_draw_score) if avg_draw_score is not None else "-",
+        "top_reason": sorted(reason_counts.items(), key=lambda item: (-_safe_int(item[1]), str(item[0])))[0][0] if reason_counts else "-",
+        "rows": rows,
+        "recommendation": recommendation,
+        "recommendation_text": recommendation_text,
+        "summary_text": (
+            f"\u6837\u672c {total} | \u62e6\u622a {blocked_count} | "
+            f"\u907f\u514d\u5047\u9633 {avoid_count} | \u9519\u8fc7\u771f\u5e73 {missed_count} | \u907f\u514d\u7387 {_pct(avoid_rate) if avoid_rate is not None else '-'}"
+        ),
+    }
+
+
 def build_handicap_margin_backtest_summary(settlements: Sequence[Mapping[str, object]] | object) -> dict[str, object]:
     settlement_items = [item for item in settlements if isinstance(item, Mapping)] if isinstance(settlements, Sequence) else []
     known = [
@@ -7194,6 +7348,7 @@ def build_high_accuracy_strategy_dashboard(
     )
     market_entropy_backtest = build_market_entropy_backtest_summary(settlement_items)
     handicap_margin_backtest = build_handicap_margin_backtest_summary(settlement_items)
+    draw_release_guard_review = build_draw_release_guard_review_summary(settlement_items)
     jc_bucket_feedback = build_jc_bucket_feedback_summary(resolved, settlement_items)
     live_feedback_loop = build_high_accuracy_live_feedback_summary(resolved)
     statsbomb_event_review = build_statsbomb_event_review_summary(settlement_items, statsbomb_event_baseline or {})
@@ -7433,6 +7588,17 @@ def build_high_accuracy_strategy_dashboard(
             if str(handicap_margin_backtest.get("recommendation") or "") in {"observe_high_handicap_margin", "collecting"}
             else "neutral",
         },
+        {
+            "label": "\u5e73\u5c40\u62e6\u622a",
+            "value": str(draw_release_guard_review.get("avoid_rate_text") or "-"),
+            "tone": "good"
+            if str(draw_release_guard_review.get("recommendation") or "") == "keep_draw_guard"
+            else "bad"
+            if str(draw_release_guard_review.get("recommendation") or "") == "loosen_draw_guard"
+            else "warning"
+            if str(draw_release_guard_review.get("recommendation") or "") == "collecting"
+            else "neutral",
+        },
     ]
     validation_rows = [
         (
@@ -7519,4 +7685,5 @@ def build_high_accuracy_strategy_dashboard(
         "policy_tuning_guard": policy_tuning_guard,
         "market_entropy_backtest": market_entropy_backtest,
         "handicap_margin_backtest": handicap_margin_backtest,
+        "draw_release_guard_review": draw_release_guard_review,
     }

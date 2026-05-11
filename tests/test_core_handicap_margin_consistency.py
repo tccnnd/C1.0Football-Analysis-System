@@ -109,6 +109,24 @@ class CoreHandicapMarginConsistencyTests(unittest.TestCase):
                                 "depth_gap": 0.15,
                                 "handicap_pick_side": "away",
                             },
+                            "draw_score": 0.76,
+                            "draw_grade": "博平",
+                            "draw_takeover": False,
+                            "draw_release_guard": {
+                                "blocked": True,
+                                "reason": "weak_draw_odds_bucket",
+                                "weak_score": True,
+                                "base_takeover": True,
+                                "odds_bucket": "<=3.00",
+                                "odds_draw": 2.95,
+                                "min_score": 0.58,
+                                "evidence": {
+                                    "precision": 0.222222,
+                                    "draw_rate": 0.157895,
+                                    "lift": -0.075439,
+                                    "source": "draw_specialist_backtest_20260511_112806",
+                                },
+                            },
                             "supervisor": {
                                 "status": "alert",
                                 "next_actions": ["review_handicap_margin_consistency"],
@@ -133,6 +151,12 @@ class CoreHandicapMarginConsistencyTests(unittest.TestCase):
         self.assertEqual(settlements[0]["handicap_margin_signals"], ["handicap_direction_mismatch"])
         self.assertEqual(settlements[0]["handicap_margin_market_side"], "away")
         self.assertEqual(settlements[0]["strategy_admission_decision"], "")
+        self.assertEqual(settlements[0]["draw_score"], 0.76)
+        self.assertEqual(settlements[0]["draw_release_guard_status"], "blocked")
+        self.assertTrue(settlements[0]["draw_release_guard_blocked"])
+        self.assertEqual(settlements[0]["draw_release_guard_reason"], "weak_draw_odds_bucket")
+        self.assertEqual(settlements[0]["draw_release_guard_odds_bucket"], "<=3.00")
+        self.assertEqual(settlements[0]["draw_release_guard_evidence_precision"], 0.222222)
         self.assertEqual(settlements[0]["supervisor_agent_statuses"]["RiskGuardian"], "alert")
         self.assertEqual(settlements[0]["supervisor_alert_agents"], ["RiskGuardian"])
         self.assertIn("review_handicap_margin_consistency", settlements[0]["supervisor_agent_actions"])

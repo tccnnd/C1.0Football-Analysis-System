@@ -6466,6 +6466,25 @@ class SmartMatchDashboard:
                     ),
                 )
 
+        draw_guard_review = dashboard.get("draw_release_guard_review", {}) if isinstance(dashboard.get("draw_release_guard_review"), dict) else {}
+        self._strategy_section_title(right, "\u5e73\u5c40\u62e6\u622a\u6548\u679c\u590d\u76d8")
+        self._strategy_row(
+            right,
+            f"{draw_guard_review.get('recommendation', '-')}: {draw_guard_review.get('summary_text', '-')}",
+            str(draw_guard_review.get("recommendation_text") or "-"),
+        )
+        for row in draw_guard_review.get("rows", []) if isinstance(draw_guard_review.get("rows"), list) else []:
+            if isinstance(row, dict):
+                self._strategy_row(
+                    right,
+                    f"{row.get('label', '-')} | \u6837\u672c {row.get('count', 0)} | \u62e6\u622a {row.get('blocked_count', 0)}",
+                    (
+                        f"\u907f\u514d\u5047\u9633 {row.get('avoid_count', 0)} ({row.get('avoid_rate_text', '-')}) | "
+                        f"\u9519\u8fc7\u771f\u5e73 {row.get('missed_count', 0)} ({row.get('missed_rate_text', '-')}) | "
+                        f"\u5e73\u5c40\u5206 {row.get('avg_draw_score_text', '-')} | \u4e3b\u56e0 {row.get('top_reason', '-')}"
+                    ),
+                )
+
         statsbomb_review = dashboard.get("statsbomb_event_review", {}) if isinstance(dashboard.get("statsbomb_event_review"), dict) else {}
         self._strategy_section_title(right, "StatsBomb \u8d5b\u540e\u4e8b\u4ef6")
         self._strategy_row(
