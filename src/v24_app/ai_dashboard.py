@@ -120,6 +120,7 @@ from .ui_modules import (
     build_strategy_policy_audit_report_filename,
     build_strategy_policy_audit_report_lines,
     build_strategy_policy_effect_review,
+    build_strategy_policy_rollback_effect_review,
     build_strategy_policy_rollback_preview,
     build_strategy_trend_tuning_effect_review,
     build_strategy_policy_tuning_guard,
@@ -2888,6 +2889,7 @@ class SmartMatchDashboard:
             list(reversed(get_recent_settlements(limit=200))),
         )
         trend_tuning_effect = build_strategy_trend_tuning_effect_review(policy_effect_review)
+        rollback_effect = build_strategy_policy_rollback_effect_review(policy_effect_review)
         policy_tuning_guard = build_strategy_policy_tuning_guard(
             policy_effect_review.get("stability_monitor", {}) if isinstance(policy_effect_review.get("stability_monitor"), dict) else {},
             source="monitor",
@@ -3049,6 +3051,7 @@ class SmartMatchDashboard:
             ("\u56de\u6536\u544a\u8b66", str(len(recovery_quality_alerts)), RED if any(item.get("severity") == "high" for item in recovery_quality_alerts) else YELLOW if recovery_quality_alerts else GREEN),
             ("\u653e\u884c\u8d8b\u52bf", str(len(recovery_trend_alerts)), RED if any(item.get("severity") == "high" for item in recovery_trend_alerts) else YELLOW if recovery_trend_alerts else GREEN),
             ("\u95e8\u63a7\u751f\u6548", str(trend_tuning_effect.get("label") or "-"), self._tone_color(str(trend_tuning_effect.get("tone") or "neutral"))),
+            ("\u56de\u6eda\u4fee\u590d", str(rollback_effect.get("label") or "-"), self._tone_color(str(rollback_effect.get("tone") or "neutral"))),
             ("\u8c03\u53c2\u95e8\u63a7", str(policy_tuning_guard.get("label") or "-"), self._tone_color(str(policy_tuning_guard.get("tone") or "neutral"))),
             ("\u540e\u53f0\u4efb\u52a1", str(background_task_summary.get("running", 0)), YELLOW if int(background_task_summary.get("running", 0) or 0) else GREEN),
             ("\u591a\u8fdb\u7a0b", str(background_task_summary.get("process_running", 0)), "#7aa2ff"),
@@ -3161,6 +3164,24 @@ class SmartMatchDashboard:
                 left,
                 "\u67e5\u770b\u95e8\u63a7\u751f\u6548\u660e\u7ec6",
                 "\u590d\u6838\u5f53\u524d\u8d1f\u5411\u7248\u672c\u3001\u653e\u884c\u9519\u8bef\u6837\u672c\u548c\u53ef\u56de\u6eda\u7248\u672c\u3002",
+                command=lambda review=policy_effect_review: self.open_policy_effect_detail_window(review),
+            )
+
+        if str(rollback_effect.get("status") or "") in {"effective", "negative", "watch"}:
+            tk.Label(left, text="\u56de\u6eda\u4fee\u590d\u8ddf\u8e2a", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
+            self._alert_card(
+                left,
+                str(rollback_effect.get("label") or "-"),
+                (
+                    f"{rollback_effect.get('summary_text', '-')}\n"
+                    f"{rollback_effect.get('recommendation_text', '-')}"
+                ),
+                tone=str(rollback_effect.get("tone") or "neutral"),
+            )
+            self._strategy_row(
+                left,
+                "\u67e5\u770b\u56de\u6eda\u7248\u672c\u6837\u672c",
+                "\u5bf9\u6bd4\u56de\u6eda\u540e\u7248\u672c\u548c\u88ab\u56de\u6eda\u7248\u672c\u7684\u653e\u884c\u547d\u4e2d\u4e0e Replay \u51c0\u503c\u3002",
                 command=lambda review=policy_effect_review: self.open_policy_effect_detail_window(review),
             )
 
@@ -3693,6 +3714,15 @@ class SmartMatchDashboard:
             (
                 f"{trend_tuning_effect.get('summary_text', '-')}\n"
                 f"{trend_tuning_effect.get('recommendation_text', '-')}"
+            ),
+            command=lambda review=policy_effect_review: self.open_policy_effect_detail_window(review),
+        )
+        self._strategy_row(
+            trend_card,
+            f"\u56de\u6eda\u4fee\u590d\u8ddf\u8e2a: {rollback_effect.get('label', '-')}",
+            (
+                f"{rollback_effect.get('summary_text', '-')}\n"
+                f"{rollback_effect.get('recommendation_text', '-')}"
             ),
             command=lambda review=policy_effect_review: self.open_policy_effect_detail_window(review),
         )
@@ -6047,6 +6077,26 @@ class SmartMatchDashboard:
             command=lambda review=policy_effect: self.open_policy_effect_detail_window(review),
         )
         for row in trend_tuning_effect.get("rows", []) if isinstance(trend_tuning_effect.get("rows"), list) else []:
+            if isinstance(row, dict):
+                self._strategy_row(
+                    right,
+                    str(row.get("title") or "-"),
+                    str(row.get("body") or "-"),
+                    command=lambda review=policy_effect: self.open_policy_effect_detail_window(review),
+                )
+
+        rollback_effect = dashboard.get("rollback_effect_review", {}) if isinstance(dashboard.get("rollback_effect_review"), dict) else {}
+        self._strategy_section_title(right, "\u56de\u6eda\u4fee\u590d\u6548\u679c\u8ddf\u8e2a")
+        self._strategy_row(
+            right,
+            str(rollback_effect.get("label") or "-"),
+            (
+                f"{rollback_effect.get('summary_text', '-')}\n"
+                f"{rollback_effect.get('recommendation_text', '-')}"
+            ),
+            command=lambda review=policy_effect: self.open_policy_effect_detail_window(review),
+        )
+        for row in rollback_effect.get("rows", []) if isinstance(rollback_effect.get("rows"), list) else []:
             if isinstance(row, dict):
                 self._strategy_row(
                     right,

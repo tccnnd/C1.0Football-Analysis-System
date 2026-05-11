@@ -4656,6 +4656,175 @@ def build_strategy_trend_tuning_effect_review(
     }
 
 
+def _policy_rollback_source_version(source: object) -> str:
+    text = _text(source, "").strip()
+    if not text:
+        return ""
+    prefix = "policy_rollback:"
+    if text.lower().startswith(prefix):
+        return text[len(prefix) :].strip()
+    return ""
+
+
+def _policy_rollback_effect_label(status: str) -> str:
+    labels = {
+        "effective": "\u56de\u6eda\u4fee\u590d\u751f\u6548",
+        "negative": "\u56de\u6eda\u540e\u4ecd\u56de\u9000",
+        "watch": "\u56de\u6eda\u540e\u89c2\u5bdf",
+        "collecting": "\u56de\u6eda\u6837\u672c\u79ef\u7d2f\u4e2d",
+        "none": "\u6682\u65e0\u56de\u6eda\u7248\u672c",
+    }
+    return labels.get(status, labels["watch"])
+
+
+def _policy_rollback_effect_tone(status: str) -> str:
+    if status == "effective":
+        return "good"
+    if status == "negative":
+        return "bad"
+    if status == "watch":
+        return "warning"
+    return "neutral"
+
+
+def build_strategy_policy_rollback_effect_review(
+    policy_effect_review: Mapping[str, object] | object,
+    *,
+    min_known_samples: int = 3,
+    min_delta: float = 0.05,
+    limit: int = 5,
+) -> dict[str, object]:
+    review = _as_mapping(policy_effect_review)
+    row_source = _as_list(review.get("all_rows")) or _as_list(review.get("rows"))
+    rows = [dict(row) for row in row_source if isinstance(row, Mapping)]
+    rows.sort(key=lambda row: (_parse_policy_review_time(row.get("updated_at")) or datetime.min, str(row.get("version_id") or "")))
+    rollback_indexes = [
+        (index, row)
+        for index, row in enumerate(rows)
+        if str(row.get("source") or "").strip().lower().startswith("policy_rollback")
+    ]
+    if not rollback_indexes:
+        label = _policy_rollback_effect_label("none")
+        return {
+            "status": "collecting",
+            "label": label,
+            "tone": "neutral",
+            "summary_text": f"{label} | \u5c1a\u672a\u627e\u5230\u7b56\u7565\u53c2\u6570\u56de\u6eda\u7248\u672c\u3002",
+            "recommendation_text": "\u56de\u6eda\u6267\u884c\u540e\uff0c\u5b8c\u6210\u540e\u7eed\u8d5b\u679c\u56de\u6536\u5373\u53ef\u8bc4\u4f30\u4fee\u590d\u6548\u679c\u3002",
+            "latest_version_id": "-",
+            "rolled_back_version_id": "-",
+            "post_known_count": 0,
+            "rolled_back_known_count": 0,
+            "post_allow_hit_rate": None,
+            "rolled_back_allow_hit_rate": None,
+            "allow_hit_rate_delta": None,
+            "allow_hit_rate_delta_text": "-",
+            "metrics": [],
+            "rows": [],
+        }
+
+    latest_index, rollback_row = rollback_indexes[-1]
+    source_version_id = _policy_rollback_source_version(rollback_row.get("source"))
+    rolled_back_row = _policy_effect_row_by_version(review, source_version_id) if source_version_id else {}
+    if not rolled_back_row and latest_index > 0:
+        rolled_back_row = rows[latest_index - 1]
+    post_hits, post_known, post_rate = _policy_effect_rate_parts(rollback_row)
+    prior_hits, prior_known, prior_rate = _policy_effect_rate_parts(rolled_back_row)
+    delta = post_rate - prior_rate if post_rate is not None and prior_rate is not None else None
+    prior_status = str(rolled_back_row.get("effect_status") or "")
+    rollback_status = str(rollback_row.get("effect_status") or "")
+
+    if post_known < max(1, int(min_known_samples)) or post_rate is None or prior_rate is None:
+        status = "collecting"
+    elif delta is not None and delta >= abs(float(min_delta)):
+        status = "effective"
+    elif prior_status == "negative" and rollback_status in {"effective", "flat"} and post_rate >= prior_rate:
+        status = "effective"
+    elif delta is not None and delta <= -abs(float(min_delta)):
+        status = "negative"
+    elif rollback_status == "negative":
+        status = "negative"
+    else:
+        status = "watch"
+
+    label = _policy_rollback_effect_label(status)
+    tone = _policy_rollback_effect_tone(status)
+    post_rate_text = _pct(post_rate) if post_rate is not None else "-"
+    prior_rate_text = _pct(prior_rate) if prior_rate is not None else "-"
+    delta_text = _pct(delta) if delta is not None else "-"
+    if status == "effective":
+        recommendation = "\u56de\u6eda\u540e\u653e\u884c\u547d\u4e2d\u76f8\u6bd4\u88ab\u56de\u6eda\u7248\u672c\u5df2\u6539\u5584\uff0c\u7ee7\u7eed\u6309\u56de\u6eda\u540e\u95e8\u69db\u6536\u96c6\u6837\u672c\u3002"
+    elif status == "negative":
+        recommendation = "\u56de\u6eda\u540e\u547d\u4e2d\u4ecd\u672a\u4fee\u590d\uff0c\u6682\u505c\u8fdb\u4e00\u6b65\u81ea\u52a8\u8c03\u53c2\uff0c\u5148\u590d\u6838\u56de\u6eda\u540e\u9519\u8bef\u6837\u672c\u3002"
+    elif status == "watch":
+        recommendation = "\u56de\u6eda\u540e\u672a\u51fa\u73b0\u660e\u786e\u4fee\u590d\u6216\u6076\u5316\uff0c\u7ee7\u7eed\u89c2\u5bdf\u4e0b\u4e00\u6279\u53ef\u56de\u6536\u6837\u672c\u3002"
+    else:
+        recommendation = "\u56de\u6eda\u540e\u53ef\u5224\u5b9a\u6837\u672c\u4e0d\u8db3\uff0c\u6682\u4e0d\u7ed9\u51fa\u4fee\u590d\u7ed3\u8bba\u3002"
+
+    detail_rows: list[dict[str, object]] = []
+    for _index, row in reversed(rollback_indexes[-max(1, int(limit)) :]):
+        row_source_version = _policy_rollback_source_version(row.get("source"))
+        compare_row = _policy_effect_row_by_version(review, row_source_version) if row_source_version else {}
+        if not compare_row and _index > 0:
+            compare_row = rows[_index - 1]
+        row_hits, row_known, row_rate = _policy_effect_rate_parts(row)
+        compare_hits, compare_known, compare_rate = _policy_effect_rate_parts(compare_row)
+        row_delta = row_rate - compare_rate if row_rate is not None and compare_rate is not None else None
+        detail_rows.append(
+            {
+                "title": f"{row.get('updated_at', '-')} | \u56de\u6eda {row.get('version_id', '-')} -> \u5bf9\u7167 {compare_row.get('version_id', '-')}",
+                "body": (
+                    f"\u56de\u6eda\u540e {row_hits}/{row_known} ({_pct(row_rate) if row_rate is not None else '-'}) | "
+                    f"\u88ab\u56de\u6eda {compare_hits}/{compare_known} ({_pct(compare_rate) if compare_rate is not None else '-'}) | "
+                    f"\u53d8\u5316 {_pct(row_delta) if row_delta is not None else '-'}"
+                ),
+                "version_id": row.get("version_id", "-"),
+                "rolled_back_version_id": compare_row.get("version_id", row_source_version or "-"),
+                "post_allow_hit_rate": row_rate,
+                "rolled_back_allow_hit_rate": compare_rate,
+                "allow_hit_rate_delta": row_delta,
+                "allow_hit_rate_delta_text": _pct(row_delta) if row_delta is not None else "-",
+            }
+        )
+
+    metrics = [
+        {"label": "\u56de\u6eda\u4fee\u590d", "value": label, "tone": tone},
+        {"label": "\u56de\u6eda\u540e\u547d\u4e2d", "value": f"{post_hits}/{post_known} ({post_rate_text})", "tone": tone if post_known else "neutral"},
+        {"label": "\u88ab\u56de\u6eda\u547d\u4e2d", "value": f"{prior_hits}/{prior_known} ({prior_rate_text})", "tone": "neutral"},
+        {"label": "\u4fee\u590d\u53d8\u5316", "value": delta_text, "tone": "good" if delta is not None and delta >= 0 else "bad" if delta is not None else "neutral"},
+    ]
+    summary_text = (
+        f"{label} | \u56de\u6eda {rollback_row.get('version_id', '-')} | "
+        f"\u88ab\u56de\u6eda {rolled_back_row.get('version_id', source_version_id or '-')} | "
+        f"\u56de\u6eda\u540e {post_hits}/{post_known} ({post_rate_text}) | "
+        f"\u5bf9\u7167 {prior_hits}/{prior_known} ({prior_rate_text}) | \u53d8\u5316 {delta_text}"
+    )
+    return {
+        "status": status,
+        "label": label,
+        "tone": tone,
+        "summary_text": summary_text,
+        "recommendation_text": recommendation,
+        "latest_version_id": rollback_row.get("version_id", "-"),
+        "latest_source": rollback_row.get("source", "-"),
+        "latest_updated_at": rollback_row.get("updated_at", "-"),
+        "rolled_back_version_id": rolled_back_row.get("version_id", source_version_id or "-"),
+        "post_known_count": post_known,
+        "rolled_back_known_count": prior_known,
+        "post_allow_hits": post_hits,
+        "rolled_back_allow_hits": prior_hits,
+        "post_allow_hit_rate": post_rate,
+        "rolled_back_allow_hit_rate": prior_rate,
+        "post_allow_hit_rate_text": post_rate_text,
+        "rolled_back_allow_hit_rate_text": prior_rate_text,
+        "allow_hit_rate_delta": delta,
+        "allow_hit_rate_delta_text": delta_text,
+        "min_known_samples": max(1, int(min_known_samples)),
+        "metrics": metrics,
+        "rows": detail_rows,
+    }
+
+
 def build_strategy_evaluation_agent_summary(
     status: Mapping[str, object] | object,
     settlements: Sequence[Mapping[str, object]] | object,
@@ -6732,6 +6901,7 @@ def build_high_accuracy_strategy_dashboard(
     policy_effect_review = build_strategy_policy_effect_review(policy_history or [], settlement_items)
     policy_stability_monitor = _as_mapping(policy_effect_review.get("stability_monitor"))
     trend_tuning_effect_review = build_strategy_trend_tuning_effect_review(policy_effect_review)
+    rollback_effect_review = build_strategy_policy_rollback_effect_review(policy_effect_review)
     policy_tuning_guard = build_strategy_policy_tuning_guard(
         policy_stability_monitor,
         source="dashboard",
@@ -6870,6 +7040,11 @@ def build_high_accuracy_strategy_dashboard(
             "label": "\u95e8\u63a7\u751f\u6548",
             "value": str(trend_tuning_effect_review.get("label") or "-"),
             "tone": str(trend_tuning_effect_review.get("tone") or "neutral"),
+        },
+        {
+            "label": "\u56de\u6eda\u4fee\u590d",
+            "value": str(rollback_effect_review.get("label") or "-"),
+            "tone": str(rollback_effect_review.get("tone") or "neutral"),
         },
         {
             "label": "\u7248\u672c\u7a33\u5b9a",
@@ -7036,6 +7211,7 @@ def build_high_accuracy_strategy_dashboard(
         "allowlist_tuning": allowlist_tuning,
         "policy_effect_review": policy_effect_review,
         "trend_tuning_effect_review": trend_tuning_effect_review,
+        "rollback_effect_review": rollback_effect_review,
         "policy_stability_monitor": policy_stability_monitor,
         "policy_tuning_guard": policy_tuning_guard,
         "market_entropy_backtest": market_entropy_backtest,

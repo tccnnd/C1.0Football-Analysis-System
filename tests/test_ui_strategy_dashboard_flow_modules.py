@@ -25,6 +25,7 @@ from v24_app.ui_modules import (
     build_agent_replay_guard_tuning_recommendation,
     build_strategy_policy_effect_review,
     build_strategy_trend_tuning_effect_review,
+    build_strategy_policy_rollback_effect_review,
     build_strategy_policy_rollback_preview,
     build_strategy_policy_stability_monitor,
     build_strategy_policy_tuning_guard,
@@ -698,6 +699,71 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
 
         self.assertFalse(preview["available"])
         self.assertIn("\u6ca1\u6709\u53ef\u6062\u590d", preview["reason"])
+
+    def test_strategy_policy_rollback_effect_review_waits_without_rollback(self) -> None:
+        review = build_strategy_policy_effect_review([], [])
+
+        effect = build_strategy_policy_rollback_effect_review(review)
+
+        self.assertEqual(effect["status"], "collecting")
+        self.assertEqual(effect["latest_version_id"], "-")
+        self.assertEqual(effect["allow_hit_rate_delta_text"], "-")
+
+    def test_strategy_policy_rollback_effect_review_marks_repair(self) -> None:
+        history = [
+            {"version_id": "v1", "updated_at": "2026-05-01 10:00:00", "source": "manual"},
+            {"version_id": "v2", "updated_at": "2026-05-02 10:00:00", "source": "release_quality_trend"},
+            {"version_id": "v3", "updated_at": "2026-05-03 10:00:00", "source": "policy_rollback:v2"},
+        ]
+        settlements = [
+            {"timestamp": "2026-05-01 11:00:00", "strategy_admission_decision": "allow", "is_correct": True},
+            {"timestamp": "2026-05-01 12:00:00", "strategy_admission_decision": "allow", "is_correct": True},
+            {"timestamp": "2026-05-01 13:00:00", "strategy_admission_decision": "allow", "is_correct": True},
+            {"timestamp": "2026-05-02 11:00:00", "strategy_admission_decision": "allow", "is_correct": False},
+            {"timestamp": "2026-05-02 12:00:00", "strategy_admission_decision": "allow", "is_correct": False},
+            {"timestamp": "2026-05-02 13:00:00", "strategy_admission_decision": "allow", "is_correct": True},
+            {"timestamp": "2026-05-03 11:00:00", "strategy_admission_decision": "allow", "is_correct": True},
+            {"timestamp": "2026-05-03 12:00:00", "strategy_admission_decision": "allow", "is_correct": True},
+            {"timestamp": "2026-05-03 13:00:00", "strategy_admission_decision": "allow", "is_correct": True},
+        ]
+
+        review = build_strategy_policy_effect_review(history, settlements, limit=10)
+        effect = build_strategy_policy_rollback_effect_review(review)
+        dashboard = build_high_accuracy_strategy_dashboard({}, settlements, history)
+
+        self.assertEqual(effect["status"], "effective")
+        self.assertEqual(effect["latest_version_id"], "v3")
+        self.assertEqual(effect["rolled_back_version_id"], "v2")
+        self.assertEqual(effect["post_allow_hit_rate_text"], "100.0%")
+        self.assertEqual(effect["rolled_back_allow_hit_rate_text"], "33.3%")
+        self.assertEqual(effect["allow_hit_rate_delta_text"], "66.7%")
+        self.assertIn("\u56de\u6eda\u4fee\u590d\u751f\u6548", effect["summary_text"])
+        self.assertEqual(dashboard["rollback_effect_review"]["status"], "effective")
+
+    def test_strategy_policy_rollback_effect_review_marks_failed_repair(self) -> None:
+        history = [
+            {"version_id": "v1", "updated_at": "2026-05-01 10:00:00", "source": "manual"},
+            {"version_id": "v2", "updated_at": "2026-05-02 10:00:00", "source": "release_quality_trend"},
+            {"version_id": "v3", "updated_at": "2026-05-03 10:00:00", "source": "policy_rollback:v2"},
+        ]
+        settlements = [
+            {"timestamp": "2026-05-01 11:00:00", "strategy_admission_decision": "allow", "is_correct": True},
+            {"timestamp": "2026-05-01 12:00:00", "strategy_admission_decision": "allow", "is_correct": True},
+            {"timestamp": "2026-05-01 13:00:00", "strategy_admission_decision": "allow", "is_correct": True},
+            {"timestamp": "2026-05-02 11:00:00", "strategy_admission_decision": "allow", "is_correct": True},
+            {"timestamp": "2026-05-02 12:00:00", "strategy_admission_decision": "allow", "is_correct": False},
+            {"timestamp": "2026-05-02 13:00:00", "strategy_admission_decision": "allow", "is_correct": True},
+            {"timestamp": "2026-05-03 11:00:00", "strategy_admission_decision": "allow", "is_correct": False},
+            {"timestamp": "2026-05-03 12:00:00", "strategy_admission_decision": "allow", "is_correct": False},
+            {"timestamp": "2026-05-03 13:00:00", "strategy_admission_decision": "allow", "is_correct": True},
+        ]
+
+        effect = build_strategy_policy_rollback_effect_review(build_strategy_policy_effect_review(history, settlements, limit=10))
+
+        self.assertEqual(effect["status"], "negative")
+        self.assertEqual(effect["post_allow_hit_rate_text"], "33.3%")
+        self.assertEqual(effect["rolled_back_allow_hit_rate_text"], "66.7%")
+        self.assertEqual(effect["allow_hit_rate_delta_text"], "-33.3%")
 
     def test_strategy_policy_audit_report_exports_review_and_samples(self) -> None:
         history = [
