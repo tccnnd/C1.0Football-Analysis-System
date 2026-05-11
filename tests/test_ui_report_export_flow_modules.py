@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+import os
+import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -18,7 +20,9 @@ from v24_app.ui_modules import (
     build_export_message_text,
     build_export_status_text,
     build_report_filename,
+    classify_dashboard_report_file,
     collect_visible_match_ids,
+    list_dashboard_report_files,
     resolve_current_filter,
     select_matches_for_export,
     should_run_pre_export_analysis,
@@ -92,6 +96,26 @@ class UIReportExportFlowModuleTests(unittest.TestCase):
         self.assertIn("范围: 全部赛事", msg)
         self.assertIn("场次: 8", msg)
         self.assertIn("r.md", msg)
+
+    def test_dashboard_report_index_includes_release_loop_reports(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            report_dir = Path(tmp)
+            match_report = report_dir / "ai_match_report_20260510_120000_a_vs_b.md"
+            loop_report = report_dir / "strategy_release_recovery_loop_20260510_121000.md"
+            ignored = report_dir / "strategy_release_recovery_loop_20260510_121000.json"
+            match_report.write_text("match", encoding="utf-8")
+            loop_report.write_text("loop", encoding="utf-8")
+            ignored.write_text("{}", encoding="utf-8")
+            os.utime(match_report, (1000, 1000))
+            os.utime(loop_report, (2000, 2000))
+
+            rows = list_dashboard_report_files(report_dir)
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["name"], loop_report.name)
+        self.assertEqual(rows[0]["label"], "\u653e\u884c\u95ed\u73af")
+        self.assertEqual(rows[1]["label"], "\u5355\u573a\u5206\u6790")
+        self.assertEqual(classify_dashboard_report_file(Path("unknown_report.md")), "\u5176\u4ed6\u62a5\u544a")
 
 
 if __name__ == "__main__":

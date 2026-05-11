@@ -5,6 +5,23 @@ from pathlib import Path
 from typing import Any, Mapping
 
 
+REPORT_TYPE_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("ai_match_report_", "\u5355\u573a\u5206\u6790"),
+    ("strategy_release_recovery_loop_", "\u653e\u884c\u95ed\u73af"),
+    ("strategy_allowlist_", "\u653e\u884c\u6e05\u5355"),
+    ("strategy_policy_audit_", "\u8c03\u53c2\u5ba1\u8ba1"),
+    ("statsbomb_event_sandbox_", "StatsBomb\u590d\u76d8"),
+    ("statsbomb_fewshot_backfill_", "StatsBomb\u8865\u6837"),
+    ("statsbomb_fewshot_draft_review_", "StatsBomb\u8349\u7a3f"),
+    ("statsbomb_fewshot_merge_plan_", "StatsBomb\u5408\u5e76"),
+    ("statsbomb_fewshot_merge_bundle_review_", "StatsBomb\u5408\u5e76"),
+    ("statsbomb_fewshot_merge_apply_preview_", "StatsBomb\u5e94\u7528"),
+    ("statsbomb_fewshot_merge_applied_", "StatsBomb\u5e94\u7528"),
+    ("statsbomb_fewshot_memory_rollback_", "StatsBomb\u56de\u6eda"),
+    ("statsbomb_fewshot_memory_audit_", "StatsBomb\u5ba1\u8ba1"),
+)
+
+
 def should_run_pre_export_analysis(predictions: Mapping[str, object] | None) -> bool:
     return not bool(predictions)
 
@@ -48,6 +65,35 @@ def resolve_current_filter(filter_var: Any | None, default: str = "全部") -> s
 
 def build_export_status_text(report_name: str) -> str:
     return f"报告已导出 | {report_name}"
+
+
+def classify_dashboard_report_file(path: Path) -> str:
+    name = path.name
+    for prefix, label in REPORT_TYPE_PREFIXES:
+        if name.startswith(prefix):
+            return label
+    return "\u5176\u4ed6\u62a5\u544a"
+
+
+def list_dashboard_report_files(report_dir: Path, *, limit: int = 100) -> list[dict[str, object]]:
+    if not report_dir.exists():
+        return []
+    files = [path for path in report_dir.glob("*.md") if path.is_file()]
+    files.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    rows: list[dict[str, object]] = []
+    for path in files[: max(0, int(limit))]:
+        stat = path.stat()
+        rows.append(
+            {
+                "path": path,
+                "name": path.name,
+                "label": classify_dashboard_report_file(path),
+                "updated_at": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M"),
+                "mtime": stat.st_mtime,
+                "size_bytes": stat.st_size,
+            }
+        )
+    return rows
 
 
 def build_export_message_text(*, scope_label: str, match_count: int, report_path: Path) -> str:

@@ -118,6 +118,7 @@ from .ui_modules import (
     format_strategy_admission_reasons,
     format_strategy_admission_replay_guard,
     format_strategy_admission_thresholds,
+    list_dashboard_report_files,
     select_strategy_allowlist_rows,
 )
 
@@ -1695,7 +1696,8 @@ class SmartMatchDashboard:
         total = len(self.rows)
         alerts = sum(1 for row in self.rows if _risk_key(row.prediction.get("risk_level")) == "high")
         self.summary_vars["matches"].set(str(total))
-        self.summary_vars["reports"].set(str(total))
+        report_count = len(list_dashboard_report_files(REPORT_DIR, limit=10000)) if REPORT_DIR.exists() else 0
+        self.summary_vars["reports"].set(str(report_count))
         self.summary_vars["alerts"].set(str(alerts))
         self.summary_vars["hit_rate"].set(self._historical_hit_rate())
         self.summary_vars["settlements"].set(str(self._historical_settlement_count()))
@@ -2090,7 +2092,8 @@ class SmartMatchDashboard:
         self.current_view = "history"
         self._refresh_nav_highlight()
         REPORT_DIR.mkdir(parents=True, exist_ok=True)
-        files = sorted(REPORT_DIR.glob("ai_match_report_*.md"), key=lambda path: path.stat().st_mtime, reverse=True)
+        report_rows = list_dashboard_report_files(REPORT_DIR, limit=200)
+        files = [row["path"] for row in report_rows if isinstance(row.get("path"), Path)]
 
         shell = self._page_shell("\u5386\u53f2\u62a5\u544a", f"\u62a5\u544a\u76ee\u5f55: {REPORT_DIR}")
 
@@ -2140,15 +2143,17 @@ class SmartMatchDashboard:
             preview.insert("1.0", content)
             preview.configure(state=tk.DISABLED)
 
-        for path in files:
-            stamp = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
-            listbox.insert(tk.END, f"{stamp}  {path.name}")
+        for row in report_rows:
+            path = row.get("path")
+            if not isinstance(path, Path):
+                continue
+            listbox.insert(tk.END, f"{row.get('updated_at', '-')}  [{row.get('label', '-')}]  {path.name}")
 
         if files:
             listbox.selection_set(0)
             show_file(0)
         else:
-            preview.insert("1.0", "\u6682\u65e0\u5355\u573a\u5206\u6790\u62a5\u544a\u3002")
+            preview.insert("1.0", "\u6682\u65e0\u5386\u53f2\u62a5\u544a\u3002")
             preview.configure(state=tk.DISABLED)
 
         listbox.bind("<<ListboxSelect>>", lambda _event: show_file(listbox.curselection()[0] if listbox.curselection() else -1))
@@ -2165,7 +2170,7 @@ class SmartMatchDashboard:
         top = tk.Frame(shell, bg=BG)
         top.pack(fill=tk.X, pady=(0, 16))
         risk_counts = self._risk_counts()
-        report_count = len(list(REPORT_DIR.glob("ai_match_report_*.md"))) if REPORT_DIR.exists() else 0
+        report_count = len(list_dashboard_report_files(REPORT_DIR, limit=10000)) if REPORT_DIR.exists() else 0
         load_report = self.last_load_diagnostics if isinstance(self.last_load_diagnostics, dict) else {}
         source_health = _source_health_summary(load_report)
         cache_status = _cache_status_summary(load_report)
@@ -2804,7 +2809,7 @@ class SmartMatchDashboard:
             ("Simulation", f"\u5df2\u63a8\u6f14 {len(self.rows)} \u573a"),
             ("RiskGuardian", "\u6b63\u5e38" if risk_counts.get("high", 0) == 0 else "\u89e6\u53d1\u9884\u8b66"),
             ("ReviewLoop", f"\u653e\u884c\u5f85\u56de\u6536 {release_alert_count} \u573a" if release_alert_count else "\u65e0\u5f85\u56de\u6536\u6b63\u5f0f\u653e\u884c"),
-            ("StrategyComposer", f"\u62a5\u544a {len(list(REPORT_DIR.glob('ai_match_report_*.md'))) if REPORT_DIR.exists() else 0} \u4efd"),
+            ("StrategyComposer", f"\u62a5\u544a {len(list_dashboard_report_files(REPORT_DIR, limit=10000)) if REPORT_DIR.exists() else 0} \u4efd"),
         ]
         for label, value in agent_rows:
             self._kv_row(left, label, value)
