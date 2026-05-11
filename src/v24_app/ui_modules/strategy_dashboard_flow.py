@@ -6367,6 +6367,43 @@ def _draw_guard_effect_tone(status: str) -> str:
     return "neutral"
 
 
+def _draw_guard_rollback_effect_label(status: str) -> str:
+    labels = {
+        "effective": "DrawGuard回滚修复生效",
+        "negative": "DrawGuard回滚后仍回退",
+        "watch": "DrawGuard回滚后观察",
+        "collecting": "DrawGuard回滚样本积累中",
+        "none": "暂无DrawGuard回滚版本",
+    }
+    return labels.get(status, labels["watch"])
+
+
+def _draw_guard_rollback_source_version(source: object) -> str:
+    text = _text(source, "").strip()
+    if not text:
+        return ""
+    lowered = text.lower()
+    for prefix in ("draw_guard_policy_rollback:", "draw_release_guard_policy_rollback:"):
+        if lowered.startswith(prefix):
+            return text[len(prefix) :].strip()
+    return ""
+
+
+def _draw_guard_is_rollback_source(source: object) -> bool:
+    lowered = _text(source, "").strip().lower()
+    return "draw_guard_policy_rollback" in lowered or "draw_release_guard_policy_rollback" in lowered
+
+
+def _draw_guard_effect_row_by_version(rows: Sequence[Mapping[str, object]], version_id: object) -> dict[str, object]:
+    key = _text(version_id, "")
+    if not key:
+        return {}
+    for row in rows:
+        if isinstance(row, Mapping) and _text(row.get("version_id"), "") == key:
+            return dict(row)
+    return {}
+
+
 def build_draw_release_guard_tuning_effect_review(
     policy_history: Sequence[Mapping[str, object]] | object,
     settlements: Sequence[Mapping[str, object]] | object,
@@ -6533,6 +6570,162 @@ def build_draw_release_guard_tuning_effect_review(
         "metrics": metrics,
         "rows": rows[: max(0, int(limit))],
         "all_rows": rows,
+    }
+
+
+def build_draw_release_guard_rollback_effect_review(
+    policy_history: Sequence[Mapping[str, object]] | object,
+    settlements: Sequence[Mapping[str, object]] | object,
+    *,
+    min_blocked_samples: int = 3,
+    min_delta: float = 0.10,
+    limit: int = 5,
+) -> dict[str, object]:
+    tuning_effect = build_draw_release_guard_tuning_effect_review(
+        policy_history,
+        settlements,
+        min_blocked_samples=min_blocked_samples,
+        min_delta=min_delta,
+        limit=limit,
+    )
+    source_rows = _as_list(tuning_effect.get("all_rows")) or _as_list(tuning_effect.get("rows"))
+    rows = [dict(row) for row in source_rows if isinstance(row, Mapping)]
+    rows.sort(key=lambda row: (_parse_policy_review_time(row.get("updated_at")) or datetime.min, str(row.get("version_id") or "")))
+    rollback_indexes = [
+        (index, row)
+        for index, row in enumerate(rows)
+        if _draw_guard_is_rollback_source(row.get("source"))
+    ]
+    if not rollback_indexes:
+        label = _draw_guard_rollback_effect_label("none")
+        return {
+            "status": "collecting",
+            "label": label,
+            "tone": "neutral",
+            "summary_text": f"{label} | 尚未找到 DrawGuard 回滚版本。",
+            "recommendation_text": "执行 DrawGuard 回滚并完成后续赛果回收后，再判断回滚是否修复调参回退。",
+            "latest_version_id": "-",
+            "latest_source": "-",
+            "latest_updated_at": "-",
+            "rolled_back_version_id": "-",
+            "post_blocked_count": 0,
+            "rolled_back_blocked_count": 0,
+            "post_avoid_rate": None,
+            "rolled_back_avoid_rate": None,
+            "post_missed_rate": None,
+            "rolled_back_missed_rate": None,
+            "avoid_rate_delta": None,
+            "missed_rate_delta": None,
+            "avoid_rate_delta_text": "-",
+            "missed_rate_delta_text": "-",
+            "metrics": [],
+            "rows": [],
+        }
+
+    latest_index, rollback_row = rollback_indexes[-1]
+    rolled_back_version_id = _draw_guard_rollback_source_version(rollback_row.get("source"))
+    rolled_back_row = _draw_guard_effect_row_by_version(rows, rolled_back_version_id)
+    if not rolled_back_row and latest_index > 0:
+        rolled_back_row = rows[latest_index - 1]
+
+    post_blocked = _safe_int(rollback_row.get("blocked_count"))
+    prior_blocked = _safe_int(rolled_back_row.get("blocked_count"))
+    post_avoid = rollback_row.get("avoid_rate")
+    prior_avoid = rolled_back_row.get("avoid_rate") if rolled_back_row else None
+    post_missed = rollback_row.get("missed_rate")
+    prior_missed = rolled_back_row.get("missed_rate") if rolled_back_row else None
+    avoid_delta = _safe_float(post_avoid) - _safe_float(prior_avoid) if post_avoid is not None and prior_avoid is not None else None
+    missed_delta = _safe_float(post_missed) - _safe_float(prior_missed) if post_missed is not None and prior_missed is not None else None
+
+    sample_floor = max(1, int(min_blocked_samples))
+    delta_floor = abs(float(min_delta))
+    if post_blocked < sample_floor or prior_blocked < sample_floor or avoid_delta is None or missed_delta is None:
+        status = "collecting"
+    elif missed_delta <= -delta_floor or avoid_delta >= delta_floor:
+        status = "effective"
+    elif missed_delta >= delta_floor or avoid_delta <= -delta_floor:
+        status = "negative"
+    else:
+        status = "watch"
+
+    label = _draw_guard_rollback_effect_label(status)
+    tone = _draw_guard_effect_tone(status)
+    if status == "effective":
+        recommendation = "回滚后错过真平下降或避免假阳恢复，继续按回滚后版本观察下一批回收样本。"
+    elif status == "negative":
+        recommendation = "回滚后仍未修复核心指标，暂停继续调参，优先复核回滚后的错过真平和赔率桶样本。"
+    elif status == "watch":
+        recommendation = "回滚后暂未出现足够明确修复或恶化，维持观察并继续回收样本。"
+    else:
+        recommendation = "回滚后可判断样本不足，暂不下修复结论。"
+
+    detail_rows: list[dict[str, object]] = []
+    for index, row in reversed(rollback_indexes[-max(1, int(limit)) :]):
+        source_version = _draw_guard_rollback_source_version(row.get("source"))
+        compare_row = _draw_guard_effect_row_by_version(rows, source_version)
+        if not compare_row and index > 0:
+            compare_row = rows[index - 1]
+        row_avoid = row.get("avoid_rate")
+        compare_avoid = compare_row.get("avoid_rate") if compare_row else None
+        row_missed = row.get("missed_rate")
+        compare_missed = compare_row.get("missed_rate") if compare_row else None
+        row_avoid_delta = _safe_float(row_avoid) - _safe_float(compare_avoid) if row_avoid is not None and compare_avoid is not None else None
+        row_missed_delta = _safe_float(row_missed) - _safe_float(compare_missed) if row_missed is not None and compare_missed is not None else None
+        detail_rows.append(
+            {
+                "title": f"{row.get('updated_at', '-')} | 回滚 {row.get('version_id', '-')} -> 对照 {compare_row.get('version_id', source_version or '-')}",
+                "body": (
+                    f"回滚后拦截 {row.get('blocked_count', 0)} | 避免 {row.get('avoid_rate_text', '-')} ({_pct(row_avoid_delta) if row_avoid_delta is not None else '-'}) | "
+                    f"错过 {row.get('missed_rate_text', '-')} ({_pct(row_missed_delta) if row_missed_delta is not None else '-'}) | "
+                    f"被回滚版本拦截 {compare_row.get('blocked_count', 0)}"
+                ),
+                "version_id": row.get("version_id", "-"),
+                "rolled_back_version_id": compare_row.get("version_id", source_version or "-"),
+                "updated_at": row.get("updated_at", "-"),
+                "post_blocked_count": _safe_int(row.get("blocked_count")),
+                "rolled_back_blocked_count": _safe_int(compare_row.get("blocked_count")),
+                "avoid_rate_delta": row_avoid_delta,
+                "missed_rate_delta": row_missed_delta,
+                "avoid_rate_delta_text": _pct(row_avoid_delta) if row_avoid_delta is not None else "-",
+                "missed_rate_delta_text": _pct(row_missed_delta) if row_missed_delta is not None else "-",
+            }
+        )
+
+    metrics = [
+        {"label": "回滚修复", "value": label, "tone": tone},
+        {"label": "回滚后拦截", "value": str(post_blocked), "tone": "neutral"},
+        {"label": "避免变化", "value": _pct(avoid_delta) if avoid_delta is not None else "-", "tone": "good" if avoid_delta is not None and avoid_delta > 0 else "bad" if avoid_delta is not None else "neutral"},
+        {"label": "错过变化", "value": _pct(missed_delta) if missed_delta is not None else "-", "tone": "good" if missed_delta is not None and missed_delta < 0 else "bad" if missed_delta is not None else "neutral"},
+    ]
+    summary_text = (
+        f"{label} | 回滚 {rollback_row.get('version_id', '-')} | "
+        f"被回滚 {rolled_back_row.get('version_id', rolled_back_version_id or '-')} | "
+        f"避免变化 {_pct(avoid_delta) if avoid_delta is not None else '-'} | "
+        f"错过变化 {_pct(missed_delta) if missed_delta is not None else '-'}"
+    )
+    return {
+        "status": status,
+        "label": label,
+        "tone": tone,
+        "summary_text": summary_text,
+        "recommendation_text": recommendation,
+        "latest_version_id": rollback_row.get("version_id", "-"),
+        "latest_source": rollback_row.get("source", "-"),
+        "latest_updated_at": rollback_row.get("updated_at", "-"),
+        "rolled_back_version_id": rolled_back_row.get("version_id", rolled_back_version_id or "-"),
+        "post_blocked_count": post_blocked,
+        "rolled_back_blocked_count": prior_blocked,
+        "post_avoid_rate": post_avoid,
+        "rolled_back_avoid_rate": prior_avoid,
+        "post_missed_rate": post_missed,
+        "rolled_back_missed_rate": prior_missed,
+        "avoid_rate_delta": avoid_delta,
+        "missed_rate_delta": missed_delta,
+        "avoid_rate_delta_text": _pct(avoid_delta) if avoid_delta is not None else "-",
+        "missed_rate_delta_text": _pct(missed_delta) if missed_delta is not None else "-",
+        "min_blocked_samples": sample_floor,
+        "metrics": metrics,
+        "rows": detail_rows,
     }
 
 
@@ -7674,6 +7867,10 @@ def build_high_accuracy_strategy_dashboard(
         draw_release_guard_policy_history or [],
         settlement_items,
     )
+    draw_release_guard_rollback_effect = build_draw_release_guard_rollback_effect_review(
+        draw_release_guard_policy_history or [],
+        settlement_items,
+    )
     jc_bucket_feedback = build_jc_bucket_feedback_summary(resolved, settlement_items)
     live_feedback_loop = build_high_accuracy_live_feedback_summary(resolved)
     statsbomb_event_review = build_statsbomb_event_review_summary(settlement_items, statsbomb_event_baseline or {})
@@ -7934,6 +8131,11 @@ def build_high_accuracy_strategy_dashboard(
             "value": str(draw_release_guard_tuning_effect.get("label") or "-"),
             "tone": str(draw_release_guard_tuning_effect.get("tone") or "neutral"),
         },
+        {
+            "label": "DrawGuard\u56de\u6eda",
+            "value": str(draw_release_guard_rollback_effect.get("label") or "-"),
+            "tone": str(draw_release_guard_rollback_effect.get("tone") or "neutral"),
+        },
     ]
     validation_rows = [
         (
@@ -8023,4 +8225,5 @@ def build_high_accuracy_strategy_dashboard(
         "draw_release_guard_review": draw_release_guard_review,
         "draw_release_guard_tuning": draw_release_guard_tuning,
         "draw_release_guard_tuning_effect": draw_release_guard_tuning_effect,
+        "draw_release_guard_rollback_effect": draw_release_guard_rollback_effect,
     }

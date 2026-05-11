@@ -6600,6 +6600,19 @@ class SmartMatchDashboard:
             if isinstance(row, dict):
                 self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
 
+        draw_guard_rollback = dashboard.get("draw_release_guard_rollback_effect", {}) if isinstance(dashboard.get("draw_release_guard_rollback_effect"), dict) else {}
+        self._strategy_row(
+            right,
+            f"DrawGuard\u56de\u6eda\u4fee\u590d: {draw_guard_rollback.get('label', '-')}",
+            (
+                f"{draw_guard_rollback.get('summary_text', '-')}\n"
+                f"{draw_guard_rollback.get('recommendation_text', '-')}"
+            ),
+        )
+        for row in draw_guard_rollback.get("rows", []) if isinstance(draw_guard_rollback.get("rows"), list) else []:
+            if isinstance(row, dict):
+                self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
+
         statsbomb_review = dashboard.get("statsbomb_event_review", {}) if isinstance(dashboard.get("statsbomb_event_review"), dict) else {}
         self._strategy_section_title(right, "StatsBomb \u8d5b\u540e\u4e8b\u4ef6")
         self._strategy_row(

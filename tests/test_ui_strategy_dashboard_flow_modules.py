@@ -33,6 +33,7 @@ from v24_app.ui_modules import (
     build_strategy_policy_tuning_guard,
     build_draw_release_guard_policy_tuning_recommendation,
     build_draw_release_guard_tuning_effect_review,
+    build_draw_release_guard_rollback_effect_review,
     build_draw_release_guard_review_summary,
     build_handicap_margin_backtest_summary,
     build_market_entropy_backtest_summary,
@@ -1149,6 +1150,73 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
 
         self.assertEqual(effect["status"], "none")
         self.assertEqual(effect["post_blocked_count"], 0)
+        self.assertEqual(effect["rows"], [])
+
+    def test_draw_release_guard_rollback_effect_marks_repair_after_missed_rate_drops(self) -> None:
+        history = [
+            {
+                "version_id": "dg1",
+                "updated_at": "2026-05-01 10:00:00",
+                "source": "manual",
+                "policy": {"enabled": True, "min_score": 0.58, "weak_odds_buckets": {"<=3.00": {"source": "unit"}}},
+                "previous_policy": {"enabled": True, "min_score": 0.58, "weak_odds_buckets": {"<=3.00": {"source": "unit"}}},
+            },
+            {
+                "version_id": "dg2",
+                "updated_at": "2026-05-02 10:00:00",
+                "source": "draw_release_guard_tuning",
+                "policy": {"enabled": True, "min_score": 0.54, "weak_odds_buckets": {"<=3.00": {"source": "unit"}}},
+                "previous_policy": {"enabled": True, "min_score": 0.58, "weak_odds_buckets": {"<=3.00": {"source": "unit"}}},
+            },
+            {
+                "version_id": "dg3",
+                "updated_at": "2026-05-03 10:00:00",
+                "source": "draw_guard_policy_rollback:dg2",
+                "policy": {"enabled": True, "min_score": 0.58, "weak_odds_buckets": {"<=3.00": {"source": "unit"}}},
+                "previous_policy": {"enabled": True, "min_score": 0.54, "weak_odds_buckets": {"<=3.00": {"source": "unit"}}},
+            },
+        ]
+        settlements = [
+            {"timestamp": "2026-05-01 11:00:00", "home_goals": 2, "away_goals": 1, "draw_release_guard_status": "blocked", "draw_release_guard_blocked": True, "draw_release_guard_odds_bucket": "<=3.00"},
+            {"timestamp": "2026-05-01 12:00:00", "home_goals": 1, "away_goals": 0, "draw_release_guard_status": "blocked", "draw_release_guard_blocked": True, "draw_release_guard_odds_bucket": "<=3.00"},
+            {"timestamp": "2026-05-01 13:00:00", "home_goals": 0, "away_goals": 1, "draw_release_guard_status": "blocked", "draw_release_guard_blocked": True, "draw_release_guard_odds_bucket": "<=3.00"},
+            {"timestamp": "2026-05-02 11:00:00", "home_goals": 1, "away_goals": 1, "draw_release_guard_status": "blocked", "draw_release_guard_blocked": True, "draw_release_guard_odds_bucket": "<=3.00"},
+            {"timestamp": "2026-05-02 12:00:00", "home_goals": 0, "away_goals": 0, "draw_release_guard_status": "blocked", "draw_release_guard_blocked": True, "draw_release_guard_odds_bucket": "<=3.00"},
+            {"timestamp": "2026-05-02 13:00:00", "home_goals": 2, "away_goals": 1, "draw_release_guard_status": "blocked", "draw_release_guard_blocked": True, "draw_release_guard_odds_bucket": "<=3.00"},
+            {"timestamp": "2026-05-03 11:00:00", "home_goals": 2, "away_goals": 0, "draw_release_guard_status": "blocked", "draw_release_guard_blocked": True, "draw_release_guard_odds_bucket": "<=3.00"},
+            {"timestamp": "2026-05-03 12:00:00", "home_goals": 1, "away_goals": 0, "draw_release_guard_status": "blocked", "draw_release_guard_blocked": True, "draw_release_guard_odds_bucket": "<=3.00"},
+            {"timestamp": "2026-05-03 13:00:00", "home_goals": 0, "away_goals": 1, "draw_release_guard_status": "blocked", "draw_release_guard_blocked": True, "draw_release_guard_odds_bucket": "<=3.00"},
+        ]
+
+        effect = build_draw_release_guard_rollback_effect_review(history, settlements)
+        dashboard = build_high_accuracy_strategy_dashboard(
+            {"enabled": True},
+            settlements,
+            draw_release_guard_policy_history=history,
+        )
+
+        self.assertEqual(effect["status"], "effective")
+        self.assertEqual(effect["latest_version_id"], "dg3")
+        self.assertEqual(effect["rolled_back_version_id"], "dg2")
+        self.assertEqual(effect["missed_rate_delta_text"], "-66.7%")
+        self.assertEqual(dashboard["draw_release_guard_rollback_effect"]["status"], "effective")
+        self.assertIn("DrawGuard\u56de\u6eda", {item["label"] for item in dashboard["metrics"]})
+
+    def test_draw_release_guard_rollback_effect_waits_without_rollback(self) -> None:
+        history = [
+            {
+                "version_id": "dg1",
+                "updated_at": "2026-05-01 10:00:00",
+                "source": "manual",
+                "policy": {"enabled": True, "min_score": 0.58, "weak_odds_buckets": {"<=3.00": {"source": "unit"}}},
+                "previous_policy": {"enabled": True, "min_score": 0.58, "weak_odds_buckets": {"<=3.00": {"source": "unit"}}},
+            }
+        ]
+
+        effect = build_draw_release_guard_rollback_effect_review(history, [])
+
+        self.assertEqual(effect["status"], "collecting")
+        self.assertEqual(effect["latest_version_id"], "-")
         self.assertEqual(effect["rows"], [])
 
     def test_high_accuracy_live_feedback_summary_groups_strategy_states(self) -> None:
