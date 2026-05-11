@@ -1112,6 +1112,38 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertEqual(dashboard["draw_release_guard_tuning_effect"]["status"], "effective")
         self.assertIn("DrawGuard\u751f\u6548", {item["label"] for item in dashboard["metrics"]})
 
+    def test_draw_release_guard_tuning_effect_recommends_rollback_on_regression(self) -> None:
+        history = [
+            {
+                "version_id": "dg1",
+                "updated_at": "2026-05-01 10:00:00",
+                "source": "manual",
+                "policy": {"enabled": True, "min_score": 0.58, "weak_odds_buckets": {"<=3.00": {"source": "unit"}}},
+                "previous_policy": {"enabled": True, "min_score": 0.58, "weak_odds_buckets": {"<=3.00": {"source": "unit"}}},
+            },
+            {
+                "version_id": "dg2",
+                "updated_at": "2026-05-02 10:00:00",
+                "source": "draw_release_guard_tuning",
+                "policy": {"enabled": True, "min_score": 0.54, "weak_odds_buckets": {"<=3.00": {"source": "unit"}}},
+                "previous_policy": {"enabled": True, "min_score": 0.58, "weak_odds_buckets": {"<=3.00": {"source": "unit"}}},
+            },
+        ]
+        settlements = [
+            {"timestamp": "2026-05-01 11:00:00", "home_goals": 2, "away_goals": 1, "draw_release_guard_status": "blocked", "draw_release_guard_blocked": True, "draw_release_guard_odds_bucket": "<=3.00"},
+            {"timestamp": "2026-05-01 12:00:00", "home_goals": 1, "away_goals": 0, "draw_release_guard_status": "blocked", "draw_release_guard_blocked": True, "draw_release_guard_odds_bucket": "<=3.00"},
+            {"timestamp": "2026-05-01 13:00:00", "home_goals": 0, "away_goals": 1, "draw_release_guard_status": "blocked", "draw_release_guard_blocked": True, "draw_release_guard_odds_bucket": "<=3.00"},
+            {"timestamp": "2026-05-02 11:00:00", "home_goals": 1, "away_goals": 1, "draw_release_guard_status": "blocked", "draw_release_guard_blocked": True, "draw_release_guard_odds_bucket": "<=3.00"},
+            {"timestamp": "2026-05-02 12:00:00", "home_goals": 0, "away_goals": 0, "draw_release_guard_status": "blocked", "draw_release_guard_blocked": True, "draw_release_guard_odds_bucket": "<=3.00"},
+            {"timestamp": "2026-05-02 13:00:00", "home_goals": 2, "away_goals": 1, "draw_release_guard_status": "blocked", "draw_release_guard_blocked": True, "draw_release_guard_odds_bucket": "<=3.00"},
+        ]
+
+        effect = build_draw_release_guard_tuning_effect_review(history, settlements)
+
+        self.assertEqual(effect["status"], "negative")
+        self.assertTrue(effect["rollback_recommended"])
+        self.assertEqual(effect["rollback_candidate_version_id"], "dg2")
+
     def test_draw_release_guard_tuning_effect_waits_without_history(self) -> None:
         effect = build_draw_release_guard_tuning_effect_review([], [])
 

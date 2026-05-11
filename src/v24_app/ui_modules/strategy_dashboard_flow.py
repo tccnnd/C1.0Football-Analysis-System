@@ -6514,6 +6514,8 @@ def build_draw_release_guard_tuning_effect_review(
         "label": latest_label,
         "tone": str(latest.get("tone") or "neutral"),
         "history_count": len(parsed_history),
+        "rollback_recommended": latest_status == "negative",
+        "rollback_candidate_version_id": latest.get("version_id", "-") if latest_status == "negative" else "-",
         "summary_text": (
             f"\u7248\u672c {len(parsed_history)} | \u6700\u65b0 {latest_label} | "
             f"\u907f\u514d\u53d8\u5316 {latest.get('avoid_rate_delta_text', '-') if latest else '-'} | "

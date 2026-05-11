@@ -333,6 +333,32 @@ class CoreStrategyAllowlistLinkTests(unittest.TestCase):
                 core._DRAW_RELEASE_GUARD_POLICY_CACHE.clear()
                 core._DRAW_RELEASE_GUARD_POLICY_CACHE.update(cache_backup)
 
+    def test_rollback_draw_release_guard_policy_restores_previous_policy(self) -> None:
+        cache_backup = dict(core._DRAW_RELEASE_GUARD_POLICY_CACHE)
+        with tempfile.TemporaryDirectory() as tmp:
+            policy_path = Path(tmp) / "draw_release_guard_policy_v1.json"
+            history_path = Path(tmp) / "draw_release_guard_policy_history_v1.json"
+            try:
+                core._DRAW_RELEASE_GUARD_POLICY_CACHE.update({"mtime": object(), "policy": {}, "report": {}})
+                with patch("v24_app.core.DRAW_RELEASE_GUARD_POLICY_FILE", policy_path), patch(
+                    "v24_app.core.DRAW_RELEASE_GUARD_POLICY_HISTORY_FILE",
+                    history_path,
+                ):
+                    core.apply_draw_release_guard_policy_update({"min_score": 0.62}, source="unit_raise")
+                    core.apply_draw_release_guard_policy_update(
+                        {"min_score": 0.70, "weak_odds_buckets": {">4.20": {"source": "unit"}}},
+                        source="unit_raise_again",
+                    )
+                    rolled_back = core.rollback_draw_release_guard_policy()
+
+                    self.assertEqual(rolled_back["policy"]["min_score"], 0.62)
+                    self.assertIn("<=3.00", rolled_back["policy"]["weak_odds_buckets"])
+                    history = core.get_draw_release_guard_policy_history(limit=5)
+                    self.assertEqual(history[0]["source"].split(":")[0], "draw_guard_policy_rollback")
+            finally:
+                core._DRAW_RELEASE_GUARD_POLICY_CACHE.clear()
+                core._DRAW_RELEASE_GUARD_POLICY_CACHE.update(cache_backup)
+
 
 if __name__ == "__main__":
     unittest.main()

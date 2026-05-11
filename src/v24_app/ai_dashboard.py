@@ -42,6 +42,7 @@ from .core import (
     predict_match,
     record_result_recovery_run,
     rollback_strategy_admission_policy,
+    rollback_draw_release_guard_policy,
     run_draw_specialist_backtest,
     run_high_accuracy_strategy_backtest,
     run_play_model_backtest,
@@ -5607,6 +5608,42 @@ class SmartMatchDashboard:
         messagebox.showinfo("\u7b56\u7565\u53c2\u6570\u56de\u6eda", "\u5df2\u6062\u590d\u4e0a\u4e00\u7248\u7b56\u7565\u53c2\u6570\u3002")
         self.open_strategy_library()
 
+    def rollback_latest_draw_guard_policy(self) -> None:
+        history = get_draw_release_guard_policy_history(limit=1)
+        if not history:
+            messagebox.showinfo("DrawGuard\u56de\u6eda", "\u5c1a\u65e0\u53ef\u56de\u6eda\u7684 DrawGuard \u53c2\u6570\u7248\u672c\u3002")
+            return
+        latest = history[0]
+        previous = latest.get("previous_policy") if isinstance(latest.get("previous_policy"), dict) else {}
+        if not previous:
+            messagebox.showinfo("DrawGuard\u56de\u6eda", "\u6700\u8fd1\u4e00\u6b21 DrawGuard \u8c03\u53c2\u6ca1\u6709\u53ef\u6062\u590d\u7684\u4e0a\u4e00\u7248\u53c2\u6570\u3002")
+            return
+        current = get_draw_release_guard_policy_status().get("policy", {})
+        current = current if isinstance(current, dict) else {}
+        current_buckets = current.get("weak_odds_buckets") if isinstance(current.get("weak_odds_buckets"), dict) else {}
+        previous_buckets = previous.get("weak_odds_buckets") if isinstance(previous.get("weak_odds_buckets"), dict) else {}
+        confirm = messagebox.askyesno(
+            "DrawGuard\u56de\u6eda\u4e0a\u4e00\u7248",
+            (
+                f"\u5c06\u6062\u590d DrawGuard \u4e0a\u4e00\u7248\u53c2\u6570:\n\n"
+                f"\u7248\u672c: {latest.get('version_id', '-')}\n"
+                f"\u6765\u6e90: {latest.get('source', '-')}\n"
+                f"\u5206\u6570\u7ebf: {float(current.get('min_score', 0.58) or 0.58):.2f} -> {float(previous.get('min_score', 0.58) or 0.58):.2f}\n"
+                f"\u5f31\u8d54\u7387\u6876: {', '.join(sorted(str(key) for key in current_buckets)) or '-'} -> {', '.join(sorted(str(key) for key in previous_buckets)) or '-'}\n\n"
+                "\u786e\u8ba4\u540e\uff0c\u540e\u7eed\u5206\u6790\u5c06\u6309\u56de\u6eda\u540e\u7684 DrawGuard \u53c2\u6570\u6267\u884c\u3002"
+            ),
+        )
+        if not confirm:
+            return
+        status = rollback_draw_release_guard_policy()
+        policy = status.get("policy", {}) if isinstance(status.get("policy"), dict) else {}
+        buckets = policy.get("weak_odds_buckets") if isinstance(policy.get("weak_odds_buckets"), dict) else {}
+        self.status_var.set(
+            f"DrawGuard\u5df2\u56de\u6eda: score_floor={float(policy.get('min_score', 0) or 0):.2f}, buckets={', '.join(sorted(str(key) for key in buckets)) or '-'}"
+        )
+        messagebox.showinfo("DrawGuard\u56de\u6eda", "DrawGuard \u53c2\u6570\u5df2\u6062\u590d\u4e0a\u4e00\u7248\u3002")
+        self.open_strategy_library()
+
     def open_policy_effect_detail_window(self, policy_effect: dict | object) -> None:
         review = policy_effect if isinstance(policy_effect, dict) else {}
         rows = review.get("rows", []) if isinstance(review.get("rows"), list) else []
@@ -6194,6 +6231,7 @@ class SmartMatchDashboard:
             lambda review=dashboard.get("policy_effect_review", {}): self.open_policy_effect_detail_window(review),
         )
         self._strategy_toolbar_button(audit_tools, "StatsBomb\u6837\u672c", self.open_statsbomb_event_sandbox_window)
+        self._strategy_toolbar_button(audit_tools, "\u56de\u6edaDrawGuard", self.rollback_latest_draw_guard_policy, danger=True)
         self._strategy_toolbar_button(audit_tools, "\u56de\u6eda\u4e0a\u4e00\u7248", self.rollback_latest_strategy_policy, danger=True)
         tk.Label(
             audit_tools,
@@ -6554,7 +6592,9 @@ class SmartMatchDashboard:
             (
                 f"{draw_guard_effect.get('summary_text', '-')}\n"
                 f"{draw_guard_effect.get('recommendation_text', '-')}"
+                + ("\n\u5efa\u8bae\uff1a\u56de\u6eda DrawGuard \u4e0a\u4e00\u7248\u53c2\u6570\u3002" if bool(draw_guard_effect.get("rollback_recommended")) else "")
             ),
+            command=self.rollback_latest_draw_guard_policy if bool(draw_guard_effect.get("rollback_recommended")) else None,
         )
         for row in draw_guard_effect.get("rows", []) if isinstance(draw_guard_effect.get("rows"), list) else []:
             if isinstance(row, dict):

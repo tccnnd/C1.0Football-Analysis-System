@@ -8855,6 +8855,30 @@ def apply_draw_release_guard_policy_update(update: dict, *, source: str = "draw_
     return get_draw_release_guard_policy_status()
 
 
+def rollback_draw_release_guard_policy(*, version_id: str | None = None, source: str = "draw_guard_policy_rollback") -> dict:
+    history_items = get_draw_release_guard_policy_history(limit=0)
+    if not history_items:
+        return get_draw_release_guard_policy_status()
+    target: dict | None = None
+    rollback_source = str(source or "draw_guard_policy_rollback")
+    if version_id:
+        target_entry = next((item for item in history_items if str(item.get("version_id") or "") == str(version_id)), None)
+        if isinstance(target_entry, dict):
+            policy = target_entry.get("policy")
+            if isinstance(policy, dict):
+                target = dict(policy)
+                rollback_source = f"{rollback_source}:{version_id}"
+    else:
+        latest = history_items[0]
+        previous = latest.get("previous_policy")
+        if isinstance(previous, dict):
+            target = dict(previous)
+            rollback_source = f"{rollback_source}:{latest.get('version_id', '-')}"
+    if not target:
+        return get_draw_release_guard_policy_status()
+    return apply_draw_release_guard_policy_update(target, source=rollback_source)
+
+
 def _draw_release_guard(match: AppMatch, draw_score: object, *, base_takeover: bool = False) -> dict[str, object]:
     policy = _current_draw_release_guard_policy()
     min_score = _safe_float(policy.get("min_score"), default=0.58)
