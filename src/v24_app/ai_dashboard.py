@@ -125,6 +125,7 @@ from .ui_modules import (
     build_strategy_policy_audit_report_lines,
     build_strategy_policy_effect_review,
     build_strategy_policy_freeze_override_status,
+    build_strategy_policy_freeze_alerts,
     build_strategy_policy_governance_event_summary,
     build_strategy_policy_rollback_effect_review,
     build_strategy_policy_rollback_preview,
@@ -2404,6 +2405,24 @@ class SmartMatchDashboard:
         ]
         for label, value, color in metrics:
             self._detail_metric(top, label, value, color)
+
+        freeze_alerts = build_strategy_policy_freeze_alerts(freeze_override, draw_guard_freeze)
+        freeze_cards = [item for item in freeze_alerts.get("alerts", []) if isinstance(item, dict)] if isinstance(freeze_alerts, dict) else []
+        if freeze_cards:
+            freeze_wrap = tk.Frame(shell, bg=BG)
+            freeze_wrap.pack(fill=tk.X, pady=(0, 16))
+            tk.Label(freeze_wrap, text="????", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(0, 8))
+            freeze_row = tk.Frame(freeze_wrap, bg=BG)
+            freeze_row.pack(fill=tk.X)
+            for index, alert in enumerate(freeze_cards[:2]):
+                column = tk.Frame(freeze_row, bg=BG)
+                column.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 8) if index == 0 else (8, 0))
+                self._alert_card(
+                    column,
+                    str(alert.get("title") or "-"),
+                    str(alert.get("body") or "-"),
+                    tone=str(alert.get("tone") or "warning"),
+                )
 
         body = tk.Frame(shell, bg=BG)
         body.pack(fill=tk.BOTH, expand=True)
@@ -5896,7 +5915,7 @@ class SmartMatchDashboard:
         draw_release_guard_tuning_guard: dict | object | None = None,
     ) -> None:
         review = policy_effect if isinstance(policy_effect, dict) else {}
-        governance = build_strategy_policy_governance_event_summary(
+        base_governance = build_strategy_policy_governance_event_summary(
             review,
             draw_release_guard_policy_history=draw_release_guard_policy_history or [],
             draw_release_guard_tuning_effect_review=draw_release_guard_tuning_effect_review,
@@ -5904,7 +5923,6 @@ class SmartMatchDashboard:
             draw_release_guard_freeze_override_status=draw_release_guard_freeze_override_status,
             draw_release_guard_tuning_guard=draw_release_guard_tuning_guard,
         )
-        rows = [row for row in governance.get("rows", []) if isinstance(row, dict)] if isinstance(governance.get("rows"), list) else []
 
         def as_text(value: object, default: str = "-") -> str:
             text = str(value if value is not None else "").strip()
@@ -5917,29 +5935,59 @@ class SmartMatchDashboard:
                 return 0
 
         window = tk.Toplevel(self.root)
-        window.title("\u7b56\u7565\u6cbb\u7406\u4e8b\u4ef6")
+        window.title("??????")
         window.configure(bg=BG)
         window.geometry("1120x640")
         window.minsize(980, 540)
 
         header = tk.Frame(window, bg=BG)
         header.pack(fill=tk.X, padx=16, pady=(14, 8))
+        title_var = tk.StringVar(value=f"?????? | {base_governance.get('summary_text', '-')}")
+        meta_var = tk.StringVar(value=f"{base_governance.get('latest_summary') or '??????'}\n{base_governance.get('filter_summary_text') or '?? ?=?? / ??=?? | ?? 0/0'}")
         tk.Label(
             header,
-            text=f"\u7b56\u7565\u6cbb\u7406\u4e8b\u4ef6 | {governance.get('summary_text', '-')}",
+            textvariable=title_var,
             bg=BG,
             fg=TEXT,
             font=("Microsoft YaHei UI", 14, "bold"),
         ).pack(anchor=tk.W)
         tk.Label(
             header,
-            text=str(governance.get("latest_summary") or "\u6682\u65e0\u6cbb\u7406\u4e8b\u4ef6"),
+            textvariable=meta_var,
             bg=BG,
             fg=MUTED,
             font=("Microsoft YaHei UI", 10),
             wraplength=1040,
             justify=tk.LEFT,
         ).pack(anchor=tk.W, pady=(4, 0))
+
+        filter_bar = tk.Frame(window, bg=BG)
+        filter_bar.pack(fill=tk.X, padx=16, pady=(0, 10))
+        domain_frame = tk.Frame(filter_bar, bg=BG)
+        domain_frame.pack(side=tk.LEFT, padx=(0, 12))
+        tk.Label(domain_frame, text="???", bg=BG, fg=MUTED, font=("Microsoft YaHei UI", 9)).pack(anchor=tk.W)
+        domain_var = tk.StringVar(value="??")
+        domain_combo = ttk.Combobox(
+            domain_frame,
+            state="readonly",
+            textvariable=domain_var,
+            values=list(base_governance.get("domain_options") or ["??", "strategy", "draw_guard"]),
+            width=16,
+        )
+        domain_combo.pack(anchor=tk.W, pady=(4, 0))
+
+        event_frame = tk.Frame(filter_bar, bg=BG)
+        event_frame.pack(side=tk.LEFT)
+        tk.Label(event_frame, text="????", bg=BG, fg=MUTED, font=("Microsoft YaHei UI", 9)).pack(anchor=tk.W)
+        event_var = tk.StringVar(value="??")
+        event_combo = ttk.Combobox(
+            event_frame,
+            state="readonly",
+            textvariable=event_var,
+            values=list(base_governance.get("event_type_options") or ["??"]),
+            width=24,
+        )
+        event_combo.pack(anchor=tk.W, pady=(4, 0))
 
         body = tk.PanedWindow(window, orient=tk.VERTICAL, bg=BG, sashwidth=5, bd=0)
         body.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 16))
@@ -5952,14 +6000,14 @@ class SmartMatchDashboard:
         columns = ("time", "version", "event", "source", "related", "effect", "allow", "replay")
         tree = ttk.Treeview(table_frame, columns=columns, show="headings", style="PolicyGovernance.Treeview", height=10)
         headings = {
-            "time": "\u65f6\u95f4",
-            "version": "\u7248\u672c",
-            "event": "\u4e8b\u4ef6",
-            "source": "\u6765\u6e90",
-            "related": "\u5173\u8054\u7248\u672c",
-            "effect": "\u6548\u679c",
-            "allow": "\u653e\u884c\u547d\u4e2d",
-            "replay": "Replay\u51c0\u503c",
+            "time": "??",
+            "version": "??",
+            "event": "??",
+            "source": "??",
+            "related": "????",
+            "effect": "??",
+            "allow": "????",
+            "replay": "Replay??",
         }
         widths = {"time": 145, "version": 110, "event": 110, "source": 190, "related": 105, "effect": 125, "allow": 105, "replay": 85}
         for col in columns:
@@ -5988,24 +6036,6 @@ class SmartMatchDashboard:
         detail_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
         row_by_iid: dict[str, dict] = {}
-        for index, row in enumerate(rows):
-            iid = str(index)
-            row_by_iid[iid] = row
-            tree.insert(
-                "",
-                tk.END,
-                iid=iid,
-                values=(
-                    as_text(row.get("updated_at")),
-                    as_text(row.get("version_id")),
-                    as_text(row.get("event_label")),
-                    as_text(row.get("source")),
-                    as_text(row.get("related_version_id")),
-                    as_text(row.get("effect_label")),
-                    as_text(row.get("allow_hit_rate_text")),
-                    f"{as_int(row.get('replay_guard_net')):+d}",
-                ),
-            )
 
         def show_detail(row: dict | None) -> None:
             if isinstance(row, dict):
@@ -6018,35 +6048,79 @@ class SmartMatchDashboard:
                     )
                 else:
                     metric_line = (
-                        f"\u6837\u672c: {as_int(row.get('sample_count'))} | \u5df2\u77e5\u653e\u884c {as_int(row.get('known_allow_count'))} | "
-                        f"Replay\u51c0\u503c {as_int(row.get('replay_guard_net')):+d}"
+                        f"样本: {as_int(row.get('sample_count'))} | 已知放行 {as_int(row.get('known_allow_count'))} | "
+                        f"Replay净值 {as_int(row.get('replay_guard_net')):+d}"
                     )
                 content = (
                     f"{as_text(row.get('summary'))}\n\n"
-                    f"\u4e8b\u4ef6\u7c7b\u578b: {as_text(row.get('event_type'))}\n"
-                    f"\u6765\u6e90: {as_text(row.get('source'))}\n"
-                    f"\u5173\u8054\u7248\u672c: {as_text(row.get('related_version_id'))}\n"
+                    f"领域: {as_text(row.get('domain'))}\n"
+                    f"事件类型: {as_text(row.get('event_type'))}\n"
+                    f"来源: {as_text(row.get('source'))}\n"
+                    f"关联版本: {as_text(row.get('related_version_id'))}\n"
                     f"{metric_line}\n"
-                    f"\u8bf4\u660e: {as_text(row.get('description'))}"
+                    f"说明: {as_text(row.get('description'))}"
                 )
             else:
-                content = "\u6682\u65e0\u7b56\u7565\u6cbb\u7406\u4e8b\u4ef6\u3002"
+                content = "暂无匹配的治理事件。"
             detail.configure(state=tk.NORMAL)
             detail.delete("1.0", tk.END)
             detail.insert("1.0", content)
             detail.configure(state=tk.DISABLED)
+
+
+        def refresh_view(_event=None) -> None:
+            summary = build_strategy_policy_governance_event_summary(
+                review,
+                draw_release_guard_policy_history=draw_release_guard_policy_history or [],
+                draw_release_guard_tuning_effect_review=draw_release_guard_tuning_effect_review,
+                draw_release_guard_rollback_effect_review=draw_release_guard_rollback_effect_review,
+                draw_release_guard_freeze_override_status=draw_release_guard_freeze_override_status,
+                draw_release_guard_tuning_guard=draw_release_guard_tuning_guard,
+                domain_filter=domain_var.get(),
+                event_type_filter=event_var.get(),
+            )
+            rows = [row for row in summary.get("rows", []) if isinstance(row, dict)] if isinstance(summary.get("rows"), list) else []
+            title_var.set(f"?????? | {summary.get('summary_text', '-')}")
+            latest_summary = as_text(summary.get("latest_summary"), "??????????") if rows else "??????????"
+            meta_var.set(f"{latest_summary}\n{summary.get('filter_summary_text') or '?? ?=?? / ??=?? | ?? 0/0'}")
+            tree.delete(*tree.get_children())
+            row_by_iid.clear()
+            for index, row in enumerate(rows):
+                iid = str(index)
+                row_by_iid[iid] = row
+                tree.insert(
+                    "",
+                    tk.END,
+                    iid=iid,
+                    values=(
+                        as_text(row.get("updated_at")),
+                        as_text(row.get("version_id")),
+                        as_text(row.get("event_label")),
+                        as_text(row.get("source")),
+                        as_text(row.get("related_version_id")),
+                        as_text(row.get("effect_label")),
+                        as_text(row.get("allow_hit_rate_text")),
+                        f"{as_int(row.get('replay_guard_net')):+d}",
+                    ),
+                )
+            if rows:
+                tree.selection_set(tree.get_children()[0])
+                show_detail(rows[0])
+            else:
+                show_detail(None)
 
         def on_select(_event=None) -> None:
             selected = tree.selection()
             show_detail(row_by_iid.get(selected[0]) if selected else None)
 
         tree.bind("<<TreeviewSelect>>", on_select)
-        children = tree.get_children()
-        if children:
-            tree.selection_set(children[0])
-            show_detail(row_by_iid.get(children[0]))
+        domain_combo.bind("<<ComboboxSelected>>", refresh_view)
+        event_combo.bind("<<ComboboxSelected>>", refresh_view)
+        if rows := base_governance.get("rows"):
+            refresh_view()
         else:
-            show_detail(None)
+            refresh_view()
+
 
     def open_statsbomb_event_sandbox_window(self) -> None:
         baseline = get_statsbomb_event_baseline()
@@ -6364,6 +6438,27 @@ class SmartMatchDashboard:
         top = tk.Frame(content, bg=BG)
         top.pack(fill=tk.X, pady=(0, 16))
         self._strategy_metric_grid(top, dashboard.get("metrics", []), columns=4)
+
+        freeze_alerts = build_strategy_policy_freeze_alerts(
+            dashboard.get("freeze_override_status", {}),
+            dashboard.get("draw_release_guard_freeze_override", {}),
+        )
+        freeze_cards = [item for item in freeze_alerts.get("alerts", []) if isinstance(item, dict)] if isinstance(freeze_alerts, dict) else []
+        if freeze_cards:
+            freeze_wrap = tk.Frame(content, bg=BG)
+            freeze_wrap.pack(fill=tk.X, pady=(0, 16))
+            tk.Label(freeze_wrap, text="????", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(2, 8))
+            freeze_row = tk.Frame(freeze_wrap, bg=BG)
+            freeze_row.pack(fill=tk.X)
+            for index, alert in enumerate(freeze_cards[:2]):
+                column = tk.Frame(freeze_row, bg=BG)
+                column.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 8) if index == 0 else (8, 0))
+                self._alert_card(
+                    column,
+                    str(alert.get("title") or "-"),
+                    str(alert.get("body") or "-"),
+                    tone=str(alert.get("tone") or "warning"),
+                )
 
         body = tk.Frame(content, bg=BG)
         body.pack(fill=tk.BOTH, expand=True)

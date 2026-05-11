@@ -25,6 +25,7 @@ from v24_app.ui_modules import (
     build_agent_replay_guard_tuning_recommendation,
     build_strategy_policy_effect_review,
     build_strategy_policy_governance_event_summary,
+    build_strategy_policy_freeze_alerts,
     build_strategy_trend_tuning_effect_review,
     build_strategy_policy_rollback_effect_review,
     build_strategy_policy_freeze_override_status,
@@ -92,6 +93,7 @@ from v24_app.ui_modules import (
     build_strategy_release_pool_rows,
     compute_strategy_admission_counts,
     filter_strategy_admission_rows,
+    filter_strategy_policy_governance_event_rows,
     format_high_accuracy_strategy_release_explanation,
     format_strategy_admission_label,
     format_strategy_admission_pick,
@@ -904,6 +906,150 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("\u56de\u6eda 1", metrics["\u6cbb\u7406\u4e8b\u4ef6"])
         self.assertEqual(governance["rows"][0]["event_type"], "freeze_override")
         self.assertEqual(governance["rows"][0]["related_version_id"], "v3")
+
+
+    def test_strategy_policy_governance_event_filters_rows_by_domain_and_type(self) -> None:
+        rows = [
+            {"domain": "strategy", "event_type": "rollback", "version_id": "v2"},
+            {"domain": "strategy", "event_type": "freeze_override", "version_id": "v3"},
+            {"domain": "draw_guard", "event_type": "draw_guard_rollback", "version_id": "dg2"},
+            {"domain": "draw_guard", "event_type": "draw_guard_freeze", "version_id": "dg3"},
+            {"domain": "draw_guard", "event_type": "draw_guard_freeze_override", "version_id": "dg4"},
+        ]
+
+        self.assertEqual(
+            [row["event_type"] for row in filter_strategy_policy_governance_event_rows(rows, domain_filter="strategy")],
+            ["rollback", "freeze_override"],
+        )
+        self.assertEqual(
+            [row["event_type"] for row in filter_strategy_policy_governance_event_rows(rows, domain_filter="draw_guard")],
+            ["draw_guard_rollback", "draw_guard_freeze", "draw_guard_freeze_override"],
+        )
+        freeze_rows = filter_strategy_policy_governance_event_rows(rows, event_type_filter="draw_guard_freeze_override")
+        self.assertEqual(len(freeze_rows), 1)
+        self.assertEqual(freeze_rows[0]["version_id"], "dg4")
+
+    def test_strategy_policy_governance_event_summary_recounts_filtered_rows(self) -> None:
+        strategy_history = [
+            {"version_id": "v1", "updated_at": "2026-05-01 10:00:00", "source": "manual"},
+            {"version_id": "v2", "updated_at": "2026-05-02 10:00:00", "source": "release_quality_trend"},
+            {"version_id": "v3", "updated_at": "2026-05-03 10:00:00", "source": "policy_rollback:v2"},
+            {"version_id": "v4", "updated_at": "2026-05-04 10:00:00", "source": "policy_freeze_override:v3"},
+        ]
+        draw_history = [
+            {"version_id": "dg1", "updated_at": "2026-05-01 10:00:00", "source": "manual"},
+            {"version_id": "dg2", "updated_at": "2026-05-02 10:00:00", "source": "draw_release_guard_tuning"},
+            {"version_id": "dg3", "updated_at": "2026-05-03 10:00:00", "source": "draw_guard_policy_rollback:dg2"},
+            {"version_id": "dg4", "updated_at": "2026-05-04 10:00:00", "source": "draw_guard_freeze_override:dg3"},
+        ]
+        settlements = [
+            {"timestamp": "2026-05-02 11:00:00", "strategy_admission_decision": "allow", "is_correct": True, "draw_release_guard_status": "blocked", "draw_release_guard_blocked": True, "draw_release_guard_odds_bucket": "<=3.00"},
+            {"timestamp": "2026-05-02 12:00:00", "strategy_admission_decision": "allow", "is_correct": False, "draw_release_guard_status": "blocked", "draw_release_guard_blocked": True, "draw_release_guard_odds_bucket": "<=3.00"},
+            {"timestamp": "2026-05-02 13:00:00", "strategy_admission_decision": "allow", "is_correct": False, "draw_release_guard_status": "blocked", "draw_release_guard_blocked": True, "draw_release_guard_odds_bucket": "<=3.00"},
+            {"timestamp": "2026-05-03 11:00:00", "strategy_admission_decision": "allow", "is_correct": False, "draw_release_guard_status": "blocked", "draw_release_guard_blocked": True, "draw_release_guard_odds_bucket": "<=3.00"},
+            {"timestamp": "2026-05-03 12:00:00", "strategy_admission_decision": "allow", "is_correct": False, "draw_release_guard_status": "blocked", "draw_release_guard_blocked": True, "draw_release_guard_odds_bucket": "<=3.00"},
+            {"timestamp": "2026-05-03 13:00:00", "strategy_admission_decision": "allow", "is_correct": True, "draw_release_guard_status": "blocked", "draw_release_guard_blocked": True, "draw_release_guard_odds_bucket": "<=3.00"},
+        ]
+
+        review = build_strategy_policy_effect_review(strategy_history, settlements)
+        draw_tuning = build_draw_release_guard_tuning_effect_review(draw_history, settlements)
+        draw_rollback = build_draw_release_guard_rollback_effect_review(draw_history, settlements)
+        draw_freeze = build_draw_release_guard_freeze_override_status(draw_history, draw_rollback)
+        draw_guard = build_draw_release_guard_tuning_guard({}, rollback_effect_review=draw_rollback, freeze_override_status=draw_freeze)
+
+        summary = build_strategy_policy_governance_event_summary(
+            review,
+            draw_release_guard_policy_history=draw_history,
+            draw_release_guard_tuning_effect_review=draw_tuning,
+            draw_release_guard_rollback_effect_review=draw_rollback,
+            draw_release_guard_freeze_override_status=draw_freeze,
+            draw_release_guard_tuning_guard=draw_guard,
+        )
+        strategy_only = build_strategy_policy_governance_event_summary(
+            review,
+            draw_release_guard_policy_history=draw_history,
+            draw_release_guard_tuning_effect_review=draw_tuning,
+            draw_release_guard_rollback_effect_review=draw_rollback,
+            draw_release_guard_freeze_override_status=draw_freeze,
+            draw_release_guard_tuning_guard=draw_guard,
+            domain_filter="strategy",
+        )
+        draw_only = build_strategy_policy_governance_event_summary(
+            review,
+            draw_release_guard_policy_history=draw_history,
+            draw_release_guard_tuning_effect_review=draw_tuning,
+            draw_release_guard_rollback_effect_review=draw_rollback,
+            draw_release_guard_freeze_override_status=draw_freeze,
+            draw_release_guard_tuning_guard=draw_guard,
+            domain_filter="draw_guard",
+        )
+        freeze_only = build_strategy_policy_governance_event_summary(
+            review,
+            draw_release_guard_policy_history=draw_history,
+            draw_release_guard_tuning_effect_review=draw_tuning,
+            draw_release_guard_rollback_effect_review=draw_rollback,
+            draw_release_guard_freeze_override_status=draw_freeze,
+            draw_release_guard_tuning_guard=draw_guard,
+            event_type_filter="draw_guard_freeze_override",
+        )
+
+        self.assertEqual(summary["event_count"], 8)
+        self.assertIn("DrawGuard", summary["summary_text"])
+        self.assertEqual(strategy_only["event_count"], 4)
+        self.assertTrue(all(row["domain"] == "strategy" for row in strategy_only["rows"]))
+        self.assertEqual(draw_only["event_count"], 4)
+        self.assertTrue(all(row["domain"] == "draw_guard" for row in draw_only["rows"]))
+        self.assertEqual(freeze_only["event_count"], 1)
+        self.assertEqual(freeze_only["rows"][0]["event_type"], "draw_guard_freeze_override")
+
+    def test_strategy_policy_freeze_alerts_surface_blocking_and_confirmation_states(self) -> None:
+        strategy_freeze = {
+            "status": "frozen",
+            "label": "strategy freeze",
+            "rollback_version_id": "v3",
+            "freeze_source": "policy_rollback:v3",
+            "related_version_id": "v2",
+            "recommended_action": "review rollback version",
+        }
+        draw_freeze = {
+            "status": "frozen",
+            "label": "draw guard freeze",
+            "rollback_version_id": "dg3",
+            "freeze_source": "draw_guard_policy_rollback:dg3",
+            "related_version_id": "dg2",
+            "recommended_action": "review DrawGuard rollback version",
+        }
+
+        alerts = build_strategy_policy_freeze_alerts(strategy_freeze, draw_freeze)
+        strategy_alert = next(item for item in alerts["alerts"] if item["family"] == "strategy")
+        draw_alert = next(item for item in alerts["alerts"] if item["family"] == "draw_guard")
+
+        self.assertEqual(alerts["count"], 2)
+        self.assertTrue(strategy_alert["blocking"])
+        self.assertEqual(strategy_alert["tone"], "bad")
+        self.assertIn(strategy_freeze["freeze_source"], strategy_alert["body"])
+        self.assertIn(strategy_freeze["rollback_version_id"], strategy_alert["body"])
+        self.assertIn(strategy_freeze["recommended_action"], strategy_alert["body"])
+        self.assertTrue(draw_alert["blocking"])
+        self.assertIn("DrawGuard", draw_alert["title"])
+
+        overridden_freeze = {
+            "status": "overridden",
+            "label": "freeze overridden",
+            "rollback_version_id": "v3",
+            "override_version_id": "v4",
+            "override_source": "policy_freeze_override:v4",
+            "freeze_source": "policy_freeze_override:v4",
+            "related_version_id": "v2",
+            "recommended_action": "confirm manual override record",
+        }
+        confirm_alerts = build_strategy_policy_freeze_alerts(overridden_freeze, {"status": "inactive"})
+        confirm_alert = confirm_alerts["alerts"][0]
+
+        self.assertFalse(confirm_alert["blocking"])
+        self.assertEqual(confirm_alert["tone"], "warning")
+        self.assertEqual(confirm_alert["state_label"], "需确认")
+        self.assertIn("policy_freeze_override:v4", confirm_alert["body"])
 
     def test_strategy_policy_audit_report_exports_review_and_samples(self) -> None:
         history = [

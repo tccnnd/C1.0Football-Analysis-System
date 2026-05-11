@@ -5076,6 +5076,32 @@ def _draw_guard_governance_event_rows(
     return event_rows
 
 
+def filter_strategy_policy_governance_event_rows(
+    rows: Sequence[Mapping[str, object]] | object,
+    *,
+    domain_filter: object = "\u5168\u90e8",
+    event_type_filter: object = "\u5168\u90e8",
+) -> list[dict[str, object]]:
+    row_items = [dict(item) for item in rows if isinstance(item, Mapping)] if isinstance(rows, Sequence) else []
+    domain_value = _text(domain_filter, "\u5168\u90e8").strip() or "\u5168\u90e8"
+    event_type_value = _text(event_type_filter, "\u5168\u90e8").strip() or "\u5168\u90e8"
+    if domain_value.lower() in {"all", "any"}:
+        domain_value = "\u5168\u90e8"
+    if event_type_value.lower() in {"all", "any"}:
+        event_type_value = "\u5168\u90e8"
+
+    filtered: list[dict[str, object]] = []
+    for row in row_items:
+        row_domain = str(row.get("domain") or "").strip()
+        row_event_type = str(row.get("event_type") or "").strip()
+        if domain_value != "\u5168\u90e8" and row_domain != domain_value:
+            continue
+        if event_type_value != "\u5168\u90e8" and row_event_type != event_type_value:
+            continue
+        filtered.append(row)
+    return filtered
+
+
 def build_strategy_policy_governance_event_summary(
     policy_effect_review: Mapping[str, object] | object,
     *,
@@ -5084,6 +5110,8 @@ def build_strategy_policy_governance_event_summary(
     draw_release_guard_rollback_effect_review: Mapping[str, object] | object | None = None,
     draw_release_guard_freeze_override_status: Mapping[str, object] | object | None = None,
     draw_release_guard_tuning_guard: Mapping[str, object] | object | None = None,
+    domain_filter: object = "\u5168\u90e8",
+    event_type_filter: object = "\u5168\u90e8",
 ) -> dict[str, object]:
     review = _as_mapping(policy_effect_review)
     row_source = _as_list(review.get("all_rows")) or _as_list(review.get("rows"))
@@ -5096,10 +5124,8 @@ def build_strategy_policy_governance_event_summary(
         reverse=True,
     )
     event_rows: list[dict[str, object]] = []
-    counts: dict[str, int] = {}
     for row in rows:
         event_type, event_label, description = _strategy_policy_governance_event_type(row.get("source"))
-        counts[event_type] = counts.get(event_type, 0) + 1
         related_version = _strategy_policy_governance_related_version(row.get("source"))
         tone = "bad" if event_type == "rollback" and str(row.get("effect_status") or "") == "negative" else "warning" if event_type in {"rollback", "freeze_override", "trend_gate"} else "neutral"
         if event_type == "freeze_override":
@@ -5147,8 +5173,14 @@ def build_strategy_policy_governance_event_summary(
         ),
         reverse=True,
     )
-    counts = {}
-    for row in event_rows:
+    all_event_rows = list(event_rows)
+    filtered_rows = filter_strategy_policy_governance_event_rows(
+        all_event_rows,
+        domain_filter=domain_filter,
+        event_type_filter=event_type_filter,
+    )
+    counts: dict[str, int] = {}
+    for row in filtered_rows:
         key = str(row.get("event_type") or "")
         counts[key] = counts.get(key, 0) + 1
     governance_count = sum(counts.get(key, 0) for key in ("trend_gate", "allowlist_tuning", "replay_guard_tuning", "rollback", "freeze_override"))
@@ -5168,15 +5200,52 @@ def build_strategy_policy_governance_event_summary(
     draw_guard_rollback_count = counts.get("draw_guard_rollback", 0)
     draw_guard_freeze_count = counts.get("draw_guard_freeze", 0)
     draw_guard_freeze_override_count = counts.get("draw_guard_freeze_override", 0)
-    latest = event_rows[0] if event_rows else {}
+    latest = filtered_rows[0] if filtered_rows else {}
+    domain_value = _text(domain_filter, "\u5168\u90e8").strip() or "\u5168\u90e8"
+    event_type_value = _text(event_type_filter, "\u5168\u90e8").strip() or "\u5168\u90e8"
+    if domain_value.lower() in {"all", "any"}:
+        domain_value = "\u5168\u90e8"
+    if event_type_value.lower() in {"all", "any"}:
+        event_type_value = "\u5168\u90e8"
+    domain_options = ["\u5168\u90e8", "strategy", "draw_guard"]
+    event_type_order = [
+        "trend_gate",
+        "allowlist_tuning",
+        "replay_guard_tuning",
+        "rollback",
+        "freeze_override",
+        "draw_guard_tuning",
+        "draw_guard_rollback",
+        "draw_guard_freeze",
+        "draw_guard_freeze_override",
+        "manual",
+        "draw_guard_manual",
+    ]
+    event_type_options: list[str] = ["\u5168\u90e8"]
+    seen_event_types: set[str] = set()
+    for name in event_type_order:
+        if any(str(row.get("event_type") or "") == name for row in all_event_rows):
+            event_type_options.append(name)
+            seen_event_types.add(name)
+    for row in all_event_rows:
+        name = str(row.get("event_type") or "").strip()
+        if name and name not in seen_event_types:
+            event_type_options.append(name)
+            seen_event_types.add(name)
+    total_event_count = len(all_event_rows)
     summary_text = (
         f"\u6cbb\u7406\u4e8b\u4ef6 {governance_count} | "
         f"\u8d8b\u52bf\u95e8\u63a7 {trend_gate_count} | \u56de\u6eda {rollback_count} | \u89e3\u9664\u51bb\u7ed3 {freeze_override_count}"
     )
     if draw_guard_governance_count:
         summary_text = f"{summary_text} | DrawGuard {draw_guard_governance_count}"
+    filter_summary_text = (
+        f"\u7b5b\u9009 \u57df {domain_value} / \u4e8b\u4ef6 {event_type_value} | "
+        f"{len(filtered_rows)}/{total_event_count}"
+    )
     return {
-        "event_count": len(event_rows),
+        "event_count": len(filtered_rows),
+        "total_event_count": total_event_count,
         "governance_count": governance_count,
         "rollback_count": rollback_count,
         "freeze_override_count": freeze_override_count,
@@ -5186,10 +5255,134 @@ def build_strategy_policy_governance_event_summary(
         "draw_guard_freeze_count": draw_guard_freeze_count,
         "draw_guard_freeze_override_count": draw_guard_freeze_override_count,
         "counts": counts,
+        "domain_filter": domain_value,
+        "event_type_filter": event_type_value,
+        "domain_options": domain_options,
+        "event_type_options": event_type_options,
+        "filter_summary_text": filter_summary_text,
         "latest_label": latest.get("event_label", "-") if latest else "-",
         "latest_summary": latest.get("summary", "-") if latest else "-",
         "summary_text": summary_text,
-        "rows": event_rows,
+        "rows": filtered_rows,
+        "all_rows": all_event_rows,
+    }
+
+
+def build_strategy_policy_freeze_alerts(
+    freeze_override_status: Mapping[str, object] | object | None = None,
+    draw_guard_freeze_override_status: Mapping[str, object] | object | None = None,
+) -> dict[str, object]:
+    strategy_freeze = _as_mapping(freeze_override_status)
+    draw_guard_freeze = _as_mapping(draw_guard_freeze_override_status)
+
+    def _freeze_alert(
+        *,
+        family: str,
+        title: str,
+        state_label: str,
+        source: str,
+        related_version_id: str,
+        recommended_action: str,
+        tone: str,
+        blocking: bool,
+        status_label: str,
+    ) -> dict[str, object]:
+        body = (
+            f"\u51bb\u7ed3\u6765\u6e90: {source}\n"
+            f"\u5173\u8054\u7248\u672c: {related_version_id}\n"
+            f"\u5efa\u8bae\u52a8\u4f5c: {recommended_action}"
+        )
+        return {
+            "family": family,
+            "title": title,
+            "body": body,
+            "tone": tone,
+            "blocking": blocking,
+            "state_label": state_label,
+            "status_label": status_label,
+            "freeze_source": source,
+            "related_version_id": related_version_id,
+            "recommended_action": recommended_action,
+        }
+
+    alerts: list[dict[str, object]] = []
+    strategy_status = str(strategy_freeze.get("status") or "")
+    if strategy_status in {"frozen", "overridden"}:
+        rollback_version = str(strategy_freeze.get("rollback_version_id") or "-")
+        strategy_source = str(strategy_freeze.get("freeze_source") or "").strip()
+        strategy_related_version = str(strategy_freeze.get("related_version_id") or "").strip() or rollback_version
+        strategy_action = str(strategy_freeze.get("recommended_action") or "").strip()
+        if strategy_status == "frozen":
+            alerts.append(
+                _freeze_alert(
+                    family="strategy",
+                    title="\u7b56\u7565\u8c03\u53c2\u51bb\u7ed3\u98ce\u9669",
+                    state_label="\u963b\u65ad\u98ce\u9669",
+                    source=strategy_source or f"policy_rollback:{rollback_version}",
+                    related_version_id=strategy_related_version,
+                    recommended_action=strategy_action or "\u590d\u6838\u56de\u6eda\u6240\u5bf9\u5e94\u7684\u7b56\u7565\u7248\u672c\uff0c\u786e\u8ba4\u540e\u518d\u89e3\u9664\u51bb\u7ed3\u3002",
+                    tone="bad",
+                    blocking=True,
+                    status_label=str(strategy_freeze.get("label") or "\u8c03\u53c2\u51bb\u7ed3\u4e2d"),
+                )
+            )
+        else:
+            override_source = str(strategy_freeze.get("override_source") or "").strip()
+            override_version_id = str(strategy_freeze.get("override_version_id") or "").strip()
+            alerts.append(
+                _freeze_alert(
+                    family="strategy",
+                    title="\u7b56\u7565\u8c03\u53c2\u51bb\u7ed3\u5df2\u4eba\u5de5\u89e3\u9664",
+                    state_label="\u9700\u786e\u8ba4",
+                    source=override_source or f"policy_freeze_override:{override_version_id or '-'}",
+                    related_version_id=strategy_related_version,
+                    recommended_action=strategy_action or "\u786e\u8ba4\u4eba\u5de5\u89e3\u9664\u8bb0\u5f55\uff0c\u7ee7\u7eed\u89c2\u5bdf\u540e\u7eed\u6587\u4ef6\u7248\u672c\u3002",
+                    tone="warning",
+                    blocking=False,
+                    status_label=str(strategy_freeze.get("label") or "\u51bb\u7ed3\u5df2\u4eba\u5de5\u89e3\u9664"),
+                )
+            )
+
+    draw_status = str(draw_guard_freeze.get("status") or "")
+    if draw_status in {"frozen", "overridden"}:
+        rollback_version = str(draw_guard_freeze.get("rollback_version_id") or "-")
+        draw_source = str(draw_guard_freeze.get("freeze_source") or "").strip()
+        draw_related_version = str(draw_guard_freeze.get("related_version_id") or "").strip() or rollback_version
+        draw_action = str(draw_guard_freeze.get("recommended_action") or "").strip()
+        if draw_status == "frozen":
+            alerts.append(
+                _freeze_alert(
+                    family="draw_guard",
+                    title="DrawGuard\u8c03\u53c2\u51bb\u7ed3\u98ce\u9669",
+                    state_label="\u963b\u65ad\u98ce\u9669",
+                    source=draw_source or f"draw_guard_policy_rollback:{rollback_version}",
+                    related_version_id=draw_related_version,
+                    recommended_action=draw_action or "\u590d\u6838 DrawGuard \u56de\u6eda\u6240\u5bf9\u5e94\u7684\u7248\u672c\uff0c\u786e\u8ba4\u540e\u518d\u89e3\u9664\u51bb\u7ed3\u3002",
+                    tone="bad",
+                    blocking=True,
+                    status_label=str(draw_guard_freeze.get("label") or "DrawGuard\u8c03\u53c2\u51bb\u7ed3\u4e2d"),
+                )
+            )
+        else:
+            override_source = str(draw_guard_freeze.get("override_source") or "").strip()
+            override_version_id = str(draw_guard_freeze.get("override_version_id") or "").strip()
+            alerts.append(
+                _freeze_alert(
+                    family="draw_guard",
+                    title="DrawGuard\u8c03\u53c2\u51bb\u7ed3\u5df2\u4eba\u5de5\u89e3\u9664",
+                    state_label="\u9700\u786e\u8ba4",
+                    source=override_source or f"draw_guard_freeze_override:{override_version_id or '-'}",
+                    related_version_id=draw_related_version,
+                    recommended_action=draw_action or "\u786e\u8ba4\u4eba\u5de5\u89e3\u9664\u8bb0\u5f55\uff0c\u7ee7\u7eed\u89c2\u5bdf DrawGuard \u540e\u7eed\u53d8\u5316\u3002",
+                    tone="warning",
+                    blocking=False,
+                    status_label=str(draw_guard_freeze.get("label") or "DrawGuard\u51bb\u7ed3\u5df2\u4eba\u5de5\u89e3\u9664"),
+                )
+            )
+
+    return {
+        "count": len(alerts),
+        "alerts": alerts,
     }
 
 
