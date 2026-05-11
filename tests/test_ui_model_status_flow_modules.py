@@ -220,15 +220,24 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
                 "guard": {"sample_count": 30, "actual_draw_count": 12, "draw_rate_text": "40.0%", "lift": 0.15, "lift_text": "+15.0%"},
                 "takeover": {"sample_count": 10, "precision_text": "40.0%", "recall_text": "16.0%"},
             },
+            "draw_release_guard_policy": {
+                "enabled": True,
+                "min_score": 0.58,
+                "weak_odds_buckets": {"<=3.00": {"precision": 0.222222}, ">4.20": {"draw_rate": 0.149425}},
+            },
             "report_path": "draw.md",
         }
 
         status_text = build_draw_specialist_backtest_status_text(result)
+        self.assertIn("Draw guard policy: enabled=True", status_text)
+        self.assertIn("weak_odds=<=3.00, >4.20", status_text)
         self.assertIn("平局专项诊断", status_text)
         self.assertIn("精确率 40.0%", status_text)
         self.assertIn("报告: draw.md", status_text)
         self.assertIn("平局专项回测完成", build_draw_specialist_backtest_apply_status_text(result))
         rows = build_draw_specialist_backtest_card_rows(result)
+        self.assertEqual(rows[2]["title"], "Draw guard policy")
+        self.assertIn("min_score=0.58", rows[2]["body"])
         self.assertEqual(rows[0]["tone"], "good")
         self.assertIn("精确 40.0%", rows[0]["title"])
 

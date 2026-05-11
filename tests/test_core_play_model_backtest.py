@@ -142,6 +142,8 @@ class PlayModelBacktestTests(unittest.TestCase):
         self.assertEqual(result["summary"]["missed_draw_count"], 2)
         self.assertEqual(result["summary"]["false_positive_count"], 1)
         self.assertTrue(result["score_buckets"])
+        self.assertEqual(result["draw_release_guard_policy"]["min_score"], 0.58)
+        self.assertIn("<=3.00", result["draw_release_guard_policy"]["weak_odds_buckets"])
         self.assertEqual(status["summary"]["sample_count"], 4)
 
     def test_draw_takeover_guard_blocks_high_score_in_weak_low_odds_bucket(self) -> None:

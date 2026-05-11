@@ -8919,6 +8919,10 @@ def _write_draw_specialist_backtest_markdown(result: dict) -> str | None:
     report_path = REPORT_DIR / f"draw_specialist_backtest_{timestamp}.md"
     summary = result.get("summary", {}) if isinstance(result.get("summary"), dict) else {}
     validation = result.get("validation", {}) if isinstance(result.get("validation"), dict) else {}
+    guard_policy = result.get("draw_release_guard_policy") if isinstance(result.get("draw_release_guard_policy"), dict) else {}
+    if not guard_policy and isinstance(summary.get("draw_release_guard_policy"), dict):
+        guard_policy = summary.get("draw_release_guard_policy", {})
+    weak_odds_buckets = guard_policy.get("weak_odds_buckets") if isinstance(guard_policy.get("weak_odds_buckets"), dict) else {}
     lines = [
         "# Draw Specialist Backtest",
         "",
@@ -8929,6 +8933,7 @@ def _write_draw_specialist_backtest_markdown(result: dict) -> str | None:
         f"- Draw Precision: {summary.get('precision_text', '-')}",
         f"- Draw Recall: {summary.get('recall_text', '-')}",
         f"- Recommendation: {summary.get('recommendation', '-')}",
+        f"- Draw Guard Policy: enabled={bool(guard_policy.get('enabled', True))}, min_score={_safe_float(guard_policy.get('min_score'), 0.0):.2f}, weak_odds_buckets={', '.join(sorted(str(key) for key in weak_odds_buckets)) or '-'}",
         "",
         "## Score Buckets",
         "",
@@ -8977,6 +8982,8 @@ def run_draw_specialist_backtest(
     if max_validation_samples > 0 and len(validation_items) > int(max_validation_samples):
         validation_items = validation_items[-int(max_validation_samples):]
 
+    draw_release_guard_policy = _current_draw_release_guard_policy()
+    draw_guard_min_score = _safe_float(draw_release_guard_policy.get("min_score"), default=0.58)
     totals = _draw_bucket_template()
     guard_bucket = _draw_bucket_template()
     takeover_bucket = _draw_bucket_template()
@@ -9015,7 +9022,7 @@ def run_draw_specialist_backtest(
         market_balance = _safe_float(draw_signals.get("market_balance"), default=0.0)
 
         _draw_bucket_record(totals, actual_draw=actual_draw, predicted_draw=predicted_draw)
-        if draw_score >= 0.58:
+        if draw_score >= draw_guard_min_score:
             _draw_bucket_record(guard_bucket, actual_draw=actual_draw, predicted_draw=predicted_draw)
         if bool(prediction.get("draw_takeover")):
             _draw_bucket_record(takeover_bucket, actual_draw=actual_draw, predicted_draw=predicted_draw)
@@ -9044,7 +9051,7 @@ def run_draw_specialist_backtest(
     recall = draw_hit_count / actual_draw_count if actual_draw_count else None
     actual_draw_rate = actual_draw_count / sample_count if sample_count else None
     baseline_draw_rate = actual_draw_rate or 0.0
-    guard = _finalize_draw_bucket("draw_score>=0.58", guard_bucket, baseline_draw_rate=baseline_draw_rate)
+    guard = _finalize_draw_bucket(f"draw_score>={draw_guard_min_score:.2f}", guard_bucket, baseline_draw_rate=baseline_draw_rate)
     takeover = _finalize_draw_bucket("draw_takeover", takeover_bucket, baseline_draw_rate=baseline_draw_rate)
 
     recommendation = "collecting"
@@ -9080,6 +9087,7 @@ def run_draw_specialist_backtest(
         "takeover": takeover,
         "recommendation": recommendation,
         "recommendation_text": recommendation_text,
+        "draw_release_guard_policy": json.loads(json.dumps(draw_release_guard_policy)),
     }
     missed_draw_rows.sort(key=lambda row: (-_safe_float(row.get("draw_score"), default=0.0), str(row.get("match_date") or "")))
     false_positive_rows.sort(key=lambda row: (-_safe_float(row.get("draw_score"), default=0.0), str(row.get("match_date") or "")))
@@ -9098,6 +9106,7 @@ def run_draw_specialist_backtest(
             "ratio": round(len(validation_items) / max(len(train_items) + original_validation_count, 1), 4),
         },
         "summary": summary,
+        "draw_release_guard_policy": json.loads(json.dumps(draw_release_guard_policy)),
         "score_buckets": _draw_bucket_rows(score_buckets, baseline_draw_rate=baseline_draw_rate),
         "odds_buckets": _draw_bucket_rows(odds_buckets, baseline_draw_rate=baseline_draw_rate),
         "handicap_buckets": _draw_bucket_rows(handicap_buckets, baseline_draw_rate=baseline_draw_rate),

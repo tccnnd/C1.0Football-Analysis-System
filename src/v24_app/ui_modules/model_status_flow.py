@@ -17,6 +17,21 @@ def _safe_int(value: object, default: int = 0) -> int:
         return default
 
 
+def _draw_guard_policy_text(result: Mapping[str, object]) -> str:
+    policy = result.get("draw_release_guard_policy")
+    if not isinstance(policy, Mapping):
+        summary = result.get("summary", {}) if isinstance(result.get("summary"), Mapping) else {}
+        policy = summary.get("draw_release_guard_policy") if isinstance(summary.get("draw_release_guard_policy"), Mapping) else {}
+    if not isinstance(policy, Mapping) or not policy:
+        return "Draw guard policy: -"
+    weak_buckets = policy.get("weak_odds_buckets") if isinstance(policy.get("weak_odds_buckets"), Mapping) else {}
+    bucket_text = ", ".join(sorted(str(key) for key in weak_buckets)) if weak_buckets else "-"
+    return (
+        f"Draw guard policy: enabled={bool(policy.get('enabled', True))} | "
+        f"min_score={_safe_float(policy.get('min_score'), 0.0):.2f} | weak_odds={bucket_text}"
+    )
+
+
 def _ready_text(value: object) -> str:
     return "就绪" if bool(value) else "未就绪"
 
@@ -431,6 +446,11 @@ def build_draw_specialist_backtest_status_text(result: Mapping[str, object] | ob
     validation = resolved.get("validation", {}) if isinstance(resolved.get("validation"), Mapping) else {}
     guard = summary.get("guard", {}) if isinstance(summary.get("guard"), Mapping) else {}
     takeover = summary.get("takeover", {}) if isinstance(summary.get("takeover"), Mapping) else {}
+    guard_policy_text = _draw_guard_policy_text(resolved)
+    policy = resolved.get("draw_release_guard_policy")
+    if not isinstance(policy, Mapping):
+        policy = summary.get("draw_release_guard_policy") if isinstance(summary.get("draw_release_guard_policy"), Mapping) else {}
+    min_score = _safe_float(policy.get("min_score"), 0.58) if isinstance(policy, Mapping) else 0.58
     if not bool(resolved.get("ok")):
         return (
             "平局专项诊断\n"
@@ -443,10 +463,11 @@ def build_draw_specialist_backtest_status_text(result: Mapping[str, object] | ob
         + f"- 验证样本: {validation.get('sample_count', 0)} | 时间: {validation.get('date_start') or '-'} -> {validation.get('date_end') or '-'}\n"
         + f"- 真实平局: {summary.get('actual_draw_count', 0)} ({summary.get('actual_draw_rate_text', '-')})\n"
         + f"- 正式博平: {summary.get('draw_hit_count', 0)}/{summary.get('predicted_draw_count', 0)} | 精确率 {summary.get('precision_text', '-')} | 召回 {summary.get('recall_text', '-')}\n"
-        + f"- 防平信号(draw_score>=0.58): 样本 {guard.get('sample_count', 0)} | 平局率 {guard.get('draw_rate_text', '-')} | lift {guard.get('lift_text', '-')}\n"
+        + f"- 防平信号(draw_score>={min_score:.2f}): 样本 {guard.get('sample_count', 0)} | 平局率 {guard.get('draw_rate_text', '-')} | lift {guard.get('lift_text', '-')}\n"
         + f"- draw_takeover: 样本 {takeover.get('sample_count', 0)} | 精确率 {takeover.get('precision_text', '-')} | 召回 {takeover.get('recall_text', '-')}\n"
         + f"- 漏判平局: {summary.get('missed_draw_count', 0)} | 误报平局: {summary.get('false_positive_count', 0)}\n"
         + f"- 建议: {summary.get('recommendation_text') or summary.get('recommendation') or '-'}\n"
+        + f"- {guard_policy_text}\n"
         + f"- 报告: {resolved.get('report_path') or '-'}"
     )
 
@@ -479,6 +500,10 @@ def build_draw_specialist_backtest_card_rows(result: Mapping[str, object] | obje
         ]
     recommendation = str(summary.get("recommendation") or "")
     tone = "good" if recommendation == "enable_draw_watch" else "warning" if recommendation in {"watch_draw_guard", "tighten_draw_takeover"} else "neutral"
+    policy = resolved.get("draw_release_guard_policy")
+    if not isinstance(policy, Mapping):
+        policy = summary.get("draw_release_guard_policy") if isinstance(summary.get("draw_release_guard_policy"), Mapping) else {}
+    min_score = _safe_float(policy.get("min_score"), 0.58) if isinstance(policy, Mapping) else 0.58
     return [
         {
             "title": f"平局识别: 精确 {summary.get('precision_text', '-')} / 召回 {summary.get('recall_text', '-')}",
@@ -492,10 +517,15 @@ def build_draw_specialist_backtest_card_rows(result: Mapping[str, object] | obje
         {
             "title": f"防平信号: {guard.get('draw_rate_text', '-')} / lift {guard.get('lift_text', '-')}",
             "body": (
-                f"draw_score>=0.58 样本 {guard.get('sample_count', 0)} | 真实平局 {guard.get('actual_draw_count', 0)} | "
+                f"draw_score>={min_score:.2f} 样本 {guard.get('sample_count', 0)} | 真实平局 {guard.get('actual_draw_count', 0)} | "
                 f"正式博平 {takeover.get('sample_count', 0)}样本，精确 {takeover.get('precision_text', '-')}"
             ),
             "tone": "good" if _safe_float(guard.get("lift"), 0.0) > 0.03 else "warning" if _safe_int(guard.get("sample_count")) else "neutral",
+        },
+        {
+            "title": "Draw guard policy",
+            "body": _draw_guard_policy_text(resolved),
+            "tone": "warning" if "weak_odds=-" not in _draw_guard_policy_text(resolved) else "neutral",
         },
     ]
 
