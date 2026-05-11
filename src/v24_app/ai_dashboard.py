@@ -74,6 +74,7 @@ from .ui_modules import (
     build_result_recovery_strategy_adjustment,
     build_strategy_release_quality_trend,
     build_strategy_release_quality_trend_alerts,
+    build_strategy_release_trend_policy_tuning,
     build_agent_trace_nodes,
     mark_stale_result_recovery_runs,
     format_agent_trace_detail,
@@ -3494,6 +3495,14 @@ class SmartMatchDashboard:
         run_rows = build_result_recovery_run_rows(records, limit=50)
         quality_trend = build_strategy_release_quality_trend(records)
         trend_alerts = build_strategy_release_quality_trend_alerts(quality_trend)
+        admission_policy = get_strategy_admission_policy_status().get("policy", {})
+        trend_tuning = build_strategy_release_trend_policy_tuning(
+            quality_trend,
+            trend_alerts,
+            base_min_confidence=float(admission_policy.get("min_confidence", 0.5) or 0.5) if isinstance(admission_policy, dict) else 0.5,
+            base_active_strategy_min=int(admission_policy.get("active_strategy_min", 1) or 1) if isinstance(admission_policy, dict) else 1,
+            base_medium_risk_allowed=bool(admission_policy.get("medium_risk_allowed", True)) if isinstance(admission_policy, dict) else True,
+        )
         latest_status = str(summary.get("latest_status") or "")
         lookback_days = self._recovery_lookback_days()
         snapshot_audit = self._result_recovery_snapshot_audit(lookback_days=lookback_days)
@@ -3615,6 +3624,30 @@ class SmartMatchDashboard:
                     str(alert.get("body") or "-"),
                     tone=str(alert.get("tone") or "warning"),
                 )
+        tuning_reasons = trend_tuning.get("reasons", []) if isinstance(trend_tuning.get("reasons"), list) else []
+        tuning_body = "\n".join(str(item) for item in tuning_reasons[:4]) or "-"
+        if str(trend_tuning.get("action") or "") == "tighten":
+            self._strategy_row(
+                trend_card,
+                f"\u95e8\u63a7\u8054\u52a8: {trend_tuning.get('label', '-')}",
+                tuning_body,
+                command=lambda tuning=trend_tuning: self.apply_strategy_allowlist_tuning(tuning),
+            )
+            tk.Button(
+                trend_card,
+                text="\u5e94\u7528\u8d8b\u52bf\u95e8\u63a7\u5efa\u8bae",
+                command=lambda tuning=trend_tuning: self.apply_strategy_allowlist_tuning(tuning),
+                bg=YELLOW,
+                fg="#10141f",
+                activebackground="#f7c948",
+                activeforeground="#10141f",
+                relief=tk.FLAT,
+                font=("Microsoft YaHei UI", 10, "bold"),
+                padx=14,
+                pady=7,
+            ).pack(anchor=tk.E, padx=18, pady=(0, 12))
+        else:
+            self._strategy_row(trend_card, f"\u95e8\u63a7\u8054\u52a8: {trend_tuning.get('label', '-')}", tuning_body)
         if trend_rows:
             for row in trend_rows[:3]:
                 if isinstance(row, dict):

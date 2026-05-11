@@ -630,6 +630,130 @@ def build_strategy_release_quality_trend_alerts(
     return alerts
 
 
+def build_strategy_release_trend_policy_tuning(
+    trend: Mapping[str, object] | object,
+    alerts: Sequence[Mapping[str, object]] | object = (),
+    *,
+    base_min_confidence: float = 0.50,
+    base_active_strategy_min: int = 1,
+    base_medium_risk_allowed: bool = True,
+) -> dict[str, object]:
+    item = _as_mapping(trend)
+    alert_rows = [row for row in alerts if isinstance(row, Mapping)] if isinstance(alerts, Sequence) else []
+    sample_count = _safe_int(item.get("sample_count"))
+    current_min_confidence = round(max(0.45, min(0.78, _safe_float(base_min_confidence, 0.50))), 2)
+    next_min_confidence = current_min_confidence
+    current_active_min = max(1, min(3, _safe_int(base_active_strategy_min, 1)))
+    next_active_min = current_active_min
+    current_medium_allowed = bool(base_medium_risk_allowed)
+    next_medium_allowed = current_medium_allowed
+    reasons: list[str] = []
+
+    if sample_count < 2:
+        reasons.append(f"趋势样本只有 {sample_count} 次，暂不建议根据短期趋势写入新门槛。")
+        return {
+            "action": "collect",
+            "label": "继续积累趋势样本",
+            "tone": "neutral",
+            "priority": "low",
+            "next_min_confidence": next_min_confidence,
+            "next_active_strategy_min": next_active_min,
+            "medium_risk_allowed": next_medium_allowed,
+            "policy_update": {},
+            "reasons": reasons,
+            "rows": [
+                ("动作", "继续积累趋势样本"),
+                ("趋势样本", str(sample_count)),
+                ("最低置信", f"{current_min_confidence:.2f} -> {next_min_confidence:.2f}"),
+                ("高准策略数", f"{current_active_min} -> {next_active_min}"),
+                ("中风险放行", "ON" if next_medium_allowed else "OFF"),
+            ],
+        }
+    if not alert_rows:
+        reasons.append("当前放行趋势未触发门控告警，维持现有准入参数。")
+        return {
+            "action": "hold",
+            "label": "维持当前门槛",
+            "tone": "good",
+            "priority": "low",
+            "next_min_confidence": next_min_confidence,
+            "next_active_strategy_min": next_active_min,
+            "medium_risk_allowed": next_medium_allowed,
+            "policy_update": {},
+            "reasons": reasons,
+            "rows": [
+                ("动作", "维持当前门槛"),
+                ("趋势状态", str(item.get("label") or "-")),
+                ("最低置信", f"{current_min_confidence:.2f} -> {next_min_confidence:.2f}"),
+                ("高准策略数", f"{current_active_min} -> {next_active_min}"),
+                ("中风险放行", "ON" if next_medium_allowed else "OFF"),
+            ],
+        }
+
+    high_alert_count = sum(1 for row in alert_rows if str(row.get("severity") or "") == "high")
+    alert_titles = [str(row.get("title") or "-") for row in alert_rows]
+    title_text = " / ".join(alert_titles[:4])
+    title_blob = "\n".join(alert_titles)
+    if "放行命中趋势走弱" in title_blob:
+        delta = item.get("release_hit_rate_delta")
+        decline = _safe_float(delta, 0.0) if delta is not None else 0.0
+        step = 0.06 if decline <= -0.10 else 0.04
+        next_min_confidence += step
+        reasons.append(f"放行命中趋势走弱，准入置信建议提高 {step:.2f}。")
+    if "最近放行命中低于观察线" in title_blob:
+        next_min_confidence += 0.03
+        reasons.append("最近放行命中低于观察线，短期不应扩大覆盖。")
+    if "实盘反馈未同步" in title_blob or "缺少有效实盘反馈验证" in title_blob:
+        next_active_min = max(next_active_min, 2)
+        next_medium_allowed = False
+        reasons.append("新增结算未稳定转化为高准策略实盘反馈，要求至少 2 条高准策略共同支持，并关闭中风险放行。")
+    if "放行赛果回收超期" in title_blob or "待回收放行积压" in title_blob:
+        next_medium_allowed = False
+        reasons.append("放行回收存在超期或积压，先收紧中风险放行，避免未复盘样本继续扩大。")
+    if "放行快照缺失" in title_blob:
+        next_medium_allowed = False
+        reasons.append("存在放行快照缺失，后续复盘证据不完整，暂不放行中风险场次。")
+    if "暂停策略增加" in title_blob:
+        paused_delta = _safe_int(item.get("total_paused_delta"))
+        next_active_min = max(next_active_min, 3 if paused_delta >= 2 else 2)
+        next_min_confidence += 0.03
+        next_medium_allowed = False
+        reasons.append("暂停策略增加，断路器压力上升，提高高准策略数量要求并收紧置信门槛。")
+
+    next_min_confidence = round(max(0.45, min(0.78, next_min_confidence)), 2)
+    next_active_min = max(1, min(3, next_active_min))
+    if not reasons:
+        reasons.append(f"趋势告警已触发: {title_text}。建议人工复核后再调整。")
+    priority = "high" if high_alert_count else "medium"
+    policy_update = {
+        "min_confidence": next_min_confidence,
+        "active_strategy_min": next_active_min,
+        "medium_risk_allowed": next_medium_allowed,
+        "high_risk_allowed": False,
+    }
+    return {
+        "action": "tighten",
+        "label": "趋势告警建议收紧",
+        "tone": "bad" if priority == "high" else "warning",
+        "priority": priority,
+        "source": "release_quality_trend",
+        "next_min_confidence": next_min_confidence,
+        "next_active_strategy_min": next_active_min,
+        "medium_risk_allowed": next_medium_allowed,
+        "policy_update": policy_update,
+        "reasons": reasons,
+        "rows": [
+            ("动作", "趋势告警建议收紧"),
+            ("触发告警", title_text or "-"),
+            ("趋势样本", str(sample_count)),
+            ("放行命中", f"{item.get('latest_release_hit_rate_text', '-')} / 均值 {item.get('avg_release_hit_rate_text', '-')}"),
+            ("最低置信", f"{current_min_confidence:.2f} -> {next_min_confidence:.2f}"),
+            ("高准策略数", f"{current_active_min} -> {next_active_min}"),
+            ("中风险放行", f"{'ON' if current_medium_allowed else 'OFF'} -> {'ON' if next_medium_allowed else 'OFF'}"),
+        ],
+    }
+
+
 def build_result_recovery_quality_alerts(
     records: Sequence[Mapping[str, object]] | object,
     *,

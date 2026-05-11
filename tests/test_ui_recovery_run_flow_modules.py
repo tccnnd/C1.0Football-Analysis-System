@@ -22,6 +22,7 @@ from v24_app.ui_modules import (
     build_result_recovery_strategy_adjustment,
     build_strategy_release_quality_trend,
     build_strategy_release_quality_trend_alerts,
+    build_strategy_release_trend_policy_tuning,
     mark_stale_result_recovery_runs,
 )
 
@@ -213,6 +214,54 @@ class UIRecoveryRunFlowModuleTests(unittest.TestCase):
         self.assertIn("暂停策略增加", titles)
         self.assertTrue(any(item["severity"] == "high" for item in alerts))
         self.assertEqual(build_strategy_release_quality_trend_alerts({"sample_count": 0}), [])
+
+    def test_strategy_release_trend_policy_tuning_tightens_from_trend_alerts(self) -> None:
+        trend = {
+            "sample_count": 4,
+            "label": "放行命中走弱",
+            "release_hit_rate_delta": -0.12,
+            "latest_release_hit_rate": 0.48,
+            "latest_release_hit_rate_text": "48.0%",
+            "avg_release_hit_rate": 0.58,
+            "avg_release_hit_rate_text": "58.0%",
+            "no_feedback_count": 2,
+            "verified_count": 0,
+            "total_new_settled": 5,
+            "total_feedback_known_delta": 0,
+            "latest_pending_count": 4,
+            "latest_missing_snapshot_count": 1,
+            "latest_stale_pending_count": 2,
+            "total_paused_delta": 1,
+        }
+        alerts = build_strategy_release_quality_trend_alerts(trend, pending_threshold=3)
+
+        tuning = build_strategy_release_trend_policy_tuning(
+            trend,
+            alerts,
+            base_min_confidence=0.58,
+            base_active_strategy_min=1,
+            base_medium_risk_allowed=True,
+        )
+
+        self.assertEqual(tuning["action"], "tighten")
+        self.assertEqual(tuning["priority"], "high")
+        self.assertEqual(tuning["policy_update"]["min_confidence"], 0.70)
+        self.assertEqual(tuning["policy_update"]["active_strategy_min"], 2)
+        self.assertFalse(tuning["policy_update"]["medium_risk_allowed"])
+        self.assertTrue(any("放行命中趋势走弱" in reason for reason in tuning["reasons"]))
+        self.assertTrue(any("断路器压力" in reason for reason in tuning["reasons"]))
+
+        hold = build_strategy_release_trend_policy_tuning(
+            {"sample_count": 3, "label": "反馈稳定"},
+            [],
+            base_min_confidence=0.58,
+        )
+        self.assertEqual(hold["action"], "hold")
+        self.assertEqual(hold["policy_update"], {})
+
+        collect = build_strategy_release_trend_policy_tuning({"sample_count": 1}, alerts)
+        self.assertEqual(collect["action"], "collect")
+        self.assertEqual(collect["policy_update"], {})
 
     def test_rows_and_detail_include_recovery_metrics(self) -> None:
         records = [
