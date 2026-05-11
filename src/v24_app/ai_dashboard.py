@@ -25,6 +25,7 @@ from .core import (
     extract_video_review_frames_now,
     fetch_matches_v24,
     get_draw_specialist_backtest_status,
+    get_draw_release_guard_policy_history,
     get_draw_release_guard_policy_status,
     get_play_model_policy_status,
     get_play_model_training_status,
@@ -6111,6 +6112,7 @@ class SmartMatchDashboard:
         draw_guard_policy = draw_guard_status.get("policy", {}) if isinstance(draw_guard_status.get("policy"), dict) else {}
         settlements = list(reversed(get_recent_settlements(limit=200)))
         policy_history = get_strategy_admission_policy_history(limit=20)
+        draw_guard_history = get_draw_release_guard_policy_history(limit=20)
         release_loop = self._strategy_release_recovery_loop(settlements)
         historical_replay = build_historical_strategy_replay_samples(status, historical_limit=50000, max_samples=1000)
         dashboard = build_high_accuracy_strategy_dashboard(
@@ -6121,6 +6123,7 @@ class SmartMatchDashboard:
             get_statsbomb_sandbox_fewshot_memory(),
             historical_replay,
             draw_guard_status,
+            draw_guard_history,
         )
         release_pool_rows = self._strategy_release_pool_rows(settlements, release_loop=release_loop)
         shell = self._page_shell(
@@ -6543,6 +6546,19 @@ class SmartMatchDashboard:
                 tuning_body,
                 command=lambda tuning=draw_guard_tuning: self.apply_draw_release_guard_tuning(tuning),
             )
+
+        draw_guard_effect = dashboard.get("draw_release_guard_tuning_effect", {}) if isinstance(dashboard.get("draw_release_guard_tuning_effect"), dict) else {}
+        self._strategy_row(
+            right,
+            f"DrawGuard\u751f\u6548\u8ffd\u8e2a: {draw_guard_effect.get('label', '-')}",
+            (
+                f"{draw_guard_effect.get('summary_text', '-')}\n"
+                f"{draw_guard_effect.get('recommendation_text', '-')}"
+            ),
+        )
+        for row in draw_guard_effect.get("rows", []) if isinstance(draw_guard_effect.get("rows"), list) else []:
+            if isinstance(row, dict):
+                self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
 
         statsbomb_review = dashboard.get("statsbomb_event_review", {}) if isinstance(dashboard.get("statsbomb_event_review"), dict) else {}
         self._strategy_section_title(right, "StatsBomb \u8d5b\u540e\u4e8b\u4ef6")

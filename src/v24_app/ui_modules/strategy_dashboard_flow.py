@@ -6332,6 +6332,208 @@ def build_draw_release_guard_policy_tuning_recommendation(
     }
 
 
+def _draw_guard_policy_direction(item: Mapping[str, object]) -> str:
+    policy = _draw_guard_policy_from_status(item.get("policy") if isinstance(item.get("policy"), Mapping) else item)
+    previous = _draw_guard_policy_from_status(item.get("previous_policy") if isinstance(item.get("previous_policy"), Mapping) else {})
+    policy_min = _safe_float(policy.get("min_score"), 0.58)
+    previous_min = _safe_float(previous.get("min_score"), policy_min)
+    policy_buckets = set((_as_mapping(policy.get("weak_odds_buckets"))).keys())
+    previous_buckets = set((_as_mapping(previous.get("weak_odds_buckets"))).keys())
+    if policy_min > previous_min or len(policy_buckets) < len(previous_buckets):
+        return "loosen"
+    if policy_min < previous_min or len(policy_buckets) > len(previous_buckets):
+        return "tighten"
+    return "hold"
+
+
+def _draw_guard_effect_label(status: str) -> str:
+    labels = {
+        "effective": "\u5e73\u5c40\u8c03\u53c2\u751f\u6548",
+        "negative": "\u5e73\u5c40\u8c03\u53c2\u56de\u9000",
+        "watch": "\u5e73\u5c40\u8c03\u53c2\u89c2\u5bdf",
+        "collecting": "\u5e73\u5c40\u8c03\u53c2\u6837\u672c\u79ef\u7d2f\u4e2d",
+        "none": "\u6682\u65e0\u5e73\u5c40\u8c03\u53c2\u7248\u672c",
+    }
+    return labels.get(status, labels["watch"])
+
+
+def _draw_guard_effect_tone(status: str) -> str:
+    if status == "effective":
+        return "good"
+    if status == "negative":
+        return "bad"
+    if status == "watch":
+        return "warning"
+    return "neutral"
+
+
+def build_draw_release_guard_tuning_effect_review(
+    policy_history: Sequence[Mapping[str, object]] | object,
+    settlements: Sequence[Mapping[str, object]] | object,
+    *,
+    min_blocked_samples: int = 3,
+    min_delta: float = 0.10,
+    limit: int = 5,
+) -> dict[str, object]:
+    history_items = [item for item in policy_history if isinstance(item, Mapping)] if isinstance(policy_history, Sequence) else []
+    settlement_items = [item for item in settlements if isinstance(item, Mapping)] if isinstance(settlements, Sequence) else []
+    parsed_history: list[dict[str, object]] = []
+    for item in history_items:
+        updated_at = _parse_policy_review_time(item.get("updated_at"))
+        if updated_at is None:
+            continue
+        parsed_history.append({**dict(item), "_updated_dt": updated_at})
+    parsed_history.sort(key=lambda item: item["_updated_dt"])
+    if not parsed_history:
+        label = _draw_guard_effect_label("none")
+        return {
+            "status": "none",
+            "label": label,
+            "tone": "neutral",
+            "history_count": 0,
+            "summary_text": f"{label} | \u5c1a\u672a\u5e94\u7528 DrawGuard \u8c03\u53c2\u7248\u672c\u3002",
+            "recommendation_text": "\u5148\u5e94\u7528\u5e73\u5c40\u62e6\u622a\u8c03\u53c2\uff0c\u518d\u7528\u540e\u7eed\u8d5b\u679c\u56de\u6536\u9a8c\u8bc1\u6548\u679c\u3002",
+            "latest_version_id": "-",
+            "latest_source": "-",
+            "post_blocked_count": 0,
+            "pre_blocked_count": 0,
+            "avoid_rate_delta": None,
+            "missed_rate_delta": None,
+            "avoid_rate_delta_text": "-",
+            "missed_rate_delta_text": "-",
+            "metrics": [],
+            "rows": [],
+        }
+
+    rows: list[dict[str, object]] = []
+    previous_review: Mapping[str, object] | None = None
+    for index, item in enumerate(parsed_history):
+        start = item["_updated_dt"]
+        end = parsed_history[index + 1]["_updated_dt"] if index + 1 < len(parsed_history) else None
+        window_items = []
+        for settlement in settlement_items:
+            settled_at = _settlement_review_time(settlement)
+            if settled_at is None or settled_at < start:
+                continue
+            if end is not None and settled_at >= end:
+                continue
+            window_items.append(settlement)
+        review = build_draw_release_guard_review_summary(window_items)
+        direction = _draw_guard_policy_direction(item)
+        post_blocked = _safe_int(review.get("blocked_count"))
+        post_avoid = review.get("avoid_rate")
+        post_missed = review.get("missed_rate")
+        pre_blocked = _safe_int(previous_review.get("blocked_count")) if isinstance(previous_review, Mapping) else 0
+        pre_avoid = previous_review.get("avoid_rate") if isinstance(previous_review, Mapping) else None
+        pre_missed = previous_review.get("missed_rate") if isinstance(previous_review, Mapping) else None
+        avoid_delta = _safe_float(post_avoid) - _safe_float(pre_avoid) if post_avoid is not None and pre_avoid is not None else None
+        missed_delta = _safe_float(post_missed) - _safe_float(pre_missed) if post_missed is not None and pre_missed is not None else None
+        if post_blocked < max(1, int(min_blocked_samples)) or pre_blocked < max(1, int(min_blocked_samples)) or avoid_delta is None or missed_delta is None:
+            status = "collecting"
+        elif direction == "loosen":
+            if missed_delta <= -abs(float(min_delta)):
+                status = "effective"
+            elif missed_delta >= abs(float(min_delta)) or avoid_delta <= -abs(float(min_delta)):
+                status = "negative"
+            else:
+                status = "watch"
+        elif direction == "tighten":
+            if avoid_delta >= abs(float(min_delta)) and missed_delta <= 0.05:
+                status = "effective"
+            elif missed_delta >= abs(float(min_delta)) or avoid_delta <= -abs(float(min_delta)):
+                status = "negative"
+            else:
+                status = "watch"
+        else:
+            if missed_delta <= -abs(float(min_delta)) or avoid_delta >= abs(float(min_delta)):
+                status = "effective"
+            elif missed_delta >= abs(float(min_delta)) or avoid_delta <= -abs(float(min_delta)):
+                status = "negative"
+            else:
+                status = "watch"
+        label = _draw_guard_effect_label(status)
+        tone = _draw_guard_effect_tone(status)
+        source = _text(item.get("source") or item.get("reason"), "-")
+        version_id = _text(item.get("version_id"), "-")
+        body = (
+            f"\u7248\u672c {version_id} | \u65b9\u5411 {direction} | "
+            f"\u62e6\u622a {post_blocked} | \u907f\u514d {review.get('avoid_rate_text', '-')} ({_pct(avoid_delta) if avoid_delta is not None else '-'}) | "
+            f"\u9519\u8fc7 {review.get('missed_rate_text', '-')} ({_pct(missed_delta) if missed_delta is not None else '-'})"
+        )
+        rows.append(
+            {
+                "version_id": version_id,
+                "updated_at": item.get("updated_at", "-"),
+                "source": source,
+                "direction": direction,
+                "sample_count": _safe_int(review.get("sample_count")),
+                "blocked_count": post_blocked,
+                "avoid_rate": post_avoid,
+                "avoid_rate_text": review.get("avoid_rate_text", "-"),
+                "missed_rate": post_missed,
+                "missed_rate_text": review.get("missed_rate_text", "-"),
+                "pre_blocked_count": pre_blocked,
+                "pre_avoid_rate": pre_avoid,
+                "pre_avoid_rate_text": _pct(pre_avoid) if pre_avoid is not None else "-",
+                "pre_missed_rate": pre_missed,
+                "pre_missed_rate_text": _pct(pre_missed) if pre_missed is not None else "-",
+                "avoid_rate_delta": avoid_delta,
+                "avoid_rate_delta_text": _pct(avoid_delta) if avoid_delta is not None else "-",
+                "missed_rate_delta": missed_delta,
+                "missed_rate_delta_text": _pct(missed_delta) if missed_delta is not None else "-",
+                "effect_status": status,
+                "effect_label": label,
+                "tone": tone,
+                "title": f"{label} | {source} | {item.get('updated_at', '-')}",
+                "body": body,
+                "review": review,
+            }
+        )
+        previous_review = review
+
+    rows.sort(key=lambda row: str(row.get("updated_at") or ""), reverse=True)
+    latest = rows[0] if rows else {}
+    latest_status = str(latest.get("effect_status") or "none")
+    latest_label = str(latest.get("effect_label") or _draw_guard_effect_label(latest_status))
+    if latest_status == "effective":
+        recommendation = "\u5e73\u5c40\u62e6\u622a\u8c03\u53c2\u540e\u6838\u5fc3\u6307\u6807\u6539\u5584\uff0c\u7ee7\u7eed\u4fdd\u7559\u5f53\u524d\u7248\u672c\u5e76\u7d2f\u79ef\u6837\u672c\u3002"
+    elif latest_status == "negative":
+        recommendation = "\u5e73\u5c40\u62e6\u622a\u8c03\u53c2\u540e\u6307\u6807\u56de\u9000\uff0c\u4f18\u5148\u590d\u6838\u8be5\u7248\u672c\u7684\u9519\u8fc7\u771f\u5e73\u548c\u907f\u514d\u5047\u9633\u6837\u672c\u3002"
+    elif latest_status == "watch":
+        recommendation = "\u6682\u65e0\u660e\u786e\u6539\u5584\u6216\u56de\u9000\uff0c\u7ef4\u6301\u89c2\u5bdf\u3002"
+    else:
+        recommendation = "\u8c03\u53c2\u540e\u62e6\u622a\u6837\u672c\u6216\u5bf9\u7167\u6837\u672c\u4e0d\u8db3\uff0c\u6682\u4e0d\u5224\u5b9a\u6548\u679c\u3002"
+    metrics = [
+        {"label": "\u751f\u6548\u72b6\u6001", "value": latest_label, "tone": str(latest.get("tone") or "neutral")},
+        {"label": "\u540e\u7eed\u62e6\u622a", "value": str(latest.get("blocked_count", 0)), "tone": "neutral"},
+        {"label": "\u907f\u514d\u53d8\u5316", "value": str(latest.get("avoid_rate_delta_text") or "-"), "tone": "good" if _safe_float(latest.get("avoid_rate_delta"), 0.0) > 0 else "bad" if latest.get("avoid_rate_delta") is not None else "neutral"},
+        {"label": "\u9519\u8fc7\u53d8\u5316", "value": str(latest.get("missed_rate_delta_text") or "-"), "tone": "good" if latest.get("missed_rate_delta") is not None and _safe_float(latest.get("missed_rate_delta"), 0.0) < 0 else "bad" if latest.get("missed_rate_delta") is not None else "neutral"},
+    ]
+    return {
+        "status": latest_status,
+        "label": latest_label,
+        "tone": str(latest.get("tone") or "neutral"),
+        "history_count": len(parsed_history),
+        "summary_text": (
+            f"\u7248\u672c {len(parsed_history)} | \u6700\u65b0 {latest_label} | "
+            f"\u907f\u514d\u53d8\u5316 {latest.get('avoid_rate_delta_text', '-') if latest else '-'} | "
+            f"\u9519\u8fc7\u53d8\u5316 {latest.get('missed_rate_delta_text', '-') if latest else '-'}"
+        ),
+        "recommendation_text": recommendation,
+        "latest_version_id": latest.get("version_id", "-") if latest else "-",
+        "latest_source": latest.get("source", "-") if latest else "-",
+        "post_blocked_count": _safe_int(latest.get("blocked_count")) if latest else 0,
+        "pre_blocked_count": _safe_int(latest.get("pre_blocked_count")) if latest else 0,
+        "avoid_rate_delta": latest.get("avoid_rate_delta") if latest else None,
+        "missed_rate_delta": latest.get("missed_rate_delta") if latest else None,
+        "avoid_rate_delta_text": latest.get("avoid_rate_delta_text", "-") if latest else "-",
+        "missed_rate_delta_text": latest.get("missed_rate_delta_text", "-") if latest else "-",
+        "metrics": metrics,
+        "rows": rows[: max(0, int(limit))],
+        "all_rows": rows,
+    }
+
+
 def build_handicap_margin_backtest_summary(settlements: Sequence[Mapping[str, object]] | object) -> dict[str, object]:
     settlement_items = [item for item in settlements if isinstance(item, Mapping)] if isinstance(settlements, Sequence) else []
     known = [
@@ -7419,6 +7621,7 @@ def build_high_accuracy_strategy_dashboard(
     statsbomb_fewshot_memory: Mapping[str, object] | object | None = None,
     historical_replay: Mapping[str, object] | object | None = None,
     draw_release_guard_policy_status: Mapping[str, object] | object | None = None,
+    draw_release_guard_policy_history: Sequence[Mapping[str, object]] | object | None = None,
     *,
     include_statsbomb_backfill_candidates: bool = False,
 ) -> dict[str, object]:
@@ -7464,6 +7667,10 @@ def build_high_accuracy_strategy_dashboard(
     draw_release_guard_tuning = build_draw_release_guard_policy_tuning_recommendation(
         settlement_items,
         draw_release_guard_policy_status,
+    )
+    draw_release_guard_tuning_effect = build_draw_release_guard_tuning_effect_review(
+        draw_release_guard_policy_history or [],
+        settlement_items,
     )
     jc_bucket_feedback = build_jc_bucket_feedback_summary(resolved, settlement_items)
     live_feedback_loop = build_high_accuracy_live_feedback_summary(resolved)
@@ -7720,6 +7927,11 @@ def build_high_accuracy_strategy_dashboard(
             "value": str(draw_release_guard_tuning.get("label") or "-"),
             "tone": str(draw_release_guard_tuning.get("tone") or "neutral"),
         },
+        {
+            "label": "DrawGuard\u751f\u6548",
+            "value": str(draw_release_guard_tuning_effect.get("label") or "-"),
+            "tone": str(draw_release_guard_tuning_effect.get("tone") or "neutral"),
+        },
     ]
     validation_rows = [
         (
@@ -7808,4 +8020,5 @@ def build_high_accuracy_strategy_dashboard(
         "handicap_margin_backtest": handicap_margin_backtest,
         "draw_release_guard_review": draw_release_guard_review,
         "draw_release_guard_tuning": draw_release_guard_tuning,
+        "draw_release_guard_tuning_effect": draw_release_guard_tuning_effect,
     }
