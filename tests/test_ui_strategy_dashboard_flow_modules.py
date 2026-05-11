@@ -17,6 +17,7 @@ from v24_app.core import AppMatch
 from v24_app.ui_modules import (
     build_high_accuracy_strategy_dashboard,
     build_high_accuracy_live_feedback_summary,
+    build_high_accuracy_live_feedback_recovery_validation,
     build_high_accuracy_strategy_pool_rows,
     build_high_accuracy_strategy_settlement_summary,
     build_agent_trace_replay_summary,
@@ -675,6 +676,44 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("接近断路", bodies)
         self.assertIn("接近恢复", bodies)
         self.assertIn("JC实盘", bodies)
+
+    def test_high_accuracy_live_feedback_recovery_validation_tracks_after_settlement_delta(self) -> None:
+        validation = build_high_accuracy_live_feedback_recovery_validation(
+            {
+                "runtime_active_count": 2,
+                "pending_count": 3,
+                "feedback_known_count": 5,
+                "hit_count": 4,
+                "paused_count": 1,
+                "recovering_count": 0,
+            },
+            {
+                "runtime_active_count": 3,
+                "pending_count": 1,
+                "feedback_known_count": 8,
+                "hit_count": 6,
+                "paused_count": 0,
+                "recovering_count": 1,
+            },
+            new_settled=2,
+        )
+
+        self.assertEqual(validation["status"], "verified")
+        self.assertEqual(validation["pending_reduced"], 2)
+        self.assertEqual(validation["feedback_known_delta"], 3)
+        self.assertEqual(validation["hit_delta"], 2)
+        self.assertEqual(validation["paused_delta"], -1)
+        self.assertIn("\u5df2\u9a8c\u8bc1", validation["summary_text"])
+        self.assertIn("\u5f85\u53cd\u9988\u51cf\u5c11 2", validation["summary_text"])
+        self.assertEqual(len(validation["rows"]), 3)
+
+        no_feedback = build_high_accuracy_live_feedback_recovery_validation(
+            {"pending_count": 1, "feedback_known_count": 2, "hit_count": 1},
+            {"pending_count": 1, "feedback_known_count": 2, "hit_count": 1},
+            new_settled=1,
+        )
+        self.assertEqual(no_feedback["status"], "no_strategy_feedback")
+        self.assertEqual(no_feedback["tone"], "warning")
 
     def test_strategy_dashboard_summarizes_pool_and_settlements(self) -> None:
         status = {

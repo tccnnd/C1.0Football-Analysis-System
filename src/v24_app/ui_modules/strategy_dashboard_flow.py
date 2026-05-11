@@ -4703,6 +4703,102 @@ def build_high_accuracy_live_feedback_summary(status: Mapping[str, object] | obj
     }
 
 
+def build_high_accuracy_live_feedback_recovery_validation(
+    before: Mapping[str, object] | object,
+    after: Mapping[str, object] | object,
+    *,
+    new_settled: int = 0,
+) -> dict[str, object]:
+    before_summary = _as_mapping(before)
+    after_summary = _as_mapping(after)
+    before_pending = _safe_int(before_summary.get("pending_count"))
+    after_pending = _safe_int(after_summary.get("pending_count"))
+    before_known = _safe_int(before_summary.get("feedback_known_count"))
+    after_known = _safe_int(after_summary.get("feedback_known_count"))
+    before_hits = _safe_int(before_summary.get("hit_count"))
+    after_hits = _safe_int(after_summary.get("hit_count"))
+    before_paused = _safe_int(before_summary.get("paused_count"))
+    after_paused = _safe_int(after_summary.get("paused_count"))
+    before_recovering = _safe_int(before_summary.get("recovering_count"))
+    after_recovering = _safe_int(after_summary.get("recovering_count"))
+    before_active = _safe_int(before_summary.get("runtime_active_count"))
+    after_active = _safe_int(after_summary.get("runtime_active_count"))
+    pending_reduced = max(0, before_pending - after_pending)
+    pending_delta = after_pending - before_pending
+    feedback_known_delta = after_known - before_known
+    hit_delta = after_hits - before_hits
+    paused_delta = after_paused - before_paused
+    recovering_delta = after_recovering - before_recovering
+    active_delta = after_active - before_active
+
+    if not before_summary and not after_summary:
+        status = "unavailable"
+        tone = "neutral"
+        summary_text = "实盘反馈验证不可用"
+    elif pending_reduced > 0 or feedback_known_delta > 0 or hit_delta > 0:
+        status = "verified"
+        tone = "good"
+        summary_text = (
+            f"已验证 | 待反馈减少 {pending_reduced} | 实盘样本 +{max(0, feedback_known_delta)} | "
+            f"命中 +{max(0, hit_delta)}"
+        )
+    elif _safe_int(new_settled) > 0:
+        status = "no_strategy_feedback"
+        tone = "warning"
+        summary_text = f"本轮新增结算 {_safe_int(new_settled)} 场，但高准策略实盘反馈未变化"
+    else:
+        status = "waiting"
+        tone = "neutral"
+        summary_text = "本轮暂无新增结算，高准策略实盘反馈等待后续赛果"
+    if pending_delta > 0 or paused_delta > 0:
+        tone = "warning" if tone != "bad" else tone
+
+    rows = [
+        {
+            "title": "待反馈变化",
+            "body": f"{before_pending} -> {after_pending} | 减少 {pending_reduced} | 净变化 {pending_delta:+d}",
+        },
+        {
+            "title": "实盘样本变化",
+            "body": f"样本 {before_known} -> {after_known} ({feedback_known_delta:+d}) | 命中 {before_hits} -> {after_hits} ({hit_delta:+d})",
+        },
+        {
+            "title": "断路/恢复变化",
+            "body": (
+                f"可用 {before_active} -> {after_active} ({active_delta:+d}) | "
+                f"暂停 {before_paused} -> {after_paused} ({paused_delta:+d}) | "
+                f"恢复中 {before_recovering} -> {after_recovering} ({recovering_delta:+d})"
+            ),
+        },
+    ]
+    return {
+        "status": status,
+        "tone": tone,
+        "summary_text": summary_text,
+        "new_settled": _safe_int(new_settled),
+        "pending_before": before_pending,
+        "pending_after": after_pending,
+        "pending_reduced": pending_reduced,
+        "pending_delta": pending_delta,
+        "feedback_known_before": before_known,
+        "feedback_known_after": after_known,
+        "feedback_known_delta": feedback_known_delta,
+        "hit_before": before_hits,
+        "hit_after": after_hits,
+        "hit_delta": hit_delta,
+        "paused_before": before_paused,
+        "paused_after": after_paused,
+        "paused_delta": paused_delta,
+        "recovering_before": before_recovering,
+        "recovering_after": after_recovering,
+        "recovering_delta": recovering_delta,
+        "runtime_active_before": before_active,
+        "runtime_active_after": after_active,
+        "runtime_active_delta": active_delta,
+        "rows": rows,
+    }
+
+
 def build_high_accuracy_strategy_settlement_rows(
     settlements: Sequence[Mapping[str, object]],
     *,

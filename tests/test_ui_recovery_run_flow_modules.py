@@ -161,6 +161,14 @@ class UIRecoveryRunFlowModuleTests(unittest.TestCase):
                 "strategy_release_loop_stale_pending_count": 1,
                 "strategy_release_loop_missing_snapshot_count": 0,
                 "strategy_release_loop_hit_rate_text": "66.7%",
+                "live_feedback_validation": {
+                    "status": "verified",
+                    "summary_text": "\u5df2\u9a8c\u8bc1 | \u5f85\u53cd\u9988\u51cf\u5c11 2 | \u5b9e\u76d8\u6837\u672c +3 | \u547d\u4e2d +2",
+                    "rows": [
+                        {"title": "\u5f85\u53cd\u9988\u53d8\u5316", "body": "3 -> 1 | \u51cf\u5c11 2 | \u51c0\u53d8\u5316 -2"},
+                        {"title": "\u5b9e\u76d8\u6837\u672c\u53d8\u5316", "body": "\u6837\u672c 5 -> 8 (+3) | \u547d\u4e2d 4 -> 6 (+2)"},
+                    ],
+                },
                 "messages": ["done"],
             }
         ]
@@ -170,6 +178,8 @@ class UIRecoveryRunFlowModuleTests(unittest.TestCase):
         self.assertIn("新增结算 3", rows[0]["title"])
         self.assertIn("完场: 6", rows[0]["body"])
         self.assertIn("本轮新增结算", rows[0]["body"])
+        self.assertIn("实盘反馈", rows[0]["body"])
+        self.assertIn("待反馈减少 2", rows[0]["body"])
 
         detail = build_result_recovery_run_detail(records[0])
         self.assertIn("运行 ID: run-1", detail)
@@ -184,6 +194,9 @@ class UIRecoveryRunFlowModuleTests(unittest.TestCase):
         self.assertIn("strategy_release_recovery_loop_20260509_200002.md", detail)
         self.assertIn("66.7%", detail)
         self.assertIn("\u653e\u884c 4", detail)
+        self.assertIn("实盘反馈验证", detail)
+        self.assertIn("已验证", detail)
+        self.assertIn("实盘样本变化", detail)
         self.assertIn("- done", detail)
 
     def test_quality_alerts_detect_failures_no_settlement_and_slow_runs(self) -> None:

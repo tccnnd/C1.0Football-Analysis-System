@@ -476,6 +476,9 @@ def build_result_recovery_run_rows(
             else:
                 review_head = str(review.get("summary_text") or "-").splitlines()[0]
             body = f"{body}\n\u590d\u76d8: {review_head}"
+        live_feedback_validation = _as_mapping(item.get("live_feedback_validation"))
+        if live_feedback_validation:
+            body = f"{body}\n\u5b9e\u76d8\u53cd\u9988: {live_feedback_validation.get('summary_text') or '-'}"
         if status == "failed":
             body = f"{body}\n\u9519\u8bef: {item.get('error') or '-'}"
         result.append({"title": title, "body": body, "status": status, "record": dict(item)})
@@ -496,6 +499,18 @@ def build_result_recovery_run_detail(record: Mapping[str, object] | object) -> s
     release_loop_summary = item.get("strategy_release_loop_summary") or result.get("strategy_release_loop_summary") or "-"
     release_loop_health = item.get("strategy_release_loop_health") or result.get("strategy_release_loop_health") or "-"
     release_loop_hit_rate = item.get("strategy_release_loop_hit_rate_text") or result.get("strategy_release_loop_hit_rate_text") or "-"
+    live_feedback_validation = _as_mapping(item.get("live_feedback_validation") or result.get("live_feedback_validation"))
+    live_feedback_rows = live_feedback_validation.get("rows")
+    if isinstance(live_feedback_rows, Sequence) and not isinstance(live_feedback_rows, (str, bytes)):
+        live_feedback_detail = "\n".join(
+            f"- {row.get('title') or '-'}: {row.get('body') or '-'}"
+            for row in live_feedback_rows
+            if isinstance(row, Mapping)
+        )
+    else:
+        live_feedback_detail = ""
+    if not live_feedback_detail:
+        live_feedback_detail = "- \u65e0"
     return (
         f"\u8fd0\u884c ID: {item.get('run_id') or '-'}\n"
         f"\u72b6\u6001: {_status_label(item.get('status'))}\n"
@@ -530,6 +545,10 @@ def build_result_recovery_run_detail(record: Mapping[str, object] | object) -> s
         f"- \u5f85\u56de\u6536: {_safe_int(item.get('strategy_release_loop_pending_count') or result.get('strategy_release_loop_pending_count'), 0)}\n"
         f"- \u7f3a\u5feb\u7167: {_safe_int(item.get('strategy_release_loop_missing_snapshot_count') or result.get('strategy_release_loop_missing_snapshot_count'), 0)}\n"
         f"- \u8d85\u671f: {_safe_int(item.get('strategy_release_loop_stale_pending_count') or result.get('strategy_release_loop_stale_pending_count'), 0)}\n\n"
+        f"\u5b9e\u76d8\u53cd\u9988\u9a8c\u8bc1:\n"
+        f"- \u72b6\u6001: {live_feedback_validation.get('status') or '-'}\n"
+        f"- \u6458\u8981: {live_feedback_validation.get('summary_text') or '-'}\n"
+        f"{live_feedback_detail}\n\n"
         f"\u672c\u8f6e\u590d\u76d8\u6458\u8981:\n{_review_summary_text(review_summary)}\n\n"
         f"\u672a\u547d\u4e2d\u6837\u4f8b:\n{_miss_items_text(miss_items)}\n\n"
         f"\u9519\u8bef:\n- {item.get('error') or '-'}\n\n"

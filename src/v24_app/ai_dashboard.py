@@ -76,6 +76,8 @@ from .ui_modules import (
     mark_stale_result_recovery_runs,
     format_agent_trace_detail,
     build_high_accuracy_strategy_dashboard,
+    build_high_accuracy_live_feedback_summary,
+    build_high_accuracy_live_feedback_recovery_validation,
     build_strategy_allowlist_settlement_summary,
     build_strategy_allowlist_tuning_recommendation,
     build_statsbomb_event_sandbox_report_filename,
@@ -1447,6 +1449,28 @@ class SmartMatchDashboard:
         except Exception as exc:
             self._log_event("ERROR", f"\u56de\u6536\u8fd0\u884c\u8bb0\u5f55\u5199\u5165\u5931\u8d25: {exc}")
 
+    def _live_feedback_recovery_checkpoint(self) -> dict[str, object]:
+        try:
+            summary = build_high_accuracy_live_feedback_summary(get_high_accuracy_strategy_status())
+        except Exception as exc:
+            return {"status": "unavailable", "summary_text": f"\u5b9e\u76d8\u53cd\u9988\u8bfb\u53d6\u5931\u8d25: {exc}"}
+        keys = (
+            "strategy_count",
+            "runtime_active_count",
+            "pending_count",
+            "known_count",
+            "feedback_strategy_count",
+            "paused_count",
+            "recovering_count",
+            "recovered_count",
+            "hit_count",
+            "feedback_known_count",
+            "hit_rate_text",
+            "summary_text",
+            "tone",
+        )
+        return {key: summary.get(key) for key in keys}
+
     def _begin_result_recovery_run_record(self, trigger: str = "manual_ui") -> dict[str, object]:
         now = datetime.now()
         record: dict[str, object] = {
@@ -1457,6 +1481,7 @@ class SmartMatchDashboard:
             "started_at": now.strftime("%Y-%m-%d %H:%M:%S"),
             "lookback_days": self._recovery_lookback_days(),
             "prediction_cache_count": len(self.rows),
+            "live_feedback_before": self._live_feedback_recovery_checkpoint(),
         }
         self.result_recovery_run_record = dict(record)
         self._record_result_recovery_run(record)
@@ -1482,6 +1507,12 @@ class SmartMatchDashboard:
             review_summary = build_result_recovery_review_summary(
                 result_payload.get("items", []) if isinstance(result_payload.get("items"), list) else []
             )
+        live_feedback_after = self._live_feedback_recovery_checkpoint()
+        live_feedback_validation = build_high_accuracy_live_feedback_recovery_validation(
+            record.get("live_feedback_before") if isinstance(record.get("live_feedback_before"), dict) else {},
+            live_feedback_after,
+            new_settled=int(result_payload.get("new_settled", 0) or 0),
+        )
         record.update(
             {
                 "status": status,
@@ -1512,6 +1543,8 @@ class SmartMatchDashboard:
                 "snapshot_audit": result_payload.get("snapshot_audit", {}) if isinstance(result_payload.get("snapshot_audit"), dict) else {},
                 "lookback_days": int(result_payload.get("lookback_days", record.get("lookback_days", 2)) or 2),
                 "messages": [str(item) for item in messages if item],
+                "live_feedback_after": live_feedback_after,
+                "live_feedback_validation": live_feedback_validation,
             }
         )
         if error is not None:
@@ -3687,6 +3720,14 @@ class SmartMatchDashboard:
         review_summary = build_result_recovery_review_summary(result.get("items", []) if isinstance(result.get("items"), list) else [])
         if int(review_summary.get("settlement_count", 0) or 0) > 0:
             detail = f"{detail}\n\n\u672c\u8f6e\u590d\u76d8:\n{review_summary.get('summary_text') or '-'}"
+        live_feedback_validation = (
+            self.result_recovery_run_record.get("live_feedback_validation")
+            if isinstance(self.result_recovery_run_record, dict)
+            and isinstance(self.result_recovery_run_record.get("live_feedback_validation"), dict)
+            else {}
+        )
+        if live_feedback_validation:
+            detail = f"{detail}\n\n\u5b9e\u76d8\u53cd\u9988\u9a8c\u8bc1:\n{live_feedback_validation.get('summary_text') or '-'}"
         if report_path is not None:
             detail = f"{detail}\n\n\u653e\u884c\u56de\u6536\u95ed\u73af\u62a5\u544a:\n{report_path}"
         self._schedule_auto_result_recovery()
