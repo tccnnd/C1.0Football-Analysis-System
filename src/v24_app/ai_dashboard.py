@@ -119,6 +119,8 @@ from .ui_modules import (
     build_strategy_policy_audit_csv_text,
     build_strategy_policy_audit_report_filename,
     build_strategy_policy_audit_report_lines,
+    build_strategy_policy_effect_review,
+    build_strategy_trend_tuning_effect_review,
     build_strategy_policy_tuning_guard,
     build_strategy_release_recovery_loop_report_filename,
     build_strategy_release_recovery_loop_report_lines,
@@ -3503,6 +3505,11 @@ class SmartMatchDashboard:
             base_active_strategy_min=int(admission_policy.get("active_strategy_min", 1) or 1) if isinstance(admission_policy, dict) else 1,
             base_medium_risk_allowed=bool(admission_policy.get("medium_risk_allowed", True)) if isinstance(admission_policy, dict) else True,
         )
+        policy_effect_review = build_strategy_policy_effect_review(
+            get_strategy_admission_policy_history(limit=20),
+            list(reversed(get_recent_settlements(limit=200))),
+        )
+        trend_tuning_effect = build_strategy_trend_tuning_effect_review(policy_effect_review)
         latest_status = str(summary.get("latest_status") or "")
         lookback_days = self._recovery_lookback_days()
         snapshot_audit = self._result_recovery_snapshot_audit(lookback_days=lookback_days)
@@ -3648,6 +3655,15 @@ class SmartMatchDashboard:
             ).pack(anchor=tk.E, padx=18, pady=(0, 12))
         else:
             self._strategy_row(trend_card, f"\u95e8\u63a7\u8054\u52a8: {trend_tuning.get('label', '-')}", tuning_body)
+        self._strategy_row(
+            trend_card,
+            f"\u95e8\u63a7\u751f\u6548\u590d\u76d8: {trend_tuning_effect.get('label', '-')}",
+            (
+                f"{trend_tuning_effect.get('summary_text', '-')}\n"
+                f"{trend_tuning_effect.get('recommendation_text', '-')}"
+            ),
+            command=lambda review=policy_effect_review: self.open_policy_effect_detail_window(review),
+        )
         if trend_rows:
             for row in trend_rows[:3]:
                 if isinstance(row, dict):
@@ -5261,7 +5277,10 @@ class SmartMatchDashboard:
         if not update:
             messagebox.showinfo("\u653e\u884c\u95e8\u69db", "\u5efa\u8bae\u4e2d\u6ca1\u6709\u53ef\u5199\u5165\u7684\u95e8\u69db\u53c2\u6570\u3002")
             return
-        guard = self._block_strategy_policy_tuning_if_needed(tuning, "strategy_allowlist_tuning")
+        source_key = str(tuning.get("source") or "strategy_allowlist_tuning")
+        if source_key not in {"strategy_allowlist_tuning", "release_quality_trend"}:
+            source_key = "strategy_allowlist_tuning"
+        guard = self._block_strategy_policy_tuning_if_needed(tuning, source_key)
         if guard is None:
             return
         current = get_strategy_admission_policy_status().get("policy", {})
@@ -5280,7 +5299,7 @@ class SmartMatchDashboard:
         )
         if not confirm:
             return
-        status = apply_strategy_admission_policy_update(update, source="strategy_allowlist_tuning")
+        status = apply_strategy_admission_policy_update(update, source=source_key)
         policy = status.get("policy", {}) if isinstance(status.get("policy"), dict) else {}
         self.status_var.set(f"\u653e\u884c\u95e8\u69db\u5df2\u5e94\u7528: min={float(policy.get('min_confidence', 0) or 0):.2f}, high_strategy={int(policy.get('active_strategy_min', 1) or 1)}")
         messagebox.showinfo("\u653e\u884c\u95e8\u69db", "\u95e8\u69db\u5df2\u5199\u5165\u672c\u5730\u914d\u7f6e\uff0c\u540e\u7eed\u5206\u6790\u5c06\u6309\u65b0\u51c6\u5165\u7b56\u7565\u6267\u884c\u3002")
@@ -5969,6 +5988,26 @@ class SmartMatchDashboard:
                     right,
                     str(row.get("title") or "-"),
                     f"{row.get('body', '-')}\n\u70b9\u51fb\u67e5\u770b\u8be5\u7248\u672c\u6837\u672c",
+                    command=lambda review=policy_effect: self.open_policy_effect_detail_window(review),
+                )
+
+        trend_tuning_effect = dashboard.get("trend_tuning_effect_review", {}) if isinstance(dashboard.get("trend_tuning_effect_review"), dict) else {}
+        self._strategy_section_title(right, "\u95e8\u63a7\u5efa\u8bae\u751f\u6548\u8ddf\u8e2a")
+        self._strategy_row(
+            right,
+            str(trend_tuning_effect.get("label") or "-"),
+            (
+                f"{trend_tuning_effect.get('summary_text', '-')}\n"
+                f"{trend_tuning_effect.get('recommendation_text', '-')}"
+            ),
+            command=lambda review=policy_effect: self.open_policy_effect_detail_window(review),
+        )
+        for row in trend_tuning_effect.get("rows", []) if isinstance(trend_tuning_effect.get("rows"), list) else []:
+            if isinstance(row, dict):
+                self._strategy_row(
+                    right,
+                    str(row.get("title") or "-"),
+                    str(row.get("body") or "-"),
                     command=lambda review=policy_effect: self.open_policy_effect_detail_window(review),
                 )
 

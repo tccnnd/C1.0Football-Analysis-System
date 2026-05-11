@@ -4063,6 +4063,7 @@ def build_strategy_policy_tuning_guard(
     action = str(tuning_payload.get("action") or "").strip()
     source_label = {
         "strategy_allowlist_tuning": "\u653e\u884c\u95e8\u69db",
+        "release_quality_trend": "\u8d8b\u52bf\u95e8\u63a7",
         "agent_replay_guard_tuning": "Replay Guard",
     }.get(source, "\u7b56\u7565\u8c03\u53c2")
     if status in {"regression", "volatile"}:
@@ -4187,6 +4188,7 @@ def build_strategy_policy_effect_review(
                 "source": source,
                 "sample_count": len(window_items),
                 "allow_count": len(allowed),
+                "allow_hits": allow_hits,
                 "known_allow_count": len(known_allowed),
                 "allow_hit_rate": allow_hit_rate,
                 "allow_hit_rate_text": _pct(allow_hit_rate) if allow_hit_rate is not None else "-",
@@ -4223,6 +4225,182 @@ def build_strategy_policy_effect_review(
             f"\u7248\u672c {len(parsed_history)} | \u6700\u65b0 {latest.get('effect_label', '-') if latest else '-'} | "
             f"\u6b63\u5411 {status_counts.get('effective', 0)} / \u590d\u6838 {status_counts.get('negative', 0)}"
         ),
+    }
+
+
+def _policy_gate_source_matches(source: object, target_sources: Sequence[str]) -> bool:
+    key = str(source or "").strip().lower()
+    if not key:
+        return False
+    normalized_targets = [str(item or "").strip().lower() for item in target_sources]
+    return any(target and target in key for target in normalized_targets)
+
+
+def _policy_effect_rate_parts(row: Mapping[str, object]) -> tuple[int, int, float | None]:
+    known = _safe_int(row.get("known_allow_count"))
+    raw_rate = row.get("allow_hit_rate")
+    rate = _safe_float(raw_rate) if raw_rate is not None else None
+    if row.get("allow_hits") is not None:
+        hits = _safe_int(row.get("allow_hits"))
+    elif rate is not None and known:
+        hits = round(rate * known)
+    else:
+        hits = 0
+    if rate is None and known:
+        rate = hits / known
+    return hits, known, rate
+
+
+def _trend_tuning_effect_label(status: str) -> str:
+    labels = {
+        "effective": "\u95e8\u63a7\u6539\u5584\u751f\u6548",
+        "negative": "\u95e8\u63a7\u540e\u56de\u9000",
+        "watch": "\u95e8\u63a7\u540e\u89c2\u5bdf",
+        "collecting": "\u95e8\u63a7\u6837\u672c\u79ef\u7d2f\u4e2d",
+        "none": "\u6682\u65e0\u95e8\u63a7\u7248\u672c",
+    }
+    return labels.get(status, labels["watch"])
+
+
+def _trend_tuning_effect_tone(status: str) -> str:
+    if status == "effective":
+        return "good"
+    if status == "negative":
+        return "bad"
+    if status == "watch":
+        return "warning"
+    return "neutral"
+
+
+def build_strategy_trend_tuning_effect_review(
+    policy_effect_review: Mapping[str, object] | object,
+    *,
+    target_sources: Sequence[str] = ("release_quality_trend", "strategy_allowlist_tuning"),
+    min_known_samples: int = 3,
+    min_delta: float = 0.05,
+    min_watch_hit_rate: float = 0.55,
+    limit: int = 5,
+) -> dict[str, object]:
+    review = _as_mapping(policy_effect_review)
+    rows = [dict(row) for row in _as_list(review.get("rows")) if isinstance(row, Mapping)]
+    rows.sort(key=lambda row: (_parse_policy_review_time(row.get("updated_at")) or datetime.min, str(row.get("version_id") or "")))
+    target_indexes = [
+        (index, row)
+        for index, row in enumerate(rows)
+        if _policy_gate_source_matches(row.get("source"), target_sources)
+    ]
+    if not target_indexes:
+        label = _trend_tuning_effect_label("collecting")
+        return {
+            "status": "collecting",
+            "label": label,
+            "tone": "neutral",
+            "summary_text": f"{label} | \u5c1a\u672a\u627e\u5230\u653e\u884c\u95e8\u69db\u6216\u8d8b\u52bf\u95e8\u63a7\u7248\u672c\u3002",
+            "recommendation_text": "\u7b49\u5f85\u95e8\u63a7\u5efa\u8bae\u5e94\u7528\u4ee5\u53ca\u540e\u7eed\u8d5b\u679c\u56de\u6536\u540e\u518d\u5224\u5b9a\u6548\u679c\u3002",
+            "latest_version_id": "-",
+            "latest_source": "-",
+            "latest_updated_at": "-",
+            "post_known_count": 0,
+            "pre_known_count": 0,
+            "post_allow_hit_rate": None,
+            "pre_allow_hit_rate": None,
+            "post_allow_hit_rate_text": "-",
+            "pre_allow_hit_rate_text": "-",
+            "allow_hit_rate_delta": None,
+            "allow_hit_rate_delta_text": "-",
+            "metrics": [],
+            "rows": [],
+        }
+
+    latest_index, latest = target_indexes[-1]
+    previous = rows[latest_index - 1] if latest_index > 0 else {}
+    post_hits, post_known, post_rate = _policy_effect_rate_parts(latest)
+    pre_hits, pre_known, pre_rate = _policy_effect_rate_parts(previous) if previous else (0, 0, None)
+    delta = post_rate - pre_rate if post_rate is not None and pre_rate is not None else None
+
+    if post_known < max(1, int(min_known_samples)) or post_rate is None or pre_rate is None:
+        status = "collecting"
+    elif delta is not None and delta >= abs(float(min_delta)):
+        status = "effective"
+    elif delta is not None and delta <= -abs(float(min_delta)):
+        status = "negative"
+    elif post_rate < float(min_watch_hit_rate):
+        status = "watch"
+    else:
+        status = "watch"
+    label = _trend_tuning_effect_label(status)
+    tone = _trend_tuning_effect_tone(status)
+    delta_text = _pct(delta) if delta is not None else "-"
+    pre_rate_text = _pct(pre_rate) if pre_rate is not None else "-"
+    post_rate_text = _pct(post_rate) if post_rate is not None else "-"
+
+    if status == "effective":
+        recommendation = "\u95e8\u63a7\u5e94\u7528\u540e\u547d\u4e2d\u6709\u6539\u5584\uff0c\u7ee7\u7eed\u6309\u5f53\u524d\u95e8\u69db\u6536\u96c6\u6837\u672c\u3002"
+    elif status == "negative":
+        recommendation = "\u95e8\u63a7\u5e94\u7528\u540e\u547d\u4e2d\u56de\u9000\uff0c\u4f18\u5148\u590d\u6838\u653e\u884c\u9519\u8bef\u6837\u672c\uff0c\u5fc5\u8981\u65f6\u56de\u6eda\u4e0a\u4e00\u7248\u3002"
+    elif status == "watch":
+        recommendation = "\u95e8\u63a7\u5e94\u7528\u540e\u672a\u51fa\u73b0\u8db3\u591f\u660e\u786e\u6539\u5584\uff0c\u6682\u65f6\u7ef4\u6301\u89c2\u5bdf\u3002"
+    else:
+        recommendation = "\u6837\u672c\u6216\u5bf9\u7167\u7248\u672c\u4e0d\u8db3\uff0c\u6682\u4e0d\u5224\u5b9a\u95e8\u63a7\u751f\u6548\u3002"
+
+    detail_rows: list[dict[str, object]] = []
+    for _index, row in reversed(target_indexes[-max(1, int(limit)) :]):
+        hits, known, rate = _policy_effect_rate_parts(row)
+        detail_rows.append(
+            {
+                "title": f"{row.get('updated_at', '-')} | {row.get('source', '-')} | {row.get('effect_label', '-')}",
+                "body": (
+                    f"\u7248\u672c {row.get('version_id', '-')} | "
+                    f"\u653e\u884c\u547d\u4e2d {hits}/{known} ({_pct(rate) if rate is not None else '-'}) | "
+                    f"\u6837\u672c {_safe_int(row.get('sample_count'))} | Replay\u51c0\u503c {_safe_int(row.get('replay_guard_net')):+d}"
+                ),
+                "version_id": row.get("version_id", "-"),
+                "updated_at": row.get("updated_at", "-"),
+                "source": row.get("source", "-"),
+                "known_allow_count": known,
+                "allow_hits": hits,
+                "allow_hit_rate": rate,
+                "allow_hit_rate_text": _pct(rate) if rate is not None else "-",
+                "effect_status": row.get("effect_status", "-"),
+                "effect_label": row.get("effect_label", "-"),
+            }
+        )
+
+    metrics = [
+        {"label": "\u751f\u6548\u72b6\u6001", "value": label, "tone": tone},
+        {"label": "\u540e\u7eed\u547d\u4e2d", "value": f"{post_hits}/{post_known} ({post_rate_text})", "tone": tone if post_known else "neutral"},
+        {"label": "\u524d\u5e8f\u547d\u4e2d", "value": f"{pre_hits}/{pre_known} ({pre_rate_text})", "tone": "neutral"},
+        {"label": "\u547d\u4e2d\u53d8\u5316", "value": delta_text, "tone": "good" if delta is not None and delta >= 0 else "bad" if delta is not None else "neutral"},
+    ]
+    summary_text = (
+        f"{label} | \u6765\u6e90 {latest.get('source', '-')} | "
+        f"\u540e\u7eed {post_hits}/{post_known} ({post_rate_text}) | "
+        f"\u524d\u5e8f {pre_hits}/{pre_known} ({pre_rate_text}) | "
+        f"\u53d8\u5316 {delta_text}"
+    )
+    return {
+        "status": status,
+        "label": label,
+        "tone": tone,
+        "summary_text": summary_text,
+        "recommendation_text": recommendation,
+        "latest_version_id": latest.get("version_id", "-"),
+        "latest_source": latest.get("source", "-"),
+        "latest_updated_at": latest.get("updated_at", "-"),
+        "previous_version_id": previous.get("version_id", "-") if previous else "-",
+        "post_known_count": post_known,
+        "pre_known_count": pre_known,
+        "post_allow_hits": post_hits,
+        "pre_allow_hits": pre_hits,
+        "post_allow_hit_rate": post_rate,
+        "pre_allow_hit_rate": pre_rate,
+        "post_allow_hit_rate_text": post_rate_text,
+        "pre_allow_hit_rate_text": pre_rate_text,
+        "allow_hit_rate_delta": delta,
+        "allow_hit_rate_delta_text": delta_text,
+        "min_known_samples": max(1, int(min_known_samples)),
+        "metrics": metrics,
+        "rows": detail_rows,
     }
 
 
@@ -6301,6 +6479,7 @@ def build_high_accuracy_strategy_dashboard(
     )
     policy_effect_review = build_strategy_policy_effect_review(policy_history or [], settlement_items)
     policy_stability_monitor = _as_mapping(policy_effect_review.get("stability_monitor"))
+    trend_tuning_effect_review = build_strategy_trend_tuning_effect_review(policy_effect_review)
     policy_tuning_guard = build_strategy_policy_tuning_guard(policy_stability_monitor, source="dashboard")
     market_entropy_backtest = build_market_entropy_backtest_summary(settlement_items)
     handicap_margin_backtest = build_handicap_margin_backtest_summary(settlement_items)
@@ -6430,6 +6609,11 @@ def build_high_accuracy_strategy_dashboard(
             else "bad"
             if str(policy_effect_review.get("latest_status") or "") == "negative"
             else "neutral",
+        },
+        {
+            "label": "\u95e8\u63a7\u751f\u6548",
+            "value": str(trend_tuning_effect_review.get("label") or "-"),
+            "tone": str(trend_tuning_effect_review.get("tone") or "neutral"),
         },
         {
             "label": "\u7248\u672c\u7a33\u5b9a",
@@ -6595,6 +6779,7 @@ def build_high_accuracy_strategy_dashboard(
         "allowlist_settlement_summary": allowlist_summary,
         "allowlist_tuning": allowlist_tuning,
         "policy_effect_review": policy_effect_review,
+        "trend_tuning_effect_review": trend_tuning_effect_review,
         "policy_stability_monitor": policy_stability_monitor,
         "policy_tuning_guard": policy_tuning_guard,
         "market_entropy_backtest": market_entropy_backtest,

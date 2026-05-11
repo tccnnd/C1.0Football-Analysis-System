@@ -24,6 +24,7 @@ from v24_app.ui_modules import (
     build_agent_replay_downgrade_backtest_summary,
     build_agent_replay_guard_tuning_recommendation,
     build_strategy_policy_effect_review,
+    build_strategy_trend_tuning_effect_review,
     build_strategy_policy_stability_monitor,
     build_strategy_policy_tuning_guard,
     build_handicap_margin_backtest_summary,
@@ -390,6 +391,79 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertEqual(len(review["rows"][0]["sample_rows"]), 3)
         self.assertEqual(review["rows"][0]["sample_rows"][0]["replay_guard"], "\u89e6\u53d1")
         self.assertIn("RiskGuardian", review["rows"][0]["sample_rows"][0]["summary"])
+
+    def test_strategy_trend_tuning_effect_review_waits_without_history(self) -> None:
+        review = build_strategy_policy_effect_review([], [])
+
+        effect = build_strategy_trend_tuning_effect_review(review)
+
+        self.assertEqual(effect["status"], "collecting")
+        self.assertEqual(effect["post_known_count"], 0)
+        self.assertEqual(effect["allow_hit_rate_delta_text"], "-")
+
+    def test_strategy_trend_tuning_effect_review_waits_for_post_samples(self) -> None:
+        history = [
+            {"version_id": "v1", "updated_at": "2026-05-01 10:00:00", "source": "manual"},
+            {"version_id": "v2", "updated_at": "2026-05-02 10:00:00", "source": "release_quality_trend"},
+        ]
+        settlements = [
+            {"timestamp": "2026-05-01 11:00:00", "strategy_admission_decision": "allow", "is_correct": True},
+            {"timestamp": "2026-05-01 12:00:00", "strategy_admission_decision": "allow", "is_correct": False},
+            {"timestamp": "2026-05-01 13:00:00", "strategy_admission_decision": "allow", "is_correct": True},
+            {"timestamp": "2026-05-02 11:00:00", "strategy_admission_decision": "allow", "is_correct": True},
+            {"timestamp": "2026-05-02 12:00:00", "strategy_admission_decision": "allow", "is_correct": False},
+        ]
+
+        effect = build_strategy_trend_tuning_effect_review(build_strategy_policy_effect_review(history, settlements))
+
+        self.assertEqual(effect["status"], "collecting")
+        self.assertEqual(effect["latest_source"], "release_quality_trend")
+        self.assertEqual(effect["post_known_count"], 2)
+
+    def test_strategy_trend_tuning_effect_review_marks_effective_improvement(self) -> None:
+        history = [
+            {"version_id": "v1", "updated_at": "2026-05-01 10:00:00", "source": "manual"},
+            {"version_id": "v2", "updated_at": "2026-05-02 10:00:00", "source": "release_quality_trend"},
+        ]
+        settlements = [
+            {"timestamp": "2026-05-01 11:00:00", "strategy_admission_decision": "allow", "is_correct": True},
+            {"timestamp": "2026-05-01 12:00:00", "strategy_admission_decision": "allow", "is_correct": False},
+            {"timestamp": "2026-05-01 13:00:00", "strategy_admission_decision": "allow", "is_correct": False},
+            {"timestamp": "2026-05-02 11:00:00", "strategy_admission_decision": "allow", "is_correct": True},
+            {"timestamp": "2026-05-02 12:00:00", "strategy_admission_decision": "allow", "is_correct": True},
+            {"timestamp": "2026-05-02 13:00:00", "strategy_admission_decision": "allow", "is_correct": True},
+        ]
+
+        review = build_strategy_policy_effect_review(history, settlements)
+        effect = build_strategy_trend_tuning_effect_review(review)
+        dashboard = build_high_accuracy_strategy_dashboard({}, settlements, history)
+
+        self.assertEqual(effect["status"], "effective")
+        self.assertEqual(effect["post_allow_hit_rate_text"], "100.0%")
+        self.assertEqual(effect["pre_allow_hit_rate_text"], "33.3%")
+        self.assertEqual(effect["allow_hit_rate_delta_text"], "66.7%")
+        self.assertEqual(dashboard["trend_tuning_effect_review"]["status"], "effective")
+
+    def test_strategy_trend_tuning_effect_review_marks_negative_drop(self) -> None:
+        history = [
+            {"version_id": "v1", "updated_at": "2026-05-01 10:00:00", "source": "manual"},
+            {"version_id": "v2", "updated_at": "2026-05-02 10:00:00", "source": "release_quality_trend"},
+        ]
+        settlements = [
+            {"timestamp": "2026-05-01 11:00:00", "strategy_admission_decision": "allow", "is_correct": True},
+            {"timestamp": "2026-05-01 12:00:00", "strategy_admission_decision": "allow", "is_correct": True},
+            {"timestamp": "2026-05-01 13:00:00", "strategy_admission_decision": "allow", "is_correct": True},
+            {"timestamp": "2026-05-02 11:00:00", "strategy_admission_decision": "allow", "is_correct": False},
+            {"timestamp": "2026-05-02 12:00:00", "strategy_admission_decision": "allow", "is_correct": False},
+            {"timestamp": "2026-05-02 13:00:00", "strategy_admission_decision": "allow", "is_correct": True},
+        ]
+
+        effect = build_strategy_trend_tuning_effect_review(build_strategy_policy_effect_review(history, settlements))
+
+        self.assertEqual(effect["status"], "negative")
+        self.assertEqual(effect["post_allow_hit_rate_text"], "33.3%")
+        self.assertEqual(effect["pre_allow_hit_rate_text"], "100.0%")
+        self.assertEqual(effect["allow_hit_rate_delta_text"], "-66.7%")
 
     def test_strategy_policy_effect_review_pinpoints_negative_drivers(self) -> None:
         history = [
