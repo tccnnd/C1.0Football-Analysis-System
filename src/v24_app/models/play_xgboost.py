@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 import json
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,7 @@ class BasePlayXGBoostModel:
         self._last_train_attempt: datetime | None = None
         self._meta_cache_signature: dict[str, int] | None = None
         self._meta_cache: dict[str, Any] = {}
+        self._model_lock = threading.RLock()
 
     @staticmethod
     def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -205,10 +207,11 @@ class BasePlayXGBoostModel:
             **{key: value for key, value in dataset_meta.items() if key not in {"class_names", "usable_count"}},
         }
         self.meta_file.write_text(json.dumps(meta_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        self._meta_cache_signature = self._meta_signature()
-        self._meta_cache = dict(meta_payload)
-        self._model = model
-        self._model_ready = True
+        with self._model_lock:
+            self._meta_cache_signature = self._meta_signature()
+            self._meta_cache = dict(meta_payload)
+            self._model = model
+            self._model_ready = True
         return {
             "trained": True,
             "reason": "ok",
@@ -221,30 +224,33 @@ class BasePlayXGBoostModel:
         }
 
     def _load_model(self) -> None:
-        if self._model is not None or self._model_ready:
-            return
-        if xgb is None or not self.model_file.exists():
-            return
-        meta = self._load_meta()
-        class_names = meta.get("class_names", [])
-        if not self._is_model_compatible(meta) or not isinstance(class_names, list):
-            self._model = None
-            self._model_ready = False
-            return
-        try:
-            model = xgb.XGBClassifier(objective="multi:softprob", num_class=len(class_names))
-            model.load_model(str(self.model_file))
-            self._model = model
-            self._model_ready = True
-        except Exception:
-            self._model = None
-            self._model_ready = False
+        with self._model_lock:
+            if self._model is not None or self._model_ready:
+                return
+            if xgb is None or not self.model_file.exists():
+                return
+            meta = self._load_meta()
+            class_names = meta.get("class_names", [])
+            if not self._is_model_compatible(meta) or not isinstance(class_names, list):
+                self._model = None
+                self._model_ready = False
+                return
+            try:
+                model = xgb.XGBClassifier(objective="multi:softprob", num_class=len(class_names))
+                model.load_model(str(self.model_file))
+                self._model = model
+                self._model_ready = True
+            except Exception:
+                self._model = None
+                self._model_ready = False
 
     def _predict_from_features(self, feature_map: dict[str, float]) -> dict[str, Any]:
         meta = self._load_meta()
         class_names = meta.get("class_names", [])
         self._load_model()
-        if self._model is None or np is None or not isinstance(class_names, list) or not class_names:
+        with self._model_lock:
+            model = self._model
+        if model is None or np is None or not isinstance(class_names, list) or not class_names:
             return {
                 "model_ready": False,
                 "label": None,
@@ -254,7 +260,7 @@ class BasePlayXGBoostModel:
             }
         try:
             vector = np.array([self._feature_vector(feature_map)], dtype=float)
-            probs = self._model.predict_proba(vector)[0]
+            probs = model.predict_proba(vector)[0]
         except Exception:
             return {
                 "model_ready": False,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 import json
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -89,6 +90,7 @@ class XGBoostProbabilityModel:
         self._last_train_attempt: datetime | None = None
         self._meta_cache_signature: dict[str, int] | None = None
         self._meta_cache: dict[str, Any] = {}
+        self._model_lock = threading.RLock()
 
     @staticmethod
     def build_estimator() -> Any:
@@ -345,10 +347,11 @@ class XGBoostProbabilityModel:
             "model": "xgb_v0_match_outcome",
         }
         self.meta_file.write_text(json.dumps(meta_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        self._meta_cache_signature = self._meta_signature()
-        self._meta_cache = dict(meta_payload)
-        self._model = model
-        self._model_ready = True
+        with self._model_lock:
+            self._meta_cache_signature = self._meta_signature()
+            self._meta_cache = dict(meta_payload)
+            self._model = model
+            self._model_ready = True
         return {
             "trained": True,
             "reason": "ok",
@@ -367,33 +370,36 @@ class XGBoostProbabilityModel:
         self._train_from_samples(samples)
 
     def _load_model(self) -> None:
-        if self._model is not None or self._model_ready:
-            return
-        if xgb is None or not self.model_file.exists():
-            return
-        meta = self._load_meta()
-        if not self._is_model_compatible(meta):
-            self._model = None
-            self._model_ready = False
-            return
-        try:
-            model = xgb.XGBClassifier(objective="multi:softprob", num_class=3)
-            model.load_model(str(self.model_file))
-            self._model = model
-            self._model_ready = True
-        except Exception:
-            self._model = None
-            self._model_ready = False
+        with self._model_lock:
+            if self._model is not None or self._model_ready:
+                return
+            if xgb is None or not self.model_file.exists():
+                return
+            meta = self._load_meta()
+            if not self._is_model_compatible(meta):
+                self._model = None
+                self._model_ready = False
+                return
+            try:
+                model = xgb.XGBClassifier(objective="multi:softprob", num_class=3)
+                model.load_model(str(self.model_file))
+                self._model = model
+                self._model_ready = True
+            except Exception:
+                self._model = None
+                self._model_ready = False
 
     def _predict_with_model(self, feature_map: dict[str, float]) -> ProbabilityTriple | None:
         if np is None:
             return None
         self._load_model()
-        if self._model is None:
+        with self._model_lock:
+            model = self._model
+        if model is None:
             return None
         try:
             vector = np.array([self._feature_vector(feature_map)], dtype=float)
-            probs = self._model.predict_proba(vector)[0]
+            probs = model.predict_proba(vector)[0]
             if len(probs) != 3:
                 return None
             return float(probs[0]), float(probs[1]), float(probs[2])

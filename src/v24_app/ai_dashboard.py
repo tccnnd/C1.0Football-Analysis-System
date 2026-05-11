@@ -44,6 +44,7 @@ from .core import (
     run_play_model_backtest,
     STATSBOMB_SANDBOX_FEWSHOT_FILE,
     train_play_models_now,
+    warmup_prediction_models,
 )
 from .ui_modules import (
     build_background_task_rows,
@@ -885,6 +886,8 @@ class SmartMatchDashboard:
         self.current_nav_index = 0
         self.current_view = "home"
         self.result_recovery_running = False
+        self.model_warmup_running = False
+        self.model_warmup_report: dict[str, object] = {}
         self.background_tasks = BackgroundTaskCenter(
             max_thread_workers=4,
             max_process_workers=2,
@@ -919,6 +922,7 @@ class SmartMatchDashboard:
         self._mark_stale_result_recovery_runs()
         self._build_layout()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._start_model_warmup()
         self.refresh()
         self._schedule_auto_refresh()
         self._schedule_auto_result_recovery()
@@ -1524,7 +1528,46 @@ class SmartMatchDashboard:
         canvas.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 14))
         return canvas
 
+    def _start_model_warmup(self) -> None:
+        if self.model_warmup_running:
+            return
+        if str(self.model_warmup_report.get("status") or "") == "ready":
+            return
+        self.model_warmup_running = True
+        self._log_event("INFO", "启动预测模型后台预热")
+
+        def runner() -> None:
+            try:
+                report = warmup_prediction_models()
+            except Exception as exc:
+                report = {
+                    "status": "error",
+                    "ready_count": 0,
+                    "total_count": 0,
+                    "items": [],
+                    "elapsed_seconds": 0.0,
+                    "error": str(exc),
+                    "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                }
+            try:
+                self.root.after(0, lambda payload=report: self._finish_model_warmup(payload))
+            except Exception:
+                self.model_warmup_running = False
+                self.model_warmup_report = dict(report)
+
+        threading.Thread(target=runner, daemon=True).start()
+
+    def _finish_model_warmup(self, report: dict[str, object]) -> None:
+        self.model_warmup_running = False
+        self.model_warmup_report = dict(report)
+        ready_count = int(report.get("ready_count", 0) or 0)
+        total_count = int(report.get("total_count", 0) or 0)
+        elapsed = float(report.get("elapsed_seconds", 0.0) or 0.0)
+        status = str(report.get("status") or "-")
+        self._log_event("INFO", f"模型预热完成: {status} {ready_count}/{total_count} ({elapsed:.2f}s)")
+
     def refresh(self, force_live: bool = False, cache_only: bool = False) -> None:
+        self._start_model_warmup()
         if cache_only:
             self._log_event("INFO", "\u624b\u52a8\u8bfb\u53d6\u56de\u9000\u7f13\u5b58")
             self.status_var.set("\u6b63\u5728\u8bfb\u53d6\u56de\u9000\u7f13\u5b58...")

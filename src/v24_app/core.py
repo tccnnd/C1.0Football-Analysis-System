@@ -4,6 +4,7 @@ import json
 import hashlib
 import shutil
 import subprocess
+import time
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -11784,6 +11785,63 @@ def get_xgb_training_status() -> dict:
 
 def train_xgb_v0_now(force_min_samples: int | None = None) -> dict:
     return XGBOOST_MODEL.train_now(force_min_samples=force_min_samples)
+
+
+def _prediction_model_warmup_targets() -> list[tuple[str, object]]:
+    return [
+        ("xgb_outcome", XGBOOST_MODEL),
+        ("total_goals", TOTAL_GOALS_MODEL),
+        ("scoreline", SCORELINE_MODEL),
+        ("volatile_scoreline", VOLATILE_SCORELINE_MODEL),
+    ]
+
+
+def warmup_prediction_models() -> dict:
+    started = time.perf_counter()
+    items: list[dict] = []
+    ready_count = 0
+    for name, model in _prediction_model_warmup_targets():
+        item_started = time.perf_counter()
+        model_file = getattr(model, "model_file", None)
+        model_exists = bool(isinstance(model_file, Path) and model_file.exists())
+        item = {
+            "model": name,
+            "model_exists": model_exists,
+            "ready": False,
+            "status": "missing_model" if not model_exists else "pending",
+        }
+        try:
+            loader = getattr(model, "_load_model", None)
+            if callable(loader):
+                loader()
+            ready = bool(getattr(model, "_model_ready", False))
+            item["ready"] = ready
+            item["status"] = "ready" if ready else ("missing_model" if not model_exists else "not_ready")
+            if ready:
+                ready_count += 1
+        except Exception as exc:
+            item["status"] = "error"
+            item["error"] = str(exc)
+        item["elapsed_seconds"] = round(time.perf_counter() - item_started, 4)
+        items.append(item)
+
+    total = len(items)
+    if ready_count == total and total > 0:
+        status = "ready"
+    elif any(item.get("status") == "error" for item in items):
+        status = "error"
+    elif ready_count > 0:
+        status = "partial"
+    else:
+        status = "not_ready"
+    return {
+        "status": status,
+        "ready_count": ready_count,
+        "total_count": total,
+        "items": items,
+        "elapsed_seconds": round(time.perf_counter() - started, 4),
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
 
 
 def get_play_model_training_status() -> dict:
