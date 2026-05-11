@@ -4209,18 +4209,227 @@ def _load_state_items_summary(filename: str, *, date_key: str, year_key: str | N
     return summary
 
 
+TRAINING_HEALTH_MIN_XGB_SAMPLES = 300
+TRAINING_HEALTH_MIN_VALID_FEATURES = 300
+TRAINING_HEALTH_MIN_VALID_FEATURE_RATIO = 0.95
+TRAINING_HEALTH_MIN_LABEL_CLASSES = 3
+TRAINING_HEALTH_MIN_CLASS_COUNT = 30
+TRAINING_HEALTH_MIN_LEAGUES = 5
+TRAINING_HEALTH_MIN_CLUB_HISTORY = 100
+
+
+def _int_count_mapping(payload: object) -> dict[str, int]:
+    if not isinstance(payload, dict):
+        return {}
+    counts: dict[str, int] = {}
+    for key, value in payload.items():
+        try:
+            count = int(value or 0)
+        except Exception:
+            continue
+        counts[str(key)] = count
+    return counts
+
+
+def _training_health_issue(code: str, severity: str, message: str, recommendation: str) -> dict[str, str]:
+    return {
+        "code": code,
+        "severity": severity,
+        "message": message,
+        "recommendation": recommendation,
+    }
+
+
+def _build_training_health_diagnostics(
+    *,
+    xgb_samples: dict,
+    club_history: dict,
+    world_cup_history: dict,
+    statsbomb_events: dict,
+    rating_pools: dict,
+) -> dict:
+    issues: list[dict[str, str]] = []
+
+    sample_count = int(xgb_samples.get("sample_count", 0) or 0)
+    valid_feature_count = int(xgb_samples.get("valid_feature_count", 0) or 0)
+    valid_feature_ratio = valid_feature_count / sample_count if sample_count > 0 else 0.0
+    label_counts = _int_count_mapping(xgb_samples.get("label_counts", {}))
+    present_label_counts = [count for count in label_counts.values() if count > 0]
+    label_class_count = len(present_label_counts)
+    min_class_count = min(present_label_counts) if present_label_counts else 0
+    league_count = int(xgb_samples.get("league_count", 0) or 0)
+    date_start = xgb_samples.get("date_start")
+    date_end = xgb_samples.get("date_end")
+    has_date_range = bool(date_start and date_end)
+
+    if sample_count < TRAINING_HEALTH_MIN_XGB_SAMPLES:
+        issues.append(
+            _training_health_issue(
+                "xgb_sample_count_low",
+                "blocking",
+                f"XGB样本数不足: {sample_count}/{TRAINING_HEALTH_MIN_XGB_SAMPLES}",
+                "继续导入历史赛果样本，优先补齐最近赛季和主流联赛。",
+            )
+        )
+    if valid_feature_count < TRAINING_HEALTH_MIN_VALID_FEATURES:
+        issues.append(
+            _training_health_issue(
+                "xgb_valid_feature_count_low",
+                "blocking",
+                f"XGB有效特征样本不足: {valid_feature_count}/{TRAINING_HEALTH_MIN_VALID_FEATURES}",
+                "检查样本特征生成链路，确保导入样本都带有完整features字段。",
+            )
+        )
+    if sample_count > 0 and valid_feature_ratio < TRAINING_HEALTH_MIN_VALID_FEATURE_RATIO:
+        issues.append(
+            _training_health_issue(
+                "xgb_valid_feature_ratio_low",
+                "warning",
+                f"XGB有效特征比例偏低: {valid_feature_ratio:.1%}",
+                "清理无特征样本或重新生成缺失特征，避免训练集噪声扩大。",
+            )
+        )
+    if label_class_count < TRAINING_HEALTH_MIN_LABEL_CLASSES:
+        issues.append(
+            _training_health_issue(
+                "xgb_label_class_missing",
+                "warning",
+                f"XGB标签类别覆盖不足: {label_class_count}/{TRAINING_HEALTH_MIN_LABEL_CLASSES}",
+                "补充主胜、平局、客胜三类都有结果的历史样本。",
+            )
+        )
+    if present_label_counts and min_class_count < TRAINING_HEALTH_MIN_CLASS_COUNT:
+        issues.append(
+            _training_health_issue(
+                "xgb_class_balance_low",
+                "warning",
+                f"XGB最小标签样本偏低: {min_class_count}/{TRAINING_HEALTH_MIN_CLASS_COUNT}",
+                "扩大历史样本或在训练时降低小样本类别的过拟合风险。",
+            )
+        )
+    if league_count < TRAINING_HEALTH_MIN_LEAGUES:
+        issues.append(
+            _training_health_issue(
+                "xgb_league_coverage_low",
+                "warning",
+                f"XGB联赛覆盖不足: {league_count}/{TRAINING_HEALTH_MIN_LEAGUES}",
+                "优先补充不同联赛样本，避免策略只适配单一赛事环境。",
+            )
+        )
+    if not has_date_range:
+        issues.append(
+            _training_health_issue(
+                "xgb_date_range_missing",
+                "warning",
+                "XGB样本缺少可用日期范围",
+                "确保导入样本meta.match_date可解析，便于时间切分与回测。",
+            )
+        )
+
+    club_match_count = int(club_history.get("match_count", 0) or 0)
+    league_profile_count = int(club_history.get("league_profile_count", 0) or 0)
+    if club_match_count < TRAINING_HEALTH_MIN_CLUB_HISTORY:
+        issues.append(
+            _training_health_issue(
+                "club_history_low",
+                "warning",
+                f"俱乐部历史样本不足: {club_match_count}/{TRAINING_HEALTH_MIN_CLUB_HISTORY}",
+                "继续扩充联赛历史数据，用于球队状态和联赛画像特征。",
+            )
+        )
+    if club_match_count > 0 and league_profile_count <= 0:
+        issues.append(
+            _training_health_issue(
+                "league_profiles_missing",
+                "warning",
+                "已存在俱乐部历史，但缺少联赛画像",
+                "生成league_profiles，补齐不同联赛的进球、节奏和主场基准。",
+            )
+        )
+
+    statsbomb_match_count = int(statsbomb_events.get("match_count", 0) or 0)
+    statsbomb_review_sample_count = int(statsbomb_events.get("review_sample_count", 0) or 0)
+    if statsbomb_match_count > 0 and statsbomb_review_sample_count <= 0:
+        issues.append(
+            _training_health_issue(
+                "statsbomb_review_samples_missing",
+                "warning",
+                "StatsBomb事件存在，但复盘训练样本为0",
+                "将事件摘要转成复盘训练样本，补齐视频/事件复盘学习链路。",
+            )
+        )
+
+    has_blocking = any(issue.get("severity") == "blocking" for issue in issues)
+    status = "blocked" if has_blocking else "attention" if issues else "healthy"
+    return {
+        "status": status,
+        "issue_count": len(issues),
+        "blocking_count": sum(1 for issue in issues if issue.get("severity") == "blocking"),
+        "warning_count": sum(1 for issue in issues if issue.get("severity") == "warning"),
+        "issues": issues,
+        "xgb_trainability": {
+            "sample_count": sample_count,
+            "min_sample_count": TRAINING_HEALTH_MIN_XGB_SAMPLES,
+            "valid_feature_count": valid_feature_count,
+            "min_valid_feature_count": TRAINING_HEALTH_MIN_VALID_FEATURES,
+            "valid_feature_ratio": round(valid_feature_ratio, 4),
+            "min_valid_feature_ratio": TRAINING_HEALTH_MIN_VALID_FEATURE_RATIO,
+            "label_counts": label_counts,
+            "label_class_count": label_class_count,
+            "min_label_classes": TRAINING_HEALTH_MIN_LABEL_CLASSES,
+            "min_class_count": min_class_count,
+            "min_required_class_count": TRAINING_HEALTH_MIN_CLASS_COUNT,
+            "league_count": league_count,
+            "min_league_count": TRAINING_HEALTH_MIN_LEAGUES,
+            "date_start": date_start,
+            "date_end": date_end,
+            "has_date_range": has_date_range,
+        },
+        "history_readiness": {
+            "club_match_count": club_match_count,
+            "min_club_match_count": TRAINING_HEALTH_MIN_CLUB_HISTORY,
+            "club_date_start": club_history.get("date_start"),
+            "club_date_end": club_history.get("date_end"),
+            "league_profile_count": league_profile_count,
+            "world_cup_match_count": int(world_cup_history.get("match_count", 0) or 0),
+            "world_cup_year_start": world_cup_history.get("year_start"),
+            "world_cup_year_end": world_cup_history.get("year_end"),
+            "world_cup_year_count": int(world_cup_history.get("year_count", 0) or 0),
+            "statsbomb_match_count": statsbomb_match_count,
+            "statsbomb_review_sample_count": statsbomb_review_sample_count,
+            "statsbomb_review_feature_count": int(statsbomb_events.get("review_feature_count", 0) or 0),
+        },
+        "rating_readiness": {
+            "club_team_count": int(rating_pools.get("club_team_count", 0) or 0),
+            "national_team_count": int(rating_pools.get("national_team_count", 0) or 0),
+            "club_ready": int(rating_pools.get("club_team_count", 0) or 0) > 0,
+            "national_ready": int(rating_pools.get("national_team_count", 0) or 0) > 0,
+        },
+    }
+
+
 def get_training_data_coverage_status() -> dict:
     try:
         xgb_summary = STATE_STORE.load_xgb_samples_summary()
     except Exception:
         samples = STATE_STORE.load_xgb_samples()
         valid_samples = [item for item in samples if isinstance(item, dict) and isinstance(item.get("features"), dict)]
+        sample_label_counts: dict[str, int] = {}
+        for item in samples:
+            if not isinstance(item, dict):
+                continue
+            try:
+                label = str(int(item.get("label")))
+                sample_label_counts[label] = sample_label_counts.get(label, 0) + 1
+            except Exception:
+                pass
         sample_meta = [item.get("meta", {}) for item in valid_samples if isinstance(item.get("meta"), dict)]
         sample_dates = [normalize_text(meta.get("match_date", "")) for meta in sample_meta if normalize_text(meta.get("match_date", ""))]
         sample_leagues = sorted({normalize_text(meta.get("league", "")) for meta in sample_meta if normalize_text(meta.get("league", ""))})
         xgb_summary = {
             "sample_count": len(samples),
             "valid_feature_count": len(valid_samples),
+            "label_counts": sample_label_counts,
             "date_start": min(sample_dates) if sample_dates else None,
             "date_end": max(sample_dates) if sample_dates else None,
             "league_count": len(sample_leagues),
@@ -4241,10 +4450,11 @@ def get_training_data_coverage_status() -> dict:
 
     club_ratings = STATE_STORE.load_ratings()
     national_team_ratings = STATE_STORE.load_national_team_ratings()
-    return {
+    coverage = {
         "xgb_samples": {
             "sample_count": int(xgb_summary.get("sample_count", 0) or 0),
             "valid_feature_count": int(xgb_summary.get("valid_feature_count", 0) or 0),
+            "label_counts": _int_count_mapping(xgb_summary.get("label_counts", {})),
             "date_start": xgb_summary.get("date_start"),
             "date_end": xgb_summary.get("date_end"),
             "league_count": int(xgb_summary.get("league_count", 0) or 0),
@@ -4287,6 +4497,14 @@ def get_training_data_coverage_status() -> dict:
             "national_team_count": len(national_team_ratings),
         },
     }
+    coverage["training_health"] = _build_training_health_diagnostics(
+        xgb_samples=coverage["xgb_samples"],
+        club_history=coverage["club_history"],
+        world_cup_history=coverage["world_cup_history"],
+        statsbomb_events=coverage["statsbomb_events"],
+        rating_pools=coverage["rating_pools"],
+    )
+    return coverage
 
 
 def _current_play_model_policy() -> dict:

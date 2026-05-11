@@ -70,6 +70,15 @@ def build_model_training_overview_text(
     world_cup = coverage.get("world_cup_history", {}) if isinstance(coverage, Mapping) else {}
     statsbomb = coverage.get("statsbomb_events", {}) if isinstance(coverage, Mapping) else {}
     rating_pools = coverage.get("rating_pools", {}) if isinstance(coverage, Mapping) else {}
+    training_health = coverage.get("training_health", {}) if isinstance(coverage.get("training_health"), Mapping) else {}
+    health_issues = training_health.get("issues", []) if isinstance(training_health.get("issues"), list) else []
+    health_issue_lines = []
+    for index, issue in enumerate([row for row in health_issues if isinstance(row, Mapping)][:3], start=1):
+        health_issue_lines.append(
+            f"- 健康问题{index}: [{issue.get('severity', '-')}] {issue.get('message', '-')} | 建议: {issue.get('recommendation', '-')}"
+        )
+    if not health_issue_lines:
+        health_issue_lines.append("- 健康问题: -")
 
     lines = [
         "模型训练状态总览",
@@ -80,7 +89,10 @@ def build_model_training_overview_text(
         f"- 联赛样例: {', '.join(samples.get('league_examples', []) or []) or '-'}",
         f"- 联赛历史: {club_history.get('match_count', 0)} 场 | {club_history.get('date_start') or '-'} -> {club_history.get('date_end') or '-'} | profile={club_history.get('league_profile_count', 0)}",
         f"- 世界杯历史: {world_cup.get('match_count', 0)} 场 | {world_cup.get('year_start') or '-'}-{world_cup.get('year_end') or '-'} | 届数={world_cup.get('year_count', 0)}",
+        f"- StatsBomb事件: {statsbomb.get('match_count', 0)} 场 | 复盘样本={statsbomb.get('review_sample_count', 0)} | 特征={statsbomb.get('review_feature_count', 0)}",
         f"- ELO评分池: 俱乐部 {rating_pools.get('club_team_count', 0)} 队 | 国家队 {rating_pools.get('national_team_count', 0)} 队",
+        f"- 训练健康: {training_health.get('status', '-')} | blocking={training_health.get('blocking_count', 0)} | warning={training_health.get('warning_count', 0)}",
+        *health_issue_lines,
         "",
         "模型就绪",
         f"- 主胜平负 XGB: {_ready_text(xgb.get('model_ready'))} | 样本={xgb.get('sample_count', 0)} | updated={xgb.get('model_updated_at') or '-'}",
@@ -97,10 +109,6 @@ def build_model_training_overview_text(
         f"- 比分接管: enabled={scoreline_policy.get('takeover_enabled')} | 同向={float(scoreline_policy.get('regular_same_outcome_min_confidence', 0) or 0):.2f} | 跨向={scoreline_policy.get('regular_cross_outcome_enabled')}@{float(scoreline_policy.get('regular_cross_outcome_min_confidence', 0) or 0):.2f}",
         f"- 总进球接管: enabled={total_goals_policy.get('takeover_enabled')} | min_conf={float(total_goals_policy.get('min_confidence', 0) or 0):.2f}",
     ]
-    lines.insert(
-        9,
-        f"- StatsBomb事件: {statsbomb.get('match_count', 0)} 场 | 复盘样本={statsbomb.get('review_sample_count', 0)} | 特征={statsbomb.get('review_feature_count', 0)}",
-    )
     return "\n".join(lines)
 
 

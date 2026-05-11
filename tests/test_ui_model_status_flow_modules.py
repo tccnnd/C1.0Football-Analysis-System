@@ -55,6 +55,43 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
         self.assertIn("StatsBomb事件: 3 场", text)
         self.assertIn("复盘样本=2", text)
 
+    def test_model_training_overview_shows_training_health_issues(self) -> None:
+        text = build_model_training_overview_text(
+            xgb_status={},
+            play_model_status={},
+            ensemble_status={},
+            bayes_status={},
+            threshold_status={},
+            policy_status={},
+            coverage_status={
+                "xgb_samples": {"sample_count": 120, "valid_feature_count": 110, "league_count": 2},
+                "training_health": {
+                    "status": "blocked",
+                    "blocking_count": 1,
+                    "warning_count": 1,
+                    "issues": [
+                        {
+                            "code": "xgb_sample_count_low",
+                            "severity": "blocking",
+                            "message": "XGB样本数不足: 120/300",
+                            "recommendation": "继续导入历史赛果样本。",
+                        },
+                        {
+                            "code": "xgb_league_coverage_low",
+                            "severity": "warning",
+                            "message": "XGB联赛覆盖不足: 2/5",
+                            "recommendation": "补充不同联赛样本。",
+                        },
+                    ],
+                },
+            },
+        )
+
+        self.assertIn("训练健康: blocked", text)
+        self.assertIn("blocking=1", text)
+        self.assertIn("健康问题1: [blocking] XGB样本数不足: 120/300", text)
+        self.assertIn("建议: 继续导入历史赛果样本。", text)
+
     def test_ensemble_status_and_messages(self) -> None:
         status_text = build_ensemble_weight_status_text(
             {
