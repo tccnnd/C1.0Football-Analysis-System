@@ -8933,7 +8933,7 @@ def _write_draw_specialist_backtest_markdown(result: dict) -> str | None:
         f"- Draw Precision: {summary.get('precision_text', '-')}",
         f"- Draw Recall: {summary.get('recall_text', '-')}",
         f"- Recommendation: {summary.get('recommendation', '-')}",
-        f"- Draw Guard Policy: enabled={bool(guard_policy.get('enabled', True))}, min_score={_safe_float(guard_policy.get('min_score'), 0.0):.2f}, weak_odds_buckets={', '.join(sorted(str(key) for key in weak_odds_buckets)) or '-'}",
+        f"- Draw Release Guard: active={bool(guard_policy.get('enabled', True))}, score_floor={_safe_float(guard_policy.get('min_score'), 0.0):.2f}, blocked_odds={', '.join(sorted(str(key) for key in weak_odds_buckets)) or '-'}",
         "",
         "## Score Buckets",
         "",

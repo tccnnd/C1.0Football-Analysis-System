@@ -23,12 +23,12 @@ def _draw_guard_policy_text(result: Mapping[str, object]) -> str:
         summary = result.get("summary", {}) if isinstance(result.get("summary"), Mapping) else {}
         policy = summary.get("draw_release_guard_policy") if isinstance(summary.get("draw_release_guard_policy"), Mapping) else {}
     if not isinstance(policy, Mapping) or not policy:
-        return "Draw guard policy: -"
+        return "Draw release guard: -"
     weak_buckets = policy.get("weak_odds_buckets") if isinstance(policy.get("weak_odds_buckets"), Mapping) else {}
     bucket_text = ", ".join(sorted(str(key) for key in weak_buckets)) if weak_buckets else "-"
     return (
-        f"Draw guard policy: enabled={bool(policy.get('enabled', True))} | "
-        f"min_score={_safe_float(policy.get('min_score'), 0.0):.2f} | weak_odds={bucket_text}"
+        f"Draw release guard: active={bool(policy.get('enabled', True))} | "
+        f"score_floor={_safe_float(policy.get('min_score'), 0.0):.2f} | blocked_odds={bucket_text}"
     )
 
 
@@ -523,9 +523,9 @@ def build_draw_specialist_backtest_card_rows(result: Mapping[str, object] | obje
             "tone": "good" if _safe_float(guard.get("lift"), 0.0) > 0.03 else "warning" if _safe_int(guard.get("sample_count")) else "neutral",
         },
         {
-            "title": "Draw guard policy",
+            "title": "Draw release guard",
             "body": _draw_guard_policy_text(resolved),
-            "tone": "warning" if "weak_odds=-" not in _draw_guard_policy_text(resolved) else "neutral",
+            "tone": "warning" if "blocked_odds=-" not in _draw_guard_policy_text(resolved) else "neutral",
         },
     ]
 
