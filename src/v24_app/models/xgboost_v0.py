@@ -389,7 +389,9 @@ class XGBoostProbabilityModel:
 
     def predict(self, context: EnsembleContext) -> ModelOutput:
         feature_map = self._feature_map(context)
-        self._maybe_train()
+        self._load_model()
+        if self._model is None:
+            self._maybe_train()
         probs = self._predict_with_model(feature_map)
         using_fallback = probs is None
         if probs is None:

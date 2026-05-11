@@ -222,6 +222,52 @@ _LIVE_PLAY_THRESHOLD_CACHE: dict[str, object] = {
     "thresholds": {},
     "meta": {},
 }
+_RECENT_SETTLEMENTS_CACHE: dict[tuple[object, ...], list[dict]] = {}
+_MARKET_SNAPSHOT_RECORD_CACHE: dict[str, object] = {
+    "signature": None,
+    "items": {},
+}
+_HIGH_ACCURACY_STRATEGY_STATUS_CACHE: dict[str, object] = {
+    "cache_key": None,
+    "status": {},
+}
+_JC_BUCKET_LIVE_FEEDBACK_CACHE: dict[str, object] = {
+    "cache_key": None,
+    "feedback": {},
+}
+
+
+def _path_signature(path: Path) -> tuple[int, int]:
+    try:
+        stat = path.stat()
+        return int(stat.st_mtime_ns), int(stat.st_size)
+    except OSError:
+        return 0, 0
+
+
+def _state_store_path_signature(attribute: str) -> tuple[int, int] | None:
+    path = getattr(STATE_STORE, attribute, None)
+    return _path_signature(path) if isinstance(path, Path) else None
+
+
+def _recent_settlements_signature(limit: int) -> tuple[object, ...] | None:
+    settlements_signature = _state_store_path_signature("settlements_file")
+    history_signature = _state_store_path_signature("analysis_history_file")
+    if settlements_signature is None or history_signature is None:
+        return None
+    return (
+        int(limit),
+        id(STATE_STORE),
+        id(get_recent_settlements),
+        settlements_signature,
+        history_signature,
+        _path_signature(VIDEO_REVIEW_FILE),
+        _path_signature(STATSBOMB_EVENT_SUMMARIES_FILE),
+    )
+
+
+def _copy_dict_rows(rows: Iterable[dict]) -> list[dict]:
+    return [dict(item) for item in rows if isinstance(item, dict)]
 
 
 @dataclass
@@ -1170,7 +1216,13 @@ def _market_snapshot_history_for_match(match: AppMatch) -> list[dict]:
     if not isinstance(match, AppMatch):
         return []
     try:
-        items = STATE_STORE.load_market_snapshots()
+        signature = _path_signature(STATE_STORE.market_snapshots_file)
+        if _MARKET_SNAPSHOT_RECORD_CACHE.get("signature") == signature:
+            items = _MARKET_SNAPSHOT_RECORD_CACHE.get("items", {})
+        else:
+            items = STATE_STORE.load_market_snapshots()
+            _MARKET_SNAPSHOT_RECORD_CACHE["signature"] = signature
+            _MARKET_SNAPSHOT_RECORD_CACHE["items"] = items
     except Exception:
         return []
     if not isinstance(items, dict):
@@ -5699,6 +5751,12 @@ def build_jc_bucket_live_feedback(
     *,
     limit: int = JC_BUCKET_LIVE_FEEDBACK_WINDOW,
 ) -> dict[str, dict]:
+    use_cache = settlements is None
+    cache_key = _recent_settlements_signature(max(0, int(limit))) if use_cache else None
+    if use_cache and cache_key is not None and _JC_BUCKET_LIVE_FEEDBACK_CACHE.get("cache_key") == cache_key:
+        cached_feedback = _JC_BUCKET_LIVE_FEEDBACK_CACHE.get("feedback")
+        if isinstance(cached_feedback, dict):
+            return {str(key): dict(value) for key, value in cached_feedback.items() if isinstance(value, dict)}
     if settlements is None:
         try:
             settlements = get_recent_settlements(limit=max(0, int(limit)))
@@ -5816,6 +5874,11 @@ def build_jc_bucket_live_feedback(
             "deviation": round(deviation, 4) if deviation is not None else None,
             "official_count": sum(1 for row in rows if not row.get("is_shadow")),
             "shadow_count": sum(1 for row in rows if row.get("is_shadow")),
+        }
+    if use_cache and cache_key is not None:
+        _JC_BUCKET_LIVE_FEEDBACK_CACHE["cache_key"] = cache_key
+        _JC_BUCKET_LIVE_FEEDBACK_CACHE["feedback"] = {
+            str(key): dict(value) for key, value in feedback.items() if isinstance(value, dict)
         }
     return feedback
 
@@ -5956,6 +6019,15 @@ def _apply_high_accuracy_strategy_breakers(status: dict, settlements: list[dict]
 
 
 def get_high_accuracy_strategy_status() -> dict:
+    recent_signature = _recent_settlements_signature(HIGH_ACCURACY_STRATEGY_BREAKER_WINDOW * 4)
+    cache_key = (
+        _path_signature(HIGH_ACCURACY_STRATEGY_FILE),
+        recent_signature,
+    ) if recent_signature is not None else None
+    if cache_key is not None and _HIGH_ACCURACY_STRATEGY_STATUS_CACHE.get("cache_key") == cache_key:
+        cached_status = _HIGH_ACCURACY_STRATEGY_STATUS_CACHE.get("status")
+        if isinstance(cached_status, dict):
+            return dict(cached_status)
     if not HIGH_ACCURACY_STRATEGY_FILE.exists():
         return {
             "enabled": False,
@@ -5989,7 +6061,11 @@ def get_high_accuracy_strategy_status() -> dict:
         settlements = get_recent_settlements(limit=HIGH_ACCURACY_STRATEGY_BREAKER_WINDOW * 4)
     except Exception:
         settlements = []
-    return _apply_high_accuracy_strategy_breakers(status, settlements)
+    resolved = _apply_high_accuracy_strategy_breakers(status, settlements)
+    if cache_key is not None:
+        _HIGH_ACCURACY_STRATEGY_STATUS_CACHE["cache_key"] = cache_key
+        _HIGH_ACCURACY_STRATEGY_STATUS_CACHE["status"] = dict(resolved)
+    return resolved
 
 
 def _load_cached_statsbomb_state_json(path: Path) -> dict:
@@ -7762,7 +7838,7 @@ def calibrate_play_model_policy_now(
     search_profile: str = "fast",
 ) -> dict:
     previous_policy_report = _load_play_model_policy_report()
-    _, validation_items = _validation_split_samples(
+    train_items, validation_items = _validation_split_samples(
         validation_ratio=validation_ratio,
         min_validation_samples=min_validation_samples,
     )
@@ -7973,7 +8049,7 @@ def calibrate_play_model_policy_now(
             "holdout_sample_count": len(holdout_rows),
             "date_start": min(sample_dates) if sample_dates else None,
             "date_end": max(sample_dates) if sample_dates else None,
-            "ratio": round(len(validation_items) / max(len(STATE_STORE.load_xgb_samples()), 1), 4),
+            "ratio": round(len(validation_items) / max(len(train_items) + original_validation_count, 1), 4),
             "original_validation_count": original_validation_count,
             "max_validation_samples": max_validation_samples,
             "search_profile": resolved_search_profile,
@@ -8038,7 +8114,7 @@ def run_play_model_backtest(
     max_validation_samples: int = 1000,
     write_report: bool = True,
 ) -> dict:
-    _, validation_items = _validation_split_samples(
+    train_items, validation_items = _validation_split_samples(
         validation_ratio=validation_ratio,
         min_validation_samples=min_validation_samples,
     )
@@ -8186,7 +8262,7 @@ def run_play_model_backtest(
             "truncated": len(validation_items) < original_validation_count,
             "date_start": min(dates) if dates else None,
             "date_end": max(dates) if dates else None,
-            "ratio": round(len(validation_items) / max(len(STATE_STORE.load_xgb_samples()), 1), 4),
+            "ratio": round(len(validation_items) / max(len(train_items) + original_validation_count, 1), 4),
         },
         "metrics": finalized,
         "improvement": improvement,
@@ -8490,7 +8566,7 @@ def run_draw_specialist_backtest(
     max_validation_samples: int = 300,
     write_report: bool = True,
 ) -> dict:
-    _, validation_items = _validation_split_samples(
+    train_items, validation_items = _validation_split_samples(
         validation_ratio=validation_ratio,
         min_validation_samples=min_validation_samples,
     )
@@ -8618,7 +8694,7 @@ def run_draw_specialist_backtest(
             "skipped": skipped,
             "date_start": min(dates) if dates else None,
             "date_end": max(dates) if dates else None,
-            "ratio": round(len(validation_items) / max(len(STATE_STORE.load_xgb_samples()), 1), 4),
+            "ratio": round(len(validation_items) / max(len(train_items) + original_validation_count, 1), 4),
         },
         "summary": summary,
         "score_buckets": _draw_bucket_rows(score_buckets, baseline_draw_rate=baseline_draw_rate),
@@ -11029,6 +11105,16 @@ def _match_statsbomb_event_summary(settlement: dict, index: dict[str, dict]) -> 
 
 
 def get_recent_settlements(limit: int = 20) -> list[dict]:
+    try:
+        resolved_limit = int(limit)
+    except Exception:
+        resolved_limit = 20
+    cache_key = _recent_settlements_signature(resolved_limit)
+    if cache_key is not None:
+        cached = _RECENT_SETTLEMENTS_CACHE.get(cache_key)
+        if isinstance(cached, list):
+            return _copy_dict_rows(cached)
+
     items = STATE_STORE.load_settlements()
     video_reviews_by_match: dict[str, dict] = {}
     try:
@@ -11081,9 +11167,12 @@ def get_recent_settlements(limit: int = 20) -> list[dict]:
                     record["statsbomb_source_url"] = statsbomb_record.get("source_url")
             enriched.append(record)
         items = enriched
-    if limit <= 0:
-        return items
-    return items[-limit:]
+    result = items if resolved_limit <= 0 else items[-resolved_limit:]
+    if cache_key is not None:
+        if len(_RECENT_SETTLEMENTS_CACHE) > 16:
+            _RECENT_SETTLEMENTS_CACHE.clear()
+        _RECENT_SETTLEMENTS_CACHE[cache_key] = _copy_dict_rows(result)
+    return _copy_dict_rows(result)
 
 
 def get_result_recovery_runs(limit: int = 50) -> list[dict]:
