@@ -188,6 +188,7 @@ _RECENT_FORM_CACHE: dict[str, object] = {
     "signature": None,
     "team_histories": {},
 }
+_RECENT_FORM_CACHE_VERSION = 1
 _ENSEMBLE_WEIGHT_CACHE: dict[str, object] = {
     "mtime": None,
     "weights": dict(DEFAULT_ENSEMBLE_WEIGHTS),
@@ -9219,16 +9220,79 @@ def _resolved_ratings(
     return float(home_rating), float(away_rating), ratings_map
 
 
-def _recent_form_state_signature() -> tuple[float, float]:
+def _recent_form_cache_path() -> Path:
+    state_dir = getattr(STATE_STORE, "state_dir", PROJECT_DIR / "data" / "state")
     try:
-        sample_mtime = STATE_STORE.xgb_samples_file.stat().st_mtime
+        resolved_state_dir = state_dir if isinstance(state_dir, Path) else Path(str(state_dir))
     except Exception:
-        sample_mtime = 0.0
+        resolved_state_dir = PROJECT_DIR / "data" / "state"
+    return resolved_state_dir / "recent_form_team_histories.json"
+
+
+def _recent_form_state_file_signature(attribute: str) -> dict[str, object]:
+    path = getattr(STATE_STORE, attribute, None)
+    if path is None:
+        return {"source_file": "", "mtime_ns": 0, "size_bytes": 0}
+    if isinstance(path, Path):
+        signature = _state_file_signature(path)
+        return {"source_file": str(path), **signature}
     try:
-        settlement_mtime = STATE_STORE.settlements_file.stat().st_mtime
+        resolved_path = Path(str(path))
+        signature = _state_file_signature(resolved_path)
+        return {"source_file": str(resolved_path), **signature}
     except Exception:
-        settlement_mtime = 0.0
-    return sample_mtime, settlement_mtime
+        return {"source_file": str(path), "mtime_ns": 0, "size_bytes": 0}
+
+
+def _recent_form_state_signature() -> dict[str, object]:
+    return {
+        "version": _RECENT_FORM_CACHE_VERSION,
+        "xgb_samples": _recent_form_state_file_signature("xgb_samples_file"),
+        "settlements": _recent_form_state_file_signature("settlements_file"),
+    }
+
+
+def _normalize_recent_form_team_histories(payload: object) -> dict[str, list[dict]] | None:
+    if not isinstance(payload, dict):
+        return None
+    normalized: dict[str, list[dict]] = {}
+    for team_name, entries in payload.items():
+        if not isinstance(entries, list):
+            continue
+        normalized[str(team_name)] = [dict(item) for item in entries if isinstance(item, dict)]
+    return normalized
+
+
+def _load_recent_form_team_histories_cache(signature: dict[str, object]) -> dict[str, list[dict]] | None:
+    cache_path = _recent_form_cache_path()
+    if not cache_path.exists():
+        return None
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(payload, dict) or payload.get("source_signature") != signature:
+        return None
+    return _normalize_recent_form_team_histories(payload.get("team_histories"))
+
+
+def _save_recent_form_team_histories_cache(signature: dict[str, object], team_histories: dict[str, list[dict]]) -> None:
+    cache_path = _recent_form_cache_path()
+    history_entry_count = sum(len(entries) for entries in team_histories.values() if isinstance(entries, list))
+    payload = {
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "source_signature": signature,
+        "team_count": len(team_histories),
+        "history_entry_count": history_entry_count,
+        "team_histories": team_histories,
+    }
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = cache_path.with_name(f"{cache_path.name}.tmp")
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        tmp_path.replace(cache_path)
+    except Exception:
+        pass
 
 
 def _recent_form_team_histories() -> dict[str, list[dict]]:
@@ -9238,10 +9302,17 @@ def _recent_form_team_histories() -> dict[str, list[dict]]:
     if cached_signature == signature and isinstance(cached_histories, dict):
         return cached_histories
 
+    cached_file_histories = _load_recent_form_team_histories_cache(signature)
+    if cached_file_histories is not None:
+        _RECENT_FORM_CACHE["signature"] = signature
+        _RECENT_FORM_CACHE["team_histories"] = cached_file_histories
+        return cached_file_histories
+
     team_histories = build_team_histories_from_state(
         sample_items=STATE_STORE.load_xgb_samples(),
         settlement_items=STATE_STORE.load_settlements(),
     )
+    _save_recent_form_team_histories_cache(signature, team_histories)
     _RECENT_FORM_CACHE["signature"] = signature
     _RECENT_FORM_CACHE["team_histories"] = team_histories
     return team_histories
