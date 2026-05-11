@@ -18,6 +18,7 @@ from .core import (
     AppMatch,
     apply_strategy_admission_policy_update,
     auto_settle_finished_matches,
+    build_historical_strategy_replay_samples,
     build_result_recovery_snapshot_audit,
     create_video_review,
     extract_video_review_frames_now,
@@ -5399,12 +5400,14 @@ class SmartMatchDashboard:
         settlements = list(reversed(get_recent_settlements(limit=200)))
         policy_history = get_strategy_admission_policy_history(limit=20)
         release_loop = self._strategy_release_recovery_loop(settlements)
+        historical_replay = build_historical_strategy_replay_samples(status, historical_limit=50000, max_samples=1000)
         dashboard = build_high_accuracy_strategy_dashboard(
             status,
             settlements,
             policy_history,
             get_statsbomb_event_baseline(),
             get_statsbomb_sandbox_fewshot_memory(),
+            historical_replay,
         )
         release_pool_rows = self._strategy_release_pool_rows(settlements, release_loop=release_loop)
         shell = self._page_shell(
@@ -5537,6 +5540,31 @@ class SmartMatchDashboard:
         for row in error_attribution.get("rows", []) if isinstance(error_attribution.get("rows"), list) else []:
             if isinstance(row, dict):
                 self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
+
+        historical_replay = dashboard.get("historical_strategy_replay", {}) if isinstance(dashboard.get("historical_strategy_replay"), dict) else {}
+        historical_error_attribution = dashboard.get("historical_error_attribution", {}) if isinstance(dashboard.get("historical_error_attribution"), dict) else {}
+        source_counts = historical_replay.get("source_counts", {}) if isinstance(historical_replay.get("source_counts"), dict) else {}
+        source_text = " / ".join(f"{key}:{value}" for key, value in list(source_counts.items())[:3]) if source_counts else "-"
+        self._strategy_section_title(right, "\u5386\u53f2\u7b56\u7565\u56de\u653e\u9519\u56e0")
+        if int(historical_replay.get("sample_count") or 0):
+            self._strategy_row(
+                right,
+                f"\u56de\u653e\u6837\u672c: {historical_replay.get('sample_count', 0)} | \u547d\u4e2d {historical_replay.get('hit_rate_text', '-')}",
+                (
+                    f"\u9519\u56e0\u9879 {historical_error_attribution.get('miss_count', 0)} | "
+                    f"\u4e3b\u56e0 {historical_error_attribution.get('top_reason', '-')} | "
+                    f"\u6765\u6e90 {source_text}"
+                ),
+            )
+            for row in historical_error_attribution.get("rows", []) if isinstance(historical_error_attribution.get("rows"), list) else []:
+                if isinstance(row, dict):
+                    self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
+        else:
+            self._strategy_row(
+                right,
+                "\u6682\u65e0\u5386\u53f2\u56de\u653e\u6837\u672c",
+                "\u9700\u5148\u751f\u6210\u7b56\u7565\u6c60\uff0c\u5e76\u786e\u4fdd\u5386\u53f2\u5e02\u573a\u6837\u672c\u80fd\u547d\u4e2d\u5f53\u524d\u7b56\u7565\u95e8\u69db\u3002",
+            )
 
         agent_trace_replay = dashboard.get("agent_trace_replay", {}) if isinstance(dashboard.get("agent_trace_replay"), dict) else {}
         self._strategy_section_title(right, "Agent Replay 复盘")

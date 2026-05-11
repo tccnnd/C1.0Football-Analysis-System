@@ -492,6 +492,16 @@ ERROR_ATTRIBUTION_LABELS = {
     "shadow_observation": "\u89c2\u5bdf\u7b56\u7565\u5931\u8bef",
     "unknown": "\u672a\u5b9a\u4e49\u9519\u56e0",
 }
+ERROR_ATTRIBUTION_WEIGHTS = {
+    "small_sample": 0.25,
+}
+
+
+def _error_attribution_rank_key(item: tuple[str, int]) -> tuple[float, int, str]:
+    code, count = item
+    weight = _safe_float(ERROR_ATTRIBUTION_WEIGHTS.get(code), 1.0)
+    priority = 1 if code == "small_sample" else 0
+    return (-count * weight, priority, ERROR_ATTRIBUTION_LABELS.get(code, code))
 
 
 def _pick_side(value: object) -> str:
@@ -3269,7 +3279,7 @@ def build_strategy_error_attribution_summary(
                     "body": base_body,
                 }
             )
-    ranked = sorted(counts.items(), key=lambda item: (-item[1], ERROR_ATTRIBUTION_LABELS.get(item[0], item[0])))
+    ranked = sorted(counts.items(), key=_error_attribution_rank_key)
     top_reason = "-"
     if ranked:
         top_reason = f"{ERROR_ATTRIBUTION_LABELS.get(ranked[0][0], ranked[0][0])} {ranked[0][1]}\u6b21"
@@ -5112,8 +5122,29 @@ def build_strategy_allowlist_tuning_recommendation(
     *,
     base_min_confidence: float = 0.50,
     base_active_strategy_min: int = 1,
+    historical_error_attribution: Mapping[str, object] | object | None = None,
+    historical_replay: Mapping[str, object] | object | None = None,
 ) -> dict[str, object]:
     summary = build_strategy_allowlist_settlement_summary(settlements)
+    historical_errors = _as_mapping(historical_error_attribution)
+    historical_replay_summary = _as_mapping(historical_replay)
+    historical_reason_counts = _as_mapping(historical_errors.get("reason_counts"))
+    historical_sample_count = _safe_int(historical_replay_summary.get("sample_count"))
+    historical_miss_count = _safe_int(historical_errors.get("miss_count") or historical_replay_summary.get("miss_count"))
+    historical_hit_rate = historical_replay_summary.get("hit_rate")
+    historical_hit_rate_value = _safe_float(historical_hit_rate, -1.0) if historical_hit_rate is not None else None
+    historical_high_conf_misses = _safe_int(historical_reason_counts.get("high_confidence_miss"))
+    historical_gap_misses = _safe_int(historical_reason_counts.get("historical_gap"))
+    historical_ready = historical_sample_count >= 100 and historical_miss_count >= 10
+    historical_weak = historical_hit_rate_value is not None and 0.0 <= historical_hit_rate_value < 0.65
+    historical_pressure = bool(
+        historical_ready
+        and (
+            historical_weak
+            or historical_high_conf_misses >= max(12, int(historical_sample_count * 0.16))
+            or historical_gap_misses >= max(12, int(historical_sample_count * 0.16))
+        )
+    )
     known_count = _safe_int(summary.get("known_count"))
     hit_rate = summary.get("hit_rate")
     hit_rate_value = _safe_float(hit_rate, 0.0) if hit_rate is not None else None
@@ -5130,7 +5161,23 @@ def build_strategy_allowlist_tuning_recommendation(
     tone = "neutral"
 
     if known_count < 5:
-        reasons.append(f"\u653e\u884c\u5df2\u7ed3\u7b97\u6837\u672c\u4ec5 {known_count} \u573a\uff0c\u4e0d\u8db3\u4ee5\u81ea\u52a8\u6539\u95e8\u69db\u3002")
+        if historical_ready:
+            action = "history_watch"
+            label = "\u53c2\u8003\u5386\u53f2\u56de\u653e"
+            tone = "warning" if historical_pressure else "neutral"
+            reasons.append(
+                f"\u771f\u5b9e\u653e\u884c\u5df2\u7ed3\u7b97\u6837\u672c\u4ec5 {known_count} \u573a\uff0c\u4e0d\u76f4\u63a5\u6df7\u5165\u5386\u53f2\u56de\u653e\u547d\u4e2d\u7387\u3002"
+            )
+            reasons.append(
+                f"\u5386\u53f2\u56de\u653e {historical_sample_count} \u9879 | \u547d\u4e2d {historical_replay_summary.get('hit_rate_text') or '-'} | "
+                f"\u9ad8\u7f6e\u4fe1\u5931\u8bef {historical_high_conf_misses} | \u5386\u53f2\u80cc\u79bb {historical_gap_misses}\u3002"
+            )
+            if historical_pressure:
+                reasons.append("\u5386\u53f2\u56de\u653e\u663e\u793a\u95e8\u69db\u5b58\u5728\u538b\u529b\uff0c\u5efa\u8bae\u5148\u4ee5\u89c2\u5bdf\u65b9\u5f0f\u6536\u7a84\u653e\u884c\u8303\u56f4\uff0c\u7b49\u771f\u5b9e\u7ed3\u7b97\u6837\u672c\u8fbe\u6807\u540e\u518d\u81ea\u52a8\u5e94\u7528\u3002")
+                medium_risk_allowed = False
+                risk_policy = "\u5386\u53f2\u56de\u653e\u627f\u538b\uff1a\u4e2d\u98ce\u9669\u5148\u964d\u4e3a\u89c2\u5bdf"
+        else:
+            reasons.append(f"\u653e\u884c\u5df2\u7ed3\u7b97\u6837\u672c\u4ec5 {known_count} \u573a\uff0c\u4e0d\u8db3\u4ee5\u81ea\u52a8\u6539\u95e8\u69db\u3002")
     elif (
         (hit_rate_value is not None and hit_rate_value < 0.55)
         or high_conf_misses >= max(2, known_count // 4)
@@ -5150,6 +5197,17 @@ def build_strategy_allowlist_tuning_recommendation(
         if high_strategy_value is not None and high_strategy_value < 0.60:
             reasons.append(f"\u9ad8\u51c6\u7b56\u7565\u547d\u4e2d {summary.get('high_strategy_summary')}\uff0c\u5efa\u8bae\u589e\u52a0\u6b63\u5f0f\u7b56\u7565\u6570\u8981\u6c42\u3002")
             next_active_strategy_min = max(next_active_strategy_min, 2)
+        if historical_ready:
+            reasons.append(
+                f"\u5386\u53f2\u56de\u653e\u53c2\u8003\uff1a{historical_sample_count} \u9879 | \u547d\u4e2d {historical_replay_summary.get('hit_rate_text') or '-'} | "
+                f"\u4e3b\u56e0 {historical_errors.get('top_reason') or '-'}\u3002"
+            )
+            if historical_high_conf_misses >= max(12, int(historical_sample_count * 0.12)) and not historical_weak:
+                next_min_confidence += 0.02
+                medium_risk_allowed = False
+                risk_policy = "\u4ec5\u5141\u8bb8\u4f4e\u98ce\u9669\uff0c\u5386\u53f2\u9ad8\u7f6e\u4fe1\u5931\u8bef\u504f\u591a"
+            if historical_gap_misses >= max(12, int(historical_sample_count * 0.12)):
+                next_active_strategy_min = max(next_active_strategy_min, 2)
     elif hit_rate_value is not None and hit_rate_value >= 0.70 and (high_strategy_value is None or high_strategy_value >= 0.70):
         action = "hold"
         label = "\u7ef4\u6301\u95e8\u69db"
@@ -5162,7 +5220,7 @@ def build_strategy_allowlist_tuning_recommendation(
         reasons.append("\u653e\u884c\u8868\u73b0\u672a\u8fbe\u5230\u653e\u5bbd\u6761\u4ef6\uff0c\u4f46\u4e5f\u672a\u89e6\u53d1\u660e\u663e\u6536\u7d27\u6761\u4ef6\u3002")
 
     next_min_confidence = round(min(0.78, max(0.45, next_min_confidence)), 2)
-    if action in {"collect", "hold", "watch"}:
+    if action in {"collect", "hold", "watch", "history_watch"}:
         next_min_confidence = round(_safe_float(base_min_confidence), 2)
 
     rows = [
@@ -5171,6 +5229,15 @@ def build_strategy_allowlist_tuning_recommendation(
         ("\u6700\u4f4e\u7f6e\u4fe1", f"{_safe_float(base_min_confidence):.2f} -> {next_min_confidence:.2f}"),
         ("\u9ad8\u51c6\u7b56\u7565\u6570", f"{max(1, _safe_int(base_active_strategy_min, 1))} -> {next_active_strategy_min}"),
         ("\u98ce\u9669\u9650\u5236", risk_policy),
+        (
+            "\u5386\u53f2\u56de\u653e",
+            (
+                f"{historical_sample_count} \u9879 | \u547d\u4e2d {historical_replay_summary.get('hit_rate_text') or '-'} | "
+                f"\u9519\u56e0 {historical_errors.get('top_reason') or '-'}"
+                if historical_sample_count
+                else "-"
+            ),
+        ),
         ("\u89e6\u53d1\u539f\u56e0", "\n".join(reasons) if reasons else "-"),
     ]
     return {
@@ -5182,6 +5249,11 @@ def build_strategy_allowlist_tuning_recommendation(
         "next_active_strategy_min": next_active_strategy_min,
         "medium_risk_allowed": medium_risk_allowed,
         "risk_policy": risk_policy,
+        "historical_sample_count": historical_sample_count,
+        "historical_miss_count": historical_miss_count,
+        "historical_pressure": historical_pressure,
+        "historical_error_attribution": dict(historical_errors),
+        "historical_replay": dict(historical_replay_summary),
         "policy_update": {
             "min_confidence": next_min_confidence,
             "active_strategy_min": next_active_strategy_min,
@@ -5861,6 +5933,7 @@ def build_high_accuracy_strategy_dashboard(
     policy_history: Sequence[Mapping[str, object]] | object | None = None,
     statsbomb_event_baseline: Mapping[str, object] | object | None = None,
     statsbomb_fewshot_memory: Mapping[str, object] | object | None = None,
+    historical_replay: Mapping[str, object] | object | None = None,
     *,
     include_statsbomb_backfill_candidates: bool = False,
 ) -> dict[str, object]:
@@ -5871,11 +5944,22 @@ def build_high_accuracy_strategy_dashboard(
     breaker = _as_mapping(resolved.get("breaker"))
     settlement_summary = build_high_accuracy_strategy_settlement_summary(settlement_items)
     error_attribution = build_strategy_error_attribution_summary(settlement_items)
+    historical_replay_summary = _as_mapping(historical_replay)
+    historical_replay_settlements = [
+        item
+        for item in _as_list(historical_replay_summary.get("settlements"))
+        if isinstance(item, Mapping)
+    ]
+    historical_error_attribution = build_strategy_error_attribution_summary(historical_replay_settlements)
     agent_trace_replay = build_agent_trace_replay_summary(settlement_items)
     agent_replay_downgrade = build_agent_replay_downgrade_backtest_summary(settlement_items)
     agent_replay_guard_tuning = build_agent_replay_guard_tuning_recommendation(settlement_items)
     allowlist_summary = build_strategy_allowlist_settlement_summary(settlement_items)
-    allowlist_tuning = build_strategy_allowlist_tuning_recommendation(settlement_items)
+    allowlist_tuning = build_strategy_allowlist_tuning_recommendation(
+        settlement_items,
+        historical_error_attribution=historical_error_attribution,
+        historical_replay=historical_replay_summary,
+    )
     policy_effect_review = build_strategy_policy_effect_review(policy_history or [], settlement_items)
     policy_stability_monitor = _as_mapping(policy_effect_review.get("stability_monitor"))
     policy_tuning_guard = build_strategy_policy_tuning_guard(policy_stability_monitor, source="dashboard")
@@ -5936,6 +6020,19 @@ def build_high_accuracy_strategy_dashboard(
             "label": "\u7b56\u7565\u9519\u56e0",
             "value": str(error_attribution.get("top_reason") or "-"),
             "tone": "warning" if _safe_int(error_attribution.get("miss_count")) else "good",
+        },
+        {
+            "label": "\u5386\u53f2\u56de\u653e",
+            "value": (
+                f"{_safe_int(historical_replay_summary.get('sample_count'))} | {historical_replay_summary.get('hit_rate_text') or '-'}"
+                if _safe_int(historical_replay_summary.get("sample_count"))
+                else "-"
+            ),
+            "tone": "warning"
+            if _safe_int(historical_error_attribution.get("miss_count"))
+            else "good"
+            if _safe_int(historical_replay_summary.get("sample_count"))
+            else "neutral",
         },
         {
             "label": "Agent Replay",
@@ -6063,6 +6160,14 @@ def build_high_accuracy_strategy_dashboard(
         ),
         ("\u65f6\u95f4\u8303\u56f4", f"{validation.get('date_start') or '-'} -> {validation.get('date_end') or '-'}"),
         (
+            "\u5386\u53f2\u56de\u653e\u6837\u672c",
+            (
+                f"{_safe_int(historical_replay_summary.get('sample_count'))} | "
+                f"\u547d\u4e2d {historical_replay_summary.get('hit_rate_text') or '-'} | "
+                f"\u4e3b\u56e0 {historical_error_attribution.get('top_reason') or '-'}"
+            ),
+        ),
+        (
             "\u7ed3\u7b97\u547d\u4e2d",
             f"\u6b63\u5f0f {settlement_summary.get('official_summary_text')} | \u89c2\u5bdf {settlement_summary.get('shadow_summary_text')} | \u672a\u5224\u5b9a {_safe_int(settlement_summary.get('unknown_count'))}",
         ),
@@ -6101,6 +6206,8 @@ def build_high_accuracy_strategy_dashboard(
         "pool_rows": build_high_accuracy_strategy_pool_rows(resolved),
         "settlement_rows": build_high_accuracy_strategy_settlement_rows(settlement_items),
         "error_attribution": error_attribution,
+        "historical_strategy_replay": dict(historical_replay_summary),
+        "historical_error_attribution": historical_error_attribution,
         "agent_trace_replay": agent_trace_replay,
         "agent_replay_downgrade": agent_replay_downgrade,
         "agent_replay_guard_tuning": agent_replay_guard_tuning,

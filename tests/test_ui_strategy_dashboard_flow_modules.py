@@ -647,6 +647,74 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("\u547d\u4e2d", dashboard["settlement_rows"][0]["title"])
         self.assertIn("\u65ad\u8def\u5668\u5df2\u89e6\u53d1", dashboard["guidance_rows"][0]["title"])
 
+    def test_strategy_dashboard_keeps_historical_replay_attribution_separate(self) -> None:
+        historical_replay = {
+            "ok": True,
+            "sample_count": 2,
+            "match_count": 2,
+            "hit_count": 1,
+            "miss_count": 1,
+            "hit_rate_text": "50.0%",
+            "source_counts": {"unit_history": 2},
+            "settlements": [
+                {
+                    "league": "Replay League",
+                    "home_team": "A",
+                    "away_team": "B",
+                    "historical_replay": True,
+                    "high_accuracy_strategy_items": [
+                        {
+                            "role": "primary",
+                            "play_type": "market_1x2",
+                            "pick": "HOME",
+                            "actual": "HOME",
+                            "confidence": 0.68,
+                            "min_confidence": 0.60,
+                            "backtest_accuracy": 0.72,
+                            "backtest_samples": 180,
+                            "is_hit": True,
+                            "historical_replay": True,
+                        }
+                    ],
+                },
+                {
+                    "league": "Replay League",
+                    "home_team": "C",
+                    "away_team": "D",
+                    "historical_replay": True,
+                    "high_accuracy_strategy_items": [
+                        {
+                            "role": "primary",
+                            "play_type": "market_1x2",
+                            "pick": "HOME",
+                            "actual": "AWAY",
+                            "confidence": 0.72,
+                            "min_confidence": 0.60,
+                            "backtest_accuracy": 0.72,
+                            "backtest_samples": 180,
+                            "is_hit": False,
+                            "historical_replay": True,
+                        }
+                    ],
+                },
+            ],
+        }
+
+        dashboard = build_high_accuracy_strategy_dashboard(
+            {"enabled": True, "strategy_pool": []},
+            [],
+            historical_replay=historical_replay,
+        )
+
+        metrics = {item["label"]: item["value"] for item in dashboard["metrics"]}
+        self.assertEqual(metrics["\u771f\u5b9e\u547d\u4e2d"], "-")
+        self.assertEqual(metrics["\u5386\u53f2\u56de\u653e"], "2 | 50.0%")
+        self.assertEqual(dashboard["historical_strategy_replay"]["sample_count"], 2)
+        self.assertEqual(dashboard["historical_error_attribution"]["miss_count"], 1)
+        self.assertIn("high_confidence_miss", dashboard["historical_error_attribution"]["reason_counts"])
+        self.assertNotIn("data_missing", dashboard["historical_error_attribution"]["reason_counts"])
+        self.assertEqual(dashboard["error_attribution"]["miss_count"], 0)
+
     def test_strategy_pool_rows_handle_missing_status(self) -> None:
         self.assertEqual(build_high_accuracy_strategy_pool_rows({}), [])
         dashboard = build_high_accuracy_strategy_dashboard({"enabled": False, "reason": "not_calibrated"}, [])
@@ -841,6 +909,35 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("jc_live_downgraded", summary["reason_counts"])
         self.assertIn("jc_odds_drift", summary["reason_counts"])
         self.assertIn("\u9ad8\u7f6e\u4fe1\u5931\u8bef", summary["rows"][0]["body"])
+
+    def test_strategy_error_attribution_downranks_small_sample_as_top_reason(self) -> None:
+        settlements = []
+        for index in range(3):
+            settlements.append(
+                {
+                    "league": "L",
+                    "home_team": f"H{index}",
+                    "away_team": f"A{index}",
+                    "high_accuracy_strategy_items": [
+                        {
+                            "play_type": "market_1x2",
+                            "pick": "HOME",
+                            "actual": "AWAY",
+                            "confidence": 0.70 if index == 0 else 0.50,
+                            "min_confidence": 0.45,
+                            "backtest_accuracy": 0.50,
+                            "backtest_samples": 40,
+                            "is_hit": False,
+                        }
+                    ],
+                }
+            )
+
+        summary = build_strategy_error_attribution_summary(settlements)
+
+        self.assertEqual(summary["reason_counts"]["small_sample"], 3)
+        self.assertEqual(summary["reason_counts"]["high_confidence_miss"], 1)
+        self.assertIn("\u9ad8\u7f6e\u4fe1\u5931\u8bef", summary["top_reason"])
 
     def test_strategy_error_attribution_uses_statsbomb_event_evidence(self) -> None:
         settlements = [
@@ -2850,6 +2947,25 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertEqual(recommendation["action"], "collect")
         self.assertEqual(recommendation["next_min_confidence"], 0.5)
         self.assertIn("\u4e0d\u8db3", "\n".join(recommendation["reasons"]))
+
+    def test_strategy_allowlist_tuning_recommendation_uses_historical_replay_pressure(self) -> None:
+        recommendation = build_strategy_allowlist_tuning_recommendation(
+            [],
+            base_min_confidence=0.5,
+            historical_replay={"sample_count": 200, "miss_count": 60, "hit_rate": 0.70, "hit_rate_text": "70.0%"},
+            historical_error_attribution={
+                "miss_count": 60,
+                "top_reason": "\u9ad8\u7f6e\u4fe1\u5931\u8bef 50\u6b21",
+                "reason_counts": {"high_confidence_miss": 50, "small_sample": 5},
+            },
+        )
+
+        self.assertEqual(recommendation["action"], "history_watch")
+        self.assertTrue(recommendation["historical_pressure"])
+        self.assertFalse(recommendation["medium_risk_allowed"])
+        self.assertEqual(recommendation["next_min_confidence"], 0.5)
+        self.assertEqual(recommendation["historical_sample_count"], 200)
+        self.assertTrue(any(label == "\u5386\u53f2\u56de\u653e" and "200" in value for label, value in recommendation["rows"]))
 
 
 if __name__ == "__main__":

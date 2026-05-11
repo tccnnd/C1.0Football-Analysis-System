@@ -4722,6 +4722,7 @@ def _xgb_market_strategy_records(limit: int = 50000) -> list[dict]:
                 "play_type": "market_1x2",
                 "source_play_type": "market_1x2",
                 "pick": key_to_result.get(pick_key, "-"),
+                "actual": label_to_result[label],
                 "pick_side": pick_key,
                 "confidence": confidence,
                 "confidence_bucket": _confidence_bucket(confidence),
@@ -4730,6 +4731,8 @@ def _xgb_market_strategy_records(limit: int = 50000) -> list[dict]:
                 "odds_bucket": _odds_bucket(odds_by_side.get(pick_key, 0.0)),
                 "return_rate": round(_safe_float(meta.get("return_rate"), default=_safe_float(features.get("return_rate"), default=0.0)), 4),
                 "handicap_abs": round(abs(_safe_float(meta.get("handicap_line"), default=0.0)), 2),
+                "home_team": normalize_text(meta.get("home_team", "")) or "-",
+                "away_team": normalize_text(meta.get("away_team", "")) or "-",
                 "sample_source": normalize_text(meta.get("source", "")) or "xgb_training_samples",
             }
         )
@@ -4898,6 +4901,195 @@ def _strategy_candidate_from_rows(
         "edge": round(edge, 6),
         "wilson_lower": round(_wilson_lower_bound(hits, total), 6),
         "stability": stability,
+    }
+
+
+def _historical_strategy_record_dimension_values(record: dict) -> dict[str, str]:
+    league = normalize_text(record.get("league", "")) or "-"
+    year = normalize_text(record.get("year") or normalize_text(record.get("match_date", ""))[:4]) or "-"
+    confidence_bucket = normalize_text(record.get("confidence_bucket") or _confidence_bucket(record.get("confidence"))) or "unknown"
+    odds_bucket = normalize_text(record.get("odds_bucket") or _odds_bucket(record.get("pick_odds"))) or "unknown"
+    pick_side = normalize_text(record.get("pick_side", "")) or "-"
+    return {
+        "global": "all",
+        "year": year,
+        "league": league,
+        "odds_bucket": odds_bucket,
+        "confidence_bucket": confidence_bucket,
+        "pick_side": pick_side,
+        "league_odds_bucket": f"{league} | {odds_bucket}",
+        "league_confidence_bucket": f"{league} | {confidence_bucket}",
+    }
+
+
+def _historical_strategy_record_matches(strategy: dict, record: dict, *, min_confidence: float | None = None) -> bool:
+    play_type = normalize_text(strategy.get("play_type", ""))
+    if not play_type or normalize_text(record.get("play_type", "")) != play_type:
+        return False
+    record_confidence = _safe_float(record.get("confidence"), default=0.0)
+    strategy_min_confidence = _safe_float(strategy.get("min_confidence"), default=1.0)
+    if min_confidence is not None:
+        strategy_min_confidence = max(strategy_min_confidence, _safe_float(min_confidence, default=strategy_min_confidence))
+    if record_confidence < strategy_min_confidence:
+        return False
+    scope = normalize_text(strategy.get("scope", "global")) or "global"
+    scope_value = normalize_text(strategy.get("scope_value", "all")) or "all"
+    if scope == "global":
+        return True
+    if scope == "league":
+        return scope_value == (normalize_text(record.get("league", "")) or "-")
+    if scope == "jc_bucket":
+        bucket = strategy.get("jc_bucket", {}) if isinstance(strategy.get("jc_bucket"), dict) else {}
+        dimension = normalize_text(strategy.get("dimension") or bucket.get("dimension", ""))
+        bucket_value = normalize_text(bucket.get("bucket") or scope_value)
+        dimension_values = _historical_strategy_record_dimension_values(record)
+        return bool(dimension and bucket_value and normalize_text(dimension_values.get(dimension, "")) == bucket_value)
+    return False
+
+
+def _historical_strategy_replay_item(strategy: dict, record: dict) -> dict:
+    layer = strategy.get("layer", {}) if isinstance(strategy.get("layer"), dict) else {}
+    actual = normalize_text(record.get("actual", ""))
+    if not actual and record.get("is_hit") is True:
+        actual = normalize_text(record.get("pick", ""))
+    bucket = strategy.get("jc_bucket", {}) if isinstance(strategy.get("jc_bucket"), dict) else {}
+    return {
+        "role": strategy.get("effective_role") or strategy.get("role", "primary"),
+        "original_role": strategy.get("original_role") or strategy.get("role", "primary"),
+        "play_type": normalize_text(strategy.get("play_type", "")) or normalize_text(record.get("play_type", "")),
+        "scope": normalize_text(strategy.get("scope", "global")) or "global",
+        "scope_value": normalize_text(strategy.get("scope_value", "all")) or "all",
+        "dimension": strategy.get("dimension") or bucket.get("dimension"),
+        "data_layer": layer.get("data_layer", "-"),
+        "layer": dict(layer),
+        "pick": record.get("pick", "-"),
+        "actual": actual or "-",
+        "confidence": round(_safe_float(record.get("confidence"), default=0.0), 4),
+        "min_confidence": round(_safe_float(strategy.get("min_confidence"), default=0.0), 2),
+        "backtest_accuracy": strategy.get("accuracy", 0.0),
+        "backtest_hits": strategy.get("hit_count", 0),
+        "backtest_samples": strategy.get("sample_count", 0),
+        "wilson_lower": strategy.get("wilson_lower", 0.0),
+        "is_hit": bool(record.get("is_hit")),
+        "is_shadow": False,
+        "historical_replay": True,
+        "sample_source": record.get("sample_source", "-"),
+        "pick_side": record.get("pick_side", "-"),
+        "pick_odds": record.get("pick_odds"),
+        "odds_bucket": record.get("odds_bucket", "unknown"),
+        "confidence_bucket": record.get("confidence_bucket", "unknown"),
+        "jc_bucket": dict(bucket) if bucket else {},
+        "jc_context": {
+            "pick_odds": record.get("pick_odds"),
+            "confidence_bucket": record.get("confidence_bucket", "unknown"),
+            "odds_bucket": record.get("odds_bucket", "unknown"),
+        },
+    }
+
+
+def build_historical_strategy_replay_samples(
+    status: dict | None = None,
+    *,
+    historical_limit: int = 50000,
+    max_samples: int = 1000,
+    min_confidence: float | None = None,
+) -> dict:
+    resolved = status if isinstance(status, dict) else get_high_accuracy_strategy_status()
+    strategy_pool = resolved.get("strategy_pool", []) if isinstance(resolved.get("strategy_pool"), list) else []
+    if not strategy_pool and isinstance(resolved.get("strategy"), dict) and resolved.get("strategy"):
+        strategy_pool = [resolved["strategy"]]
+    strategies = [dict(item) for item in strategy_pool if isinstance(item, dict)]
+    if not strategies:
+        return {
+            "ok": False,
+            "reason": "no_strategy_pool",
+            "sample_count": 0,
+            "match_count": 0,
+            "hit_count": 0,
+            "miss_count": 0,
+            "hit_rate": None,
+            "hit_rate_text": "-",
+            "settlements": [],
+        }
+
+    records = _xgb_market_strategy_records(limit=max(0, int(historical_limit)))
+    sample_limit = max(0, int(max_samples))
+    settlements: list[dict] = []
+    matched_count = 0
+    hit_count = 0
+    miss_count = 0
+    source_counts: dict[str, int] = defaultdict(int)
+    strategy_counts: dict[str, int] = defaultdict(int)
+    dates: list[str] = []
+    for record in reversed(records):
+        if sample_limit and matched_count >= sample_limit:
+            break
+        if not isinstance(record, dict):
+            continue
+        replay_items: list[dict] = []
+        for strategy in strategies:
+            if not _historical_strategy_record_matches(strategy, record, min_confidence=min_confidence):
+                continue
+            replay_items.append(_historical_strategy_replay_item(strategy, record))
+            if sample_limit and matched_count + len(replay_items) >= sample_limit:
+                break
+        if not replay_items:
+            continue
+        if sample_limit:
+            replay_items = replay_items[: max(0, sample_limit - matched_count)]
+        if not replay_items:
+            continue
+        match_date = normalize_text(record.get("match_date", ""))
+        if match_date:
+            dates.append(match_date)
+        for item in replay_items:
+            matched_count += 1
+            if item.get("is_hit") is True:
+                hit_count += 1
+            else:
+                miss_count += 1
+            source_counts[normalize_text(item.get("sample_source", "")) or "unknown"] += 1
+            strategy_key = "|".join(
+                [
+                    normalize_text(item.get("scope", "")) or "global",
+                    normalize_text(item.get("scope_value", "")) or "all",
+                    normalize_text(item.get("play_type", "")) or "-",
+                    normalize_text(item.get("data_layer", "")) or "-",
+                    f"{_safe_float(item.get('min_confidence'), default=0.0):.2f}",
+                ]
+            )
+            strategy_counts[strategy_key] += 1
+        settlements.append(
+            {
+                "match_id": str(record.get("match_id") or ""),
+                "match_date": match_date,
+                "league": normalize_text(record.get("league", "")) or "-",
+                "home_team": normalize_text(record.get("home_team", "")) or "-",
+                "away_team": normalize_text(record.get("away_team", "")) or "-",
+                "is_correct": bool(record.get("is_hit")),
+                "historical_replay": True,
+                "sample_source": record.get("sample_source", "-"),
+                "high_accuracy_strategy_items": replay_items,
+            }
+        )
+
+    hit_rate = hit_count / matched_count if matched_count else None
+    return {
+        "ok": bool(matched_count),
+        "reason": "ok" if matched_count else "no_replay_match",
+        "sample_count": matched_count,
+        "match_count": len(settlements),
+        "hit_count": hit_count,
+        "miss_count": miss_count,
+        "hit_rate": round(hit_rate, 6) if hit_rate is not None else None,
+        "hit_rate_text": f"{hit_rate:.1%}" if hit_rate is not None else "-",
+        "date_start": min(dates) if dates else None,
+        "date_end": max(dates) if dates else None,
+        "historical_limit": int(historical_limit),
+        "max_samples": sample_limit,
+        "source_counts": dict(sorted(source_counts.items())),
+        "strategy_counts": dict(sorted(strategy_counts.items())),
+        "settlements": settlements,
     }
 
 

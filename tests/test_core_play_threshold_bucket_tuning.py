@@ -143,6 +143,87 @@ class CorePlayThresholdBucketTuningTests(unittest.TestCase):
         self.assertGreaterEqual(float(result["strategy"]["accuracy"]), 0.99)
         self.assertTrue(save_mock.called)
 
+    def test_build_historical_strategy_replay_samples_matches_strategy_pool(self) -> None:
+        status = {
+            "enabled": True,
+            "strategy_pool": [
+                {
+                    "role": "primary",
+                    "scope": "league",
+                    "scope_value": "Replay League",
+                    "play_type": "market_1x2",
+                    "min_confidence": 0.60,
+                    "accuracy": 0.72,
+                    "hit_count": 144,
+                    "sample_count": 200,
+                    "wilson_lower": 0.66,
+                    "layer": {"data_layer": "historical_market"},
+                }
+            ],
+        }
+        records = [
+            {
+                "match_id": "m1",
+                "match_date": "2026-01-01",
+                "league": "Replay League",
+                "home_team": "A",
+                "away_team": "B",
+                "play_type": "market_1x2",
+                "pick": "HOME",
+                "actual": "HOME",
+                "confidence": 0.64,
+                "confidence_bucket": "0.60-0.65",
+                "pick_side": "home",
+                "pick_odds": 1.7,
+                "odds_bucket": "1.51-1.80",
+                "is_hit": True,
+                "sample_source": "unit_history",
+            },
+            {
+                "match_id": "m2",
+                "match_date": "2026-01-02",
+                "league": "Replay League",
+                "home_team": "C",
+                "away_team": "D",
+                "play_type": "market_1x2",
+                "pick": "HOME",
+                "actual": "AWAY",
+                "confidence": 0.71,
+                "confidence_bucket": ">=0.65",
+                "pick_side": "home",
+                "pick_odds": 1.5,
+                "odds_bucket": "<=1.50",
+                "is_hit": False,
+                "sample_source": "unit_history",
+            },
+            {
+                "match_id": "m3",
+                "match_date": "2026-01-03",
+                "league": "Other League",
+                "play_type": "market_1x2",
+                "pick": "HOME",
+                "actual": "HOME",
+                "confidence": 0.8,
+                "is_hit": True,
+                "sample_source": "unit_history",
+            },
+        ]
+
+        with patch("v24_app.core._xgb_market_strategy_records", return_value=records):
+            result = core.build_historical_strategy_replay_samples(status, max_samples=10)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["sample_count"], 2)
+        self.assertEqual(result["match_count"], 2)
+        self.assertEqual(result["hit_count"], 1)
+        self.assertEqual(result["miss_count"], 1)
+        self.assertEqual(result["hit_rate_text"], "50.0%")
+        self.assertEqual(result["source_counts"], {"unit_history": 2})
+        miss_item = result["settlements"][0]["high_accuracy_strategy_items"][0]
+        self.assertTrue(miss_item["historical_replay"])
+        self.assertEqual(miss_item["actual"], "AWAY")
+        self.assertEqual(miss_item["backtest_samples"], 200)
+
     def test_run_jc_stratified_strategy_backtest_ranks_stable_bucket(self) -> None:
         records: list[dict] = []
         for index in range(30):
