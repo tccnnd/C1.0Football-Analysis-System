@@ -107,7 +107,10 @@ from .ui_modules import (
     build_strategy_policy_audit_report_filename,
     build_strategy_policy_audit_report_lines,
     build_strategy_policy_tuning_guard,
+    build_strategy_release_recovery_loop_report_filename,
+    build_strategy_release_recovery_loop_report_lines,
     build_strategy_release_recovery_alerts,
+    build_strategy_release_recovery_loop,
     build_strategy_release_pool_rows,
     compute_strategy_admission_counts,
     filter_strategy_admission_rows,
@@ -2925,6 +2928,7 @@ class SmartMatchDashboard:
         trend = self._settlement_trend_summary(settlements)
         allowlist_summary = build_strategy_allowlist_settlement_summary(settlements)
         allowlist_tuning = build_strategy_allowlist_tuning_recommendation(settlements)
+        release_loop = self._strategy_release_recovery_loop(settlements)
         recovery_summary = self._recovery_run_summary()
         lookback_days = self._recovery_lookback_days()
         snapshot_audit = self._result_recovery_snapshot_audit(lookback_days=lookback_days)
@@ -2939,6 +2943,19 @@ class SmartMatchDashboard:
             header,
             text="\u8fd0\u884c\u8bb0\u5f55",
             command=self.open_recovery_run_center,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=18,
+            pady=7,
+        ).pack(side=tk.RIGHT, padx=(0, 10))
+        tk.Button(
+            header,
+            text="\u653e\u884c\u95ed\u73af",
+            command=self.open_strategy_release_recovery_loop_window,
             bg=PANEL_2,
             fg=TEXT,
             activebackground="#172638",
@@ -3032,6 +3049,18 @@ class SmartMatchDashboard:
             ("\u8c03\u53c2\u5efa\u8bae", str(allowlist_tuning.get("label") or "-"), self._tone_color(str(allowlist_tuning.get("tone") or "neutral"))),
         ]:
             self._detail_metric(allowlist_frame, label, str(value), color)
+
+        release_loop_frame = tk.Frame(shell, bg=BG)
+        release_loop_frame.pack(fill=tk.X, pady=(0, 16))
+        for label, value, color in [
+            ("\u653e\u884c\u95ed\u73af", str(release_loop.get("health_text") or "-"), self._tone_color(str(release_loop.get("health") or "neutral"))),
+            ("\u653e\u884c\u603b\u6570", str(release_loop.get("total_release_count", 0)), TEXT),
+            ("\u5df2\u56de\u6536", str(release_loop.get("settled_count", 0)), GREEN),
+            ("\u5f85\u56de\u6536", str(release_loop.get("pending_count", 0)), YELLOW if int(release_loop.get("pending_count", 0) or 0) else GREEN),
+            ("\u7f3a\u5feb\u7167", str(release_loop.get("missing_snapshot_count", 0)), RED if int(release_loop.get("missing_snapshot_count", 0) or 0) else GREEN),
+            ("\u8d85\u671f", str(release_loop.get("stale_pending_count", 0)), RED if int(release_loop.get("stale_pending_count", 0) or 0) else GREEN),
+        ]:
+            self._detail_metric(release_loop_frame, label, str(value), color)
 
         body = tk.Frame(shell, bg=BG)
         body.pack(fill=tk.BOTH, expand=True)
@@ -3391,7 +3420,15 @@ class SmartMatchDashboard:
         self._finish_result_recovery_run_record(status="success", result=result, elapsed=elapsed)
         self.result_recovery_running = False
         self._set_result_recovery_controls_state()
-        message = f"\u8d5b\u679c\u56de\u6536\u5b8c\u6210: \u5b8c\u573a {fetched} | \u4fee\u590d\u5feb\u7167 {restored} | \u65b0\u7ed3\u7b97 {new_settled} | \u6570\u636e\u6e90 {source} | \u8017\u65f6 {elapsed:.2f}s"
+        report_path: Path | None = None
+        report_loop: dict[str, object] = {}
+        try:
+            report_path, report_loop = self._write_strategy_release_recovery_loop_report()
+            self._attach_strategy_release_loop_report_to_recovery_run(report_path, report_loop)
+        except Exception as exc:
+            self._log_event("ERROR", f"\u653e\u884c\u56de\u6536\u95ed\u73af\u62a5\u544a\u81ea\u52a8\u751f\u6210\u5931\u8d25: {exc}")
+        report_suffix = f" | \u95ed\u73af\u62a5\u544a {report_path.name}" if report_path is not None else ""
+        message = f"\u8d5b\u679c\u56de\u6536\u5b8c\u6210: \u5b8c\u573a {fetched} | \u4fee\u590d\u5feb\u7167 {restored} | \u65b0\u7ed3\u7b97 {new_settled} | \u6570\u636e\u6e90 {source} | \u8017\u65f6 {elapsed:.2f}s{report_suffix}"
         self.status_var.set(message)
         self._log_event("OK", message)
         self.summary_vars["hit_rate"].set(self._historical_hit_rate())
@@ -3400,6 +3437,8 @@ class SmartMatchDashboard:
         review_summary = build_result_recovery_review_summary(result.get("items", []) if isinstance(result.get("items"), list) else [])
         if int(review_summary.get("settlement_count", 0) or 0) > 0:
             detail = f"{detail}\n\n\u672c\u8f6e\u590d\u76d8:\n{review_summary.get('summary_text') or '-'}"
+        if report_path is not None:
+            detail = f"{detail}\n\n\u653e\u884c\u56de\u6536\u95ed\u73af\u62a5\u544a:\n{report_path}"
         self._schedule_auto_result_recovery()
         if show_popup:
             messagebox.showinfo("\u8d5b\u679c\u56de\u6536", detail)
@@ -5303,6 +5342,7 @@ class SmartMatchDashboard:
         admission_policy = admission_status.get("policy", {}) if isinstance(admission_status.get("policy"), dict) else {}
         settlements = list(reversed(get_recent_settlements(limit=200)))
         policy_history = get_strategy_admission_policy_history(limit=20)
+        release_loop = self._strategy_release_recovery_loop(settlements)
         dashboard = build_high_accuracy_strategy_dashboard(
             status,
             settlements,
@@ -5310,7 +5350,7 @@ class SmartMatchDashboard:
             get_statsbomb_event_baseline(),
             get_statsbomb_sandbox_fewshot_memory(),
         )
-        release_pool_rows = self._strategy_release_pool_rows(settlements)
+        release_pool_rows = self._strategy_release_pool_rows(settlements, release_loop=release_loop)
         shell = self._page_shell(
             "\u7b56\u7565\u770b\u677f",
             "\u5c55\u793a\u9ad8\u51c6\u7b56\u7565\u6c60\u3001\u56de\u6d4b\u5206\u5c42\u3001\u7a33\u5b9a\u6027\u548c\u771f\u5b9e\u7ed3\u7b97\u53cd\u9988",
@@ -5339,6 +5379,7 @@ class SmartMatchDashboard:
         self._strategy_toolbar_button(primary_tools, "\u5237\u65b0\u770b\u677f", self.open_strategy_library)
         self._strategy_toolbar_button(primary_tools, "\u8fdb\u7a0b\u9ad8\u51c6\u56de\u6d4b", self.run_high_accuracy_strategy_backtest_task)
         self._strategy_toolbar_button(primary_tools, "\u5bfc\u51fa\u653e\u884c\u6e05\u5355", self.export_strategy_allowlist, primary=True)
+        self._strategy_toolbar_button(primary_tools, "\u653e\u884c\u56de\u6536\u95ed\u73af", self.open_strategy_release_recovery_loop_window)
         self._strategy_toolbar_button(
             primary_tools,
             "\u5e94\u7528Replay\u5efa\u8bae",
@@ -5688,6 +5729,16 @@ class SmartMatchDashboard:
                 f"\u4e3b\u8981\u504f\u5dee: {allowlist_summary.get('top_failure', '-')}"
             ),
         )
+        self._strategy_row(
+            right,
+            f"\u653e\u884c\u56de\u6536\u95ed\u73af: {release_loop.get('health_text', '-')}",
+            (
+                f"{release_loop.get('summary_text', '-')}\n"
+                f"\u5df2\u5bfc\u51fa {release_loop.get('exported_count', 0)} | "
+                f"\u5df2\u7559\u5feb\u7167 {release_loop.get('snapshot_saved_count', 0)} | "
+                f"\u53ef\u56de\u6536 {release_loop.get('ready_for_recovery_count', 0)}"
+            ),
+        )
         allowlist_tuning = dashboard.get("allowlist_tuning", {}) if isinstance(dashboard.get("allowlist_tuning"), dict) else {}
         tuning_rows = allowlist_tuning.get("rows", []) if isinstance(allowlist_tuning.get("rows"), list) else []
         if tuning_rows:
@@ -5724,9 +5775,238 @@ class SmartMatchDashboard:
             self._strategy_row(right, "暂无准入结果", "加载并分析赛事后，这里会显示正式放行、观察和阻断清单。")
         self._bind_canvas_mousewheel(content, canvas)
 
-    def _strategy_release_pool_rows(self, settlements: list[dict] | None = None, limit: int = 10) -> list[tuple[str, str]]:
+    def open_strategy_release_recovery_loop_window(self) -> None:
+        settlements = list(reversed(get_recent_settlements(limit=300)))
+        loop = self._strategy_release_recovery_loop(settlements)
+        window = tk.Toplevel(self.root)
+        window.title("\u653e\u884c\u56de\u6536\u95ed\u73af")
+        window.geometry("1040x620")
+        window.minsize(940, 520)
+        window.configure(bg=BG)
+        window.transient(self.root)
+
+        container = tk.Frame(window, bg=BG)
+        container.pack(fill=tk.BOTH, expand=True, padx=16, pady=16)
+
+        header = tk.Frame(container, bg=BG)
+        header.pack(fill=tk.X, pady=(0, 12))
+        tk.Label(
+            header,
+            text="\u653e\u884c\u56de\u6536\u95ed\u73af",
+            bg=BG,
+            fg=TEXT,
+            font=("Microsoft YaHei UI", 15, "bold"),
+        ).pack(side=tk.LEFT)
+        recover_button = tk.Button(
+            header,
+            text="\u7acb\u5373\u56de\u6536\u8d5b\u679c",
+            command=self.run_result_recovery,
+            bg=BLUE,
+            fg="white",
+            activebackground="#3d5ee7",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=16,
+            pady=7,
+        )
+        self._register_result_recovery_button(recover_button)
+        recover_button.pack(side=tk.RIGHT)
+        tk.Button(
+            header,
+            text="\u5bfc\u51fa\u62a5\u544a",
+            command=self.export_strategy_release_recovery_loop_report,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=16,
+            pady=7,
+        ).pack(side=tk.RIGHT, padx=(0, 10))
+        tk.Button(
+            header,
+            text="\u5237\u65b0",
+            command=lambda: (window.destroy(), self.open_strategy_release_recovery_loop_window()),
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=16,
+            pady=7,
+        ).pack(side=tk.RIGHT, padx=(0, 10))
+
+        metric_bar = tk.Frame(container, bg=BG)
+        metric_bar.pack(fill=tk.X, pady=(0, 12))
+        for label, value, color in [
+            ("\u72b6\u6001", str(loop.get("health_text") or "-"), self._tone_color(str(loop.get("health") or "neutral"))),
+            ("\u653e\u884c", str(loop.get("total_release_count", 0)), TEXT),
+            ("\u5df2\u56de\u6536", str(loop.get("settled_count", 0)), GREEN),
+            ("\u5f85\u56de\u6536", str(loop.get("pending_count", 0)), YELLOW if int(loop.get("pending_count", 0) or 0) else GREEN),
+            ("\u7f3a\u5feb\u7167", str(loop.get("missing_snapshot_count", 0)), RED if int(loop.get("missing_snapshot_count", 0) or 0) else GREEN),
+            ("\u8d85\u671f", str(loop.get("stale_pending_count", 0)), RED if int(loop.get("stale_pending_count", 0) or 0) else GREEN),
+            ("\u547d\u4e2d", str(loop.get("hit_rate_text") or "-"), GREEN if float(loop.get("hit_rate") or 0) >= 0.6 else YELLOW),
+        ]:
+            self._detail_metric(metric_bar, label, str(value), color)
+
+        tk.Label(
+            container,
+            text=str(loop.get("summary_text") or "-"),
+            bg=BG,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 10),
+        ).pack(anchor=tk.W, pady=(0, 10))
+
+        table_wrap = tk.Frame(container, bg=BG)
+        table_wrap.pack(fill=tk.BOTH, expand=True)
+        self._configure_dark_tree_style("ReleaseLoop.Treeview", master=window, rowheight=28)
+        columns = ("status", "date", "league", "match", "pick", "confidence", "risk", "snapshot", "settlement", "days", "file")
+        tree = ttk.Treeview(table_wrap, columns=columns, show="headings", style="ReleaseLoop.Treeview", height=15)
+        headings = {
+            "status": "\u95ed\u73af\u72b6\u6001",
+            "date": "\u5f00\u8d5b",
+            "league": "\u8054\u8d5b",
+            "match": "\u8d5b\u4e8b",
+            "pick": "\u63a8\u8350",
+            "confidence": "\u7f6e\u4fe1",
+            "risk": "\u98ce\u9669",
+            "snapshot": "\u5feb\u7167",
+            "settlement": "\u56de\u6536",
+            "days": "\u5f85\u56de\u6536",
+            "file": "\u6e05\u5355",
+        }
+        widths = {
+            "status": 104,
+            "date": 116,
+            "league": 92,
+            "match": 190,
+            "pick": 72,
+            "confidence": 64,
+            "risk": 72,
+            "snapshot": 72,
+            "settlement": 72,
+            "days": 70,
+            "file": 155,
+        }
+        for key in columns:
+            tree.heading(key, text=headings[key], anchor=tk.W)
+            tree.column(key, width=widths[key], minwidth=54, anchor=tk.W, stretch=key in {"match", "file"})
+        scrollbar = ttk.Scrollbar(table_wrap, orient=tk.VERTICAL, command=tree.yview)
+        tree.configure(yscrollcommand=scrollbar.set)
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        rows = loop.get("rows", []) if isinstance(loop.get("rows"), list) else []
+        for index, item in enumerate(rows):
+            if not isinstance(item, dict):
+                continue
+            match = item.get("match", {}) if isinstance(item.get("match"), dict) else {}
+            match_text = f"{match.get('home_team', '-')} vs {match.get('away_team', '-')}"
+            tree.insert(
+                "",
+                tk.END,
+                iid=str(index),
+                values=(
+                    item.get("loop_status", "-"),
+                    item.get("kickoff", "-"),
+                    match.get("league", "-"),
+                    match_text,
+                    item.get("recommendation", "-"),
+                    item.get("confidence_text", "-"),
+                    item.get("risk_text", "-"),
+                    item.get("snapshot_status", "-"),
+                    item.get("settlement_status", "-"),
+                    f"{item.get('pending_days', 0)}\u5929" if item.get("pending") else "-",
+                    item.get("allowlist_file", "-"),
+                ),
+            )
+
+        if not rows:
+            tree.insert("", tk.END, values=("\u6682\u65e0\u653e\u884c\u8bb0\u5f55", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"))
+
+        footer = tk.Frame(container, bg=BG)
+        footer.pack(fill=tk.X, pady=(12, 0))
+        tk.Label(
+            footer,
+            text="\u7f3a\u5feb\u7167\u8868\u793a\u8be5\u653e\u884c\u573a\u6b21\u6ca1\u6709\u53ef\u7528\u7684\u8d5b\u524d\u5feb\u7167\uff1b\u8d85\u671f\u8868\u793a\u5df2\u8fc7\u5f00\u8d5b\u65e5\u4f46\u5c1a\u672a\u56de\u6536\u8d5b\u679c\u3002",
+            bg=BG,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 9),
+        ).pack(side=tk.LEFT)
+        tk.Button(
+            footer,
+            text="\u5173\u95ed",
+            command=window.destroy,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=16,
+            pady=7,
+        ).pack(side=tk.RIGHT)
+
+    def _write_strategy_release_recovery_loop_report(self, now: datetime | None = None) -> tuple[Path, dict[str, object]]:
+        generated_at = now or datetime.now()
+        settlements = list(reversed(get_recent_settlements(limit=300)))
+        loop = self._strategy_release_recovery_loop(settlements)
+        REPORT_DIR.mkdir(parents=True, exist_ok=True)
+        path = REPORT_DIR / build_strategy_release_recovery_loop_report_filename(generated_at)
+        path.write_text(
+            "\n".join(build_strategy_release_recovery_loop_report_lines(loop, generated_at=generated_at)),
+            encoding="utf-8",
+        )
+        return path, loop
+
+    def _attach_strategy_release_loop_report_to_recovery_run(self, path: Path, loop: dict[str, object]) -> None:
+        record = dict(self.result_recovery_run_record or {})
+        if not record.get("run_id"):
+            return
+        record.update(
+            {
+                "strategy_release_loop_report": str(path),
+                "strategy_release_loop_report_name": path.name,
+                "strategy_release_loop_summary": str(loop.get("summary_text") or "-"),
+                "strategy_release_loop_health": str(loop.get("health_text") or "-"),
+                "strategy_release_loop_pending_count": int(loop.get("pending_count", 0) or 0),
+                "strategy_release_loop_stale_pending_count": int(loop.get("stale_pending_count", 0) or 0),
+                "strategy_release_loop_missing_snapshot_count": int(loop.get("missing_snapshot_count", 0) or 0),
+                "strategy_release_loop_hit_rate_text": str(loop.get("hit_rate_text") or "-"),
+            }
+        )
+        messages = record.get("messages")
+        if not isinstance(messages, list):
+            messages = []
+        record["messages"] = [*messages, f"\u653e\u884c\u56de\u6536\u95ed\u73af\u62a5\u544a: {path.name}"]
+        self.result_recovery_run_record = dict(record)
+        self._record_result_recovery_run(record)
+
+    def export_strategy_release_recovery_loop_report(self) -> Path:
+        path, _loop = self._write_strategy_release_recovery_loop_report()
+        self.status_var.set(f"\u653e\u884c\u56de\u6536\u95ed\u73af\u62a5\u544a\u5df2\u5bfc\u51fa | {path.name}")
+        messagebox.showinfo("\u653e\u884c\u56de\u6536\u95ed\u73af", f"\u5df2\u5bfc\u51fa\u62a5\u544a\n{path}")
+        return path
+
+    def _strategy_release_recovery_loop(self, settlements: list[dict] | None = None) -> dict:
+        return build_strategy_release_recovery_loop(
+            self.rows,
+            snapshots=_load_prediction_snapshot_records(),
+            settlements=settlements if settlements is not None else get_recent_settlements(limit=0),
+        )
+
+    def _strategy_release_pool_rows(
+        self,
+        settlements: list[dict] | None = None,
+        limit: int = 10,
+        release_loop: dict | None = None,
+    ) -> list[tuple[str, str]]:
         snapshots = _load_prediction_snapshot_records()
-        pool = build_strategy_release_pool_rows(
+        loop = release_loop if isinstance(release_loop, dict) else self._strategy_release_recovery_loop(settlements)
+        pool = loop.get("rows", []) if isinstance(loop.get("rows"), list) else build_strategy_release_pool_rows(
             self.rows,
             snapshots=snapshots,
             settlements=settlements if settlements is not None else get_recent_settlements(limit=0),
@@ -5736,15 +6016,15 @@ class SmartMatchDashboard:
             match_id = str(item.get("match_id") or "")
             snapshot = snapshots.get(match_id) if isinstance(snapshots.get(match_id), dict) else {}
             snapshot_match = snapshot.get("match", {}) if isinstance(snapshot.get("match"), dict) else {}
-            live_status = str(item.get("settlement_status") or "-")
+            live_status = str(item.get("loop_status") or item.get("settlement_status") or "-")
             if live_status != "\u5df2\u56de\u6536":
                 current_status = _snapshot_status(snapshot_match) if snapshot_match else "\u7b49\u5f85\u5feb\u7167"
-                live_status = "\u53ef\u56de\u6536" if current_status == "\u5f85\u56de\u6536" else current_status
+                live_status = str(item.get("loop_status") or ("\u53ef\u56de\u6536" if current_status == "\u5f85\u56de\u6536" else current_status))
             title = f"{live_status} | {item.get('title', '-')}"
             body = (
                 f"\u5f00\u8d5b: {item.get('kickoff', '-')}\n"
                 f"\u63a8\u8350: {item.get('recommendation', '-')} | \u7f6e\u4fe1 {item.get('confidence_text', '-')} | \u98ce\u9669 {item.get('risk_text', '-')}\n"
-                f"\u5bfc\u51fa: {item.get('export_status', '-')} | \u5feb\u7167: {item.get('snapshot_status', '-')} | \u56de\u6536: {live_status}\n"
+                f"\u5bfc\u51fa: {item.get('export_status', '-')} | \u5feb\u7167: {item.get('snapshot_status', '-')} | \u56de\u6536: {live_status} | \u5f85\u56de\u6536 {item.get('pending_days', 0)} \u5929\n"
                 f"\u6e05\u5355: {item.get('allowlist_file', '-')} | \u5bfc\u51fa\u65f6\u95f4: {item.get('exported_at', '-')}\n"
                 f"\u5019\u9009: {item.get('candidate_text', '-')}\n"
                 f"\u539f\u56e0: {item.get('reason_text', '-')}"
@@ -5932,7 +6212,7 @@ class SmartMatchDashboard:
         tk.Label(frame, text=value, bg=PANEL, fg=color, font=("Microsoft YaHei UI", 14, "bold"), wraplength=150, justify=tk.LEFT).pack(anchor=tk.W, padx=14, pady=(0, 12))
 
     def _tone_color(self, tone: str) -> str:
-        return {"good": GREEN, "warning": YELLOW, "bad": RED, "info": "#7aa2ff", "neutral": TEXT}.get(str(tone or "neutral"), TEXT)
+        return {"good": GREEN, "warning": YELLOW, "watch": YELLOW, "bad": RED, "info": "#7aa2ff", "collecting": MUTED, "neutral": TEXT}.get(str(tone or "neutral"), TEXT)
 
     def _draw_probability_panel(self, parent: tk.Widget, row: DashboardRow) -> None:
         pred = row.prediction

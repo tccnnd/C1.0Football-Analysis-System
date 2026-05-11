@@ -492,6 +492,10 @@ def build_result_recovery_run_detail(record: Mapping[str, object] | object) -> s
     miss_reasons = item.get("snapshot_result_miss_reasons") or result.get("snapshot_result_miss_reasons")
     miss_items = item.get("snapshot_result_miss_items") or result.get("snapshot_result_miss_items")
     review_summary = item.get("review_summary") or result.get("review_summary")
+    release_loop_report = item.get("strategy_release_loop_report") or result.get("strategy_release_loop_report") or "-"
+    release_loop_summary = item.get("strategy_release_loop_summary") or result.get("strategy_release_loop_summary") or "-"
+    release_loop_health = item.get("strategy_release_loop_health") or result.get("strategy_release_loop_health") or "-"
+    release_loop_hit_rate = item.get("strategy_release_loop_hit_rate_text") or result.get("strategy_release_loop_hit_rate_text") or "-"
     return (
         f"\u8fd0\u884c ID: {item.get('run_id') or '-'}\n"
         f"\u72b6\u6001: {_status_label(item.get('status'))}\n"
@@ -518,6 +522,14 @@ def build_result_recovery_run_detail(record: Mapping[str, object] | object) -> s
         f"- \u7f3a source_id: {_safe_int(item.get('snapshot_missing_source_id') or result.get('snapshot_missing_source_id'), 0)}\n"
         f"- \u975e Titan \u5feb\u7167: {_safe_int(item.get('snapshot_non_titan_source') or result.get('snapshot_non_titan_source'), 0)}\n"
         f"- \u8d85\u51fa\u56de\u770b\u7a97\u53e3: {_safe_int(item.get('snapshot_out_of_window') or result.get('snapshot_out_of_window'), 0)}\n\n"
+        f"\u653e\u884c\u56de\u6536\u95ed\u73af:\n"
+        f"- \u72b6\u6001: {release_loop_health}\n"
+        f"- \u6458\u8981: {release_loop_summary}\n"
+        f"- \u547d\u4e2d: {release_loop_hit_rate}\n"
+        f"- \u62a5\u544a: {release_loop_report}\n"
+        f"- \u5f85\u56de\u6536: {_safe_int(item.get('strategy_release_loop_pending_count') or result.get('strategy_release_loop_pending_count'), 0)}\n"
+        f"- \u7f3a\u5feb\u7167: {_safe_int(item.get('strategy_release_loop_missing_snapshot_count') or result.get('strategy_release_loop_missing_snapshot_count'), 0)}\n"
+        f"- \u8d85\u671f: {_safe_int(item.get('strategy_release_loop_stale_pending_count') or result.get('strategy_release_loop_stale_pending_count'), 0)}\n\n"
         f"\u672c\u8f6e\u590d\u76d8\u6458\u8981:\n{_review_summary_text(review_summary)}\n\n"
         f"\u672a\u547d\u4e2d\u6837\u4f8b:\n{_miss_items_text(miss_items)}\n\n"
         f"\u9519\u8bef:\n- {item.get('error') or '-'}\n\n"

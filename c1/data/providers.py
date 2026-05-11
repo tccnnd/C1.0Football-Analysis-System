@@ -665,13 +665,14 @@ class ApiFootballAvailabilityProvider(AvailabilityProvider):
             return 0, 0
         now = datetime.now()
         issue_start, issue_end = self._issue_window(now)
+        rolling_end = now + timedelta(days=1)
         issue_count = 0
         for item in fixtures:
             fixture = item.get("fixture") if isinstance(item.get("fixture"), Mapping) else {}
             dt = self._parse_fixture_datetime((fixture or {}).get("date"))
             if dt is None:
                 continue
-            if issue_start <= dt < issue_end:
+            if issue_start <= dt < issue_end or now <= dt < rolling_end:
                 issue_count += 1
         base_limit = self.max_fixtures if self.max_fixtures > 0 else total
         dynamic_target = issue_count + 40 if issue_count > 0 else base_limit

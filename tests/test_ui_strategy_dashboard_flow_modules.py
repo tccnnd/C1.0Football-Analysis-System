@@ -72,7 +72,10 @@ from v24_app.ui_modules import (
     build_strategy_allowlist_tuning_recommendation,
     build_strategy_policy_audit_csv_text,
     build_strategy_policy_audit_report_lines,
+    build_strategy_release_recovery_loop_report_filename,
+    build_strategy_release_recovery_loop_report_lines,
     build_strategy_release_recovery_alerts,
+    build_strategy_release_recovery_loop,
     build_strategy_release_pool_rows,
     compute_strategy_admission_counts,
     filter_strategy_admission_rows,
@@ -2560,6 +2563,161 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         row = alerts["rows"][0]
         self.assertIn("A vs B", row["title"])
         self.assertIn("strategy_allowlist_a.md", row["body"])
+
+    def test_strategy_release_recovery_loop_merges_current_snapshot_and_settlement_state(self) -> None:
+        match_a = AppMatch(
+            home_team="A",
+            away_team="B",
+            league="L1",
+            match_time="21:00",
+            match_date="2026-05-09",
+            odds_home=1.8,
+            odds_draw=3.2,
+            odds_away=4.0,
+            source="live",
+            source_id="a1",
+        )
+        match_b = AppMatch(
+            home_team="C",
+            away_team="D",
+            league="L2",
+            match_time="22:00",
+            match_date="2026-05-08",
+            odds_home=2.0,
+            odds_draw=3.1,
+            odds_away=3.8,
+            source="live",
+            source_id="b1",
+        )
+        rows = [
+            {
+                "match": match_a,
+                "prediction": {
+                    "recommendation": "home",
+                    "confidence": 0.72,
+                    "risk_level": "LOW",
+                    "strategy_admission": {"decision": "allow", "top_play": "market_1x2", "top_pick": "home", "top_confidence": 0.76},
+                    "strategy_allowlist": {"decision": "allow", "file": "strategy_allowlist_a.md", "exported_at": "2026-05-09 17:30:45"},
+                },
+            },
+            {
+                "match": match_b,
+                "prediction": {
+                    "recommendation": "draw",
+                    "confidence": 0.68,
+                    "risk_level": "MEDIUM",
+                    "strategy_admission": {"decision": "allow", "top_play": "market_1x2", "top_pick": "draw", "top_confidence": 0.69},
+                },
+            },
+        ]
+        snapshot_only_id = "snap-only"
+        snapshots = {
+            match_a.match_id: {
+                "match": {"match_date": "2026-05-09", "match_time": "21:00", "league": "L1", "home_team": "A", "away_team": "B"},
+                "prediction": {"recommendation": "home", "confidence": 0.72, "risk_level": "LOW"},
+                "strategy_allowlist": {"decision": "allow", "file": "strategy_allowlist_a.md", "exported_at": "2026-05-09 17:30:45"},
+            },
+            snapshot_only_id: {
+                "match": {"match_id": snapshot_only_id, "match_date": "2026-05-08", "match_time": "20:00", "league": "L3", "home_team": "E", "away_team": "F"},
+                "prediction": {"recommendation": "away", "confidence": 0.66, "risk_level": "LOW"},
+                "strategy_allowlist": {"decision": "allow", "file": "strategy_allowlist_snap.md", "exported_at": "2026-05-08 18:00:00"},
+            },
+        }
+        settlements = [
+            {
+                "match_id": match_a.match_id,
+                "strategy_allowlist_decision": "allow",
+                "strategy_allowlist_file": "strategy_allowlist_a.md",
+                "match_date": "2026-05-09",
+                "league": "L1",
+                "home_team": "A",
+                "away_team": "B",
+                "predicted": "home",
+                "is_correct": True,
+                "prediction_confidence": 0.72,
+            },
+            {
+                "match_id": "settlement-only",
+                "strategy_allowlist_decision": "allow",
+                "strategy_allowlist_file": "strategy_allowlist_old.md",
+                "match_date": "2026-05-07",
+                "league": "L4",
+                "home_team": "G",
+                "away_team": "H",
+                "predicted": "home",
+                "is_correct": False,
+                "prediction_confidence": 0.61,
+            },
+        ]
+
+        loop = build_strategy_release_recovery_loop(
+            rows,
+            snapshots=snapshots,
+            settlements=settlements,
+            now=datetime(2026, 5, 10, 12, 0),
+        )
+
+        self.assertEqual(loop["total_release_count"], 4)
+        self.assertEqual(loop["settled_count"], 2)
+        self.assertEqual(loop["pending_count"], 2)
+        self.assertEqual(loop["snapshot_saved_count"], 2)
+        self.assertEqual(loop["missing_snapshot_count"], 1)
+        self.assertEqual(loop["stale_pending_count"], 2)
+        self.assertEqual(loop["ready_for_recovery_count"], 1)
+        self.assertEqual(loop["hit_rate_text"], "50.0%")
+        self.assertIn("\u7f3a\u5feb\u7167 1", loop["summary_text"])
+        statuses = {str(row.get("match_id")): row.get("loop_status") for row in loop["rows"]}
+        self.assertEqual(statuses[match_a.match_id], "\u5df2\u56de\u6536")
+        self.assertEqual(statuses[match_b.match_id], "\u7f3a\u5feb\u7167")
+        self.assertEqual(statuses[snapshot_only_id], "\u8d85\u671f\u5f85\u56de\u6536")
+
+    def test_strategy_release_recovery_loop_report_lines_include_metrics_and_rows(self) -> None:
+        loop = {
+            "health_text": "\u9700\u8865\u56de\u6536",
+            "summary_text": "\u653e\u884c 2 | \u5df2\u56de\u6536 1 | \u5f85\u56de\u6536 1 | \u7f3a\u5feb\u7167 1 | \u8d85\u671f 1 | \u547d\u4e2d 100.0%",
+            "total_release_count": 2,
+            "exported_count": 2,
+            "snapshot_saved_count": 1,
+            "settled_count": 1,
+            "pending_count": 1,
+            "missing_snapshot_count": 1,
+            "stale_pending_count": 1,
+            "hit_rate_text": "100.0%",
+            "settlement_summary": {
+                "known_count": 1,
+                "hit_rate_text": "100.0%",
+                "handicap_hit_rate_text": "-",
+                "ou_hit_rate_text": "-",
+                "high_strategy_summary": "1/1",
+                "top_failure": "-",
+            },
+            "tuning": {"label": "\u7ee7\u7eed\u79ef\u7d2f\u6837\u672c", "rows": [("\u52a8\u4f5c", "\u7ee7\u7eed\u79ef\u7d2f\u6837\u672c")]},
+            "rows": [
+                {
+                    "loop_status": "\u7f3a\u5feb\u7167",
+                    "kickoff": "2026-05-08 22:00",
+                    "match": {"league": "L2", "home_team": "C", "away_team": "D"},
+                    "recommendation": "draw",
+                    "confidence_text": "68.0%",
+                    "risk_text": "\u4e2d\u98ce\u9669",
+                    "snapshot_status": "\u7f3a\u5feb\u7167",
+                    "settlement_status": "\u5f85\u56de\u6536",
+                    "pending_days": 2,
+                    "allowlist_file": "strategy_allowlist_b.md",
+                }
+            ],
+        }
+
+        filename = build_strategy_release_recovery_loop_report_filename(datetime(2026, 5, 10, 12, 0))
+        lines = build_strategy_release_recovery_loop_report_lines(loop, generated_at=datetime(2026, 5, 10, 12, 0))
+        payload = "\n".join(lines)
+
+        self.assertEqual(filename, "strategy_release_recovery_loop_20260510_120000.md")
+        self.assertIn("\u7b56\u7565\u653e\u884c\u56de\u6536\u95ed\u73af\u62a5\u544a", payload)
+        self.assertIn("\u653e\u884c\u603b\u6570", payload)
+        self.assertIn("C vs D", payload)
+        self.assertIn("strategy_allowlist_b.md", payload)
+        self.assertIn("\u7f3a\u5feb\u7167\u573a\u6b21", payload)
 
     def test_strategy_allowlist_settlement_summary_tracks_release_quality(self) -> None:
         settlements = [

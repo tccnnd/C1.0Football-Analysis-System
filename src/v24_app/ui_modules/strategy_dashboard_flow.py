@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
-from datetime import datetime
+from datetime import date, datetime
 from typing import Mapping, Sequence
 
 
@@ -186,6 +186,19 @@ def _admission_decision(admission: Mapping[str, object]) -> str:
 def _text(value: object, default: str = "-") -> str:
     text = str(value if value is not None else "").strip()
     return text or default
+
+
+def _parse_date_value(value: object) -> date | None:
+    text = _text(value, "")
+    if not text:
+        return None
+    text = text.replace("/", "-")
+    if len(text) >= 10:
+        text = text[:10]
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError:
+        return None
 
 
 def _md_cell(value: object) -> str:
@@ -5181,6 +5194,209 @@ def build_strategy_allowlist_tuning_recommendation(
     }
 
 
+def _strategy_release_loop_match_date(item: Mapping[str, object]) -> date | None:
+    match = item.get("match")
+    match_date = _parse_date_value(_field(match, "match_date", ""))
+    if match_date is not None:
+        return match_date
+    kickoff = str(item.get("kickoff") or "").strip()
+    return _parse_date_value(kickoff)
+
+
+def _strategy_release_snapshot_row(
+    match_id: str,
+    record: Mapping[str, object],
+    *,
+    settled_ids: set[str],
+) -> dict[str, object]:
+    match = _as_mapping(record.get("match"))
+    prediction = _as_mapping(record.get("prediction"))
+    marker = _allowlist_marker(prediction, record)
+    settled = bool(match_id and match_id in settled_ids)
+    return {
+        "match_id": match_id,
+        "match": match,
+        "prediction": prediction,
+        "admission": _strategy_admission(prediction),
+        "title": f"{_text(match.get('league'))} | {_text(match.get('home_team'))} vs {_text(match.get('away_team'))}",
+        "kickoff": f"{_text(match.get('match_date'))} {_text(match.get('match_time'))}",
+        "recommendation": _text(prediction.get("recommendation")),
+        "confidence_text": _pct(prediction.get("confidence")),
+        "risk_text": _risk_text(prediction.get("risk_level")),
+        "candidate_text": format_strategy_admission_pick(marker if marker else _strategy_admission(prediction)),
+        "reason_text": format_strategy_admission_reasons(marker if marker else _strategy_admission(prediction), limit=4),
+        "export_status": "\u5df2\u5bfc\u51fa" if _text(marker.get("file"), "") else "\u672a\u5bfc\u51fa",
+        "allowlist_file": _text(marker.get("file")),
+        "exported_at": _text(marker.get("exported_at")),
+        "snapshot_status": "\u5df2\u4fdd\u5b58",
+        "settlement_status": "\u5df2\u56de\u6536" if settled else "\u5f85\u56de\u6536",
+        "ready_for_recovery": not settled,
+        "source": "snapshot",
+    }
+
+
+def _strategy_release_settlement_row(item: Mapping[str, object]) -> dict[str, object]:
+    match_id = _settlement_match_id(item)
+    match = {
+        "match_id": match_id,
+        "match_date": item.get("match_date"),
+        "match_time": item.get("match_time"),
+        "league": item.get("league"),
+        "home_team": item.get("home_team"),
+        "away_team": item.get("away_team"),
+    }
+    prediction = {
+        "recommendation": item.get("predicted"),
+        "confidence": item.get("prediction_confidence"),
+        "risk_level": item.get("risk_level"),
+    }
+    return {
+        "match_id": match_id,
+        "match": match,
+        "prediction": prediction,
+        "admission": {"decision": "allow"},
+        "title": f"{_text(item.get('league'))} | {_text(item.get('home_team'))} vs {_text(item.get('away_team'))}",
+        "kickoff": f"{_text(item.get('match_date'))} {_text(item.get('match_time'))}",
+        "recommendation": _text(item.get("predicted")),
+        "confidence_text": _pct(item.get("prediction_confidence")),
+        "risk_text": _risk_text(item.get("risk_level")),
+        "candidate_text": _text(item.get("predicted")),
+        "reason_text": "\u5df2\u901a\u8fc7\u7ed3\u7b97\u8bb0\u5f55\u56de\u586b",
+        "export_status": "\u5df2\u5bfc\u51fa" if _text(item.get("strategy_allowlist_file"), "") else "\u672a\u5bfc\u51fa",
+        "allowlist_file": _text(item.get("strategy_allowlist_file")),
+        "exported_at": _text(item.get("strategy_allowlist_exported_at")),
+        "snapshot_status": "\u7f3a\u5feb\u7167",
+        "settlement_status": "\u5df2\u56de\u6536",
+        "ready_for_recovery": False,
+        "source": "settlement",
+    }
+
+
+def build_strategy_release_recovery_loop(
+    rows: Sequence[object] | object,
+    *,
+    snapshots: Mapping[str, object] | object = None,
+    settlements: Sequence[Mapping[str, object]] | object = None,
+    now: datetime | None = None,
+    stale_after_days: int = 1,
+) -> dict[str, object]:
+    snapshot_map = snapshots if isinstance(snapshots, Mapping) else {}
+    settlement_items = _strategy_allowlist_settlements(settlements)
+    settled_ids = {_settlement_match_id(item) for item in settlement_items if _settlement_match_id(item)}
+    row_map: dict[str, dict[str, object]] = {}
+
+    for item in build_strategy_release_pool_rows(rows, snapshots=snapshot_map, settlements=settlement_items):
+        match_id = str(item.get("match_id") or "")
+        if not match_id:
+            continue
+        enriched = dict(item)
+        enriched["source"] = "current"
+        row_map[match_id] = enriched
+
+    for match_id, record in snapshot_map.items():
+        if not isinstance(record, Mapping):
+            continue
+        prediction = _as_mapping(record.get("prediction"))
+        marker = _allowlist_marker(prediction, record)
+        if not marker:
+            continue
+        key = str(match_id)
+        if key not in row_map:
+            row_map[key] = _strategy_release_snapshot_row(key, record, settled_ids=settled_ids)
+
+    for item in settlement_items:
+        match_id = _settlement_match_id(item)
+        if match_id and match_id not in row_map:
+            row_map[match_id] = _strategy_release_settlement_row(item)
+
+    current_date = (now or datetime.now()).date()
+    stale_days = max(0, _safe_int(stale_after_days, 1))
+    loop_rows: list[dict[str, object]] = []
+    for item in row_map.values():
+        row = dict(item)
+        settled = str(row.get("settlement_status") or "") == "\u5df2\u56de\u6536"
+        snapshot_saved = str(row.get("snapshot_status") or "") == "\u5df2\u4fdd\u5b58"
+        exported = str(row.get("export_status") or "") == "\u5df2\u5bfc\u51fa"
+        match_date = _strategy_release_loop_match_date(row)
+        pending_days = max(0, (current_date - match_date).days) if match_date is not None and not settled else 0
+        stale_pending = bool(not settled and match_date is not None and pending_days >= stale_days)
+        if settled:
+            loop_status = "\u5df2\u56de\u6536"
+        elif not snapshot_saved:
+            loop_status = "\u7f3a\u5feb\u7167"
+        elif stale_pending:
+            loop_status = "\u8d85\u671f\u5f85\u56de\u6536"
+        else:
+            loop_status = "\u5f85\u56de\u6536"
+        row.update(
+            {
+                "exported": exported,
+                "snapshot_saved": snapshot_saved,
+                "settled": settled,
+                "pending": not settled,
+                "pending_days": pending_days,
+                "stale_pending": stale_pending,
+                "loop_status": loop_status,
+            }
+        )
+        loop_rows.append(row)
+
+    def sort_key(item: Mapping[str, object]) -> tuple[int, int, str, str]:
+        status_rank = 0 if item.get("stale_pending") else 1 if item.get("ready_for_recovery") else 2 if item.get("pending") else 3
+        match_date = _strategy_release_loop_match_date(item)
+        return (
+            status_rank,
+            -_safe_int(item.get("pending_days")),
+            match_date.isoformat() if match_date else "9999-99-99",
+            str(item.get("match_id") or ""),
+        )
+
+    loop_rows = sorted(loop_rows, key=sort_key)
+    total_count = len(loop_rows)
+    exported_count = sum(1 for item in loop_rows if item.get("exported"))
+    snapshot_saved_count = sum(1 for item in loop_rows if item.get("snapshot_saved"))
+    settled_count = sum(1 for item in loop_rows if item.get("settled"))
+    pending_count = sum(1 for item in loop_rows if item.get("pending"))
+    ready_for_recovery_count = sum(1 for item in loop_rows if item.get("ready_for_recovery"))
+    stale_pending_count = sum(1 for item in loop_rows if item.get("stale_pending"))
+    missing_snapshot_count = sum(1 for item in loop_rows if item.get("pending") and not item.get("snapshot_saved"))
+    settlement_summary = build_strategy_allowlist_settlement_summary(settlement_items)
+    tuning = build_strategy_allowlist_tuning_recommendation(settlement_items)
+    if stale_pending_count or missing_snapshot_count:
+        health = "warning"
+        health_text = "\u9700\u8865\u56de\u6536"
+    elif pending_count:
+        health = "watch"
+        health_text = "\u7b49\u5f85\u8d5b\u679c"
+    elif total_count:
+        health = "good"
+        health_text = "\u95ed\u73af\u5b8c\u6210"
+    else:
+        health = "collecting"
+        health_text = "\u6682\u65e0\u653e\u884c"
+    return {
+        "total_release_count": total_count,
+        "exported_count": exported_count,
+        "snapshot_saved_count": snapshot_saved_count,
+        "settled_count": settled_count,
+        "pending_count": pending_count,
+        "ready_for_recovery_count": ready_for_recovery_count,
+        "stale_pending_count": stale_pending_count,
+        "missing_snapshot_count": missing_snapshot_count,
+        "hit_rate": settlement_summary.get("hit_rate"),
+        "hit_rate_text": settlement_summary.get("hit_rate_text", "-"),
+        "settlement_summary": settlement_summary,
+        "tuning": tuning,
+        "health": health,
+        "health_text": health_text,
+        "rows": loop_rows,
+        "summary_text": (
+            f"\u653e\u884c {total_count} | \u5df2\u56de\u6536 {settled_count} | \u5f85\u56de\u6536 {pending_count} | "
+            f"\u7f3a\u5feb\u7167 {missing_snapshot_count} | \u8d85\u671f {stale_pending_count} | \u547d\u4e2d {settlement_summary.get('hit_rate_text', '-')}"
+        ),
+    }
+
+
 def select_strategy_allowlist_rows(rows: Sequence[object] | object) -> list[object]:
     if not isinstance(rows, Sequence):
         return []
@@ -5205,6 +5421,109 @@ def build_strategy_policy_audit_report_filename(now: datetime | None = None) -> 
 def build_strategy_policy_audit_csv_filename(now: datetime | None = None) -> str:
     current = now or datetime.now()
     return f"strategy_policy_audit_samples_{current.strftime('%Y%m%d_%H%M%S')}.csv"
+
+
+def build_strategy_release_recovery_loop_report_filename(now: datetime | None = None) -> str:
+    current = now or datetime.now()
+    return f"strategy_release_recovery_loop_{current.strftime('%Y%m%d_%H%M%S')}.md"
+
+
+def build_strategy_release_recovery_loop_report_lines(
+    release_loop: Mapping[str, object] | object,
+    *,
+    generated_at: datetime | None = None,
+) -> list[str]:
+    loop = _as_mapping(release_loop)
+    current = generated_at or datetime.now()
+    settlement_summary = _as_mapping(loop.get("settlement_summary"))
+    tuning = _as_mapping(loop.get("tuning"))
+    rows = [item for item in _as_list(loop.get("rows")) if isinstance(item, Mapping)]
+    lines = [
+        "# \u7b56\u7565\u653e\u884c\u56de\u6536\u95ed\u73af\u62a5\u544a",
+        "",
+        f"- \u751f\u6210\u65f6\u95f4: {current.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- \u95ed\u73af\u72b6\u6001: {loop.get('health_text', '-')}",
+        f"- \u6458\u8981: {loop.get('summary_text', '-')}",
+        f"- \u8c03\u53c2\u5efa\u8bae: {tuning.get('label', '-')}",
+        "",
+        "## \u95ed\u73af\u6307\u6807",
+        "",
+        "| \u6307\u6807 | \u6570\u503c |",
+        "| --- | ---: |",
+        f"| \u653e\u884c\u603b\u6570 | {_safe_int(loop.get('total_release_count'))} |",
+        f"| \u5df2\u5bfc\u51fa | {_safe_int(loop.get('exported_count'))} |",
+        f"| \u5df2\u7559\u5feb\u7167 | {_safe_int(loop.get('snapshot_saved_count'))} |",
+        f"| \u5df2\u56de\u6536 | {_safe_int(loop.get('settled_count'))} |",
+        f"| \u5f85\u56de\u6536 | {_safe_int(loop.get('pending_count'))} |",
+        f"| \u7f3a\u5feb\u7167 | {_safe_int(loop.get('missing_snapshot_count'))} |",
+        f"| \u8d85\u671f\u5f85\u56de\u6536 | {_safe_int(loop.get('stale_pending_count'))} |",
+        f"| \u653e\u884c\u547d\u4e2d | {_text(loop.get('hit_rate_text'), '-')} |",
+        "",
+        "## \u7ed3\u7b97\u8d28\u91cf",
+        "",
+        f"- 1X2\u6837\u672c: {settlement_summary.get('known_count', 0)}",
+        f"- 1X2\u547d\u4e2d: {settlement_summary.get('hit_rate_text', '-')}",
+        f"- \u8ba9\u7403\u547d\u4e2d: {settlement_summary.get('handicap_hit_rate_text', '-')}",
+        f"- \u5927\u5c0f\u7403\u547d\u4e2d: {settlement_summary.get('ou_hit_rate_text', '-')}",
+        f"- \u9ad8\u51c6\u7b56\u7565: {settlement_summary.get('high_strategy_summary', '-')}",
+        f"- \u4e3b\u8981\u504f\u5dee: {settlement_summary.get('top_failure', '-')}",
+        "",
+        "## \u8c03\u53c2\u4fe1\u53f7",
+        "",
+    ]
+    tuning_rows = [item for item in _as_list(tuning.get("rows")) if isinstance(item, tuple) and len(item) >= 2]
+    if tuning_rows:
+        for label, value in tuning_rows:
+            lines.append(f"- {label}: {value}")
+    else:
+        lines.append("- \u6682\u65e0\u8c03\u53c2\u4fe1\u53f7")
+    lines.extend(
+        [
+            "",
+            "## \u9010\u573a\u660e\u7ec6",
+            "",
+            "| \u95ed\u73af\u72b6\u6001 | \u5f00\u8d5b | \u8054\u8d5b | \u8d5b\u4e8b | \u63a8\u8350 | \u7f6e\u4fe1 | \u98ce\u9669 | \u5feb\u7167 | \u56de\u6536 | \u5f85\u56de\u6536 | \u6e05\u5355 |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | ---: | --- |",
+        ]
+    )
+    if not rows:
+        lines.append("| \u6682\u65e0\u653e\u884c\u8bb0\u5f55 | - | - | - | - | - | - | - | - | 0 | - |")
+    for item in rows:
+        match = item.get("match", {}) if isinstance(item.get("match"), Mapping) else {}
+        match_text = f"{_text(match.get('home_team'))} vs {_text(match.get('away_team'))}"
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    _md_cell(item.get("loop_status")),
+                    _md_cell(item.get("kickoff")),
+                    _md_cell(match.get("league")),
+                    _md_cell(match_text),
+                    _md_cell(item.get("recommendation")),
+                    _md_cell(item.get("confidence_text")),
+                    _md_cell(item.get("risk_text")),
+                    _md_cell(item.get("snapshot_status")),
+                    _md_cell(item.get("settlement_status")),
+                    str(_safe_int(item.get("pending_days"))),
+                    _md_cell(item.get("allowlist_file")),
+                ]
+            )
+            + " |"
+        )
+    lines.extend(
+        [
+            "",
+            "## \u5904\u7406\u5efa\u8bae",
+            "",
+        ]
+    )
+    if _safe_int(loop.get("missing_snapshot_count")):
+        lines.append("- \u7f3a\u5feb\u7167\u573a\u6b21\u65e0\u6cd5\u5b8c\u6210\u6807\u51c6\u653e\u884c\u590d\u76d8\uff0c\u540e\u7eed\u9700\u786e\u4fdd\u5bfc\u51fa\u653e\u884c\u6e05\u5355\u65f6\u540c\u6b65\u6807\u8bb0\u5feb\u7167\u3002")
+    if _safe_int(loop.get("stale_pending_count")):
+        lines.append("- \u8d85\u671f\u5f85\u56de\u6536\u573a\u6b21\u9700\u4f18\u5148\u8fd0\u884c\u8d5b\u679c\u56de\u6536\uff0c\u5426\u5219\u653e\u884c\u547d\u4e2d\u7387\u4f1a\u6ede\u540e\u3002")
+    if not _safe_int(loop.get("missing_snapshot_count")) and not _safe_int(loop.get("stale_pending_count")):
+        lines.append("- \u5f53\u524d\u653e\u884c\u56de\u6536\u95ed\u73af\u6ca1\u6709\u660e\u663e\u963b\u65ad\u9879\uff0c\u7ee7\u7eed\u7b49\u5f85\u672a\u5f00\u8d5b\u573a\u6b21\u7ed3\u675f\u540e\u56de\u6536\u3002")
+    return lines
 
 
 def build_strategy_policy_audit_report_lines(

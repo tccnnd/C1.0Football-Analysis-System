@@ -154,6 +154,13 @@ class UIRecoveryRunFlowModuleTests(unittest.TestCase):
                         }
                     ],
                 },
+                "strategy_release_loop_report": "E:\\APP\\ELO\\reports\\strategy_release_recovery_loop_20260509_200002.md",
+                "strategy_release_loop_summary": "\u653e\u884c 4 | \u5df2\u56de\u6536 3 | \u5f85\u56de\u6536 1 | \u7f3a\u5feb\u7167 0 | \u8d85\u671f 1 | \u547d\u4e2d 66.7%",
+                "strategy_release_loop_health": "\u9700\u8865\u56de\u6536",
+                "strategy_release_loop_pending_count": 1,
+                "strategy_release_loop_stale_pending_count": 1,
+                "strategy_release_loop_missing_snapshot_count": 0,
+                "strategy_release_loop_hit_rate_text": "66.7%",
                 "messages": ["done"],
             }
         ]
@@ -174,6 +181,9 @@ class UIRecoveryRunFlowModuleTests(unittest.TestCase):
         self.assertIn("1X2 2/3", detail)
         self.assertIn("Alpha FC", detail)
         self.assertIn("建议收紧", detail)
+        self.assertIn("strategy_release_recovery_loop_20260509_200002.md", detail)
+        self.assertIn("66.7%", detail)
+        self.assertIn("\u653e\u884c 4", detail)
         self.assertIn("- done", detail)
 
     def test_quality_alerts_detect_failures_no_settlement_and_slow_runs(self) -> None:
