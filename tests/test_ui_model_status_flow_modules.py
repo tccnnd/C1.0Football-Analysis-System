@@ -18,6 +18,9 @@ from v24_app.ui_modules import (
     build_ensemble_backtest_apply_status_text,
     build_ensemble_backtest_success_message,
     build_ensemble_weight_status_text,
+    build_draw_specialist_backtest_apply_status_text,
+    build_draw_specialist_backtest_card_rows,
+    build_draw_specialist_backtest_status_text,
     build_model_training_overview_text,
     build_play_model_backtest_apply_status_text,
     build_play_model_backtest_success_message,
@@ -195,6 +198,39 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
         backtest_msg = build_play_model_backtest_success_message(backtest_result)
         self.assertIn("玩法回测完成", backtest_msg)
         self.assertIn("报告: play.md", backtest_msg)
+
+
+    def test_draw_specialist_backtest_text_and_cards(self) -> None:
+        result = {
+            "ok": True,
+            "updated_at": "2026-05-11 12:00:00",
+            "validation": {"sample_count": 100, "date_start": "2025-01-01", "date_end": "2025-12-31"},
+            "summary": {
+                "sample_count": 100,
+                "actual_draw_count": 25,
+                "actual_draw_rate_text": "25.0%",
+                "predicted_draw_count": 10,
+                "draw_hit_count": 4,
+                "precision_text": "40.0%",
+                "recall_text": "16.0%",
+                "missed_draw_count": 21,
+                "false_positive_count": 6,
+                "recommendation": "enable_draw_watch",
+                "recommendation_text": "保留博平并观察防平。",
+                "guard": {"sample_count": 30, "actual_draw_count": 12, "draw_rate_text": "40.0%", "lift": 0.15, "lift_text": "+15.0%"},
+                "takeover": {"sample_count": 10, "precision_text": "40.0%", "recall_text": "16.0%"},
+            },
+            "report_path": "draw.md",
+        }
+
+        status_text = build_draw_specialist_backtest_status_text(result)
+        self.assertIn("平局专项诊断", status_text)
+        self.assertIn("精确率 40.0%", status_text)
+        self.assertIn("报告: draw.md", status_text)
+        self.assertIn("平局专项回测完成", build_draw_specialist_backtest_apply_status_text(result))
+        rows = build_draw_specialist_backtest_card_rows(result)
+        self.assertEqual(rows[0]["tone"], "good")
+        self.assertIn("精确 40.0%", rows[0]["title"])
 
 
 if __name__ == "__main__":

@@ -58,6 +58,83 @@ class PlayModelBacktestTests(unittest.TestCase):
         self.assertTrue(result["validation"]["truncated"])
         self.assertAlmostEqual(result["validation"]["ratio"], 5 / 12, places=4)
 
+    def test_run_draw_specialist_backtest_tracks_precision_recall_and_buckets(self) -> None:
+        validation_items = [
+            {
+                "match_id": f"draw-{index}",
+                "features": {"odds_draw": 3.1 + index * 0.05},
+                "meta": {
+                    "match_date": f"2025-01-{index + 1:02d}",
+                    "league": "Draw League",
+                    "home_team": f"H{index}",
+                    "away_team": f"A{index}",
+                    "home_goals": 1 if index != 2 else 2,
+                    "away_goals": 1 if index != 2 else 1,
+                    "handicap_line": 0.0,
+                },
+            }
+            for index in range(4)
+        ]
+        predictions = [
+            {
+                "recommendation": "平局",
+                "draw_score": 0.74,
+                "draw_takeover": True,
+                "draw_grade": "博平",
+                "probabilities": {"home": 0.32, "draw": 0.34, "away": 0.34},
+                "draw_signals": {"market_balance": 0.9},
+                "expected_goals": 2.1,
+            },
+            {
+                "recommendation": "主胜",
+                "draw_score": 0.64,
+                "draw_takeover": False,
+                "draw_grade": "防平",
+                "probabilities": {"home": 0.40, "draw": 0.30, "away": 0.30},
+                "draw_signals": {"market_balance": 0.8},
+                "expected_goals": 2.3,
+            },
+            {
+                "recommendation": "平局",
+                "draw_score": 0.76,
+                "draw_takeover": True,
+                "draw_grade": "博平",
+                "probabilities": {"home": 0.31, "draw": 0.35, "away": 0.34},
+                "draw_signals": {"market_balance": 0.85},
+                "expected_goals": 2.2,
+            },
+            {
+                "recommendation": "客胜",
+                "draw_score": 0.42,
+                "draw_takeover": False,
+                "draw_grade": "不防平",
+                "probabilities": {"home": 0.26, "draw": 0.24, "away": 0.50},
+                "draw_signals": {"market_balance": 0.3},
+                "expected_goals": 3.1,
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            report_file = Path(tmp_dir) / "draw_specialist_backtest_v1.json"
+            with patch.object(core, "DRAW_SPECIALIST_BACKTEST_FILE", report_file):
+                with patch("v24_app.core._validation_split_samples", return_value=([], validation_items)):
+                    with patch("v24_app.core._sample_item_prediction", side_effect=predictions):
+                        with patch.object(core.STATE_STORE, "load_xgb_samples", return_value=validation_items):
+                            result = core.run_draw_specialist_backtest(max_validation_samples=10, write_report=False)
+                status = core.get_draw_specialist_backtest_status()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["summary"]["sample_count"], 4)
+        self.assertEqual(result["summary"]["actual_draw_count"], 3)
+        self.assertEqual(result["summary"]["predicted_draw_count"], 2)
+        self.assertEqual(result["summary"]["draw_hit_count"], 1)
+        self.assertEqual(result["summary"]["precision_text"], "50.0%")
+        self.assertEqual(result["summary"]["recall_text"], "33.3%")
+        self.assertEqual(result["summary"]["missed_draw_count"], 2)
+        self.assertEqual(result["summary"]["false_positive_count"], 1)
+        self.assertTrue(result["score_buckets"])
+        self.assertEqual(status["summary"]["sample_count"], 4)
+
     def test_total_goals_takeover_requires_material_calibration_uplift(self) -> None:
         validation_items = []
         for index in range(100):

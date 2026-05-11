@@ -59,6 +59,7 @@ ENSEMBLE_WEIGHTS_FILE = PROJECT_DIR / "data" / "models" / "ensemble_weights_v1.j
 PLAY_THRESHOLDS_FILE = PROJECT_DIR / "data" / "models" / "play_thresholds_v1.json"
 PLAY_MODEL_POLICY_FILE = PROJECT_DIR / "data" / "models" / "play_model_policy_v1.json"
 PLAY_MODEL_POLICY_HISTORY_FILE = PROJECT_DIR / "data" / "models" / "play_model_policy_history_v1.json"
+DRAW_SPECIALIST_BACKTEST_FILE = PROJECT_DIR / "data" / "models" / "draw_specialist_backtest_v1.json"
 BAYES_CALIBRATION_FILE = PROJECT_DIR / "data" / "models" / "bayes_calibration_v1.json"
 HIGH_ACCURACY_STRATEGY_FILE = PROJECT_DIR / "data" / "models" / "high_accuracy_strategy_v1.json"
 JC_STRATIFIED_STRATEGY_FILE = PROJECT_DIR / "data" / "models" / "jc_stratified_strategy_backtest_v1.json"
@@ -7547,7 +7548,17 @@ def _prediction_recommendation_key(prediction: dict | None) -> str | None:
     if not isinstance(prediction, dict):
         return None
     recommendation = str(prediction.get("recommendation", "")).strip()
-    mapping = {"主胜": "home", "平局": "draw", "客胜": "away"}
+    mapping = {
+        "主胜": "home",
+        "涓昏儨": "home",
+        "home": "home",
+        "平局": "draw",
+        "骞冲眬": "draw",
+        "draw": "draw",
+        "客胜": "away",
+        "瀹㈣儨": "away",
+        "away": "away",
+    }
     return mapping.get(recommendation)
 
 
@@ -8229,6 +8240,397 @@ def run_play_model_backtest(
         )
         report_path.write_text("\n".join(lines), encoding="utf-8")
     result["report_path"] = str(report_path) if report_path else None
+    return result
+
+
+def _draw_prediction_key(prediction: dict | None) -> str | None:
+    key = _prediction_recommendation_key(prediction)
+    if key in {"home", "draw", "away"}:
+        return key
+    if not isinstance(prediction, dict):
+        return None
+    recommendation = normalize_text(prediction.get("recommendation", "")).lower()
+    if recommendation in {"draw", "平局", "骞冲眬"} or "平" in recommendation:
+        return "draw"
+    if recommendation in {"home", "主胜", "涓昏儨"} or "主" in recommendation:
+        return "home"
+    if recommendation in {"away", "客胜", "瀹㈣儨"} or "客" in recommendation:
+        return "away"
+    return None
+
+
+def _draw_score_bucket(score: object) -> str:
+    value = _safe_float(score, default=0.0)
+    if value >= 0.72:
+        return ">=0.72 博平"
+    if value >= 0.58:
+        return "0.58-0.72 防平"
+    if value >= 0.50:
+        return "0.50-0.58 观察"
+    return "<0.50 弱信号"
+
+
+def _draw_odds_bucket(value: object) -> str:
+    odds = _safe_float(value, default=0.0)
+    if odds <= 0.0:
+        return "unknown"
+    if odds <= 3.00:
+        return "<=3.00"
+    if odds <= 3.30:
+        return "3.01-3.30"
+    if odds <= 3.70:
+        return "3.31-3.70"
+    if odds <= 4.20:
+        return "3.71-4.20"
+    return ">4.20"
+
+
+def _draw_handicap_bucket(value: object) -> str:
+    line = abs(_safe_float(value, default=0.0))
+    if line <= 0.05:
+        return "平手"
+    if line <= 0.25:
+        return "<=0.25"
+    if line <= 0.75:
+        return "0.50-0.75"
+    return ">=1.00"
+
+
+def _draw_expected_goals_bucket(value: object) -> str:
+    goals = _safe_float(value, default=0.0)
+    if goals <= 0.0:
+        return "unknown"
+    if goals <= 2.20:
+        return "<=2.20"
+    if goals <= 2.60:
+        return "2.21-2.60"
+    if goals <= 3.00:
+        return "2.61-3.00"
+    return ">3.00"
+
+
+def _draw_market_balance_bucket(value: object) -> str:
+    score = _safe_float(value, default=0.0)
+    if score >= 0.80:
+        return ">=0.80 均衡"
+    if score >= 0.65:
+        return "0.65-0.80"
+    if score >= 0.45:
+        return "0.45-0.65"
+    return "<0.45 倾斜"
+
+
+def _draw_bucket_template() -> dict[str, int]:
+    return {
+        "sample_count": 0,
+        "actual_draw_count": 0,
+        "predicted_draw_count": 0,
+        "draw_hit_count": 0,
+        "false_positive_count": 0,
+        "missed_draw_count": 0,
+    }
+
+
+def _draw_bucket_record(bucket: dict[str, int], *, actual_draw: bool, predicted_draw: bool) -> None:
+    bucket["sample_count"] += 1
+    if actual_draw:
+        bucket["actual_draw_count"] += 1
+    if predicted_draw:
+        bucket["predicted_draw_count"] += 1
+    if actual_draw and predicted_draw:
+        bucket["draw_hit_count"] += 1
+    elif predicted_draw and not actual_draw:
+        bucket["false_positive_count"] += 1
+    elif actual_draw and not predicted_draw:
+        bucket["missed_draw_count"] += 1
+
+
+def _finalize_draw_bucket(name: str, bucket: dict[str, int], *, baseline_draw_rate: float) -> dict[str, object]:
+    sample_count = int(bucket.get("sample_count", 0) or 0)
+    actual_draw_count = int(bucket.get("actual_draw_count", 0) or 0)
+    predicted_draw_count = int(bucket.get("predicted_draw_count", 0) or 0)
+    draw_hit_count = int(bucket.get("draw_hit_count", 0) or 0)
+    precision = draw_hit_count / predicted_draw_count if predicted_draw_count else None
+    recall = draw_hit_count / actual_draw_count if actual_draw_count else None
+    draw_rate = actual_draw_count / sample_count if sample_count else None
+    lift = (draw_rate - baseline_draw_rate) if draw_rate is not None else None
+    return {
+        "bucket": name,
+        "sample_count": sample_count,
+        "actual_draw_count": actual_draw_count,
+        "predicted_draw_count": predicted_draw_count,
+        "draw_hit_count": draw_hit_count,
+        "false_positive_count": int(bucket.get("false_positive_count", 0) or 0),
+        "missed_draw_count": int(bucket.get("missed_draw_count", 0) or 0),
+        "precision": round(precision, 6) if precision is not None else None,
+        "precision_text": f"{precision:.1%}" if precision is not None else "-",
+        "recall": round(recall, 6) if recall is not None else None,
+        "recall_text": f"{recall:.1%}" if recall is not None else "-",
+        "draw_rate": round(draw_rate, 6) if draw_rate is not None else None,
+        "draw_rate_text": f"{draw_rate:.1%}" if draw_rate is not None else "-",
+        "lift": round(lift, 6) if lift is not None else None,
+        "lift_text": f"{lift:+.1%}" if lift is not None else "-",
+    }
+
+
+def _draw_bucket_rows(buckets: dict[str, dict[str, int]], *, baseline_draw_rate: float, limit: int = 12) -> list[dict[str, object]]:
+    rows = [
+        _finalize_draw_bucket(name, bucket, baseline_draw_rate=baseline_draw_rate)
+        for name, bucket in buckets.items()
+    ]
+    rows.sort(
+        key=lambda item: (
+            -int(item.get("sample_count", 0) or 0),
+            -_safe_float(item.get("lift"), default=-9.0),
+            str(item.get("bucket") or ""),
+        )
+    )
+    return rows[: max(0, int(limit))]
+
+
+def _draw_sample_row(
+    item: dict,
+    prediction: dict,
+    *,
+    actual_key: str,
+    predicted_key: str | None,
+) -> dict[str, object]:
+    meta = item.get("meta", {}) if isinstance(item.get("meta"), dict) else {}
+    probabilities = prediction.get("probabilities", {}) if isinstance(prediction.get("probabilities"), dict) else {}
+    draw_signals = prediction.get("draw_signals", {}) if isinstance(prediction.get("draw_signals"), dict) else {}
+    return {
+        "match_id": str(item.get("match_id") or ""),
+        "match_date": normalize_text(meta.get("match_date", "")),
+        "league": normalize_text(meta.get("league", "")) or "-",
+        "home_team": normalize_text(meta.get("home_team", "")) or "-",
+        "away_team": normalize_text(meta.get("away_team", "")) or "-",
+        "score": f"{_safe_int(meta.get('home_goals'), 0)}-{_safe_int(meta.get('away_goals'), 0)}",
+        "actual": actual_key,
+        "predicted": predicted_key or "-",
+        "draw_score": round(_safe_float(prediction.get("draw_score"), default=0.0), 4),
+        "draw_probability": round(_safe_float(probabilities.get("draw"), default=0.0), 4),
+        "market_balance": round(_safe_float(draw_signals.get("market_balance"), default=0.0), 4),
+        "expected_goals": round(_safe_float(prediction.get("expected_goals"), default=0.0), 3),
+        "draw_grade": prediction.get("draw_grade", "-"),
+        "draw_takeover": bool(prediction.get("draw_takeover")),
+    }
+
+
+def _save_draw_specialist_backtest_report(report: dict) -> None:
+    DRAW_SPECIALIST_BACKTEST_FILE.parent.mkdir(parents=True, exist_ok=True)
+    DRAW_SPECIALIST_BACKTEST_FILE.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def get_draw_specialist_backtest_status() -> dict:
+    if not DRAW_SPECIALIST_BACKTEST_FILE.exists():
+        return {"ok": False, "reason": "not_run", "updated_at": None, "validation": {}, "summary": {}, "source": str(DRAW_SPECIALIST_BACKTEST_FILE)}
+    try:
+        payload = json.loads(DRAW_SPECIALIST_BACKTEST_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {"ok": False, "reason": "invalid_report", "updated_at": None, "validation": {}, "summary": {}, "source": str(DRAW_SPECIALIST_BACKTEST_FILE)}
+    if not isinstance(payload, dict):
+        payload = {}
+    payload["source"] = str(DRAW_SPECIALIST_BACKTEST_FILE)
+    return payload
+
+
+def _write_draw_specialist_backtest_markdown(result: dict) -> str | None:
+    if not result.get("ok"):
+        return None
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_path = REPORT_DIR / f"draw_specialist_backtest_{timestamp}.md"
+    summary = result.get("summary", {}) if isinstance(result.get("summary"), dict) else {}
+    validation = result.get("validation", {}) if isinstance(result.get("validation"), dict) else {}
+    lines = [
+        "# Draw Specialist Backtest",
+        "",
+        f"- Generated At: {result.get('updated_at') or datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- Samples: {validation.get('sample_count', 0)}",
+        f"- Window: {validation.get('date_start') or '-'} -> {validation.get('date_end') or '-'}",
+        f"- Actual Draw Rate: {summary.get('actual_draw_rate_text', '-')}",
+        f"- Draw Precision: {summary.get('precision_text', '-')}",
+        f"- Draw Recall: {summary.get('recall_text', '-')}",
+        f"- Recommendation: {summary.get('recommendation', '-')}",
+        "",
+        "## Score Buckets",
+        "",
+        "| Bucket | Samples | Draw Rate | Lift | Pred Draw | Precision | Recall |",
+        "|---|---:|---:|---:|---:|---:|---:|",
+    ]
+    score_buckets = result.get("score_buckets", []) if isinstance(result.get("score_buckets"), list) else []
+    for row in score_buckets:
+        if not isinstance(row, dict):
+            continue
+        lines.append(
+            f"| {row.get('bucket', '-')} | {row.get('sample_count', 0)} | {row.get('draw_rate_text', '-')} | "
+            f"{row.get('lift_text', '-')} | {row.get('predicted_draw_count', 0)} | {row.get('precision_text', '-')} | {row.get('recall_text', '-')} |"
+        )
+    lines.extend(["", "## Missed Draw Samples", ""])
+    for row in result.get("missed_draw_rows", []) if isinstance(result.get("missed_draw_rows"), list) else []:
+        if isinstance(row, dict):
+            lines.append(
+                f"- {row.get('match_date', '-')} {row.get('league', '-')} {row.get('home_team', '-')} vs {row.get('away_team', '-')}: "
+                f"pred={row.get('predicted', '-')} draw_score={row.get('draw_score', '-')}, draw_prob={row.get('draw_probability', '-')}"
+            )
+    lines.extend(["", "## False Positive Draw Samples", ""])
+    for row in result.get("false_positive_rows", []) if isinstance(result.get("false_positive_rows"), list) else []:
+        if isinstance(row, dict):
+            lines.append(
+                f"- {row.get('match_date', '-')} {row.get('league', '-')} {row.get('home_team', '-')} vs {row.get('away_team', '-')}: "
+                f"score={row.get('score', '-')} draw_score={row.get('draw_score', '-')}, draw_prob={row.get('draw_probability', '-')}"
+            )
+    report_path.write_text("\n".join(lines), encoding="utf-8")
+    return str(report_path)
+
+
+def run_draw_specialist_backtest(
+    validation_ratio: float = 0.20,
+    min_validation_samples: int = 300,
+    max_validation_samples: int = 300,
+    write_report: bool = True,
+) -> dict:
+    _, validation_items = _validation_split_samples(
+        validation_ratio=validation_ratio,
+        min_validation_samples=min_validation_samples,
+    )
+    if not validation_items:
+        return {"ok": False, "reason": "insufficient_validation_split", "validation": {}, "summary": {}}
+    original_validation_count = len(validation_items)
+    if max_validation_samples > 0 and len(validation_items) > int(max_validation_samples):
+        validation_items = validation_items[-int(max_validation_samples):]
+
+    totals = _draw_bucket_template()
+    guard_bucket = _draw_bucket_template()
+    takeover_bucket = _draw_bucket_template()
+    score_buckets: dict[str, dict[str, int]] = defaultdict(_draw_bucket_template)
+    odds_buckets: dict[str, dict[str, int]] = defaultdict(_draw_bucket_template)
+    handicap_buckets: dict[str, dict[str, int]] = defaultdict(_draw_bucket_template)
+    expected_goal_buckets: dict[str, dict[str, int]] = defaultdict(_draw_bucket_template)
+    market_balance_buckets: dict[str, dict[str, int]] = defaultdict(_draw_bucket_template)
+    missed_draw_rows: list[dict[str, object]] = []
+    false_positive_rows: list[dict[str, object]] = []
+    skipped = 0
+    dates: list[str] = []
+
+    for item in validation_items:
+        prediction = _sample_item_prediction(item)
+        meta = item.get("meta", {}) if isinstance(item.get("meta"), dict) else {}
+        features = item.get("features", {}) if isinstance(item.get("features"), dict) else {}
+        if not isinstance(prediction, dict) or not isinstance(meta, dict):
+            skipped += 1
+            continue
+        home_goals = _safe_int(meta.get("home_goals"))
+        away_goals = _safe_int(meta.get("away_goals"))
+        if home_goals is None or away_goals is None:
+            skipped += 1
+            continue
+        match_date = normalize_text(meta.get("match_date", ""))
+        if match_date:
+            dates.append(match_date)
+        actual_key = "draw" if int(home_goals) == int(away_goals) else "home" if int(home_goals) > int(away_goals) else "away"
+        predicted_key = _draw_prediction_key(prediction)
+        actual_draw = actual_key == "draw"
+        predicted_draw = predicted_key == "draw"
+        draw_score = _safe_float(prediction.get("draw_score"), default=0.0)
+        draw_signals = prediction.get("draw_signals", {}) if isinstance(prediction.get("draw_signals"), dict) else {}
+        expected_goals = _safe_float(prediction.get("expected_goals"), default=0.0)
+        market_balance = _safe_float(draw_signals.get("market_balance"), default=0.0)
+
+        _draw_bucket_record(totals, actual_draw=actual_draw, predicted_draw=predicted_draw)
+        if draw_score >= 0.58:
+            _draw_bucket_record(guard_bucket, actual_draw=actual_draw, predicted_draw=predicted_draw)
+        if bool(prediction.get("draw_takeover")):
+            _draw_bucket_record(takeover_bucket, actual_draw=actual_draw, predicted_draw=predicted_draw)
+        bucket_keys = {
+            "score": _draw_score_bucket(draw_score),
+            "odds": _draw_odds_bucket(features.get("odds_draw", meta.get("odds_draw"))),
+            "handicap": _draw_handicap_bucket(meta.get("handicap_line", features.get("handicap_line"))),
+            "expected_goals": _draw_expected_goals_bucket(expected_goals),
+            "market_balance": _draw_market_balance_bucket(market_balance),
+        }
+        _draw_bucket_record(score_buckets[bucket_keys["score"]], actual_draw=actual_draw, predicted_draw=predicted_draw)
+        _draw_bucket_record(odds_buckets[bucket_keys["odds"]], actual_draw=actual_draw, predicted_draw=predicted_draw)
+        _draw_bucket_record(handicap_buckets[bucket_keys["handicap"]], actual_draw=actual_draw, predicted_draw=predicted_draw)
+        _draw_bucket_record(expected_goal_buckets[bucket_keys["expected_goals"]], actual_draw=actual_draw, predicted_draw=predicted_draw)
+        _draw_bucket_record(market_balance_buckets[bucket_keys["market_balance"]], actual_draw=actual_draw, predicted_draw=predicted_draw)
+        if actual_draw and not predicted_draw:
+            missed_draw_rows.append(_draw_sample_row(item, prediction, actual_key=actual_key, predicted_key=predicted_key))
+        elif predicted_draw and not actual_draw:
+            false_positive_rows.append(_draw_sample_row(item, prediction, actual_key=actual_key, predicted_key=predicted_key))
+
+    sample_count = int(totals.get("sample_count", 0) or 0)
+    actual_draw_count = int(totals.get("actual_draw_count", 0) or 0)
+    predicted_draw_count = int(totals.get("predicted_draw_count", 0) or 0)
+    draw_hit_count = int(totals.get("draw_hit_count", 0) or 0)
+    precision = draw_hit_count / predicted_draw_count if predicted_draw_count else None
+    recall = draw_hit_count / actual_draw_count if actual_draw_count else None
+    actual_draw_rate = actual_draw_count / sample_count if sample_count else None
+    baseline_draw_rate = actual_draw_rate or 0.0
+    guard = _finalize_draw_bucket("draw_score>=0.58", guard_bucket, baseline_draw_rate=baseline_draw_rate)
+    takeover = _finalize_draw_bucket("draw_takeover", takeover_bucket, baseline_draw_rate=baseline_draw_rate)
+
+    recommendation = "collecting"
+    recommendation_text = "平局专项样本仍需积累，先继续观察。"
+    if sample_count >= 100 and predicted_draw_count >= 8 and precision is not None:
+        if precision >= max(0.34, baseline_draw_rate + 0.08):
+            recommendation = "enable_draw_watch"
+            recommendation_text = "平局正式推荐精确率高于基准，可保留博平；同时将 draw_score>=0.58 作为防平提示。"
+        elif precision < max(0.22, baseline_draw_rate - 0.03):
+            recommendation = "tighten_draw_takeover"
+            recommendation_text = "平局正式推荐误报偏多，建议提高 draw_takeover 门槛，保留防平不直接博平。"
+        else:
+            recommendation = "watch_draw_guard"
+            recommendation_text = "平局推荐暂未形成稳定优势，优先把高 draw_score 作为防平风险提示。"
+    elif sample_count >= 100 and int(guard.get("sample_count", 0) or 0) >= 20:
+        recommendation = "watch_draw_guard"
+        recommendation_text = "正式平局推荐样本少，但防平信号已有覆盖，可先观察 draw_score 分层命中。"
+
+    summary = {
+        "sample_count": sample_count,
+        "actual_draw_count": actual_draw_count,
+        "actual_draw_rate": round(actual_draw_rate, 6) if actual_draw_rate is not None else None,
+        "actual_draw_rate_text": f"{actual_draw_rate:.1%}" if actual_draw_rate is not None else "-",
+        "predicted_draw_count": predicted_draw_count,
+        "draw_hit_count": draw_hit_count,
+        "precision": round(precision, 6) if precision is not None else None,
+        "precision_text": f"{precision:.1%}" if precision is not None else "-",
+        "recall": round(recall, 6) if recall is not None else None,
+        "recall_text": f"{recall:.1%}" if recall is not None else "-",
+        "false_positive_count": int(totals.get("false_positive_count", 0) or 0),
+        "missed_draw_count": int(totals.get("missed_draw_count", 0) or 0),
+        "guard": guard,
+        "takeover": takeover,
+        "recommendation": recommendation,
+        "recommendation_text": recommendation_text,
+    }
+    missed_draw_rows.sort(key=lambda row: (-_safe_float(row.get("draw_score"), default=0.0), str(row.get("match_date") or "")))
+    false_positive_rows.sort(key=lambda row: (-_safe_float(row.get("draw_score"), default=0.0), str(row.get("match_date") or "")))
+    result = {
+        "ok": True,
+        "reason": "ok",
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "validation": {
+            "sample_count": sample_count,
+            "original_sample_count": original_validation_count,
+            "max_validation_samples": int(max_validation_samples),
+            "truncated": len(validation_items) < original_validation_count,
+            "skipped": skipped,
+            "date_start": min(dates) if dates else None,
+            "date_end": max(dates) if dates else None,
+            "ratio": round(len(validation_items) / max(len(STATE_STORE.load_xgb_samples()), 1), 4),
+        },
+        "summary": summary,
+        "score_buckets": _draw_bucket_rows(score_buckets, baseline_draw_rate=baseline_draw_rate),
+        "odds_buckets": _draw_bucket_rows(odds_buckets, baseline_draw_rate=baseline_draw_rate),
+        "handicap_buckets": _draw_bucket_rows(handicap_buckets, baseline_draw_rate=baseline_draw_rate),
+        "expected_goal_buckets": _draw_bucket_rows(expected_goal_buckets, baseline_draw_rate=baseline_draw_rate),
+        "market_balance_buckets": _draw_bucket_rows(market_balance_buckets, baseline_draw_rate=baseline_draw_rate),
+        "missed_draw_rows": missed_draw_rows[:10],
+        "false_positive_rows": false_positive_rows[:10],
+    }
+    result["report_path"] = _write_draw_specialist_backtest_markdown(result) if write_report else None
+    _save_draw_specialist_backtest_report(result)
     return result
 
 

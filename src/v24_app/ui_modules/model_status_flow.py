@@ -3,6 +3,20 @@ from __future__ import annotations
 from typing import Mapping
 
 
+def _safe_float(value: object, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(value: object, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _ready_text(value: object) -> str:
     return "就绪" if bool(value) else "未就绪"
 
@@ -409,6 +423,81 @@ def build_play_model_backtest_success_message(result: Mapping[str, object] | obj
         + f"高波动专用: {float(metrics.get('score_volatile_model_volatile', {}).get('accuracy', 0) or 0):.2%} ({int(metrics.get('score_volatile_model_volatile', {}).get('hits', 0) or 0)}/{int(metrics.get('score_volatile_model_volatile', {}).get('total', 0) or 0)})\n\n"
         + f"报告: {report_path}"
     )
+
+
+def build_draw_specialist_backtest_status_text(result: Mapping[str, object] | object) -> str:
+    resolved = result if isinstance(result, Mapping) else {}
+    summary = resolved.get("summary", {}) if isinstance(resolved.get("summary"), Mapping) else {}
+    validation = resolved.get("validation", {}) if isinstance(resolved.get("validation"), Mapping) else {}
+    guard = summary.get("guard", {}) if isinstance(summary.get("guard"), Mapping) else {}
+    takeover = summary.get("takeover", {}) if isinstance(summary.get("takeover"), Mapping) else {}
+    if not bool(resolved.get("ok")):
+        return (
+            "平局专项诊断\n"
+            + f"- 状态: {resolved.get('reason', 'not_run')}\n"
+            + "- 建议: 先运行一次平局专项回测，生成平局召回、误报和分层表现。"
+        )
+    return (
+        "平局专项诊断\n"
+        + f"- 更新时间: {resolved.get('updated_at') or '-'}\n"
+        + f"- 验证样本: {validation.get('sample_count', 0)} | 时间: {validation.get('date_start') or '-'} -> {validation.get('date_end') or '-'}\n"
+        + f"- 真实平局: {summary.get('actual_draw_count', 0)} ({summary.get('actual_draw_rate_text', '-')})\n"
+        + f"- 正式博平: {summary.get('draw_hit_count', 0)}/{summary.get('predicted_draw_count', 0)} | 精确率 {summary.get('precision_text', '-')} | 召回 {summary.get('recall_text', '-')}\n"
+        + f"- 防平信号(draw_score>=0.58): 样本 {guard.get('sample_count', 0)} | 平局率 {guard.get('draw_rate_text', '-')} | lift {guard.get('lift_text', '-')}\n"
+        + f"- draw_takeover: 样本 {takeover.get('sample_count', 0)} | 精确率 {takeover.get('precision_text', '-')} | 召回 {takeover.get('recall_text', '-')}\n"
+        + f"- 漏判平局: {summary.get('missed_draw_count', 0)} | 误报平局: {summary.get('false_positive_count', 0)}\n"
+        + f"- 建议: {summary.get('recommendation_text') or summary.get('recommendation') or '-'}\n"
+        + f"- 报告: {resolved.get('report_path') or '-'}"
+    )
+
+
+def build_draw_specialist_backtest_apply_status_text(result: Mapping[str, object] | object) -> str:
+    resolved = result if isinstance(result, Mapping) else {}
+    summary = resolved.get("summary", {}) if isinstance(resolved.get("summary"), Mapping) else {}
+    return (
+        f"平局专项回测{'完成' if bool(resolved.get('ok')) else '失败'} | "
+        f"样本 {summary.get('sample_count', 0)} | 精确 {summary.get('precision_text', '-')} | 召回 {summary.get('recall_text', '-')}"
+    )
+
+
+def build_draw_specialist_backtest_success_message(result: Mapping[str, object] | object) -> str:
+    return build_draw_specialist_backtest_status_text(result)
+
+
+def build_draw_specialist_backtest_card_rows(result: Mapping[str, object] | object) -> list[dict[str, str]]:
+    resolved = result if isinstance(result, Mapping) else {}
+    summary = resolved.get("summary", {}) if isinstance(resolved.get("summary"), Mapping) else {}
+    guard = summary.get("guard", {}) if isinstance(summary.get("guard"), Mapping) else {}
+    takeover = summary.get("takeover", {}) if isinstance(summary.get("takeover"), Mapping) else {}
+    if not bool(resolved.get("ok")):
+        return [
+            {
+                "title": "平局专项诊断: 未运行",
+                "body": "点击平局诊断运行历史回测，生成平局精确率、召回率、漏判和误报分层。",
+                "tone": "neutral",
+            }
+        ]
+    recommendation = str(summary.get("recommendation") or "")
+    tone = "good" if recommendation == "enable_draw_watch" else "warning" if recommendation in {"watch_draw_guard", "tighten_draw_takeover"} else "neutral"
+    return [
+        {
+            "title": f"平局识别: 精确 {summary.get('precision_text', '-')} / 召回 {summary.get('recall_text', '-')}",
+            "body": (
+                f"样本 {_safe_int(summary.get('sample_count'))} | 真实平局 {summary.get('actual_draw_count', 0)}"
+                f"({summary.get('actual_draw_rate_text', '-')}) | 博平 {summary.get('draw_hit_count', 0)}/{summary.get('predicted_draw_count', 0)}\n"
+                f"漏判 {summary.get('missed_draw_count', 0)} | 误报 {summary.get('false_positive_count', 0)} | 建议 {summary.get('recommendation', '-')}"
+            ),
+            "tone": tone,
+        },
+        {
+            "title": f"防平信号: {guard.get('draw_rate_text', '-')} / lift {guard.get('lift_text', '-')}",
+            "body": (
+                f"draw_score>=0.58 样本 {guard.get('sample_count', 0)} | 真实平局 {guard.get('actual_draw_count', 0)} | "
+                f"正式博平 {takeover.get('sample_count', 0)}样本，精确 {takeover.get('precision_text', '-')}"
+            ),
+            "tone": "good" if _safe_float(guard.get("lift"), 0.0) > 0.03 else "warning" if _safe_int(guard.get("sample_count")) else "neutral",
+        },
+    ]
 
 
 def build_high_accuracy_strategy_backtest_status_text(result: Mapping[str, object] | object) -> str:

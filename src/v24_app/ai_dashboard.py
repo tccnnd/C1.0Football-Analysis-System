@@ -23,6 +23,7 @@ from .core import (
     create_video_review,
     extract_video_review_frames_now,
     fetch_matches_v24,
+    get_draw_specialist_backtest_status,
     get_play_model_policy_status,
     get_play_model_training_status,
     get_high_accuracy_strategy_status,
@@ -38,6 +39,7 @@ from .core import (
     predict_match,
     record_result_recovery_run,
     rollback_strategy_admission_policy,
+    run_draw_specialist_backtest,
     run_high_accuracy_strategy_backtest,
     run_play_model_backtest,
     STATSBOMB_SANDBOX_FEWSHOT_FILE,
@@ -52,6 +54,10 @@ from .ui_modules import (
     build_background_task_stability_summary,
     build_high_accuracy_strategy_backtest_message,
     build_high_accuracy_strategy_backtest_status_text,
+    build_draw_specialist_backtest_apply_status_text,
+    build_draw_specialist_backtest_card_rows,
+    build_draw_specialist_backtest_status_text,
+    build_draw_specialist_backtest_success_message,
     build_play_model_backtest_apply_status_text,
     build_play_model_backtest_success_message,
     build_play_model_policy_decision_rows,
@@ -2385,6 +2391,18 @@ class SmartMatchDashboard:
             error_title="\u73a9\u6cd5\u6a21\u578b\u56de\u6d4b\u5931\u8d25",
         )
 
+    def run_draw_specialist_backtest_task(self) -> None:
+        self._submit_process_task(
+            key="draw_specialist_backtest",
+            label="\u5e73\u5c40\u4e13\u9879\u56de\u6d4b",
+            start_status="\u6b63\u5728\u540e\u53f0\u8fdb\u7a0b\u4e2d\u56de\u6d4b\u5e73\u5c40\u8bc6\u522b\u80fd\u529b...",
+            func=run_draw_specialist_backtest,
+            group="backtest",
+            priority=128,
+            on_success=self._finish_draw_specialist_backtest_task,
+            error_title="\u5e73\u5c40\u4e13\u9879\u56de\u6d4b\u5931\u8d25",
+        )
+
     def train_play_models_task(self) -> None:
         self._submit_process_task(
             key="train_play_models",
@@ -2464,6 +2482,17 @@ class SmartMatchDashboard:
             messagebox.showinfo("\u73a9\u6cd5\u6a21\u578b\u56de\u6d4b", build_play_model_backtest_success_message(payload))
         else:
             messagebox.showinfo("\u73a9\u6cd5\u6a21\u578b\u56de\u6d4b", f"\u56de\u6d4b\u672a\u5b8c\u6210\n\u539f\u56e0: {payload.get('reason', '-')}")
+
+    def _finish_draw_specialist_backtest_task(self, result: object, record: BackgroundTaskRecord) -> None:
+        payload = result if isinstance(result, dict) else {}
+        self.status_var.set(build_draw_specialist_backtest_apply_status_text(payload))
+        self._log_event("OK", f"\u5e73\u5c40\u4e13\u9879\u56de\u6d4b\u5b8c\u6210 | {record.task_id} | {record.elapsed_seconds or 0:.2f}s")
+        if getattr(self, "current_view", "") == "monitor":
+            self.open_monitor_center()
+        if bool(payload.get("ok")):
+            messagebox.showinfo("\u5e73\u5c40\u4e13\u9879\u56de\u6d4b", build_draw_specialist_backtest_success_message(payload))
+        else:
+            messagebox.showinfo("\u5e73\u5c40\u4e13\u9879\u56de\u6d4b", f"\u56de\u6d4b\u672a\u5b8c\u6210\n\u539f\u56e0: {payload.get('reason', '-')}")
 
     def _finish_train_play_models_task(self, result: object, record: BackgroundTaskRecord) -> None:
         payload = result if isinstance(result, dict) else {}
@@ -2559,6 +2588,89 @@ class SmartMatchDashboard:
         text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(12, 0), pady=12)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 12), pady=12)
         text.insert(tk.END, build_play_model_policy_status_text(status))
+        text.configure(state=tk.DISABLED)
+
+    def open_draw_specialist_backtest_window(self) -> None:
+        status = get_draw_specialist_backtest_status()
+        window = tk.Toplevel(self.root)
+        window.title("\u5e73\u5c40\u4e13\u9879\u8bca\u65ad")
+        window.configure(bg=BG)
+        window.geometry("900x640")
+        header = tk.Frame(window, bg=BG)
+        header.pack(fill=tk.X, padx=16, pady=(14, 8))
+        tk.Label(
+            header,
+            text="\u5e73\u5c40\u4e13\u9879\u8bca\u65ad",
+            bg=BG,
+            fg=TEXT,
+            font=("Microsoft YaHei UI", 14, "bold"),
+        ).pack(side=tk.LEFT)
+        tk.Button(
+            header,
+            text="\u8fd0\u884c\u56de\u6d4b",
+            command=self.run_draw_specialist_backtest_task,
+            bg=BLUE,
+            fg="white",
+            activebackground="#3d5ee7",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=14,
+            pady=6,
+        ).pack(side=tk.RIGHT)
+        frame = tk.Frame(window, bg=PANEL, highlightbackground="#172638", highlightthickness=1)
+        frame.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 16))
+        text = tk.Text(
+            frame,
+            bg=PANEL,
+            fg=TEXT,
+            insertbackground=TEXT,
+            selectbackground=BLUE,
+            relief=tk.FLAT,
+            wrap=tk.WORD,
+            font=("Consolas", 10),
+        )
+        scrollbar = tk.Scrollbar(frame, orient=tk.VERTICAL, command=text.yview)
+        text.configure(yscrollcommand=scrollbar.set)
+        text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(12, 0), pady=12)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 12), pady=12)
+        lines = [build_draw_specialist_backtest_status_text(status)]
+        for section_key, section_title in (
+            ("score_buckets", "\n\nDraw Score 分层"),
+            ("odds_buckets", "\n\n平赔分层"),
+            ("handicap_buckets", "\n\n让球线分层"),
+            ("expected_goal_buckets", "\n\n预期进球分层"),
+            ("market_balance_buckets", "\n\n市场均衡分层"),
+        ):
+            rows = status.get(section_key, []) if isinstance(status.get(section_key), list) else []
+            if rows:
+                lines.append(section_title)
+                for row in rows[:8]:
+                    if isinstance(row, dict):
+                        lines.append(
+                            f"- {row.get('bucket', '-')}: 样本 {row.get('sample_count', 0)} | 平局率 {row.get('draw_rate_text', '-')} | "
+                            f"lift {row.get('lift_text', '-')} | 博平 {row.get('draw_hit_count', 0)}/{row.get('predicted_draw_count', 0)} | "
+                            f"召回 {row.get('recall_text', '-')}"
+                        )
+        missed_rows = status.get("missed_draw_rows", []) if isinstance(status.get("missed_draw_rows"), list) else []
+        if missed_rows:
+            lines.append("\n\n高分漏判平局")
+            for row in missed_rows[:8]:
+                if isinstance(row, dict):
+                    lines.append(
+                        f"- {row.get('match_date', '-')} {row.get('league', '-')} {row.get('home_team', '-')} vs {row.get('away_team', '-')}: "
+                        f"pred={row.get('predicted', '-')} draw_score={row.get('draw_score', '-')} draw_prob={row.get('draw_probability', '-')}"
+                    )
+        false_rows = status.get("false_positive_rows", []) if isinstance(status.get("false_positive_rows"), list) else []
+        if false_rows:
+            lines.append("\n\n高分误报平局")
+            for row in false_rows[:8]:
+                if isinstance(row, dict):
+                    lines.append(
+                        f"- {row.get('match_date', '-')} {row.get('league', '-')} {row.get('home_team', '-')} vs {row.get('away_team', '-')}: "
+                        f"score={row.get('score', '-')} draw_score={row.get('draw_score', '-')} draw_prob={row.get('draw_probability', '-')}"
+                    )
+        text.insert(tk.END, "\n".join(lines))
         text.configure(state=tk.DISABLED)
 
     def open_background_task_detail_window(self, task_id: str | object) -> None:
@@ -2717,6 +2829,19 @@ class SmartMatchDashboard:
         ).pack(side=tk.RIGHT, padx=(0, 10))
         tk.Button(
             header,
+            text="\u5e73\u5c40\u8bca\u65ad",
+            command=self.open_draw_specialist_backtest_window,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=14,
+            pady=7,
+        ).pack(side=tk.RIGHT, padx=(0, 10))
+        tk.Button(
+            header,
             text="\u63a5\u7ba1\u7b56\u7565",
             command=self.open_play_model_policy_detail_window,
             bg=PANEL_2,
@@ -2804,6 +2929,7 @@ class SmartMatchDashboard:
         background_queue_state = self.background_tasks.queue_state()
         background_stability = build_background_task_stability_summary(background_task_history)
         play_policy_status = self._play_model_policy_status()
+        draw_specialist_status = get_draw_specialist_backtest_status()
         load_failure_count = int(load_report.get("failure_count", 0) or 0)
         snapshot_failure_count = int(load_report.get("snapshot_failure_count", 0) or 0)
         fetched_count = int(load_report.get("fetched_count", len(self.rows)) or 0)
@@ -2834,6 +2960,11 @@ class SmartMatchDashboard:
                 "\u961f\u5217\u8d44\u6e90",
                 f"T {background_queue_state.get('thread_running', 0)}/{background_queue_state.get('thread_limit', 0)} | P {background_queue_state.get('process_running', 0)}/{background_queue_state.get('process_limit', 0)}",
                 "#7aa2ff",
+            ),
+            (
+                "\u5e73\u5c40\u8bca\u65ad",
+                str((draw_specialist_status.get("summary") if isinstance(draw_specialist_status.get("summary"), dict) else {}).get("precision_text") or "-"),
+                GREEN if bool(draw_specialist_status.get("ok")) else YELLOW,
             ),
         ]
         for label, value, color in metrics:
@@ -2921,6 +3052,21 @@ class SmartMatchDashboard:
             "\u63a5\u7ba1\u7b56\u7565\u660e\u7ec6",
             "\u67e5\u770b\u5b8c\u6574\u95e8\u69db\u3001\u6821\u51c6\u6837\u672c\u548c\u63a5\u7ba1\u539f\u56e0",
             command=self.open_play_model_policy_detail_window,
+        )
+
+        tk.Label(right, text="\u5e73\u5c40\u4e13\u9879\u8bca\u65ad", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
+        for row in build_draw_specialist_backtest_card_rows(draw_specialist_status):
+            self._alert_card(
+                right,
+                str(row.get("title") or "-"),
+                f"{row.get('body', '-')}\n\u70b9\u51fb\u67e5\u770b\u5e73\u5c40\u5206\u5c42\u8be6\u60c5",
+                tone=str(row.get("tone") or "neutral"),
+            )
+        self._strategy_row(
+            right,
+            "\u5e73\u5c40\u8bca\u65ad\u660e\u7ec6",
+            "\u67e5\u770b\u5e73\u5c40\u7cbe\u786e\u7387\u3001\u53ec\u56de\u7387\u3001\u6f0f\u5224/\u8bef\u62a5\u548c\u5206\u5c42\u8868\u73b0",
+            command=self.open_draw_specialist_backtest_window,
         )
 
         tk.Label(right, text="\u540e\u53f0\u4efb\u52a1", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
