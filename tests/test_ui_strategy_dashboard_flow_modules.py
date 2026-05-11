@@ -903,8 +903,63 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("v1", report)
         self.assertIn("Bad1", report)
         self.assertIn("version_id,updated_at,source", csv_text)
+        self.assertIn("event_type,event_label,related_version_id,governance_description", csv_text)
         self.assertIn("m1", csv_text)
+        self.assertIn("allowlist_tuning", csv_text)
         self.assertIn("\u653e\u884c\u540e1X2\u5931\u8bef", csv_text)
+
+    def test_strategy_policy_audit_exports_governance_events_without_samples(self) -> None:
+        history = [
+            {"version_id": "v1", "updated_at": "2026-05-01 10:00:00", "source": "manual"},
+            {"version_id": "v2", "updated_at": "2026-05-02 10:00:00", "source": "release_quality_trend"},
+            {"version_id": "v3", "updated_at": "2026-05-03 10:00:00", "source": "policy_rollback:v2"},
+            {"version_id": "v4", "updated_at": "2026-05-04 10:00:00", "source": "policy_freeze_override:v3"},
+        ]
+        settlements = [
+            {
+                "match_id": "m2",
+                "timestamp": "2026-05-02 12:00:00",
+                "league": "A",
+                "home_team": "Trend",
+                "away_team": "Gate",
+                "strategy_admission_decision": "allow",
+                "is_correct": True,
+                "handicap_is_correct": True,
+                "agent_replay_guard_applied": True,
+            },
+            {
+                "match_id": "m3",
+                "timestamp": "2026-05-03 12:00:00",
+                "league": "A",
+                "home_team": "Rollback",
+                "away_team": "Check",
+                "strategy_admission_decision": "allow",
+                "is_correct": False,
+                "handicap_is_correct": False,
+                "agent_replay_guard_applied": False,
+            },
+        ]
+
+        review = build_strategy_policy_effect_review(history, settlements)
+        lines = build_strategy_policy_audit_report_lines(review, generated_at=datetime(2026, 5, 5, 9, 0, 0))
+        csv_text = build_strategy_policy_audit_csv_text(review)
+        report = "\n".join(lines)
+
+        self.assertIn("\u7b56\u7565\u6cbb\u7406\u4e8b\u4ef6", report)
+        self.assertIn("\u8d8b\u52bf\u95e8\u63a7", report)
+        self.assertIn("\u53c2\u6570\u56de\u6eda", report)
+        self.assertIn("\u89e3\u9664\u51bb\u7ed3", report)
+        self.assertIn("policy_rollback:v2", report)
+        self.assertIn("policy_freeze_override:v3", report)
+        self.assertIn("\u56de\u6eda\u4fee\u590d", report)
+        self.assertIn("\u51bb\u7ed3\u89e3\u9664", report)
+        self.assertIn("event_type,event_label,related_version_id,governance_description", csv_text)
+        self.assertIn("trend_gate", csv_text)
+        self.assertIn("rollback", csv_text)
+        self.assertIn("freeze_override", csv_text)
+        self.assertIn("policy_rollback:v2", csv_text)
+        self.assertIn("policy_freeze_override:v3", csv_text)
+        self.assertIn(",v3,", csv_text)
 
     def test_handicap_margin_backtest_recommends_high_conflict_block(self) -> None:
         settlements = [

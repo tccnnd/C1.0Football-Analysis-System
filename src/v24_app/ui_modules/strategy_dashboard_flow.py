@@ -4245,7 +4245,13 @@ def _policy_effect_row_by_version(policy_effect_review: Mapping[str, object], ve
 
 def _previous_policy_effect_row(policy_effect_review: Mapping[str, object], latest_version_id: object) -> dict[str, object]:
     rows = [dict(row) for row in (_as_list(policy_effect_review.get("all_rows")) or _as_list(policy_effect_review.get("rows"))) if isinstance(row, Mapping)]
-    rows.sort(key=lambda row: (_parse_policy_review_time(row.get("updated_at")) or datetime.min, str(row.get("version_id") or "")), reverse=True)
+    rows.sort(
+        key=lambda row: (
+            _parse_policy_review_time(row.get("updated_at")) or datetime.min,
+            str(row.get("version_id") or ""),
+        ),
+        reverse=True,
+    )
     key = _text(latest_version_id, "")
     for index, row in enumerate(rows):
         if _text(row.get("version_id"), "") == key:
@@ -4937,6 +4943,101 @@ def build_strategy_policy_rollback_effect_review(
         "min_known_samples": max(1, int(min_known_samples)),
         "metrics": metrics,
         "rows": detail_rows,
+    }
+
+
+def _strategy_policy_governance_event_type(source: object) -> tuple[str, str, str]:
+    text = str(source or "").strip()
+    lowered = text.lower()
+    if lowered.startswith("policy_freeze_override"):
+        return "freeze_override", "\u89e3\u9664\u51bb\u7ed3", "\u4eba\u5de5\u89e3\u9664\u8c03\u53c2\u51bb\u7ed3\u5ba1\u8ba1"
+    if lowered.startswith("policy_rollback"):
+        return "rollback", "\u53c2\u6570\u56de\u6eda", "\u56de\u6eda\u5230\u4e0a\u4e00\u7248\u6216\u6307\u5b9a\u7248\u672c"
+    if "release_quality_trend" in lowered:
+        return "trend_gate", "\u8d8b\u52bf\u95e8\u63a7", "\u653e\u884c\u8d28\u91cf\u8d8b\u52bf\u89e6\u53d1\u7684\u95e8\u69db\u8c03\u6574"
+    if "strategy_allowlist_tuning" in lowered:
+        return "allowlist_tuning", "\u653e\u884c\u95e8\u69db", "\u653e\u884c\u6c60\u8d28\u91cf\u89e6\u53d1\u7684\u95e8\u69db\u8c03\u6574"
+    if "agent_replay_guard_tuning" in lowered:
+        return "replay_guard_tuning", "Replay Guard", "Replay Guard \u53c2\u6570\u8c03\u6574"
+    return "manual", "\u666e\u901a\u8c03\u53c2", "\u624b\u52a8\u6216\u5176\u4ed6\u6765\u6e90\u53c2\u6570\u8c03\u6574"
+
+
+def _strategy_policy_governance_related_version(source: object) -> str:
+    rollback_version = _policy_rollback_source_version(source)
+    if rollback_version:
+        return rollback_version
+    override_version = _policy_freeze_override_source_version(source)
+    if override_version:
+        return override_version
+    return "-"
+
+
+def build_strategy_policy_governance_event_summary(
+    policy_effect_review: Mapping[str, object] | object,
+) -> dict[str, object]:
+    review = _as_mapping(policy_effect_review)
+    row_source = _as_list(review.get("all_rows")) or _as_list(review.get("rows"))
+    rows = [dict(row) for row in row_source if isinstance(row, Mapping)]
+    rows.sort(
+        key=lambda row: (
+            _parse_policy_review_time(row.get("updated_at")) or datetime.min,
+            str(row.get("version_id") or ""),
+        ),
+        reverse=True,
+    )
+    event_rows: list[dict[str, object]] = []
+    counts: dict[str, int] = {}
+    for row in rows:
+        event_type, event_label, description = _strategy_policy_governance_event_type(row.get("source"))
+        counts[event_type] = counts.get(event_type, 0) + 1
+        related_version = _strategy_policy_governance_related_version(row.get("source"))
+        tone = "bad" if event_type == "rollback" and str(row.get("effect_status") or "") == "negative" else "warning" if event_type in {"rollback", "freeze_override", "trend_gate"} else "neutral"
+        if event_type == "freeze_override":
+            tone = "warning"
+        elif event_type == "rollback" and str(row.get("effect_status") or "") == "effective":
+            tone = "good"
+        event_rows.append(
+            {
+                "event_type": event_type,
+                "event_label": event_label,
+                "version_id": row.get("version_id", "-"),
+                "updated_at": row.get("updated_at", "-"),
+                "source": row.get("source", "-"),
+                "related_version_id": related_version,
+                "effect_label": row.get("effect_label", "-"),
+                "effect_status": row.get("effect_status", "-"),
+                "allow_hit_rate_text": row.get("allow_hit_rate_text", "-"),
+                "known_allow_count": _safe_int(row.get("known_allow_count")),
+                "sample_count": _safe_int(row.get("sample_count")),
+                "replay_guard_net": _safe_int(row.get("replay_guard_net")),
+                "description": description,
+                "tone": tone,
+                "summary": (
+                    f"{event_label} | \u7248\u672c {row.get('version_id', '-')} | "
+                    f"\u5173\u8054 {related_version} | \u6548\u679c {row.get('effect_label', '-')} | "
+                    f"\u547d\u4e2d {row.get('allow_hit_rate_text', '-')}"
+                ),
+            }
+        )
+    governance_count = sum(counts.get(key, 0) for key in ("trend_gate", "allowlist_tuning", "replay_guard_tuning", "rollback", "freeze_override"))
+    rollback_count = counts.get("rollback", 0)
+    freeze_override_count = counts.get("freeze_override", 0)
+    trend_gate_count = counts.get("trend_gate", 0)
+    latest = event_rows[0] if event_rows else {}
+    return {
+        "event_count": len(event_rows),
+        "governance_count": governance_count,
+        "rollback_count": rollback_count,
+        "freeze_override_count": freeze_override_count,
+        "trend_gate_count": trend_gate_count,
+        "counts": counts,
+        "latest_label": latest.get("event_label", "-") if latest else "-",
+        "latest_summary": latest.get("summary", "-") if latest else "-",
+        "summary_text": (
+            f"\u6cbb\u7406\u4e8b\u4ef6 {governance_count} | "
+            f"\u8d8b\u52bf\u95e8\u63a7 {trend_gate_count} | \u56de\u6eda {rollback_count} | \u89e3\u9664\u51bb\u7ed3 {freeze_override_count}"
+        ),
+        "rows": event_rows,
     }
 
 
@@ -6660,7 +6761,16 @@ def build_strategy_policy_audit_report_lines(
     current = generated_at or datetime.now()
     rows = [row for row in _as_list(review.get("rows")) if isinstance(row, Mapping)]
     stability = _as_mapping(review.get("stability_monitor"))
-    tuning_guard = build_strategy_policy_tuning_guard(stability, source="audit")
+    rollback_effect = build_strategy_policy_rollback_effect_review(review)
+    freeze_override = build_strategy_policy_freeze_override_status(_as_list(review.get("all_rows")) or _as_list(review.get("rows")), rollback_effect)
+    governance = build_strategy_policy_governance_event_summary(review)
+    tuning_guard = build_strategy_policy_tuning_guard(
+        stability,
+        source="audit",
+        trend_tuning_effect_review=build_strategy_trend_tuning_effect_review(review),
+        rollback_effect_review=rollback_effect,
+        freeze_override_status=freeze_override,
+    )
     lines = [
         "# \u7b56\u7565\u8c03\u53c2\u5ba1\u8ba1\u62a5\u544a",
         "",
@@ -6669,24 +6779,61 @@ def build_strategy_policy_audit_report_lines(
         f"- \u6700\u65b0\u72b6\u6001: {review.get('latest_label', '-')}",
         f"- \u7248\u672c\u7a33\u5b9a: {stability.get('summary_text', '-')}",
         f"- \u8c03\u53c2\u95e8\u63a7: {tuning_guard.get('summary_text', '-')}",
+        f"- \u6cbb\u7406\u4e8b\u4ef6: {governance.get('summary_text', '-')}",
         f"- \u6458\u8981: {review.get('summary_text', '-')}",
         "",
-        "## \u7248\u672c\u7a33\u5b9a\u76d1\u63a7",
+        "## \u7b56\u7565\u6cbb\u7406\u4e8b\u4ef6",
         "",
-        f"- \u72b6\u6001: {stability.get('label', '-')}",
-        f"- \u8bc4\u4f30\u7248\u672c: {stability.get('evaluated_count', 0)} / {stability.get('version_count', 0)}",
-        f"- \u6700\u65b0\u547d\u4e2d: {stability.get('latest_allow_hit_rate_text', '-')}",
-        f"- \u6700\u65b0\u73af\u6bd4: {stability.get('latest_delta_text', '-')}",
-        f"- \u5e73\u5747\u6ce2\u52a8: {stability.get('avg_abs_delta_text', '-')}",
-        f"- Replay\u7d2f\u8ba1\u51c0\u503c: {stability.get('cumulative_replay_net', 0):+d}"
-        if isinstance(stability.get("cumulative_replay_net"), int)
-        else f"- Replay\u7d2f\u8ba1\u51c0\u503c: {stability.get('cumulative_replay_net', 0)}",
-        f"- \u5efa\u8bae: {stability.get('recommendation_text', '-')}",
-        f"- \u8c03\u53c2\u95e8\u63a7: {tuning_guard.get('label', '-')} / {tuning_guard.get('body', '-')}",
+        f"- \u6458\u8981: {governance.get('summary_text', '-')}",
+        f"- \u56de\u6eda\u4fee\u590d: {rollback_effect.get('summary_text', '-')}",
+        f"- \u51bb\u7ed3\u89e3\u9664: {freeze_override.get('summary_text', '-')}",
+        f"- \u95e8\u63a7\u72b6\u6001: {tuning_guard.get('label', '-')} / {tuning_guard.get('body', '-')}",
         "",
-        "| \u5468\u671f | \u7248\u672c | \u6837\u672c | \u653e\u884c\u547d\u4e2d | Replay\u51c0\u503c | \u6b63\u5411 | \u8d1f\u5411 | \u79ef\u7d2f |",
-        "| --- | ---: | ---: | --- | ---: | ---: | ---: | ---: |",
+        "| \u65f6\u95f4 | \u7248\u672c | \u4e8b\u4ef6 | \u6765\u6e90 | \u5173\u8054\u7248\u672c | \u6548\u679c | \u653e\u884c\u547d\u4e2d | Replay\u51c0\u503c | \u8bf4\u660e |",
+        "| --- | --- | --- | --- | --- | --- | --- | ---: | --- |",
     ]
+    governance_rows = [row for row in _as_list(governance.get("rows")) if isinstance(row, Mapping)]
+    if governance_rows:
+        for row in governance_rows:
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        _md_cell(row.get("updated_at")),
+                        _md_cell(row.get("version_id")),
+                        _md_cell(row.get("event_label")),
+                        _md_cell(row.get("source")),
+                        _md_cell(row.get("related_version_id")),
+                        _md_cell(row.get("effect_label")),
+                        _md_cell(row.get("allow_hit_rate_text")),
+                        f"{_safe_int(row.get('replay_guard_net')):+d}",
+                        _md_cell(row.get("description")),
+                    ]
+                )
+                + " |"
+            )
+    else:
+        lines.append("| - | - | \u6682\u65e0\u6cbb\u7406\u4e8b\u4ef6 | - | - | - | - | 0 | - |")
+    lines.extend(
+        [
+            "",
+            "## \u7248\u672c\u7a33\u5b9a\u76d1\u63a7",
+            "",
+            f"- \u72b6\u6001: {stability.get('label', '-')}",
+            f"- \u8bc4\u4f30\u7248\u672c: {stability.get('evaluated_count', 0)} / {stability.get('version_count', 0)}",
+            f"- \u6700\u65b0\u547d\u4e2d: {stability.get('latest_allow_hit_rate_text', '-')}",
+            f"- \u6700\u65b0\u73af\u6bd4: {stability.get('latest_delta_text', '-')}",
+            f"- \u5e73\u5747\u6ce2\u52a8: {stability.get('avg_abs_delta_text', '-')}",
+            f"- Replay\u7d2f\u8ba1\u51c0\u503c: {stability.get('cumulative_replay_net', 0):+d}"
+            if isinstance(stability.get("cumulative_replay_net"), int)
+            else f"- Replay\u7d2f\u8ba1\u51c0\u503c: {stability.get('cumulative_replay_net', 0)}",
+            f"- \u5efa\u8bae: {stability.get('recommendation_text', '-')}",
+            f"- \u8c03\u53c2\u95e8\u63a7: {tuning_guard.get('label', '-')} / {tuning_guard.get('body', '-')}",
+            "",
+            "| \u5468\u671f | \u7248\u672c | \u6837\u672c | \u653e\u884c\u547d\u4e2d | Replay\u51c0\u503c | \u6b63\u5411 | \u8d1f\u5411 | \u79ef\u7d2f |",
+            "| --- | ---: | ---: | --- | ---: | ---: | ---: | ---: |",
+        ]
+    )
     weekly_rows = [row for row in _as_list(stability.get("weekly_rows")) if isinstance(row, Mapping)]
     if weekly_rows:
         for row in weekly_rows:
@@ -6711,10 +6858,10 @@ def build_strategy_policy_audit_report_lines(
     lines.extend(
         [
             "",
-        "## \u7248\u672c\u6548\u679c\u603b\u89c8",
-        "",
-        "| \u7248\u672c | \u65f6\u95f4 | \u6765\u6e90 | \u6548\u679c | \u6837\u672c | \u653e\u884c\u547d\u4e2d | Replay\u51c0\u503c | \u56de\u6eda\u5efa\u8bae |",
-        "| --- | --- | --- | --- | ---: | --- | ---: | --- |",
+            "## \u7248\u672c\u6548\u679c\u603b\u89c8",
+            "",
+            "| \u7248\u672c | \u65f6\u95f4 | \u6765\u6e90 | \u6548\u679c | \u6837\u672c | \u653e\u884c\u547d\u4e2d | Replay\u51c0\u503c | \u56de\u6eda\u5efa\u8bae |",
+            "| --- | --- | --- | --- | ---: | --- | ---: | --- |",
         ]
     )
     if not rows:
@@ -6812,7 +6959,13 @@ def build_strategy_policy_audit_report_lines(
 
 def build_strategy_policy_audit_csv_text(policy_effect_review: Mapping[str, object] | object) -> str:
     review = _as_mapping(policy_effect_review)
-    rows = [row for row in _as_list(review.get("rows")) if isinstance(row, Mapping)]
+    rows = [row for row in (_as_list(review.get("all_rows")) or _as_list(review.get("rows"))) if isinstance(row, Mapping)]
+    governance = build_strategy_policy_governance_event_summary(review)
+    governance_by_version = {
+        str(row.get("version_id") or ""): row
+        for row in _as_list(governance.get("rows"))
+        if isinstance(row, Mapping)
+    }
     output = io.StringIO()
     writer = csv.writer(output, lineterminator="\n")
     writer.writerow(
@@ -6821,6 +6974,10 @@ def build_strategy_policy_audit_csv_text(policy_effect_review: Mapping[str, obje
             "updated_at",
             "source",
             "effect_label",
+            "event_type",
+            "event_label",
+            "related_version_id",
+            "governance_description",
             "rollback_recommended",
             "match_id",
             "time",
@@ -6837,13 +6994,22 @@ def build_strategy_policy_audit_csv_text(policy_effect_review: Mapping[str, obje
     )
     for row in rows:
         diagnostics = _as_mapping(row.get("negative_diagnostics"))
-        for sample in [item for item in _as_list(row.get("sample_rows")) if isinstance(item, Mapping)]:
+        version_id = _text(row.get("version_id"), "-")
+        governance_row = _as_mapping(governance_by_version.get(str(row.get("version_id") or "")))
+        sample_rows = [item for item in _as_list(row.get("sample_rows")) if isinstance(item, Mapping)]
+        if not sample_rows:
+            sample_rows = [{}]
+        for sample in sample_rows:
             writer.writerow(
                 [
-                    _text(row.get("version_id"), "-"),
+                    version_id,
                     _text(row.get("updated_at"), "-"),
                     _text(row.get("source"), "-"),
                     _text(row.get("effect_label"), "-"),
+                    _text(governance_row.get("event_type"), "-"),
+                    _text(governance_row.get("event_label"), "-"),
+                    _text(governance_row.get("related_version_id"), "-"),
+                    _text(governance_row.get("description"), "-"),
                     "YES" if diagnostics.get("rollback_recommended") else "NO",
                     _text(sample.get("match_id"), "-"),
                     _text(sample.get("time"), "-"),
