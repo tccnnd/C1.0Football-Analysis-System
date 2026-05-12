@@ -41,13 +41,27 @@ class UIXGBStatusFlowModuleTests(unittest.TestCase):
         self.assertIn("模型已就绪: True", text)
 
     def test_build_train_xgb_apply_texts(self) -> None:
-        result = {"trained": True, "reason": "ok", "sample_count": 128, "updated_at": "2026-04-04 12:30:00"}
+        result = {
+            "trained": True,
+            "reason": "ok",
+            "sample_count": 128,
+            "updated_at": "2026-04-04 12:30:00",
+            "auto_backtest": {"executed": False, "reason": "xgb_training_only"},
+            "postcheck": {
+                "status": "ready_to_train_play_models",
+                "recommendation": "建议训练玩法模型。",
+                "report_path": "reports/training_followup_xgb.md",
+            },
+        }
         status = build_train_xgb_apply_status_text(result)
         self.assertIn("XGB训练成功", status)
         self.assertIn("样本 128", status)
+        self.assertIn("复检 ready_to_train_play_models", status)
         message = build_train_xgb_apply_message(result, "XGB-STATUS")
         self.assertIn("训练结果: 成功", message)
         self.assertIn("原因: ok", message)
+        self.assertIn("训练后复检", message)
+        self.assertIn("闭环报告: reports/training_followup_xgb.md", message)
         self.assertIn("XGB-STATUS", message)
 
 

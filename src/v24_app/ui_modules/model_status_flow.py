@@ -682,9 +682,13 @@ def build_train_play_models_apply_status_text(result: Mapping[str, object] | obj
     total_result = resolved.get("total_goals", {}) if isinstance(resolved, Mapping) else {}
     score_result = resolved.get("scoreline", {}) if isinstance(resolved, Mapping) else {}
     volatile_result = resolved.get("volatile_scoreline", {}) if isinstance(resolved, Mapping) else {}
+    auto_backtest = resolved.get("auto_backtest", {}) if isinstance(resolved.get("auto_backtest"), Mapping) else {}
+    backtest_text = ""
+    if auto_backtest:
+        backtest_text = f" | 自动回测={'完成' if bool(auto_backtest.get('ok')) else '未完成'}"
     return (
         f"玩法模型{'完成' if trained else '未执行'} | 总进球={total_result.get('reason', '-')} | "
-        f"比分={score_result.get('reason', '-')} | 高波动={volatile_result.get('reason', '-')}"
+        f"比分={score_result.get('reason', '-')} | 高波动={volatile_result.get('reason', '-')}{backtest_text}"
     )
 
 
@@ -694,11 +698,24 @@ def build_train_play_models_apply_message(result: Mapping[str, object] | object,
     total_result = resolved.get("total_goals", {}) if isinstance(resolved, Mapping) else {}
     score_result = resolved.get("scoreline", {}) if isinstance(resolved, Mapping) else {}
     volatile_result = resolved.get("volatile_scoreline", {}) if isinstance(resolved, Mapping) else {}
+    auto_backtest = resolved.get("auto_backtest", {}) if isinstance(resolved.get("auto_backtest"), Mapping) else {}
+    postcheck = resolved.get("postcheck", {}) if isinstance(resolved.get("postcheck"), Mapping) else {}
+    auto_backtest_text = ""
+    if auto_backtest or postcheck:
+        auto_backtest_text = (
+            "\n训练后复检\n"
+            + f"- 状态: {postcheck.get('status') or '-'}\n"
+            + f"- 建议: {postcheck.get('recommendation') or '-'}\n"
+            + f"- 自动回测: {'已执行' if bool(auto_backtest.get('executed')) else '未执行'} | ok={bool(auto_backtest.get('ok'))} | {auto_backtest.get('reason') or '-'}\n"
+            + f"- 回测报告: {auto_backtest.get('report_path') or '-'}\n"
+            + f"- 闭环报告: {postcheck.get('report_path') or '-'}\n\n"
+        )
     return (
         f"玩法模型训练: {'完成' if trained else '未执行'}\n"
         + f"- 总进球: {total_result.get('reason', '-')} | 可用样本={total_result.get('usable_count', 0)} | 更新时间={total_result.get('updated_at') or '-'}\n"
         + f"- 比分: {score_result.get('reason', '-')} | 可用样本={score_result.get('usable_count', 0)} | 更新时间={score_result.get('updated_at') or '-'}\n"
         + f"- 高波动比分: {volatile_result.get('reason', '-')} | 可用样本={volatile_result.get('usable_count', 0)} | 更新时间={volatile_result.get('updated_at') or '-'}\n\n"
+        + auto_backtest_text
         + model_status_text
     )
 

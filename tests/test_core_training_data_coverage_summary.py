@@ -349,6 +349,94 @@ class CoreTrainingDataCoverageSummaryTests(unittest.TestCase):
         self.assertEqual(gate["status"], "ready_for_backtest")
         self.assertEqual(gate["recommended_action"], "run_play_model_backtest")
 
+    def test_train_xgb_with_postcheck_writes_followup_report(self) -> None:
+        before_gate = {"status": "ready_to_train_xgb", "recommended_action": "train_xgb", "recommendation": "train xgb"}
+        after_gate = {
+            "status": "ready_to_train_play_models",
+            "recommended_action": "train_play_models",
+            "recommendation": "train play",
+            "xgb": {"trainable": True, "model_ready": True, "sample_count": 400, "min_sample_count": 300, "valid_feature_count": 400, "min_valid_feature_count": 300},
+            "play_models": {"trainable_count": 3, "ready_count": 0, "total_count": 3, "items": []},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            report_dir = Path(tmp) / "reports"
+            with (
+                patch("v24_app.core.REPORT_DIR", report_dir),
+                patch("v24_app.core.get_training_model_gate_status", side_effect=[before_gate, after_gate]),
+                patch("v24_app.core.train_xgb_v0_now", return_value={"trained": True, "reason": "ok", "sample_count": 400, "updated_at": "2026-05-12"}),
+            ):
+                result = core.train_xgb_v0_with_postcheck_now()
+
+            report_path = Path(result["postcheck"]["report_path"])
+            report_text = report_path.read_text(encoding="utf-8")
+
+            self.assertTrue(result["trained"])
+            self.assertEqual(result["postcheck"]["status"], "ready_to_train_play_models")
+            self.assertFalse(result["auto_backtest"]["executed"])
+            self.assertTrue(report_path.exists())
+            self.assertIn("Training Follow-up Report", report_text)
+
+    def test_train_play_models_with_backtest_runs_backtest_and_writes_report(self) -> None:
+        before_gate = {"status": "ready_to_train_play_models", "recommended_action": "train_play_models", "recommendation": "train play"}
+        after_gate = {
+            "status": "ready_for_backtest",
+            "recommended_action": "run_play_model_backtest",
+            "recommendation": "run backtest",
+            "xgb": {"trainable": True, "model_ready": True, "sample_count": 900, "min_sample_count": 300, "valid_feature_count": 900, "min_valid_feature_count": 300},
+            "play_models": {"trainable_count": 3, "ready_count": 3, "total_count": 3, "items": []},
+        }
+        train_result = {
+            "trained": True,
+            "reason": "ok",
+            "total_goals": {"reason": "ok", "usable_count": 900},
+            "scoreline": {"reason": "ok", "usable_count": 900},
+            "volatile_scoreline": {"reason": "ok", "usable_count": 900},
+        }
+        backtest_result = {
+            "ok": True,
+            "reason": "ok",
+            "report_path": "E:/APP/ELO/reports/play_model_backtest_unit.md",
+            "validation": {"sample_count": 100, "date_start": "2025-01-01", "date_end": "2025-12-31"},
+            "improvement": {"total_goals_model_delta": 0.02, "score_model_delta": 0.01},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            report_dir = Path(tmp) / "reports"
+            with (
+                patch("v24_app.core.REPORT_DIR", report_dir),
+                patch("v24_app.core.get_training_model_gate_status", side_effect=[before_gate, after_gate]),
+                patch("v24_app.core.train_play_models_now", return_value=train_result),
+                patch("v24_app.core.run_play_model_backtest", return_value=backtest_result) as backtest_spy,
+            ):
+                result = core.train_play_models_with_backtest_now()
+
+            report_path = Path(result["postcheck"]["report_path"])
+            report_text = report_path.read_text(encoding="utf-8")
+
+        backtest_spy.assert_called_once()
+        self.assertTrue(result["auto_backtest"]["executed"])
+        self.assertTrue(result["auto_backtest"]["ok"])
+        self.assertEqual(result["postcheck"]["status"], "ready_for_backtest")
+        self.assertTrue(str(report_path).endswith(".md"))
+        self.assertIn("Auto Backtest", report_text)
+        self.assertIn("play_model_backtest_unit.md", report_text)
+
+    def test_train_play_models_with_backtest_skips_when_training_not_completed(self) -> None:
+        before_gate = {"status": "ready_to_train_play_models", "recommended_action": "train_play_models", "recommendation": "train play"}
+        after_gate = {"status": "ready_to_train_play_models", "recommended_action": "train_play_models", "recommendation": "train play"}
+        with tempfile.TemporaryDirectory() as tmp:
+            report_dir = Path(tmp) / "reports"
+            with (
+                patch("v24_app.core.REPORT_DIR", report_dir),
+                patch("v24_app.core.get_training_model_gate_status", side_effect=[before_gate, after_gate]),
+                patch("v24_app.core.train_play_models_now", return_value={"trained": False, "reason": "no_model_trained"}),
+                patch("v24_app.core.run_play_model_backtest") as backtest_spy,
+            ):
+                result = core.train_play_models_with_backtest_now()
+
+        backtest_spy.assert_not_called()
+        self.assertFalse(result["auto_backtest"]["executed"])
+        self.assertEqual(result["auto_backtest"]["reason"], "training_not_completed")
+
 
 if __name__ == "__main__":
     unittest.main()

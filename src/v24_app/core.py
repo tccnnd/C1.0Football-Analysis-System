@@ -12797,6 +12797,177 @@ def train_play_models_now(force_min_samples: int | None = None) -> dict:
     }
 
 
+def _training_gate_report_lines(title: str, gate: dict | None) -> list[str]:
+    resolved = gate if isinstance(gate, dict) else {}
+    xgb = resolved.get("xgb", {}) if isinstance(resolved.get("xgb"), dict) else {}
+    play = resolved.get("play_models", {}) if isinstance(resolved.get("play_models"), dict) else {}
+    lines = [
+        f"## {title}",
+        "",
+        f"- Status: {resolved.get('status') or '-'}",
+        f"- Recommended Action: {resolved.get('recommended_action') or '-'}",
+        f"- Recommendation: {resolved.get('recommendation') or '-'}",
+        f"- XGB: trainable={bool(xgb.get('trainable'))} | ready={bool(xgb.get('model_ready'))} | samples={xgb.get('sample_count', 0)}/{xgb.get('min_sample_count', 0)} | features={xgb.get('valid_feature_count', 0)}/{xgb.get('min_valid_feature_count', 0)}",
+        f"- Play Models: trainable={play.get('trainable_count', 0)}/{play.get('total_count', 0)} | ready={play.get('ready_count', 0)}/{play.get('total_count', 0)}",
+    ]
+    for item in play.get("items", []) if isinstance(play.get("items"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        lines.append(
+            f"  - {item.get('label') or item.get('key')}: usable={item.get('usable_count', 0)}/{item.get('min_train_samples', 0)} | ready={bool(item.get('model_ready'))}"
+        )
+    return lines
+
+
+def write_training_followup_report(
+    *,
+    train_kind: str,
+    train_result: dict,
+    before_gate: dict | None,
+    after_gate: dict | None,
+    auto_backtest: dict | None = None,
+) -> str:
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    kind = normalize_text(train_kind) or "training"
+    report_path = REPORT_DIR / f"training_followup_{kind}_{timestamp}.md"
+    backtest = auto_backtest if isinstance(auto_backtest, dict) else {"executed": False}
+    validation = backtest.get("validation", {}) if isinstance(backtest.get("validation"), dict) else {}
+    improvement = backtest.get("improvement", {}) if isinstance(backtest.get("improvement"), dict) else {}
+    lines = [
+        "# Training Follow-up Report",
+        "",
+        f"- Generated At: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- Train Kind: {kind}",
+        f"- Trained: {bool(train_result.get('trained'))}",
+        f"- Reason: {train_result.get('reason') or '-'}",
+        "",
+        "## Training Result",
+        "",
+        f"- XGB Samples: {train_result.get('sample_count', '-')}",
+        f"- Total Goals: {train_result.get('total_goals', {}).get('reason', '-') if isinstance(train_result.get('total_goals'), dict) else '-'}",
+        f"- Scoreline: {train_result.get('scoreline', {}).get('reason', '-') if isinstance(train_result.get('scoreline'), dict) else '-'}",
+        f"- Volatile Scoreline: {train_result.get('volatile_scoreline', {}).get('reason', '-') if isinstance(train_result.get('volatile_scoreline'), dict) else '-'}",
+        "",
+        *_training_gate_report_lines("Training Gate Before", before_gate),
+        "",
+        *_training_gate_report_lines("Training Gate After", after_gate),
+        "",
+        "## Auto Backtest",
+        "",
+        f"- Executed: {bool(backtest.get('executed'))}",
+        f"- OK: {bool(backtest.get('ok'))}",
+        f"- Reason: {backtest.get('reason') or '-'}",
+        f"- Validation Samples: {validation.get('sample_count', '-')}",
+        f"- Validation Window: {validation.get('date_start') or '-'} -> {validation.get('date_end') or '-'}",
+        f"- Total Goals Model Delta: {float(improvement.get('total_goals_model_delta', 0) or 0):+.2%}",
+        f"- Score Model Delta: {float(improvement.get('score_model_delta', 0) or 0):+.2%}",
+        f"- Backtest Report: {backtest.get('report_path') or '-'}",
+        "",
+        "## Next Step",
+        "",
+        f"- {(after_gate or {}).get('recommendation') or '-'}",
+    ]
+    report_path.write_text("\n".join(lines), encoding="utf-8")
+    return str(report_path)
+
+
+def run_training_postcheck(
+    train_kind: str,
+    train_result: dict,
+    *,
+    before_gate: dict | None = None,
+    auto_backtest: dict | None = None,
+    write_report: bool = True,
+) -> dict:
+    after_gate = get_training_model_gate_status()
+    backtest = auto_backtest if isinstance(auto_backtest, dict) else {"executed": False, "reason": "not_requested"}
+    report_path = None
+    if write_report:
+        report_path = write_training_followup_report(
+            train_kind=train_kind,
+            train_result=train_result,
+            before_gate=before_gate,
+            after_gate=after_gate,
+            auto_backtest=backtest,
+        )
+    return {
+        "status": after_gate.get("status"),
+        "recommended_action": after_gate.get("recommended_action"),
+        "recommendation": after_gate.get("recommendation"),
+        "training_gate_before": before_gate or {},
+        "training_gate_after": after_gate,
+        "auto_backtest": backtest,
+        "report_path": report_path,
+    }
+
+
+def train_xgb_v0_with_postcheck_now(force_min_samples: int | None = None) -> dict:
+    before_gate = get_training_model_gate_status()
+    result = train_xgb_v0_now(force_min_samples=force_min_samples)
+    auto_backtest = {"executed": False, "reason": "xgb_training_only"}
+    postcheck = run_training_postcheck(
+        "xgb",
+        result,
+        before_gate=before_gate,
+        auto_backtest=auto_backtest,
+    )
+    return {
+        **result,
+        "training_gate_before": before_gate,
+        "training_gate_after": postcheck.get("training_gate_after", {}),
+        "postcheck": postcheck,
+        "auto_backtest": auto_backtest,
+    }
+
+
+def train_play_models_with_backtest_now(
+    force_min_samples: int | None = None,
+    max_validation_samples: int = 1000,
+) -> dict:
+    before_gate = get_training_model_gate_status()
+    result = train_play_models_now(force_min_samples=force_min_samples)
+    if bool(result.get("trained")):
+        try:
+            backtest_result = run_play_model_backtest(max_validation_samples=max_validation_samples, write_report=True)
+            auto_backtest = {
+                "executed": True,
+                "ok": bool(backtest_result.get("ok")),
+                "reason": backtest_result.get("reason"),
+                "report_path": backtest_result.get("report_path"),
+                "validation": backtest_result.get("validation", {}),
+                "improvement": backtest_result.get("improvement", {}),
+                "result": backtest_result,
+            }
+        except Exception as exc:
+            auto_backtest = {
+                "executed": True,
+                "ok": False,
+                "reason": f"backtest_failed:{exc}",
+                "report_path": None,
+            }
+    else:
+        auto_backtest = {
+            "executed": False,
+            "ok": False,
+            "reason": "training_not_completed",
+            "report_path": None,
+        }
+    postcheck = run_training_postcheck(
+        "play_models",
+        result,
+        before_gate=before_gate,
+        auto_backtest=auto_backtest,
+    )
+    return {
+        **result,
+        "training_gate_before": before_gate,
+        "training_gate_after": postcheck.get("training_gate_after", {}),
+        "postcheck": postcheck,
+        "auto_backtest": auto_backtest,
+    }
+
+
 def _export_report_v2(matches: list[AppMatch], predictions: dict[str, dict]) -> Path:
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

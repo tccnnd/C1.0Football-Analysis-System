@@ -185,8 +185,8 @@ from .core import (
     save_c1_comparison_marks_cache,
     settle_match_result,
     calibrate_play_model_policy_now,
-    train_play_models_now,
-    train_xgb_v0_now,
+    train_play_models_with_backtest_now,
+    train_xgb_v0_with_postcheck_now,
 )
 
 
@@ -866,7 +866,7 @@ class FootballPredictionApp:
         self._run_background(
             task_key="train_xgb",
             start_status="正在训练 XGB...",
-            worker=train_xgb_v0_now,
+            worker=train_xgb_v0_with_postcheck_now,
             on_success=self._apply_train_xgb_result,
             error_title="训练XGB失败",
         )
@@ -1736,8 +1736,8 @@ def _app_calibrate_bayes_calibration(self) -> None:
 def _app_train_play_models(self) -> None:
     self._run_background(
         task_key="train_play_models",
-        start_status="正在训练玩法专用模型...",
-        worker=train_play_models_now,
+        start_status="正在训练玩法专用模型并自动回测...",
+        worker=train_play_models_with_backtest_now,
         on_success=self._apply_train_play_models_result,
         error_title="训练玩法模型失败",
     )

@@ -385,11 +385,26 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
             "total_goals": {"reason": "ok", "usable_count": 100, "updated_at": "2026-04-04"},
             "scoreline": {"reason": "ok", "usable_count": 80, "updated_at": "2026-04-04"},
             "volatile_scoreline": {"reason": "skip", "usable_count": 20, "updated_at": "-"},
+            "auto_backtest": {
+                "executed": True,
+                "ok": True,
+                "reason": "ok",
+                "report_path": "play_auto.md",
+            },
+            "postcheck": {
+                "status": "ready_for_backtest",
+                "recommendation": "进入稳定性回测。",
+                "report_path": "training_followup_play.md",
+            },
         }
         self.assertIn("玩法模型完成", build_train_play_models_apply_status_text(train_result))
+        self.assertIn("自动回测=完成", build_train_play_models_apply_status_text(train_result))
         train_msg = build_train_play_models_apply_message(train_result, status_text)
         self.assertIn("玩法模型训练: 完成", train_msg)
         self.assertIn("高波动比分: skip", train_msg)
+        self.assertIn("训练后复检", train_msg)
+        self.assertIn("回测报告: play_auto.md", train_msg)
+        self.assertIn("闭环报告: training_followup_play.md", train_msg)
 
         backtest_result = {
             "ok": True,
