@@ -36,6 +36,8 @@ from v24_app.ui_modules import (
     build_train_play_models_apply_status_text,
     build_training_health_action_rows,
     build_training_health_card_rows,
+    build_training_health_repair_result_text,
+    training_health_action_button_text,
 )
 
 
@@ -159,6 +161,8 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
         self.assertEqual(cards[1]["tone"], "danger")
         self.assertEqual(actions[0]["tone"], "danger")
         self.assertEqual(actions[0]["value"], "扩大历史赛果样本，优先最近4年主流联赛")
+        self.assertEqual(actions[0]["action_key"], "import_historical_samples")
+        self.assertEqual(training_health_action_button_text(actions[0]["action_key"]), "导入历史样本")
 
     def test_training_health_action_rows_show_attention_suggestions(self) -> None:
         coverage = self._coverage_with_health(
@@ -186,6 +190,7 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
         self.assertIn("需要关注", cards[0]["detail"])
         self.assertTrue(any(row["value"] == "补不同联赛样本" for row in actions))
         self.assertTrue(any(row["value"] == "补平局/客胜等弱类别样本" for row in actions))
+        self.assertTrue(any(row["action_key"] == "import_historical_samples" for row in actions))
 
     def test_training_health_action_rows_show_healthy_next_step(self) -> None:
         coverage = self._coverage_with_health("healthy", [])
@@ -199,6 +204,7 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
         self.assertIn("可训练", cards[0]["detail"])
         self.assertEqual(actions[0]["tone"], "success")
         self.assertEqual(actions[0]["value"], "进入回测/训练稳定性验证")
+        self.assertEqual(actions[0]["action_key"], "run_play_model_backtest")
 
     def test_training_health_action_rows_limit_to_five(self) -> None:
         coverage = self._coverage_with_health(
@@ -210,6 +216,22 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
         )
 
         self.assertEqual(len(build_training_health_action_rows(coverage)), 5)
+
+    def test_training_health_repair_result_text(self) -> None:
+        text = build_training_health_repair_result_text(
+            {
+                "action_key": "build_league_profiles",
+                "ok": True,
+                "before_status": "attention",
+                "after_status": "healthy",
+                "message": "联赛画像已从俱乐部历史样本生成。",
+                "result": {"league_profile_count": 5},
+            }
+        )
+
+        self.assertIn("训练健康修复: 完成", text)
+        self.assertIn("动作: 生成联赛画像", text)
+        self.assertIn("attention -> healthy", text)
 
     def test_ensemble_status_and_messages(self) -> None:
         status_text = build_ensemble_weight_status_text(

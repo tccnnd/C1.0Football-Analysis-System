@@ -87,6 +87,33 @@ def _training_health_action_for_issue(code: object, fallback: object = "") -> st
     return actions.get(str(code or ""), str(fallback or "按健康问题补齐训练数据"))
 
 
+def _training_health_action_key_for_issue(code: object) -> str:
+    action_keys = {
+        "xgb_sample_count_low": "import_historical_samples",
+        "xgb_valid_feature_count_low": "rebuild_xgb_from_club_history",
+        "xgb_valid_feature_ratio_low": "rebuild_xgb_from_club_history",
+        "xgb_label_class_missing": "import_historical_samples",
+        "xgb_class_balance_low": "import_historical_samples",
+        "xgb_league_coverage_low": "import_historical_samples",
+        "xgb_date_range_missing": "rebuild_xgb_from_club_history",
+        "league_profiles_missing": "build_league_profiles",
+        "statsbomb_review_samples_missing": "build_statsbomb_review_samples",
+    }
+    return action_keys.get(str(code or ""), "refresh_training_health")
+
+
+def training_health_action_button_text(action_key: object) -> str:
+    labels = {
+        "import_historical_samples": "导入历史样本",
+        "rebuild_xgb_from_club_history": "重建XGB样本",
+        "build_league_profiles": "生成联赛画像",
+        "build_statsbomb_review_samples": "生成复盘样本",
+        "run_play_model_backtest": "运行稳定性回测",
+        "refresh_training_health": "刷新诊断",
+    }
+    return labels.get(str(action_key or ""), "刷新诊断")
+
+
 def build_training_health_card_rows(coverage_status: Mapping[str, object] | object, *, limit: int = 8) -> list[dict[str, str]]:
     coverage = coverage_status if isinstance(coverage_status, Mapping) else {}
     samples = coverage.get("xgb_samples", {}) if isinstance(coverage.get("xgb_samples"), Mapping) else {}
@@ -181,6 +208,7 @@ def build_training_health_action_rows(coverage_status: Mapping[str, object] | ob
                 "value": "进入回测/训练稳定性验证",
                 "tone": "success" if str(health.get("status") or "") == "healthy" else "neutral",
                 "detail": "训练数据当前无阻塞问题",
+                "action_key": "run_play_model_backtest",
             }
         ][: max(0, int(limit))]
 
@@ -201,9 +229,22 @@ def build_training_health_action_rows(coverage_status: Mapping[str, object] | ob
                 "value": _training_health_action_for_issue(issue.get("code"), issue.get("recommendation")),
                 "tone": "danger" if severity == "blocking" else "warning",
                 "detail": f"{severity} | {issue.get('code', '-')} | {issue.get('message', '-')}",
+                "action_key": _training_health_action_key_for_issue(issue.get("code")),
             }
         )
     return rows
+
+
+def build_training_health_repair_result_text(result: Mapping[str, object] | object) -> str:
+    resolved = result if isinstance(result, Mapping) else {}
+    payload = resolved.get("result", {}) if isinstance(resolved.get("result"), Mapping) else {}
+    return (
+        f"训练健康修复: {'完成' if bool(resolved.get('ok', True)) else '未完成'}\n"
+        + f"- 动作: {training_health_action_button_text(resolved.get('action_key'))}\n"
+        + f"- 状态: {resolved.get('before_status') or '-'} -> {resolved.get('after_status') or '-'}\n"
+        + f"- 结果: {resolved.get('message') or '-'}\n"
+        + f"- 样本: imported={payload.get('imported_samples', '-')} | saved={payload.get('saved_total', '-')} | profiles={payload.get('league_profile_count', '-')}"
+    )
 
 
 def build_model_training_overview_text(

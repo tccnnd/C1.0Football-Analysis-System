@@ -95,6 +95,8 @@ from .model_status_flow import (
     build_train_play_models_apply_status_text,
     build_training_health_action_rows,
     build_training_health_card_rows,
+    build_training_health_repair_result_text,
+    training_health_action_button_text,
 )
 from .xgb_status_flow import (
     build_train_xgb_apply_message,
@@ -372,6 +374,8 @@ __all__ = [
     "build_train_play_models_apply_status_text",
     "build_training_health_action_rows",
     "build_training_health_card_rows",
+    "build_training_health_repair_result_text",
+    "training_health_action_button_text",
     "build_train_xgb_apply_message",
     "build_train_xgb_apply_status_text",
     "build_xgb_status_text",

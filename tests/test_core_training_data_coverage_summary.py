@@ -198,6 +198,72 @@ class CoreTrainingDataCoverageSummaryTests(unittest.TestCase):
         self.assertEqual(health["status"], "attention")
         self.assertIn("xgb_date_range_missing", codes)
 
+    def test_rebuild_league_profiles_from_club_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "data" / "state"
+            state.mkdir(parents=True)
+            (state / "club_match_history.json").write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {"match_date": "2024-01-01", "league": "A", "home_goals": 2, "away_goals": 1},
+                            {"match_date": "2024-01-02", "league": "A", "home_goals": 0, "away_goals": 0},
+                            {"match_date": "2024-01-03", "league": "B", "home_goals": 1, "away_goals": 3},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("v24_app.core.PROJECT_DIR", root):
+                result = core.rebuild_league_profiles_from_club_history()
+
+            payload = json.loads((state / "league_profiles.json").read_text(encoding="utf-8"))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["league_profile_count"], 2)
+        self.assertEqual(payload["leagues"]["A"]["matches"], 2)
+        self.assertEqual(payload["leagues"]["B"]["away_win_rate"], "100.0%")
+
+    def test_repair_training_data_health_builds_statsbomb_review_samples(self) -> None:
+        settlement = {
+            "match_id": "m1",
+            "match_date": "2024-04-14",
+            "match_time": "17:30",
+            "league": "1. Bundesliga",
+            "home_team": "Bayer Leverkusen",
+            "away_team": "Werder Bremen",
+            "home_goals": 5,
+            "away_goals": 0,
+            "is_correct": False,
+            "handicap_is_correct": True,
+            "ou_is_correct": False,
+            "statsbomb_event_summary": {
+                "event_count": 10,
+                "team_stats": {
+                    "Bayer Leverkusen": {"xg": 2.1, "shots": 12},
+                    "Werder Bremen": {"xg": 0.5, "shots": 5},
+                },
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = core.StateStore(root)
+            with (
+                patch("v24_app.core.PROJECT_DIR", root),
+                patch("v24_app.core.STATE_STORE", store),
+                patch("v24_app.core.get_recent_settlements", return_value=[settlement]),
+            ):
+                result = core.repair_training_data_health("build_statsbomb_review_samples")
+
+            payload = json.loads((root / "data" / "state" / "statsbomb_review_training_samples.json").read_text(encoding="utf-8"))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["action_key"], "build_statsbomb_review_samples")
+        self.assertEqual(payload["summary"]["sample_count"], 1)
+        self.assertEqual(result["result"]["sample_count"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

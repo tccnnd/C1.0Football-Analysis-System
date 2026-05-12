@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import threading
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from itertools import product
@@ -29,7 +29,12 @@ from .models.xgboost_v0 import XGBoostProbabilityModel
 from .models.bayesian_calibration import calibrate_three_way_probabilities
 from .orchestrator import build_supervisor_orchestration
 from .storage.state_store import StateStore
-from .training_samples import build_recent_form_feature_map, build_team_histories_from_state
+from .training_samples import (
+    build_recent_form_feature_map,
+    build_team_histories_from_state,
+    export_statsbomb_review_training_samples,
+    import_historical_xgb_samples,
+)
 
 try:
     from .data_sources.match_fetcher_titan import MatchFetcherTitan
@@ -4505,6 +4510,139 @@ def get_training_data_coverage_status() -> dict:
         rating_pools=coverage["rating_pools"],
     )
     return coverage
+
+
+def _rate_text(hits: int, total: int) -> str:
+    if total <= 0:
+        return "-"
+    return f"{hits / total:.1%}"
+
+
+def _build_league_profiles_from_history_items(items: list[dict]) -> dict:
+    buckets: dict[str, list[dict]] = defaultdict(list)
+    for item in items:
+        league = normalize_text(item.get("league", "")) or "-"
+        buckets[league].append(item)
+
+    profiles: dict[str, dict] = {}
+    for league, rows in sorted(buckets.items()):
+        result_counts: Counter[str] = Counter()
+        total_goals = 0
+        under_count = 0
+        date_values: list[str] = []
+        for row in rows:
+            home_goals = int(_safe_int(row.get("home_goals"), 0) or 0)
+            away_goals = int(_safe_int(row.get("away_goals"), 0) or 0)
+            goals = home_goals + away_goals
+            total_goals += goals
+            under_count += 1 if goals < 3 else 0
+            if home_goals > away_goals:
+                result_counts["home"] += 1
+            elif home_goals < away_goals:
+                result_counts["away"] += 1
+            else:
+                result_counts["draw"] += 1
+            match_date = normalize_text(row.get("match_date", ""))
+            if match_date:
+                date_values.append(match_date)
+        total = len(rows)
+        profiles[league] = {
+            "matches": total,
+            "home_win_rate": _rate_text(result_counts["home"], total),
+            "draw_rate": _rate_text(result_counts["draw"], total),
+            "away_win_rate": _rate_text(result_counts["away"], total),
+            "under_2_5_rate": _rate_text(under_count, total),
+            "avg_total_goals": round(total_goals / total, 3) if total else 0.0,
+            "date_start": min(date_values) if date_values else None,
+            "date_end": max(date_values) if date_values else None,
+        }
+    return {
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "source": "club_match_history",
+        "matches": len(items),
+        "leagues": profiles,
+    }
+
+
+def rebuild_league_profiles_from_club_history() -> dict:
+    payload = _load_state_payload("club_match_history.json")
+    items = _state_payload_items(payload)
+    if not items:
+        return {
+            "ok": False,
+            "reason": "club_history_missing",
+            "message": "未找到可用于生成联赛画像的俱乐部历史样本。",
+            "match_count": 0,
+            "league_profile_count": 0,
+        }
+    profile_payload = _build_league_profiles_from_history_items(items)
+    path = PROJECT_DIR / "data" / "state" / "league_profiles.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(profile_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        "ok": True,
+        "reason": "ok",
+        "message": "联赛画像已从俱乐部历史样本生成。",
+        "match_count": len(items),
+        "league_profile_count": len(profile_payload.get("leagues", {})),
+        "output_path": str(path),
+    }
+
+
+def repair_training_data_health(action_key: str, *, input_path: Path | str | None = None) -> dict:
+    action = normalize_text(action_key)
+    before = get_training_data_coverage_status()
+    result: dict[str, object]
+    if action == "import_historical_samples":
+        if input_path is None:
+            raise ValueError("input_path is required for import_historical_samples")
+        result = import_historical_xgb_samples(
+            project_dir=PROJECT_DIR,
+            input_path=Path(input_path),
+            replace=False,
+            sync_ratings=True,
+        )
+        message = f"历史样本导入完成: 新增 {int(result.get('imported_samples', 0) or 0)} 条，保存 {int(result.get('saved_total', 0) or 0)} 条。"
+    elif action == "rebuild_xgb_from_club_history":
+        history_path = PROJECT_DIR / "data" / "state" / "club_match_history.json"
+        if not history_path.exists():
+            result = {
+                "ok": False,
+                "reason": "club_history_missing",
+                "message": "club_match_history.json 不存在，无法重建XGB样本。",
+            }
+            message = str(result["message"])
+        else:
+            result = import_historical_xgb_samples(
+                project_dir=PROJECT_DIR,
+                input_path=history_path,
+                replace=False,
+                sync_ratings=True,
+            )
+            message = f"已从俱乐部历史重建XGB样本: 导入 {int(result.get('imported_samples', 0) or 0)} 条。"
+    elif action == "build_league_profiles":
+        result = rebuild_league_profiles_from_club_history()
+        message = str(result.get("message") or "-")
+    elif action == "build_statsbomb_review_samples":
+        settlements = get_recent_settlements(limit=0)
+        result = export_statsbomb_review_training_samples(
+            project_dir=PROJECT_DIR,
+            settlements=settlements,
+        )
+        message = f"StatsBomb复盘样本已生成: {int(result.get('sample_count', 0) or 0)} 条。"
+    else:
+        raise ValueError(f"Unsupported training data repair action: {action_key}")
+
+    after = get_training_data_coverage_status()
+    return {
+        "action_key": action,
+        "ok": bool(result.get("ok", True)) if isinstance(result, dict) else True,
+        "message": message,
+        "result": result,
+        "before_status": (before.get("training_health") or {}).get("status") if isinstance(before.get("training_health"), dict) else None,
+        "after_status": (after.get("training_health") or {}).get("status") if isinstance(after.get("training_health"), dict) else None,
+        "after": after,
+    }
 
 
 def _current_play_model_policy() -> dict:

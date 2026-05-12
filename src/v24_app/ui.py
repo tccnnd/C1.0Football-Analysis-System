@@ -93,6 +93,9 @@ from .ui_modules import (
     build_report_filename,
     build_train_play_models_apply_message,
     build_train_play_models_apply_status_text,
+    build_training_health_action_rows,
+    build_training_health_repair_result_text,
+    training_health_action_button_text,
     build_train_xgb_apply_message,
     build_train_xgb_apply_status_text,
     build_xgb_status_text,
@@ -176,6 +179,7 @@ from .core import (
     predict_match,
     run_ensemble_backtest,
     run_play_model_backtest,
+    repair_training_data_health,
     save_c1_comparison_marks_cache,
     settle_match_result,
     calibrate_play_model_policy_now,
@@ -747,6 +751,7 @@ class FootballPredictionApp:
 
     def show_model_training_overview(self) -> None:
         self._close_user_center()
+        coverage_status = get_training_data_coverage_status()
         self._write_details(
             build_model_training_overview_text(
                 xgb_status=get_xgb_training_status(),
@@ -755,10 +760,84 @@ class FootballPredictionApp:
                 bayes_status=get_bayes_calibration_status(),
                 threshold_status=get_play_threshold_status(),
                 policy_status=get_play_model_policy_status(),
-                coverage_status=get_training_data_coverage_status(),
+                coverage_status=coverage_status,
             )
         )
+        self._show_training_health_repair_actions(coverage_status)
         self.status_var.set("已显示模型训练状态总览")
+
+    def _show_training_health_repair_actions(self, coverage_status: dict) -> None:
+        action_rows = build_training_health_action_rows(coverage_status)
+        if not action_rows:
+            return
+        container = self.inline_actions_container
+        container.pack(fill=tk.X, pady=(8, 2), before=self.details)
+        section = ttk.LabelFrame(container, text="训练健康修复入口", padding=8)
+        section.pack(fill=tk.X, pady=(0, 8))
+        seen_actions: set[str] = set()
+        button_index = 0
+        for row in action_rows:
+            action_key = str(row.get("action_key") or "refresh_training_health")
+            if action_key in seen_actions:
+                continue
+            seen_actions.add(action_key)
+            button = ttk.Button(
+                section,
+                text=training_health_action_button_text(action_key),
+                command=lambda key=action_key: self._run_training_health_repair_action(key),
+            )
+            button.grid(row=button_index // 4, column=button_index % 4, sticky=tk.W, padx=(0, 8), pady=(0, 6))
+            button_index += 1
+        ttk.Button(
+            section,
+            text=training_health_action_button_text("refresh_training_health"),
+            command=self.show_model_training_overview,
+        ).grid(row=button_index // 4, column=button_index % 4, sticky=tk.W, padx=(0, 8), pady=(0, 6))
+
+    def _run_training_health_repair_action(self, action_key: str) -> None:
+        if action_key == "refresh_training_health":
+            self.show_model_training_overview()
+            return
+        if action_key == "run_play_model_backtest":
+            self.run_play_model_backtest()
+            return
+        if action_key == "import_historical_samples":
+            self._import_training_health_samples()
+            return
+        self._run_background(
+            task_key=f"training_health_repair:{action_key}",
+            start_status=f"正在执行训练健康修复: {training_health_action_button_text(action_key)}...",
+            worker=lambda: repair_training_data_health(action_key),
+            on_success=self._apply_training_health_repair_result,
+            error_title="训练健康修复失败",
+        )
+
+    def _import_training_health_samples(self) -> None:
+        path_text = filedialog.askopenfilename(
+            title="选择历史赛果文件",
+            filetypes=[
+                ("History files", "*.csv *.json *.jsonl"),
+                ("CSV files", "*.csv"),
+                ("JSON files", "*.json *.jsonl"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not path_text:
+            return
+        input_path = Path(path_text)
+        self._run_background(
+            task_key="training_health_repair:import_historical_samples",
+            start_status="正在导入历史赛果样本...",
+            worker=lambda: repair_training_data_health("import_historical_samples", input_path=input_path),
+            on_success=self._apply_training_health_repair_result,
+            error_title="训练健康修复失败",
+        )
+
+    def _apply_training_health_repair_result(self, result: dict) -> None:
+        result_text = build_training_health_repair_result_text(result)
+        self.show_model_training_overview()
+        self.status_var.set(result_text.splitlines()[0])
+        messagebox.showinfo("训练健康修复", result_text)
 
     def train_xgb_now(self) -> None:
         self._run_background(
