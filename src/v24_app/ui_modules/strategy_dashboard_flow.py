@@ -5076,6 +5076,13 @@ def _draw_guard_governance_event_rows(
     return event_rows
 
 
+def _normalize_governance_filter_value(value: object, default: str = "\u5168\u90e8") -> str:
+    text = _text(value, default).strip() or default
+    if text.lower() in {"all", "any"}:
+        return default
+    return text
+
+
 def filter_strategy_policy_governance_event_rows(
     rows: Sequence[Mapping[str, object]] | object,
     *,
@@ -5087,12 +5094,8 @@ def filter_strategy_policy_governance_event_rows(
         for item in rows
         if isinstance(item, Mapping)
     ] if isinstance(rows, Sequence) and not isinstance(rows, (str, bytes, bytearray)) else []
-    domain_value = _text(domain_filter, "\u5168\u90e8").strip() or "\u5168\u90e8"
-    event_type_value = _text(event_type_filter, "\u5168\u90e8").strip() or "\u5168\u90e8"
-    if domain_value.lower() in {"all", "any"}:
-        domain_value = "\u5168\u90e8"
-    if event_type_value.lower() in {"all", "any"}:
-        event_type_value = "\u5168\u90e8"
+    domain_value = _normalize_governance_filter_value(domain_filter)
+    event_type_value = _normalize_governance_filter_value(event_type_filter)
 
     filtered: list[dict[str, object]] = []
     for row in row_items:
@@ -5205,12 +5208,8 @@ def build_strategy_policy_governance_event_summary(
     draw_guard_freeze_count = counts.get("draw_guard_freeze", 0)
     draw_guard_freeze_override_count = counts.get("draw_guard_freeze_override", 0)
     latest = filtered_rows[0] if filtered_rows else {}
-    domain_value = _text(domain_filter, "\u5168\u90e8").strip() or "\u5168\u90e8"
-    event_type_value = _text(event_type_filter, "\u5168\u90e8").strip() or "\u5168\u90e8"
-    if domain_value.lower() in {"all", "any"}:
-        domain_value = "\u5168\u90e8"
-    if event_type_value.lower() in {"all", "any"}:
-        event_type_value = "\u5168\u90e8"
+    domain_value = _normalize_governance_filter_value(domain_filter)
+    event_type_value = _normalize_governance_filter_value(event_type_filter)
     domain_options = ["\u5168\u90e8", "strategy", "draw_guard"]
     event_type_order = [
         "trend_gate",
