@@ -263,6 +263,91 @@ class CoreTrainingDataCoverageSummaryTests(unittest.TestCase):
         self.assertEqual(result["action_key"], "build_statsbomb_review_samples")
         self.assertEqual(payload["summary"]["sample_count"], 1)
         self.assertEqual(result["result"]["sample_count"], 1)
+        self.assertIn("training_gate", result)
+
+    def test_training_model_gate_recommends_xgb_training_when_data_is_ready(self) -> None:
+        coverage = {
+            "training_health": {
+                "status": "healthy",
+                "blocking_count": 0,
+                "warning_count": 0,
+                "xgb_trainability": {
+                    "sample_count": 400,
+                    "min_sample_count": 300,
+                    "valid_feature_count": 400,
+                    "min_valid_feature_count": 300,
+                },
+            },
+            "xgb_samples": {"sample_count": 400, "valid_feature_count": 400},
+        }
+        gate = core.get_training_model_gate_status(
+            coverage,
+            xgb_status={"model_ready": False, "min_train_samples": 30, "xgboost_available": True},
+            play_model_status={},
+        )
+
+        self.assertEqual(gate["status"], "ready_to_train_xgb")
+        self.assertEqual(gate["recommended_action"], "train_xgb")
+        self.assertTrue(gate["xgb"]["trainable"])
+
+    def test_training_model_gate_recommends_play_training_after_xgb_ready(self) -> None:
+        coverage = {
+            "training_health": {
+                "status": "healthy",
+                "blocking_count": 0,
+                "warning_count": 0,
+                "xgb_trainability": {
+                    "sample_count": 900,
+                    "min_sample_count": 300,
+                    "valid_feature_count": 900,
+                    "min_valid_feature_count": 300,
+                },
+            },
+            "xgb_samples": {"sample_count": 900, "valid_feature_count": 900},
+        }
+        play_status = {
+            "total_goals": {"usable_count": 900, "min_train_samples": 500, "model_ready": False},
+            "scoreline": {"usable_count": 900, "min_train_samples": 800, "model_ready": False},
+            "volatile_scoreline": {"usable_count": 900, "min_train_samples": 400, "model_ready": False},
+        }
+        gate = core.get_training_model_gate_status(
+            coverage,
+            xgb_status={"model_ready": True, "min_train_samples": 30, "xgboost_available": True},
+            play_model_status=play_status,
+        )
+
+        self.assertEqual(gate["status"], "ready_to_train_play_models")
+        self.assertEqual(gate["recommended_action"], "train_play_models")
+        self.assertTrue(gate["play_models"]["all_trainable"])
+
+    def test_training_model_gate_recommends_backtest_when_models_are_ready(self) -> None:
+        coverage = {
+            "training_health": {
+                "status": "healthy",
+                "blocking_count": 0,
+                "warning_count": 0,
+                "xgb_trainability": {
+                    "sample_count": 900,
+                    "min_sample_count": 300,
+                    "valid_feature_count": 900,
+                    "min_valid_feature_count": 300,
+                },
+            },
+            "xgb_samples": {"sample_count": 900, "valid_feature_count": 900},
+        }
+        play_status = {
+            "total_goals": {"usable_count": 900, "min_train_samples": 500, "model_ready": True},
+            "scoreline": {"usable_count": 900, "min_train_samples": 800, "model_ready": True},
+            "volatile_scoreline": {"usable_count": 900, "min_train_samples": 400, "model_ready": True},
+        }
+        gate = core.get_training_model_gate_status(
+            coverage,
+            xgb_status={"model_ready": True, "min_train_samples": 30, "xgboost_available": True},
+            play_model_status=play_status,
+        )
+
+        self.assertEqual(gate["status"], "ready_for_backtest")
+        self.assertEqual(gate["recommended_action"], "run_play_model_backtest")
 
 
 if __name__ == "__main__":

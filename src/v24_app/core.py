@@ -4589,6 +4589,113 @@ def rebuild_league_profiles_from_club_history() -> dict:
     }
 
 
+def _play_model_gate_items(play_model_status: dict) -> list[dict]:
+    items: list[dict] = []
+    for key, label in (
+        ("total_goals", "总进球"),
+        ("scoreline", "比分"),
+        ("volatile_scoreline", "高波动比分"),
+    ):
+        status = play_model_status.get(key, {}) if isinstance(play_model_status.get(key), dict) else {}
+        usable_count = int(status.get("usable_count", status.get("sample_count", 0)) or 0)
+        min_train_samples = int(status.get("min_train_samples", 0) or 0)
+        items.append(
+            {
+                "key": key,
+                "label": label,
+                "usable_count": usable_count,
+                "min_train_samples": min_train_samples,
+                "trainable": usable_count >= max(1, min_train_samples),
+                "model_ready": bool(status.get("model_ready")),
+                "model_updated_at": status.get("model_updated_at"),
+            }
+        )
+    return items
+
+
+def get_training_model_gate_status(
+    coverage_status: dict | None = None,
+    *,
+    xgb_status: dict | None = None,
+    play_model_status: dict | None = None,
+) -> dict:
+    coverage = coverage_status if isinstance(coverage_status, dict) else get_training_data_coverage_status()
+    health = coverage.get("training_health", {}) if isinstance(coverage.get("training_health"), dict) else {}
+    trainability = health.get("xgb_trainability", {}) if isinstance(health.get("xgb_trainability"), dict) else {}
+    xgb = xgb_status if isinstance(xgb_status, dict) else get_xgb_training_status()
+    play = play_model_status if isinstance(play_model_status, dict) else get_play_model_training_status()
+
+    sample_count = int(trainability.get("sample_count", coverage.get("xgb_samples", {}).get("sample_count", 0) if isinstance(coverage.get("xgb_samples"), dict) else 0) or 0)
+    valid_feature_count = int(trainability.get("valid_feature_count", coverage.get("xgb_samples", {}).get("valid_feature_count", 0) if isinstance(coverage.get("xgb_samples"), dict) else 0) or 0)
+    min_sample_count = max(
+        int(trainability.get("min_sample_count", TRAINING_HEALTH_MIN_XGB_SAMPLES) or TRAINING_HEALTH_MIN_XGB_SAMPLES),
+        int(xgb.get("min_train_samples", 0) or 0),
+    )
+    min_valid_feature_count = int(trainability.get("min_valid_feature_count", TRAINING_HEALTH_MIN_VALID_FEATURES) or TRAINING_HEALTH_MIN_VALID_FEATURES)
+    blocking_count = int(health.get("blocking_count", 0) or 0)
+    xgb_available = bool(xgb.get("xgboost_available", True))
+    xgb_trainable = (
+        blocking_count <= 0
+        and xgb_available
+        and sample_count >= min_sample_count
+        and valid_feature_count >= min_valid_feature_count
+    )
+    play_items = _play_model_gate_items(play)
+    play_trainable_count = sum(1 for item in play_items if item.get("trainable"))
+    play_ready_count = sum(1 for item in play_items if item.get("model_ready"))
+    play_all_trainable = bool(play_items) and play_trainable_count == len(play_items)
+    play_all_ready = bool(play_items) and play_ready_count == len(play_items)
+    xgb_ready = bool(xgb.get("model_ready"))
+
+    if blocking_count > 0 or not xgb_available:
+        gate_status = "blocked"
+        recommended_action = "fix_training_data"
+        recommendation = "训练数据仍有阻塞项，先继续修复样本或特征。"
+    elif xgb_trainable and not xgb_ready:
+        gate_status = "ready_to_train_xgb"
+        recommended_action = "train_xgb"
+        recommendation = "训练样本已达到门槛，建议先训练主胜平负XGB。"
+    elif xgb_ready and play_all_trainable and not play_all_ready:
+        gate_status = "ready_to_train_play_models"
+        recommended_action = "train_play_models"
+        recommendation = "玩法模型样本已达到门槛，建议训练总进球、比分和高波动比分模型。"
+    elif xgb_ready and play_all_ready:
+        gate_status = "ready_for_backtest"
+        recommended_action = "run_play_model_backtest"
+        recommendation = "模型已就绪，建议进入玩法模型稳定性回测。"
+    else:
+        gate_status = "collecting"
+        recommended_action = "collect_more_samples"
+        recommendation = "部分玩法模型仍未达到训练门槛，继续积累或补齐样本。"
+
+    return {
+        "status": gate_status,
+        "recommended_action": recommended_action,
+        "recommendation": recommendation,
+        "health_status": health.get("status"),
+        "blocking_count": blocking_count,
+        "warning_count": int(health.get("warning_count", 0) or 0),
+        "xgb": {
+            "sample_count": sample_count,
+            "min_sample_count": min_sample_count,
+            "valid_feature_count": valid_feature_count,
+            "min_valid_feature_count": min_valid_feature_count,
+            "trainable": xgb_trainable,
+            "model_ready": xgb_ready,
+            "xgboost_available": xgb_available,
+            "model_updated_at": xgb.get("model_updated_at"),
+        },
+        "play_models": {
+            "trainable_count": play_trainable_count,
+            "ready_count": play_ready_count,
+            "total_count": len(play_items),
+            "all_trainable": play_all_trainable,
+            "all_ready": play_all_ready,
+            "items": play_items,
+        },
+    }
+
+
 def repair_training_data_health(action_key: str, *, input_path: Path | str | None = None) -> dict:
     action = normalize_text(action_key)
     before = get_training_data_coverage_status()
@@ -4634,6 +4741,7 @@ def repair_training_data_health(action_key: str, *, input_path: Path | str | Non
         raise ValueError(f"Unsupported training data repair action: {action_key}")
 
     after = get_training_data_coverage_status()
+    training_gate = get_training_model_gate_status(after)
     return {
         "action_key": action,
         "ok": bool(result.get("ok", True)) if isinstance(result, dict) else True,
@@ -4642,6 +4750,7 @@ def repair_training_data_health(action_key: str, *, input_path: Path | str | Non
         "before_status": (before.get("training_health") or {}).get("status") if isinstance(before.get("training_health"), dict) else None,
         "after_status": (after.get("training_health") or {}).get("status") if isinstance(after.get("training_health"), dict) else None,
         "after": after,
+        "training_gate": training_gate,
     }
 
 

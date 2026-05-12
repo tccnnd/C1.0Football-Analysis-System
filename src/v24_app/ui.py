@@ -95,6 +95,7 @@ from .ui_modules import (
     build_train_play_models_apply_status_text,
     build_training_health_action_rows,
     build_training_health_repair_result_text,
+    build_training_model_gate_rows,
     training_health_action_button_text,
     build_train_xgb_apply_message,
     build_train_xgb_apply_status_text,
@@ -167,6 +168,7 @@ from .core import (
     get_play_model_policy_status,
     get_bayes_calibration_status,
     get_training_data_coverage_status,
+    get_training_model_gate_status,
     get_recent_parlay_settlements,
     get_prediction_snapshot_migration_report,
     get_xgb_training_status,
@@ -752,6 +754,7 @@ class FootballPredictionApp:
     def show_model_training_overview(self) -> None:
         self._close_user_center()
         coverage_status = get_training_data_coverage_status()
+        training_gate_status = get_training_model_gate_status(coverage_status)
         self._write_details(
             build_model_training_overview_text(
                 xgb_status=get_xgb_training_status(),
@@ -761,13 +764,15 @@ class FootballPredictionApp:
                 threshold_status=get_play_threshold_status(),
                 policy_status=get_play_model_policy_status(),
                 coverage_status=coverage_status,
+                training_gate_status=training_gate_status,
             )
         )
-        self._show_training_health_repair_actions(coverage_status)
+        self._show_training_health_repair_actions(coverage_status, training_gate_status)
         self.status_var.set("已显示模型训练状态总览")
 
-    def _show_training_health_repair_actions(self, coverage_status: dict) -> None:
+    def _show_training_health_repair_actions(self, coverage_status: dict, training_gate_status: dict | None = None) -> None:
         action_rows = build_training_health_action_rows(coverage_status)
+        gate_rows = build_training_model_gate_rows(training_gate_status or {})
         if not action_rows:
             return
         container = self.inline_actions_container
@@ -779,6 +784,18 @@ class FootballPredictionApp:
         for row in action_rows:
             action_key = str(row.get("action_key") or "refresh_training_health")
             if action_key in seen_actions:
+                continue
+            seen_actions.add(action_key)
+            button = ttk.Button(
+                section,
+                text=training_health_action_button_text(action_key),
+                command=lambda key=action_key: self._run_training_health_repair_action(key),
+            )
+            button.grid(row=button_index // 4, column=button_index % 4, sticky=tk.W, padx=(0, 8), pady=(0, 6))
+            button_index += 1
+        for row in gate_rows:
+            action_key = str(row.get("action_key") or "")
+            if action_key not in {"train_xgb", "train_play_models", "run_play_model_backtest"} or action_key in seen_actions:
                 continue
             seen_actions.add(action_key)
             button = ttk.Button(
@@ -800,6 +817,12 @@ class FootballPredictionApp:
             return
         if action_key == "run_play_model_backtest":
             self.run_play_model_backtest()
+            return
+        if action_key == "train_xgb":
+            self.train_xgb_now()
+            return
+        if action_key == "train_play_models":
+            self.train_play_models()
             return
         if action_key == "import_historical_samples":
             self._import_training_health_samples()

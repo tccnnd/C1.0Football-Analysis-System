@@ -108,6 +108,8 @@ def training_health_action_button_text(action_key: object) -> str:
         "rebuild_xgb_from_club_history": "重建XGB样本",
         "build_league_profiles": "生成联赛画像",
         "build_statsbomb_review_samples": "生成复盘样本",
+        "train_xgb": "训练XGB",
+        "train_play_models": "训练玩法模型",
         "run_play_model_backtest": "运行稳定性回测",
         "refresh_training_health": "刷新诊断",
     }
@@ -235,15 +237,62 @@ def build_training_health_action_rows(coverage_status: Mapping[str, object] | ob
     return rows
 
 
+def build_training_model_gate_rows(gate_status: Mapping[str, object] | object, *, limit: int = 6) -> list[dict[str, str]]:
+    gate = gate_status if isinstance(gate_status, Mapping) else {}
+    xgb = gate.get("xgb", {}) if isinstance(gate.get("xgb"), Mapping) else {}
+    play = gate.get("play_models", {}) if isinstance(gate.get("play_models"), Mapping) else {}
+    recommended_action = str(gate.get("recommended_action") or "-")
+    status = str(gate.get("status") or "-")
+    rows = [
+        {
+            "label": "门槛状态",
+            "value": status,
+            "tone": "danger" if status == "blocked" else "success" if status in {"ready_to_train_xgb", "ready_to_train_play_models", "ready_for_backtest"} else "warning",
+            "detail": str(gate.get("recommendation") or "-"),
+            "action_key": recommended_action,
+        },
+        {
+            "label": "XGB训练门槛",
+            "value": "可训练" if bool(xgb.get("trainable")) else "未达标",
+            "tone": "success" if bool(xgb.get("trainable")) else "danger",
+            "detail": f"样本 {xgb.get('sample_count', 0)}/{xgb.get('min_sample_count', 0)} | 特征 {xgb.get('valid_feature_count', 0)}/{xgb.get('min_valid_feature_count', 0)} | ready={bool(xgb.get('model_ready'))}",
+            "action_key": "train_xgb" if bool(xgb.get("trainable")) and not bool(xgb.get("model_ready")) else "",
+        },
+        {
+            "label": "玩法训练门槛",
+            "value": f"{play.get('trainable_count', 0)}/{play.get('total_count', 0)}",
+            "tone": "success" if bool(play.get("all_trainable")) else "warning",
+            "detail": f"ready={play.get('ready_count', 0)}/{play.get('total_count', 0)}",
+            "action_key": "train_play_models" if bool(play.get("all_trainable")) and not bool(play.get("all_ready")) else "",
+        },
+    ]
+    items = play.get("items", []) if isinstance(play.get("items"), list) else []
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        rows.append(
+            {
+                "label": str(item.get("label") or item.get("key") or "-"),
+                "value": "可训练" if bool(item.get("trainable")) else "未达标",
+                "tone": "success" if bool(item.get("trainable")) else "warning",
+                "detail": f"usable={item.get('usable_count', 0)}/{item.get('min_train_samples', 0)} | ready={bool(item.get('model_ready'))}",
+                "action_key": "",
+            }
+        )
+    return rows[: max(0, int(limit))]
+
+
 def build_training_health_repair_result_text(result: Mapping[str, object] | object) -> str:
     resolved = result if isinstance(result, Mapping) else {}
     payload = resolved.get("result", {}) if isinstance(resolved.get("result"), Mapping) else {}
+    gate = resolved.get("training_gate", {}) if isinstance(resolved.get("training_gate"), Mapping) else {}
     return (
         f"训练健康修复: {'完成' if bool(resolved.get('ok', True)) else '未完成'}\n"
         + f"- 动作: {training_health_action_button_text(resolved.get('action_key'))}\n"
         + f"- 状态: {resolved.get('before_status') or '-'} -> {resolved.get('after_status') or '-'}\n"
         + f"- 结果: {resolved.get('message') or '-'}\n"
-        + f"- 样本: imported={payload.get('imported_samples', '-')} | saved={payload.get('saved_total', '-')} | profiles={payload.get('league_profile_count', '-')}"
+        + f"- 样本: imported={payload.get('imported_samples', '-')} | saved={payload.get('saved_total', '-')} | profiles={payload.get('league_profile_count', '-')}\n"
+        + f"- 复检: {gate.get('status', '-')} | 建议: {gate.get('recommendation', '-')}"
     )
 
 
@@ -256,6 +305,7 @@ def build_model_training_overview_text(
     threshold_status: Mapping[str, object] | object,
     policy_status: Mapping[str, object] | object,
     coverage_status: Mapping[str, object] | object,
+    training_gate_status: Mapping[str, object] | object | None = None,
 ) -> str:
     xgb = xgb_status if isinstance(xgb_status, Mapping) else {}
     play = play_model_status if isinstance(play_model_status, Mapping) else {}
@@ -298,6 +348,10 @@ def build_model_training_overview_text(
         f"- {row.get('label', '-')}: {row.get('value', '-')} | {row.get('detail', '-')}"
         for row in build_training_health_action_rows(coverage)
     ]
+    training_gate_lines = [
+        f"- {row.get('label', '-')}: {row.get('value', '-')} | {row.get('detail', '-')}"
+        for row in build_training_model_gate_rows(training_gate_status)
+    ] if isinstance(training_gate_status, Mapping) else ["- 门槛状态: -"]
 
     lines = [
         "模型训练状态总览",
@@ -318,6 +372,9 @@ def build_model_training_overview_text(
         "",
         "优先补数建议",
         *health_action_lines,
+        "",
+        "训练门槛联动",
+        *training_gate_lines,
         "",
         "模型就绪",
         f"- 主胜平负 XGB: {_ready_text(xgb.get('model_ready'))} | 样本={xgb.get('sample_count', 0)} | updated={xgb.get('model_updated_at') or '-'}",

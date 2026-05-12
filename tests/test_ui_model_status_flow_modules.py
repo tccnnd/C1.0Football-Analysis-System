@@ -37,6 +37,7 @@ from v24_app.ui_modules import (
     build_training_health_action_rows,
     build_training_health_card_rows,
     build_training_health_repair_result_text,
+    build_training_model_gate_rows,
     training_health_action_button_text,
 )
 
@@ -137,6 +138,7 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
         self.assertIn("建议: 继续导入历史赛果样本。", text)
         self.assertIn("训练健康卡片", text)
         self.assertIn("优先补数建议", text)
+        self.assertIn("训练门槛联动", text)
 
     def test_training_health_card_rows_show_blocked_status(self) -> None:
         coverage = self._coverage_with_health(
@@ -226,12 +228,47 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
                 "after_status": "healthy",
                 "message": "联赛画像已从俱乐部历史样本生成。",
                 "result": {"league_profile_count": 5},
+                "training_gate": {"status": "ready_to_train_play_models", "recommendation": "建议训练玩法模型。"},
             }
         )
 
         self.assertIn("训练健康修复: 完成", text)
         self.assertIn("动作: 生成联赛画像", text)
         self.assertIn("attention -> healthy", text)
+        self.assertIn("复检: ready_to_train_play_models", text)
+
+    def test_training_model_gate_rows_expose_training_actions(self) -> None:
+        rows = build_training_model_gate_rows(
+            {
+                "status": "ready_to_train_play_models",
+                "recommended_action": "train_play_models",
+                "recommendation": "玩法模型样本已达到门槛。",
+                "xgb": {
+                    "sample_count": 900,
+                    "min_sample_count": 300,
+                    "valid_feature_count": 900,
+                    "min_valid_feature_count": 300,
+                    "trainable": True,
+                    "model_ready": True,
+                },
+                "play_models": {
+                    "trainable_count": 3,
+                    "ready_count": 1,
+                    "total_count": 3,
+                    "all_trainable": True,
+                    "all_ready": False,
+                    "items": [
+                        {"label": "总进球", "usable_count": 900, "min_train_samples": 500, "trainable": True, "model_ready": True},
+                        {"label": "比分", "usable_count": 900, "min_train_samples": 800, "trainable": True, "model_ready": False},
+                    ],
+                },
+            }
+        )
+
+        self.assertEqual(rows[0]["action_key"], "train_play_models")
+        self.assertEqual(rows[0]["tone"], "success")
+        self.assertEqual(rows[2]["action_key"], "train_play_models")
+        self.assertEqual(training_health_action_button_text("train_play_models"), "训练玩法模型")
 
     def test_ensemble_status_and_messages(self) -> None:
         status_text = build_ensemble_weight_status_text(
