@@ -415,9 +415,11 @@ class CoreTrainingDataCoverageSummaryTests(unittest.TestCase):
         backtest_spy.assert_called_once()
         self.assertTrue(result["auto_backtest"]["executed"])
         self.assertTrue(result["auto_backtest"]["ok"])
+        self.assertEqual(result["auto_backtest"]["takeover_gate"]["status"], "block")
         self.assertEqual(result["postcheck"]["status"], "ready_for_backtest")
         self.assertTrue(str(report_path).endswith(".md"))
         self.assertIn("Auto Backtest", report_text)
+        self.assertIn("Takeover Gate", report_text)
         self.assertIn("play_model_backtest_unit.md", report_text)
 
     def test_train_play_models_with_backtest_skips_when_training_not_completed(self) -> None:

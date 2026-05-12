@@ -66,6 +66,68 @@ class PlayModelBacktestTests(unittest.TestCase):
         self.assertEqual(result["validation"]["max_validation_samples"], 5)
         self.assertTrue(result["validation"]["truncated"])
         self.assertAlmostEqual(result["validation"]["ratio"], 5 / 12, places=4)
+        self.assertEqual(result["takeover_gate"]["status"], "block")
+        self.assertTrue(
+            any(item.get("code") == "validation_sample_count_low" for item in result["takeover_gate"]["issues"])
+        )
+
+    def test_evaluate_play_model_takeover_gate_allows_stable_backtest(self) -> None:
+        gate = core.evaluate_play_model_takeover_gate(
+            {
+                "ok": True,
+                "reason": "ok",
+                "validation": {"sample_count": 500},
+                "improvement": {"total_goals_model_delta": 0.015, "score_model_delta": -0.005},
+            },
+            training_gate={"status": "ready_for_backtest"},
+        )
+
+        self.assertEqual(gate["status"], "allow")
+        self.assertEqual(gate["reason"], "stable_backtest")
+        self.assertEqual(gate["metrics"]["validation_sample_count"], 500)
+
+    def test_evaluate_play_model_takeover_gate_watches_marginal_delta(self) -> None:
+        gate = core.evaluate_play_model_takeover_gate(
+            {
+                "ok": True,
+                "reason": "ok",
+                "validation": {"sample_count": 500},
+                "improvement": {"total_goals_model_delta": -0.005, "score_model_delta": 0.0},
+            },
+            training_gate={"status": "ready_for_backtest"},
+        )
+
+        self.assertEqual(gate["status"], "watch")
+        self.assertEqual(gate["reason"], "total_goals_model_no_uplift")
+        self.assertEqual(gate["warning_count"], 1)
+
+    def test_evaluate_play_model_takeover_gate_blocks_when_training_gate_not_ready(self) -> None:
+        gate = core.evaluate_play_model_takeover_gate(
+            {
+                "ok": True,
+                "reason": "ok",
+                "validation": {"sample_count": 500},
+                "improvement": {"total_goals_model_delta": 0.02, "score_model_delta": 0.0},
+            },
+            training_gate={"status": "ready_to_train_play_models"},
+        )
+
+        self.assertEqual(gate["status"], "block")
+        self.assertEqual(gate["reason"], "training_gate_not_ready")
+
+    def test_evaluate_play_model_takeover_gate_blocks_score_regression(self) -> None:
+        gate = core.evaluate_play_model_takeover_gate(
+            {
+                "ok": True,
+                "reason": "ok",
+                "validation": {"sample_count": 500},
+                "improvement": {"total_goals_model_delta": 0.02, "score_model_delta": -0.05},
+            },
+            training_gate={"status": "ready_for_backtest"},
+        )
+
+        self.assertEqual(gate["status"], "block")
+        self.assertTrue(any(item.get("code") == "score_model_regression" for item in gate["issues"]))
 
     def test_run_draw_specialist_backtest_tracks_precision_recall_and_buckets(self) -> None:
         validation_items = [

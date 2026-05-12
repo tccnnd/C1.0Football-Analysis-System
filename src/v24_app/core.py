@@ -178,6 +178,11 @@ PLAY_MODEL_TOTAL_GOALS_MIN_HOLDOUT_UPLIFT = 0.0
 PLAY_MODEL_SCORELINE_MAX_HOLDOUT_REGRESSION = 0.03
 PLAY_MODEL_POLICY_HOLDOUT_RATIO = 0.25
 PLAY_MODEL_POLICY_MIN_HOLDOUT_ROWS = 100
+PLAY_MODEL_TAKEOVER_GATE_MIN_VALIDATION_SAMPLES = 300
+PLAY_MODEL_TAKEOVER_GATE_TOTAL_GOALS_MIN_DELTA = 0.0
+PLAY_MODEL_TAKEOVER_GATE_TOTAL_GOALS_BLOCK_DELTA = -0.02
+PLAY_MODEL_TAKEOVER_GATE_SCORE_MIN_DELTA = -0.01
+PLAY_MODEL_TAKEOVER_GATE_SCORE_BLOCK_DELTA = -0.03
 DEFAULT_DRAW_RELEASE_GUARD_POLICY = {
     "enabled": True,
     "min_score": 0.58,
@@ -4128,6 +4133,8 @@ def get_play_model_policy_status() -> dict:
         "policy": normalized,
         "validation": report.get("validation", {}),
         "metrics": report.get("metrics", {}),
+        "takeover_gate": report.get("takeover_gate", {}),
+        "last_backtest": report.get("last_backtest", {}),
         "source": str(PLAY_MODEL_POLICY_FILE),
         "history_source": str(PLAY_MODEL_POLICY_HISTORY_FILE),
     }
@@ -4694,6 +4701,148 @@ def get_training_model_gate_status(
             "items": play_items,
         },
     }
+
+
+def _play_model_takeover_gate_issue(code: str, severity: str, message: str, recommendation: str) -> dict:
+    return {
+        "code": code,
+        "severity": severity,
+        "message": message,
+        "recommendation": recommendation,
+    }
+
+
+def evaluate_play_model_takeover_gate(
+    backtest_result: dict | None = None,
+    *,
+    training_gate: dict | None = None,
+) -> dict:
+    """Return a watch-only allow/watch/block decision for play-model takeover."""
+    backtest = backtest_result if isinstance(backtest_result, dict) else {}
+    gate = training_gate if isinstance(training_gate, dict) else get_training_model_gate_status()
+    validation = backtest.get("validation", {}) if isinstance(backtest.get("validation"), dict) else {}
+    improvement = backtest.get("improvement", {}) if isinstance(backtest.get("improvement"), dict) else {}
+    sample_count = int(validation.get("sample_count", 0) or 0)
+    total_goals_delta = _safe_float(improvement.get("total_goals_model_delta"), 0.0)
+    score_delta = _safe_float(improvement.get("score_model_delta"), 0.0)
+    training_gate_status = normalize_text(gate.get("status"))
+    ok = bool(backtest.get("ok"))
+
+    issues: list[dict] = []
+    if training_gate_status and training_gate_status != "ready_for_backtest":
+        issues.append(
+            _play_model_takeover_gate_issue(
+                "training_gate_not_ready",
+                "blocking",
+                f"Training gate is {training_gate_status}, not ready_for_backtest.",
+                "Finish the model training gate before allowing formal takeover.",
+            )
+        )
+    if not ok:
+        issues.append(
+            _play_model_takeover_gate_issue(
+                "play_model_backtest_not_ok",
+                "blocking",
+                f"Play-model backtest is not OK: {backtest.get('reason') or 'not_run'}.",
+                "Run a successful play-model backtest before allowing takeover.",
+            )
+        )
+    if sample_count < PLAY_MODEL_TAKEOVER_GATE_MIN_VALIDATION_SAMPLES:
+        issues.append(
+            _play_model_takeover_gate_issue(
+                "validation_sample_count_low",
+                "blocking",
+                f"Validation samples {sample_count}/{PLAY_MODEL_TAKEOVER_GATE_MIN_VALIDATION_SAMPLES}.",
+                "Expand the validation history before allowing model takeover.",
+            )
+        )
+    if total_goals_delta < PLAY_MODEL_TAKEOVER_GATE_TOTAL_GOALS_BLOCK_DELTA:
+        issues.append(
+            _play_model_takeover_gate_issue(
+                "total_goals_model_regression",
+                "blocking",
+                f"Total-goals model delta {total_goals_delta:+.2%} is below the block threshold.",
+                "Keep total-goals model in shadow mode and retrain or recalibrate it.",
+            )
+        )
+    elif total_goals_delta < PLAY_MODEL_TAKEOVER_GATE_TOTAL_GOALS_MIN_DELTA:
+        issues.append(
+            _play_model_takeover_gate_issue(
+                "total_goals_model_no_uplift",
+                "warning",
+                f"Total-goals model delta {total_goals_delta:+.2%} has no positive uplift.",
+                "Keep observing total-goals model stability before takeover.",
+            )
+        )
+    if score_delta < PLAY_MODEL_TAKEOVER_GATE_SCORE_BLOCK_DELTA:
+        issues.append(
+            _play_model_takeover_gate_issue(
+                "score_model_regression",
+                "blocking",
+                f"Scoreline model delta {score_delta:+.2%} is below the block threshold.",
+                "Keep scoreline model out of formal takeover and review feature quality.",
+            )
+        )
+    elif score_delta < PLAY_MODEL_TAKEOVER_GATE_SCORE_MIN_DELTA:
+        issues.append(
+            _play_model_takeover_gate_issue(
+                "score_model_margin_thin",
+                "warning",
+                f"Scoreline model delta {score_delta:+.2%} is below the watch threshold.",
+                "Use scoreline model as shadow evidence until the margin improves.",
+            )
+        )
+
+    blocking_count = sum(1 for item in issues if item.get("severity") == "blocking")
+    warning_count = sum(1 for item in issues if item.get("severity") == "warning")
+    if blocking_count:
+        status = "block"
+        recommendation = "Do not allow play-model takeover; keep current policy in shadow/watch mode."
+    elif warning_count:
+        status = "watch"
+        recommendation = "Allow analysis visibility only; require another stable backtest before formal takeover."
+    else:
+        status = "allow"
+        recommendation = "Backtest is stable enough for policy calibration or guarded takeover review."
+
+    return {
+        "status": status,
+        "mode": "watch_only",
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "reason": issues[0]["code"] if issues else "stable_backtest",
+        "recommendation": recommendation,
+        "issues": issues,
+        "blocking_count": blocking_count,
+        "warning_count": warning_count,
+        "metrics": {
+            "training_gate_status": training_gate_status or "-",
+            "validation_sample_count": sample_count,
+            "min_validation_samples": PLAY_MODEL_TAKEOVER_GATE_MIN_VALIDATION_SAMPLES,
+            "total_goals_model_delta": round(total_goals_delta, 6),
+            "min_total_goals_model_delta": PLAY_MODEL_TAKEOVER_GATE_TOTAL_GOALS_MIN_DELTA,
+            "block_total_goals_model_delta": PLAY_MODEL_TAKEOVER_GATE_TOTAL_GOALS_BLOCK_DELTA,
+            "score_model_delta": round(score_delta, 6),
+            "min_score_model_delta": PLAY_MODEL_TAKEOVER_GATE_SCORE_MIN_DELTA,
+            "block_score_model_delta": PLAY_MODEL_TAKEOVER_GATE_SCORE_BLOCK_DELTA,
+        },
+        "policy_impact": "status_only",
+    }
+
+
+def _save_play_model_takeover_gate_snapshot(gate: dict, backtest_result: dict) -> None:
+    if not isinstance(gate, dict):
+        return
+    report = _load_play_model_policy_report()
+    report["takeover_gate"] = json.loads(json.dumps(gate))
+    report["last_backtest"] = {
+        "updated_at": gate.get("updated_at"),
+        "ok": bool(backtest_result.get("ok")),
+        "reason": backtest_result.get("reason"),
+        "validation": json.loads(json.dumps(backtest_result.get("validation", {}))),
+        "improvement": json.loads(json.dumps(backtest_result.get("improvement", {}))),
+        "report_path": backtest_result.get("report_path"),
+    }
+    _save_play_model_policy_report(report)
 
 
 def repair_training_data_health(action_key: str, *, input_path: Path | str | None = None) -> dict:
@@ -8900,7 +9049,14 @@ def run_play_model_backtest(
         min_validation_samples=min_validation_samples,
     )
     if not validation_items:
-        return {"ok": False, "reason": "insufficient_validation_split"}
+        result = {
+            "ok": False,
+            "reason": "insufficient_validation_split",
+            "validation": {"sample_count": 0},
+            "improvement": {},
+        }
+        result["takeover_gate"] = evaluate_play_model_takeover_gate(result)
+        return result
     original_validation_count = len(validation_items)
     if max_validation_samples > 0 and len(validation_items) > int(max_validation_samples):
         validation_items = validation_items[-int(max_validation_samples):]
@@ -9048,12 +9204,17 @@ def run_play_model_backtest(
         "metrics": finalized,
         "improvement": improvement,
     }
+    result["takeover_gate"] = evaluate_play_model_takeover_gate(result)
 
     report_path = None
     if write_report:
         REPORT_DIR.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         report_path = REPORT_DIR / f"play_model_backtest_{timestamp}.md"
+        result["report_path"] = str(report_path)
+        takeover_gate = result.get("takeover_gate", {}) if isinstance(result.get("takeover_gate"), dict) else {}
+        takeover_gate_metrics = takeover_gate.get("metrics", {}) if isinstance(takeover_gate.get("metrics"), dict) else {}
+        takeover_gate_issues = takeover_gate.get("issues", []) if isinstance(takeover_gate.get("issues"), list) else []
         lines = [
             "# Play Model Backtest Report",
             "",
@@ -9086,6 +9247,25 @@ def run_play_model_backtest(
                 f"- Score Shadow - Current: {improvement['score_shadow_delta']:+.2%}",
                 f"- Score Model - Current: {improvement['score_model_delta']:+.2%}",
                 "",
+                "## Takeover Gate",
+                "",
+                f"- Status: {takeover_gate.get('status') or '-'}",
+                f"- Mode: {takeover_gate.get('mode') or '-'}",
+                f"- Policy Impact: {takeover_gate.get('policy_impact') or '-'}",
+                f"- Training Gate: {takeover_gate_metrics.get('training_gate_status') or '-'}",
+                f"- Validation Samples: {takeover_gate_metrics.get('validation_sample_count', 0)}/{takeover_gate_metrics.get('min_validation_samples', 0)}",
+                f"- Total Goals Delta: {float(takeover_gate_metrics.get('total_goals_model_delta', 0) or 0):+.2%}",
+                f"- Score Model Delta: {float(takeover_gate_metrics.get('score_model_delta', 0) or 0):+.2%}",
+                f"- Recommendation: {takeover_gate.get('recommendation') or '-'}",
+                "",
+                "| Severity | Code | Message |",
+                "|---|---|---|",
+                *[
+                    f"| {item.get('severity', '-')} | {item.get('code', '-')} | {item.get('message', '-')} |"
+                    for item in takeover_gate_issues[:5]
+                    if isinstance(item, dict)
+                ],
+                "",
                 "## Scoreline Buckets",
                 "",
                 f"- Current Regular: {int(finalized['score_current_regular']['hits'])}/{int(finalized['score_current_regular']['total'])} ({float(finalized['score_current_regular']['accuracy']):.2%})",
@@ -9096,6 +9276,7 @@ def run_play_model_backtest(
             ]
         )
         report_path.write_text("\n".join(lines), encoding="utf-8")
+        _save_play_model_takeover_gate_snapshot(takeover_gate, result)
     result["report_path"] = str(report_path) if report_path else None
     return result
 
@@ -12834,6 +13015,9 @@ def write_training_followup_report(
     backtest = auto_backtest if isinstance(auto_backtest, dict) else {"executed": False}
     validation = backtest.get("validation", {}) if isinstance(backtest.get("validation"), dict) else {}
     improvement = backtest.get("improvement", {}) if isinstance(backtest.get("improvement"), dict) else {}
+    takeover_gate = backtest.get("takeover_gate", {}) if isinstance(backtest.get("takeover_gate"), dict) else {}
+    takeover_gate_metrics = takeover_gate.get("metrics", {}) if isinstance(takeover_gate.get("metrics"), dict) else {}
+    takeover_gate_issues = takeover_gate.get("issues", []) if isinstance(takeover_gate.get("issues"), list) else []
     lines = [
         "# Training Follow-up Report",
         "",
@@ -12864,6 +13048,18 @@ def write_training_followup_report(
         f"- Score Model Delta: {float(improvement.get('score_model_delta', 0) or 0):+.2%}",
         f"- Backtest Report: {backtest.get('report_path') or '-'}",
         "",
+        "## Takeover Gate",
+        "",
+        f"- Status: {takeover_gate.get('status') or '-'}",
+        f"- Mode: {takeover_gate.get('mode') or '-'}",
+        f"- Policy Impact: {takeover_gate.get('policy_impact') or '-'}",
+        f"- Training Gate: {takeover_gate_metrics.get('training_gate_status') or '-'}",
+        f"- Validation Samples: {takeover_gate_metrics.get('validation_sample_count', '-')}/{takeover_gate_metrics.get('min_validation_samples', '-')}",
+        f"- Total Goals Delta: {float(takeover_gate_metrics.get('total_goals_model_delta', 0) or 0):+.2%}",
+        f"- Score Model Delta: {float(takeover_gate_metrics.get('score_model_delta', 0) or 0):+.2%}",
+        f"- Recommendation: {takeover_gate.get('recommendation') or '-'}",
+        f"- Top Issues: {', '.join(str(item.get('code') or '-') for item in takeover_gate_issues[:3] if isinstance(item, dict)) or '-'}",
+        "",
         "## Next Step",
         "",
         f"- {(after_gate or {}).get('recommendation') or '-'}",
@@ -12881,7 +13077,18 @@ def run_training_postcheck(
     write_report: bool = True,
 ) -> dict:
     after_gate = get_training_model_gate_status()
-    backtest = auto_backtest if isinstance(auto_backtest, dict) else {"executed": False, "reason": "not_requested"}
+    backtest = dict(auto_backtest) if isinstance(auto_backtest, dict) else {"executed": False, "reason": "not_requested"}
+    existing_takeover_gate = backtest.get("takeover_gate")
+    if bool(backtest.get("executed")) and (
+        not isinstance(existing_takeover_gate, dict) or not existing_takeover_gate.get("status")
+    ):
+        gate_input = backtest.get("result") if isinstance(backtest.get("result"), dict) else backtest
+        takeover_gate = evaluate_play_model_takeover_gate(gate_input, training_gate=after_gate)
+        backtest["takeover_gate"] = takeover_gate
+        if isinstance(backtest.get("result"), dict):
+            nested_result = dict(backtest["result"])
+            nested_result["takeover_gate"] = takeover_gate
+            backtest["result"] = nested_result
     report_path = None
     if write_report:
         report_path = write_training_followup_report(
@@ -12917,7 +13124,7 @@ def train_xgb_v0_with_postcheck_now(force_min_samples: int | None = None) -> dic
         "training_gate_before": before_gate,
         "training_gate_after": postcheck.get("training_gate_after", {}),
         "postcheck": postcheck,
-        "auto_backtest": auto_backtest,
+        "auto_backtest": postcheck.get("auto_backtest", auto_backtest),
     }
 
 
@@ -12937,6 +13144,7 @@ def train_play_models_with_backtest_now(
                 "report_path": backtest_result.get("report_path"),
                 "validation": backtest_result.get("validation", {}),
                 "improvement": backtest_result.get("improvement", {}),
+                "takeover_gate": backtest_result.get("takeover_gate", {}),
                 "result": backtest_result,
             }
         except Exception as exc:
@@ -12964,7 +13172,7 @@ def train_play_models_with_backtest_now(
         "training_gate_before": before_gate,
         "training_gate_after": postcheck.get("training_gate_after", {}),
         "postcheck": postcheck,
-        "auto_backtest": auto_backtest,
+        "auto_backtest": postcheck.get("auto_backtest", auto_backtest),
     }
 
 

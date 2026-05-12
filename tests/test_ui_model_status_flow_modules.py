@@ -28,6 +28,7 @@ from v24_app.ui_modules import (
     build_play_model_policy_apply_success_message,
     build_play_model_policy_decision_rows,
     build_play_model_policy_status_text,
+    build_play_model_takeover_gate_rows,
     build_play_model_training_status_text,
     build_play_threshold_apply_status_text,
     build_play_threshold_apply_success_message,
@@ -369,6 +370,47 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
         self.assertIn("insufficient_calibration_uplift", decision_rows[0]["body"])
         self.assertEqual(decision_rows[1]["title"], "Scoreline takeover: ON")
 
+    def test_play_model_takeover_gate_rows_and_policy_text(self) -> None:
+        gate = {
+            "status": "block",
+            "mode": "watch_only",
+            "policy_impact": "status_only",
+            "recommendation": "Do not allow play-model takeover.",
+            "metrics": {
+                "training_gate_status": "ready_for_backtest",
+                "validation_sample_count": 120,
+                "min_validation_samples": 300,
+                "total_goals_model_delta": 0.02,
+                "score_model_delta": -0.04,
+            },
+            "issues": [
+                {
+                    "code": "score_model_regression",
+                    "severity": "blocking",
+                    "message": "Scoreline model delta is below the block threshold.",
+                    "recommendation": "Keep scoreline model out of formal takeover.",
+                }
+            ],
+        }
+
+        rows = build_play_model_takeover_gate_rows({"takeover_gate": gate})
+        self.assertEqual(rows[0]["title"], "Takeover gate: BLOCK")
+        self.assertEqual(rows[0]["tone"], "danger")
+        self.assertIn("samples 120/300", rows[0]["body"])
+        self.assertEqual(rows[1]["title"], "blocking: score_model_regression")
+
+        policy_text = build_play_model_policy_status_text(
+            {
+                "updated_at": "2026-04-04",
+                "policy": {"scoreline": {"takeover_enabled": True}, "total_goals": {"takeover_enabled": False}},
+                "metrics": {},
+                "takeover_gate": gate,
+            }
+        )
+        self.assertIn("Takeover gate", policy_text)
+        self.assertIn("Takeover gate: BLOCK", policy_text)
+        self.assertIn("Do not allow play-model takeover.", policy_text)
+
     def test_play_model_training_and_backtest(self) -> None:
         status_text = build_play_model_training_status_text(
             {
@@ -390,6 +432,7 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
                 "ok": True,
                 "reason": "ok",
                 "report_path": "play_auto.md",
+                "takeover_gate": {"status": "allow", "recommendation": "Backtest is stable enough."},
             },
             "postcheck": {
                 "status": "ready_for_backtest",
@@ -403,6 +446,7 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
         self.assertIn("玩法模型训练: 完成", train_msg)
         self.assertIn("高波动比分: skip", train_msg)
         self.assertIn("训练后复检", train_msg)
+        self.assertIn("Takeover gate: allow", train_msg)
         self.assertIn("回测报告: play_auto.md", train_msg)
         self.assertIn("闭环报告: training_followup_play.md", train_msg)
 
@@ -422,12 +466,16 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
                 "score_model": {"accuracy": 0.14},
                 "score_volatile_model_volatile": {"accuracy": 0.2, "hits": 2, "total": 10},
             },
+            "takeover_gate": {"status": "watch", "mode": "watch_only", "recommendation": "Run another stable backtest."},
             "report_path": "play.md",
         }
         self.assertIn("玩法回测完成", build_play_model_backtest_apply_status_text(backtest_result))
+        self.assertIn("gate watch", build_play_model_backtest_apply_status_text(backtest_result))
         backtest_msg = build_play_model_backtest_success_message(backtest_result)
         self.assertIn("玩法回测完成", backtest_msg)
         self.assertIn("报告: play.md", backtest_msg)
+        self.assertIn("Takeover gate", backtest_msg)
+        self.assertIn("Status: watch", backtest_msg)
 
 
     def test_draw_specialist_backtest_text_and_cards(self) -> None:

@@ -676,6 +676,67 @@ def build_play_model_policy_decision_rows(status: Mapping[str, object] | object)
     ]
 
 
+def _takeover_gate_from_status(status: Mapping[str, object] | object) -> Mapping[str, object]:
+    resolved = status if isinstance(status, Mapping) else {}
+    if isinstance(resolved.get("takeover_gate"), Mapping):
+        return resolved.get("takeover_gate", {})  # type: ignore[return-value]
+    if str(resolved.get("mode") or "") == "watch_only" and "metrics" in resolved:
+        return resolved
+    return {}
+
+
+def _takeover_gate_tone(status: object) -> str:
+    value = str(status or "").strip().lower()
+    if value == "allow":
+        return "good"
+    if value == "watch":
+        return "warning"
+    if value == "block":
+        return "danger"
+    return "neutral"
+
+
+def build_play_model_takeover_gate_rows(status: Mapping[str, object] | object) -> list[dict[str, str]]:
+    gate = _takeover_gate_from_status(status)
+    if not gate:
+        return [
+            {
+                "title": "Takeover gate: not evaluated",
+                "body": "Run play-model backtest to produce allow/watch/block takeover governance.",
+                "tone": "neutral",
+            }
+        ]
+    metrics = gate.get("metrics", {}) if isinstance(gate.get("metrics"), Mapping) else {}
+    issues = gate.get("issues", []) if isinstance(gate.get("issues"), list) else []
+    status_text = str(gate.get("status") or "-")
+    rows = [
+        {
+            "title": f"Takeover gate: {status_text.upper()}",
+            "body": (
+                f"mode {gate.get('mode') or '-'} | policy_impact {gate.get('policy_impact') or '-'}\n"
+                f"training_gate {metrics.get('training_gate_status') or '-'} | "
+                f"samples {metrics.get('validation_sample_count', 0)}/{metrics.get('min_validation_samples', 0)}\n"
+                f"total_goals_delta {_safe_float(metrics.get('total_goals_model_delta'), 0.0):+.2%} | "
+                f"score_delta {_safe_float(metrics.get('score_model_delta'), 0.0):+.2%}\n"
+                f"recommendation: {gate.get('recommendation') or '-'}"
+            ),
+            "tone": _takeover_gate_tone(status_text),
+        }
+    ]
+    for item in issues[:3]:
+        if not isinstance(item, Mapping):
+            continue
+        severity = str(item.get("severity") or "-")
+        rows.append(
+            {
+                "title": f"{severity}: {item.get('code') or '-'}",
+                "body": f"{item.get('message') or '-'}\nrecommendation: {item.get('recommendation') or '-'}",
+                "tone": "danger" if severity == "blocking" else "warning" if severity == "warning" else "neutral",
+            }
+        )
+    return rows
+
+
 def build_train_play_models_apply_status_text(result: Mapping[str, object] | object) -> str:
     resolved = result if isinstance(result, Mapping) else {}
     trained = bool(resolved.get("trained"))
@@ -685,7 +746,10 @@ def build_train_play_models_apply_status_text(result: Mapping[str, object] | obj
     auto_backtest = resolved.get("auto_backtest", {}) if isinstance(resolved.get("auto_backtest"), Mapping) else {}
     backtest_text = ""
     if auto_backtest:
+        takeover_gate = auto_backtest.get("takeover_gate", {}) if isinstance(auto_backtest.get("takeover_gate"), Mapping) else {}
         backtest_text = f" | 自动回测={'完成' if bool(auto_backtest.get('ok')) else '未完成'}"
+        if takeover_gate.get("status"):
+            backtest_text += f" | gate={takeover_gate.get('status')}"
     return (
         f"玩法模型{'完成' if trained else '未执行'} | 总进球={total_result.get('reason', '-')} | "
         f"比分={score_result.get('reason', '-')} | 高波动={volatile_result.get('reason', '-')}{backtest_text}"
@@ -702,11 +766,19 @@ def build_train_play_models_apply_message(result: Mapping[str, object] | object,
     postcheck = resolved.get("postcheck", {}) if isinstance(resolved.get("postcheck"), Mapping) else {}
     auto_backtest_text = ""
     if auto_backtest or postcheck:
+        takeover_gate = auto_backtest.get("takeover_gate", {}) if isinstance(auto_backtest.get("takeover_gate"), Mapping) else {}
+        takeover_gate_text = ""
+        if takeover_gate:
+            takeover_gate_text = (
+                f"- Takeover gate: {takeover_gate.get('status') or '-'} | "
+                f"{takeover_gate.get('recommendation') or '-'}\n"
+            )
         auto_backtest_text = (
             "\n训练后复检\n"
             + f"- 状态: {postcheck.get('status') or '-'}\n"
             + f"- 建议: {postcheck.get('recommendation') or '-'}\n"
             + f"- 自动回测: {'已执行' if bool(auto_backtest.get('executed')) else '未执行'} | ok={bool(auto_backtest.get('ok'))} | {auto_backtest.get('reason') or '-'}\n"
+            + takeover_gate_text
             + f"- 回测报告: {auto_backtest.get('report_path') or '-'}\n"
             + f"- 闭环报告: {postcheck.get('report_path') or '-'}\n\n"
         )
@@ -724,9 +796,11 @@ def build_play_model_backtest_apply_status_text(result: Mapping[str, object] | o
     resolved = result if isinstance(result, Mapping) else {}
     ok = bool(resolved.get("ok"))
     improvement = resolved.get("improvement", {}) if isinstance(resolved, Mapping) else {}
+    takeover_gate = resolved.get("takeover_gate", {}) if isinstance(resolved.get("takeover_gate"), Mapping) else {}
+    gate_text = f" | gate {takeover_gate.get('status')}" if takeover_gate.get("status") else ""
     return (
         f"玩法回测{'完成' if ok else '失败'} | 让球 {float(improvement.get('handicap_shadow_delta', 0) or 0):+.2%} | "
-        f"总进球 {float(improvement.get('total_goals_model_delta', 0) or 0):+.2%} | 比分 {float(improvement.get('score_model_delta', 0) or 0):+.2%}"
+        f"总进球 {float(improvement.get('total_goals_model_delta', 0) or 0):+.2%} | 比分 {float(improvement.get('score_model_delta', 0) or 0):+.2%}{gate_text}"
     )
 
 
@@ -735,6 +809,15 @@ def build_play_model_backtest_success_message(result: Mapping[str, object] | obj
     metrics = resolved.get("metrics", {}) if isinstance(resolved, Mapping) else {}
     validation = resolved.get("validation", {}) if isinstance(resolved, Mapping) else {}
     report_path = resolved.get("report_path") or "-"
+    takeover_gate = resolved.get("takeover_gate", {}) if isinstance(resolved.get("takeover_gate"), Mapping) else {}
+    takeover_gate_text = ""
+    if takeover_gate:
+        takeover_gate_text = (
+            "\n\nTakeover gate\n"
+            + f"- Status: {takeover_gate.get('status') or '-'}\n"
+            + f"- Mode: {takeover_gate.get('mode') or '-'}\n"
+            + f"- Recommendation: {takeover_gate.get('recommendation') or '-'}"
+        )
     return (
         "玩法回测完成\n"
         + f"验证样本: {validation.get('sample_count', 0)}\n"
@@ -744,6 +827,7 @@ def build_play_model_backtest_success_message(result: Mapping[str, object] | obj
         + f"比分: baseline {float(metrics.get('score_baseline', {}).get('accuracy', 0) or 0):.2%} | current {float(metrics.get('score_current', {}).get('accuracy', 0) or 0):.2%} | model {float(metrics.get('score_model', {}).get('accuracy', 0) or 0):.2%}\n"
         + f"高波动专用: {float(metrics.get('score_volatile_model_volatile', {}).get('accuracy', 0) or 0):.2%} ({int(metrics.get('score_volatile_model_volatile', {}).get('hits', 0) or 0)}/{int(metrics.get('score_volatile_model_volatile', {}).get('total', 0) or 0)})\n\n"
         + f"报告: {report_path}"
+        + takeover_gate_text
     )
 
 
@@ -901,6 +985,10 @@ def build_play_model_policy_status_text(status: Mapping[str, object] | object) -
     decision_text = "\n".join(
         f"- {row.get('title', '-')}: {row.get('body', '-')}" for row in decision_rows
     )
+    takeover_gate_rows = build_play_model_takeover_gate_rows(resolved)
+    takeover_gate_text = "\n".join(
+        f"- {row.get('title', '-')}: {row.get('body', '-')}" for row in takeover_gate_rows
+    )
     return (
         "玩法接管策略\n"
         + f"- 更新时间: {resolved.get('updated_at') or '-'}\n"
@@ -911,4 +999,6 @@ def build_play_model_policy_status_text(status: Mapping[str, object] | object) -
         + f"- 联合最优: 比分={int(best.get('score_hits', 0) or 0)}/{int(best.get('score_covered', 0) or 0)} ({float(best.get('score_accuracy', 0) or 0):.2%}) | 总进球={int(best.get('total_goals_hits', 0) or 0)}/{int(best.get('total_goals_covered', 0) or 0)} ({float(best.get('total_goals_accuracy', 0) or 0):.2%}) | combined={int(best.get('combined_hits', 0) or 0)}\n"
         + "\nTakeover decisions\n"
         + decision_text
+        + "\n\nTakeover gate\n"
+        + takeover_gate_text
     )
