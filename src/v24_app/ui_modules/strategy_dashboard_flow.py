@@ -5082,7 +5082,11 @@ def filter_strategy_policy_governance_event_rows(
     domain_filter: object = "\u5168\u90e8",
     event_type_filter: object = "\u5168\u90e8",
 ) -> list[dict[str, object]]:
-    row_items = [dict(item) for item in rows if isinstance(item, Mapping)] if isinstance(rows, Sequence) else []
+    row_items = [
+        dict(item)
+        for item in rows
+        if isinstance(item, Mapping)
+    ] if isinstance(rows, Sequence) and not isinstance(rows, (str, bytes, bytearray)) else []
     domain_value = _text(domain_filter, "\u5168\u90e8").strip() or "\u5168\u90e8"
     event_type_value = _text(event_type_filter, "\u5168\u90e8").strip() or "\u5168\u90e8"
     if domain_value.lower() in {"all", "any"}:
@@ -5240,8 +5244,8 @@ def build_strategy_policy_governance_event_summary(
     if draw_guard_governance_count:
         summary_text = f"{summary_text} | DrawGuard {draw_guard_governance_count}"
     filter_summary_text = (
-        f"\u7b5b\u9009 \u57df {domain_value} / \u4e8b\u4ef6 {event_type_value} | "
-        f"{len(filtered_rows)}/{total_event_count}"
+        f"\u7b5b\u9009\u6761\u4ef6: \u57df={domain_value} / \u4e8b\u4ef6={event_type_value} | "
+        f"\u663e\u793a {len(filtered_rows)} / \u5171 {total_event_count}"
     )
     return {
         "event_count": len(filtered_rows),
