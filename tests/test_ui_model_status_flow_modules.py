@@ -34,10 +34,52 @@ from v24_app.ui_modules import (
     build_play_threshold_status_text,
     build_train_play_models_apply_message,
     build_train_play_models_apply_status_text,
+    build_training_health_action_rows,
+    build_training_health_card_rows,
 )
 
 
 class UIModelStatusFlowModuleTests(unittest.TestCase):
+    def _coverage_with_health(self, status: str, issues: list[dict[str, str]] | None = None) -> dict:
+        return {
+            "xgb_samples": {"sample_count": 120, "valid_feature_count": 110, "league_count": 2},
+            "training_health": {
+                "status": status,
+                "blocking_count": sum(1 for issue in issues or [] if issue.get("severity") == "blocking"),
+                "warning_count": sum(1 for issue in issues or [] if issue.get("severity") == "warning"),
+                "issues": issues or [],
+                "xgb_trainability": {
+                    "sample_count": 120,
+                    "min_sample_count": 300,
+                    "valid_feature_count": 110,
+                    "min_valid_feature_count": 300,
+                    "valid_feature_ratio": 0.9167,
+                    "min_valid_feature_ratio": 0.95,
+                    "label_class_count": 2,
+                    "min_label_classes": 3,
+                    "min_class_count": 18,
+                    "min_required_class_count": 30,
+                    "league_count": 2,
+                    "min_league_count": 5,
+                    "date_start": "2024-01-01",
+                    "date_end": "2024-12-31",
+                },
+                "history_readiness": {
+                    "club_match_count": 80,
+                    "min_club_match_count": 100,
+                    "league_profile_count": 0,
+                    "world_cup_match_count": 128,
+                    "statsbomb_match_count": 3,
+                    "statsbomb_review_sample_count": 0,
+                    "statsbomb_review_feature_count": 0,
+                },
+                "rating_readiness": {
+                    "club_team_count": 20,
+                    "national_team_count": 8,
+                },
+            },
+        }
+
     def test_model_training_overview_shows_statsbomb_review_samples(self) -> None:
         text = build_model_training_overview_text(
             xgb_status={},
@@ -91,6 +133,83 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
         self.assertIn("blocking=1", text)
         self.assertIn("健康问题1: [blocking] XGB样本数不足: 120/300", text)
         self.assertIn("建议: 继续导入历史赛果样本。", text)
+        self.assertIn("训练健康卡片", text)
+        self.assertIn("优先补数建议", text)
+
+    def test_training_health_card_rows_show_blocked_status(self) -> None:
+        coverage = self._coverage_with_health(
+            "blocked",
+            [
+                {
+                    "code": "xgb_sample_count_low",
+                    "severity": "blocking",
+                    "message": "XGB样本数不足: 120/300",
+                    "recommendation": "继续导入历史赛果样本。",
+                }
+            ],
+        )
+
+        cards = build_training_health_card_rows(coverage)
+        actions = build_training_health_action_rows(coverage)
+
+        self.assertEqual(cards[0]["label"], "整体状态")
+        self.assertEqual(cards[0]["value"], "blocked")
+        self.assertEqual(cards[0]["tone"], "danger")
+        self.assertIn("训练阻塞", cards[0]["detail"])
+        self.assertEqual(cards[1]["tone"], "danger")
+        self.assertEqual(actions[0]["tone"], "danger")
+        self.assertEqual(actions[0]["value"], "扩大历史赛果样本，优先最近4年主流联赛")
+
+    def test_training_health_action_rows_show_attention_suggestions(self) -> None:
+        coverage = self._coverage_with_health(
+            "attention",
+            [
+                {
+                    "code": "xgb_league_coverage_low",
+                    "severity": "warning",
+                    "message": "XGB联赛覆盖不足: 2/5",
+                    "recommendation": "补充不同联赛样本。",
+                },
+                {
+                    "code": "xgb_class_balance_low",
+                    "severity": "warning",
+                    "message": "XGB最小标签样本偏低: 18/30",
+                    "recommendation": "扩大历史样本。",
+                },
+            ],
+        )
+
+        cards = build_training_health_card_rows(coverage)
+        actions = build_training_health_action_rows(coverage)
+
+        self.assertEqual(cards[0]["tone"], "warning")
+        self.assertIn("需要关注", cards[0]["detail"])
+        self.assertTrue(any(row["value"] == "补不同联赛样本" for row in actions))
+        self.assertTrue(any(row["value"] == "补平局/客胜等弱类别样本" for row in actions))
+
+    def test_training_health_action_rows_show_healthy_next_step(self) -> None:
+        coverage = self._coverage_with_health("healthy", [])
+        coverage["training_health"]["blocking_count"] = 0
+        coverage["training_health"]["warning_count"] = 0
+
+        cards = build_training_health_card_rows(coverage)
+        actions = build_training_health_action_rows(coverage)
+
+        self.assertEqual(cards[0]["tone"], "success")
+        self.assertIn("可训练", cards[0]["detail"])
+        self.assertEqual(actions[0]["tone"], "success")
+        self.assertEqual(actions[0]["value"], "进入回测/训练稳定性验证")
+
+    def test_training_health_action_rows_limit_to_five(self) -> None:
+        coverage = self._coverage_with_health(
+            "attention",
+            [
+                {"code": "xgb_league_coverage_low", "severity": "warning", "message": "m", "recommendation": "r"}
+                for _ in range(6)
+            ],
+        )
+
+        self.assertEqual(len(build_training_health_action_rows(coverage)), 5)
 
     def test_ensemble_status_and_messages(self) -> None:
         status_text = build_ensemble_weight_status_text(

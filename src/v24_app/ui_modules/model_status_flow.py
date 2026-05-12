@@ -36,6 +36,176 @@ def _ready_text(value: object) -> str:
     return "就绪" if bool(value) else "未就绪"
 
 
+def _health_tone(status: object) -> str:
+    value = str(status or "").strip().lower()
+    if value == "blocked":
+        return "danger"
+    if value == "attention":
+        return "warning"
+    if value == "healthy":
+        return "success"
+    return "neutral"
+
+
+def _health_status_title(status: object) -> str:
+    value = str(status or "").strip().lower()
+    if value == "blocked":
+        return "训练阻塞"
+    if value == "attention":
+        return "需要关注"
+    if value == "healthy":
+        return "可训练"
+    return "-"
+
+
+def _metric_tone(value: int, target: int, *, status: str = "") -> str:
+    if target <= 0:
+        return "neutral"
+    if value < target:
+        return "danger" if status == "blocked" else "warning"
+    return "success"
+
+
+def _feature_ratio_tone(value: float, target: float) -> str:
+    if target <= 0:
+        return "neutral"
+    return "success" if value >= target else "warning"
+
+
+def _training_health_action_for_issue(code: object, fallback: object = "") -> str:
+    actions = {
+        "xgb_sample_count_low": "扩大历史赛果样本，优先最近4年主流联赛",
+        "xgb_valid_feature_count_low": "重建特征或清理无特征样本",
+        "xgb_valid_feature_ratio_low": "重建特征或清理无特征样本",
+        "xgb_label_class_missing": "补平局/客胜等弱类别样本",
+        "xgb_class_balance_low": "补平局/客胜等弱类别样本",
+        "xgb_league_coverage_low": "补不同联赛样本",
+        "xgb_date_range_missing": "修复样本日期字段",
+        "league_profiles_missing": "生成联赛画像",
+        "statsbomb_review_samples_missing": "将事件摘要转为复盘训练样本",
+    }
+    return actions.get(str(code or ""), str(fallback or "按健康问题补齐训练数据"))
+
+
+def build_training_health_card_rows(coverage_status: Mapping[str, object] | object, *, limit: int = 8) -> list[dict[str, str]]:
+    coverage = coverage_status if isinstance(coverage_status, Mapping) else {}
+    samples = coverage.get("xgb_samples", {}) if isinstance(coverage.get("xgb_samples"), Mapping) else {}
+    health = coverage.get("training_health", {}) if isinstance(coverage.get("training_health"), Mapping) else {}
+    trainability = health.get("xgb_trainability", {}) if isinstance(health.get("xgb_trainability"), Mapping) else {}
+    history = health.get("history_readiness", {}) if isinstance(health.get("history_readiness"), Mapping) else {}
+    rating = health.get("rating_readiness", {}) if isinstance(health.get("rating_readiness"), Mapping) else {}
+
+    status = str(health.get("status") or "-")
+    sample_count = _safe_int(trainability.get("sample_count", samples.get("sample_count", 0)))
+    min_sample_count = _safe_int(trainability.get("min_sample_count", 300))
+    valid_feature_count = _safe_int(trainability.get("valid_feature_count", samples.get("valid_feature_count", 0)))
+    min_valid_feature_count = _safe_int(trainability.get("min_valid_feature_count", 300))
+    valid_feature_ratio = _safe_float(trainability.get("valid_feature_ratio"), 0.0)
+    min_valid_feature_ratio = _safe_float(trainability.get("min_valid_feature_ratio"), 0.95)
+    label_class_count = _safe_int(trainability.get("label_class_count", 0))
+    min_label_classes = _safe_int(trainability.get("min_label_classes", 3))
+    min_class_count = _safe_int(trainability.get("min_class_count", 0))
+    min_required_class_count = _safe_int(trainability.get("min_required_class_count", 30))
+    league_count = _safe_int(trainability.get("league_count", samples.get("league_count", 0)))
+    min_league_count = _safe_int(trainability.get("min_league_count", 5))
+    club_match_count = _safe_int(history.get("club_match_count", 0))
+    min_club_match_count = _safe_int(history.get("min_club_match_count", 100))
+    league_profile_count = _safe_int(history.get("league_profile_count", 0))
+    statsbomb_match_count = _safe_int(history.get("statsbomb_match_count", 0))
+    statsbomb_review_sample_count = _safe_int(history.get("statsbomb_review_sample_count", 0))
+    statsbomb_review_feature_count = _safe_int(history.get("statsbomb_review_feature_count", 0))
+    club_team_count = _safe_int(rating.get("club_team_count", 0))
+    national_team_count = _safe_int(rating.get("national_team_count", 0))
+
+    rows = [
+        {
+            "label": "整体状态",
+            "value": status,
+            "tone": _health_tone(status),
+            "detail": f"{_health_status_title(status)} | blocking={health.get('blocking_count', 0)} | warning={health.get('warning_count', 0)}",
+        },
+        {
+            "label": "XGB样本",
+            "value": f"{sample_count} / {min_sample_count}",
+            "tone": _metric_tone(sample_count, min_sample_count, status=status),
+            "detail": f"有效特征 {valid_feature_count}",
+        },
+        {
+            "label": "有效特征",
+            "value": f"{valid_feature_count} / {min_valid_feature_count}",
+            "tone": _metric_tone(valid_feature_count, min_valid_feature_count, status=status),
+            "detail": f"比例 {valid_feature_ratio:.1%} / {min_valid_feature_ratio:.1%}",
+        },
+        {
+            "label": "标签类别",
+            "value": f"{label_class_count} / {min_label_classes}",
+            "tone": _metric_tone(label_class_count, min_label_classes),
+            "detail": f"最小类别 {min_class_count} / {min_required_class_count}",
+        },
+        {
+            "label": "联赛覆盖",
+            "value": f"{league_count} / {min_league_count}",
+            "tone": _metric_tone(league_count, min_league_count),
+            "detail": f"日期 {trainability.get('date_start') or '-'} -> {trainability.get('date_end') or '-'}",
+        },
+        {
+            "label": "历史样本",
+            "value": f"{club_match_count} / {min_club_match_count}",
+            "tone": _metric_tone(club_match_count, min_club_match_count),
+            "detail": f"联赛画像 {league_profile_count} | 世界杯 {history.get('world_cup_match_count', 0)}",
+        },
+        {
+            "label": "StatsBomb复盘",
+            "value": str(statsbomb_review_sample_count),
+            "tone": "warning" if statsbomb_match_count > 0 and statsbomb_review_sample_count <= 0 else "success" if statsbomb_review_sample_count > 0 else "neutral",
+            "detail": f"事件 {statsbomb_match_count} | 特征 {statsbomb_review_feature_count}",
+        },
+        {
+            "label": "ELO评分池",
+            "value": f"{club_team_count} / {national_team_count}",
+            "tone": "success" if club_team_count > 0 or national_team_count > 0 else "neutral",
+            "detail": "俱乐部 / 国家队",
+        },
+    ]
+    return rows[: max(0, int(limit))]
+
+
+def build_training_health_action_rows(coverage_status: Mapping[str, object] | object, *, limit: int = 5) -> list[dict[str, str]]:
+    coverage = coverage_status if isinstance(coverage_status, Mapping) else {}
+    health = coverage.get("training_health", {}) if isinstance(coverage.get("training_health"), Mapping) else {}
+    issues = [row for row in health.get("issues", []) if isinstance(row, Mapping)] if isinstance(health.get("issues"), list) else []
+    if not issues:
+        return [
+            {
+                "label": "下一步",
+                "value": "进入回测/训练稳定性验证",
+                "tone": "success" if str(health.get("status") or "") == "healthy" else "neutral",
+                "detail": "训练数据当前无阻塞问题",
+            }
+        ][: max(0, int(limit))]
+
+    severity_order = {"blocking": 0, "warning": 1}
+    ordered = sorted(
+        issues,
+        key=lambda issue: (
+            severity_order.get(str(issue.get("severity") or ""), 2),
+            str(issue.get("code") or ""),
+        ),
+    )
+    rows = []
+    for index, issue in enumerate(ordered[: max(0, int(limit))], start=1):
+        severity = str(issue.get("severity") or "-")
+        rows.append(
+            {
+                "label": f"建议{index}",
+                "value": _training_health_action_for_issue(issue.get("code"), issue.get("recommendation")),
+                "tone": "danger" if severity == "blocking" else "warning",
+                "detail": f"{severity} | {issue.get('code', '-')} | {issue.get('message', '-')}",
+            }
+        )
+    return rows
+
+
 def build_model_training_overview_text(
     *,
     xgb_status: Mapping[str, object] | object,
@@ -79,6 +249,14 @@ def build_model_training_overview_text(
         )
     if not health_issue_lines:
         health_issue_lines.append("- 健康问题: -")
+    health_card_lines = [
+        f"- {row.get('label', '-')}: {row.get('value', '-')} | {row.get('detail', '-')}"
+        for row in build_training_health_card_rows(coverage)
+    ]
+    health_action_lines = [
+        f"- {row.get('label', '-')}: {row.get('value', '-')} | {row.get('detail', '-')}"
+        for row in build_training_health_action_rows(coverage)
+    ]
 
     lines = [
         "模型训练状态总览",
@@ -93,6 +271,12 @@ def build_model_training_overview_text(
         f"- ELO评分池: 俱乐部 {rating_pools.get('club_team_count', 0)} 队 | 国家队 {rating_pools.get('national_team_count', 0)} 队",
         f"- 训练健康: {training_health.get('status', '-')} | blocking={training_health.get('blocking_count', 0)} | warning={training_health.get('warning_count', 0)}",
         *health_issue_lines,
+        "",
+        "训练健康卡片",
+        *health_card_lines,
+        "",
+        "优先补数建议",
+        *health_action_lines,
         "",
         "模型就绪",
         f"- 主胜平负 XGB: {_ready_text(xgb.get('model_ready'))} | 样本={xgb.get('sample_count', 0)} | updated={xgb.get('model_updated_at') or '-'}",
