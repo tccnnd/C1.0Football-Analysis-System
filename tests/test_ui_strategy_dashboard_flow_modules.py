@@ -42,6 +42,7 @@ from v24_app.ui_modules import (
     build_market_entropy_backtest_summary,
     build_strategy_evaluation_agent_summary,
     build_strategy_error_attribution_summary,
+    build_video_review_memory_summary,
     build_statsbomb_fewshot_backfill_queue,
     build_statsbomb_fewshot_backfill_report_filename,
     build_statsbomb_fewshot_backfill_report_lines,
@@ -2364,6 +2365,82 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertEqual(evaluation["statsbomb_event_review"]["sample_count"], 1)
         self.assertIn("statsbomb_post_match_review", evaluation["memory_tags"])
         self.assertTrue(any("StatsBomb" in item["title"] for item in evaluation["recommendations"]))
+
+    def test_video_review_memory_summary_extracts_hypotheses(self) -> None:
+        settlements = [
+            {
+                "match_date": "2026-05-14",
+                "league": "Test League",
+                "home_team": "Alpha",
+                "away_team": "Bravo",
+                "video_review": {
+                    "agent_review": {
+                        "vision_model_status": "offline_visual_evidence_ready",
+                        "evidence_level": "high",
+                        "evidence_score": 0.82,
+                        "event_hypotheses": [
+                            {"code": "tempo_shift", "confidence": 0.86, "title": "tempo shifted"},
+                            {"code": "set_piece_or_transition_risk", "confidence": 0.72, "title": "margin risk"},
+                        ],
+                        "recommended_followup": {"code": "annotate_tempo_turning_points"},
+                    }
+                },
+            }
+        ]
+
+        memory = build_video_review_memory_summary(settlements)
+
+        self.assertEqual(memory["status"], "ready")
+        self.assertEqual(memory["review_count"], 1)
+        self.assertEqual(memory["visual_ready_count"], 1)
+        self.assertEqual(memory["actionable_count"], 2)
+        self.assertEqual(memory["hypothesis_counts"]["tempo_shift"], 1)
+        self.assertIn("video_post_match_review", memory["memory_tags"])
+        self.assertIn("video_tempo_shift", memory["memory_tags"])
+        self.assertIn("AI Video", memory["summary_text"])
+
+    def test_evaluation_agent_uses_video_review_memory(self) -> None:
+        settlements = [
+            {
+                "match_date": "2026-05-14",
+                "league": "Test League",
+                "home_team": "Alpha",
+                "away_team": "Bravo",
+                "high_accuracy_strategy_items": [
+                    {
+                        "play_type": "ou",
+                        "pick": "OVER",
+                        "actual": "UNDER",
+                        "confidence": 0.72,
+                        "min_confidence": 0.65,
+                        "backtest_accuracy": 0.71,
+                        "backtest_samples": 180,
+                        "is_hit": False,
+                    }
+                ],
+                "video_review": {
+                    "agent_review": {
+                        "vision_model_status": "offline_visual_evidence_ready",
+                        "evidence_level": "high",
+                        "evidence_score": 0.79,
+                        "event_hypotheses": [
+                            {"code": "tempo_shift", "confidence": 0.83, "title": "tempo shifted"},
+                        ],
+                        "recommended_followup": {"code": "annotate_tempo_turning_points"},
+                    }
+                },
+            }
+        ]
+
+        attribution = build_strategy_error_attribution_summary(settlements)
+        evaluation = build_strategy_evaluation_agent_summary({"enabled": True}, settlements)
+
+        self.assertIn("video_tempo_shift", attribution["reason_counts"])
+        self.assertIn("AI Video", attribution["rows"][0]["body"])
+        self.assertEqual(evaluation["video_review_memory"]["review_count"], 1)
+        self.assertIn("video_post_match_review", evaluation["memory_tags"])
+        self.assertIn("video_tempo_shift", evaluation["memory_tags"])
+        self.assertTrue(any("AI视频" in item["title"] for item in evaluation["recommendations"]))
 
     def test_evaluation_agent_uses_statsbomb_fewshot_memory(self) -> None:
         settlements = [

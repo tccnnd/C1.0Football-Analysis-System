@@ -587,12 +587,27 @@ ERROR_ATTRIBUTION_LABELS = {
     "statsbomb_xg_against_pick": "StatsBomb xG\u53cd\u5411",
     "statsbomb_finishing_variance": "StatsBomb\u7ec8\u7ed3\u504f\u5dee",
     "statsbomb_event_control_gap": "StatsBomb\u573a\u9762\u52a3\u52bf",
+    "video_tempo_shift": "AI Video\u8282\u594f\u53d8\u5316",
+    "video_finishing_variance": "AI Video\u7ec8\u7ed3\u6ce2\u52a8",
+    "video_margin_risk": "AI Video\u8ba9\u7403/\u80dc\u5dee\u98ce\u9669",
+    "video_low_quality_evidence": "AI Video\u8bc1\u636e\u4e0d\u8db3",
+    "video_manual_review_needed": "AI Video\u9700\u4eba\u5de5\u590d\u6838",
     "small_sample": "\u6837\u672c\u4e0d\u8db3",
     "shadow_observation": "\u89c2\u5bdf\u7b56\u7565\u5931\u8bef",
     "unknown": "\u672a\u5b9a\u4e49\u9519\u56e0",
 }
 ERROR_ATTRIBUTION_WEIGHTS = {
     "small_sample": 0.25,
+    "video_low_quality_evidence": 0.35,
+    "video_manual_review_needed": 0.5,
+}
+
+VIDEO_REVIEW_HYPOTHESIS_TO_ERROR_CODE = {
+    "tempo_shift": "video_tempo_shift",
+    "finishing_variance": "video_finishing_variance",
+    "set_piece_or_transition_risk": "video_margin_risk",
+    "low_quality_video_evidence": "video_low_quality_evidence",
+    "manual_tactical_review_needed": "video_manual_review_needed",
 }
 
 
@@ -680,6 +695,134 @@ def _statsbomb_event_evidence(settlement: Mapping[str, object], item: Mapping[st
         f"\u5c04\u95e8 {home_shots}-{away_shots} | \u8fdb\u7403 {home_goals}-{away_goals}"
     )
     return {"codes": codes, "body": body, "available": True}
+
+
+def _video_review_agent(settlement: Mapping[str, object]) -> Mapping[str, object]:
+    video_review = _as_mapping(settlement.get("video_review"))
+    return _as_mapping(video_review.get("agent_review"))
+
+
+def _video_review_hypothesis_rows(agent_review: Mapping[str, object]) -> list[Mapping[str, object]]:
+    return [row for row in _as_list(agent_review.get("event_hypotheses")) if isinstance(row, Mapping)]
+
+
+def _video_review_evidence(settlement: Mapping[str, object]) -> dict[str, object]:
+    agent_review = _video_review_agent(settlement)
+    if not agent_review:
+        return {"codes": [], "body": "", "available": False}
+    hypotheses = _video_review_hypothesis_rows(agent_review)
+    evidence_level = _text(agent_review.get("evidence_level"), "unknown")
+    evidence_score = _safe_float(agent_review.get("evidence_score"), 0.0)
+    followup = _as_mapping(agent_review.get("recommended_followup"))
+    codes: list[str] = []
+    for item in hypotheses:
+        hypothesis_code = _text(item.get("code"), "")
+        mapped = VIDEO_REVIEW_HYPOTHESIS_TO_ERROR_CODE.get(hypothesis_code)
+        confidence = _safe_float(item.get("confidence"), 0.0)
+        if mapped and (confidence >= 0.35 or mapped == "video_low_quality_evidence"):
+            codes.append(mapped)
+    if evidence_level == "low" and "video_low_quality_evidence" not in codes:
+        codes.append("video_low_quality_evidence")
+    top = hypotheses[0] if hypotheses else {}
+    top_code = _text(top.get("code"), "-") if isinstance(top, Mapping) else "-"
+    top_confidence = _safe_float(top.get("confidence"), 0.0) if isinstance(top, Mapping) else 0.0
+    body = (
+        f"AI Video: evidence {evidence_level}/{_pct(evidence_score)} | "
+        f"top {top_code} {_pct(top_confidence)} | followup {followup.get('code') or '-'}"
+    )
+    deduped: list[str] = []
+    for code in codes:
+        if code not in deduped:
+            deduped.append(code)
+    return {
+        "codes": deduped,
+        "body": body,
+        "available": True,
+        "evidence_level": evidence_level,
+        "evidence_score": evidence_score,
+        "hypotheses": hypotheses,
+        "recommended_followup": followup,
+    }
+
+
+def build_video_review_memory_summary(
+    settlements: Sequence[Mapping[str, object]] | object,
+    *,
+    limit: int = 8,
+) -> dict[str, object]:
+    settlement_items = [item for item in settlements if isinstance(item, Mapping)] if isinstance(settlements, Sequence) else []
+    review_count = 0
+    visual_ready_count = 0
+    low_evidence_count = 0
+    actionable_count = 0
+    hypothesis_counts: dict[str, int] = {}
+    followup_counts: dict[str, int] = {}
+    rows: list[dict[str, object]] = []
+    memory_tags: list[str] = []
+    for settlement in settlement_items:
+        agent_review = _video_review_agent(settlement)
+        if not agent_review:
+            continue
+        review_count += 1
+        if str(agent_review.get("vision_model_status") or "") == "offline_visual_evidence_ready":
+            visual_ready_count += 1
+        evidence_level = _text(agent_review.get("evidence_level"), "unknown")
+        evidence_score = _safe_float(agent_review.get("evidence_score"), 0.0)
+        if evidence_level == "low":
+            low_evidence_count += 1
+        hypotheses = _video_review_hypothesis_rows(agent_review)
+        followup = _as_mapping(agent_review.get("recommended_followup"))
+        followup_code = _text(followup.get("code"), "")
+        if followup_code:
+            followup_counts[followup_code] = _safe_int(followup_counts.get(followup_code)) + 1
+        for hypothesis in hypotheses:
+            code = _text(hypothesis.get("code"), "")
+            if not code:
+                continue
+            hypothesis_counts[code] = _safe_int(hypothesis_counts.get(code)) + 1
+            mapped = VIDEO_REVIEW_HYPOTHESIS_TO_ERROR_CODE.get(code)
+            if mapped and mapped not in memory_tags:
+                memory_tags.append(mapped)
+            if mapped and mapped not in {"video_low_quality_evidence", "video_manual_review_needed"}:
+                actionable_count += 1
+        top = hypotheses[0] if hypotheses else {}
+        rows.append(
+            {
+                "title": f"{settlement.get('match_date') or '-'} | {settlement.get('league') or '-'} | {settlement.get('home_team') or '-'} vs {settlement.get('away_team') or '-'}",
+                "body": (
+                    f"evidence {evidence_level}/{_pct(evidence_score)} | "
+                    f"top {_text(top.get('code'), '-') if isinstance(top, Mapping) else '-'} "
+                    f"{_pct(top.get('confidence')) if isinstance(top, Mapping) else '-'} | "
+                    f"followup {followup_code or '-'}"
+                ),
+                "evidence_level": evidence_level,
+                "evidence_score": evidence_score,
+                "top_hypothesis": _text(top.get("code"), "-") if isinstance(top, Mapping) else "-",
+                "top_confidence": _safe_float(top.get("confidence"), 0.0) if isinstance(top, Mapping) else 0.0,
+                "recommended_followup": followup_code or "-",
+            }
+        )
+    ranked_hypotheses = sorted(hypothesis_counts.items(), key=lambda item: (-_safe_int(item[1]), str(item[0])))
+    top_hypothesis = ranked_hypotheses[0][0] if ranked_hypotheses else "-"
+    status = "missing"
+    if review_count:
+        status = "needs_more_evidence" if low_evidence_count and not actionable_count else "ready"
+    if review_count and "video_post_match_review" not in memory_tags:
+        memory_tags.insert(0, "video_post_match_review")
+    return {
+        "status": status,
+        "review_count": review_count,
+        "visual_ready_count": visual_ready_count,
+        "low_evidence_count": low_evidence_count,
+        "actionable_count": actionable_count,
+        "hypothesis_counts": dict(ranked_hypotheses),
+        "followup_counts": dict(sorted(followup_counts.items(), key=lambda item: (-_safe_int(item[1]), str(item[0])))),
+        "top_hypothesis": top_hypothesis,
+        "memory_tags": memory_tags,
+        "rows": rows[: max(0, int(limit))],
+        "summary_text": f"AI Video {review_count} | ready {visual_ready_count} | actionable {actionable_count} | top {top_hypothesis}",
+        "leakage_note": "AI video review uses post-match visual evidence and must not be used as pre-match prediction features.",
+    }
 
 
 def _side_from_margin(value: float, *, threshold: float = 0.0) -> str:
@@ -3331,6 +3474,9 @@ def _strategy_error_codes(settlement: Mapping[str, object], item: Mapping[str, o
     statsbomb_evidence = _statsbomb_event_evidence(settlement, item)
     for code in _as_list(statsbomb_evidence.get("codes")):
         codes.append(str(code))
+    video_evidence = _video_review_evidence(settlement)
+    for code in _as_list(video_evidence.get("codes")):
+        codes.append(str(code))
     if not codes:
         codes.append("unknown")
     deduped: list[str] = []
@@ -3365,6 +3511,8 @@ def build_strategy_error_attribution_summary(
             labels_text = "\u3001".join(labels)
             statsbomb_evidence = _statsbomb_event_evidence(settlement, item)
             evidence_body = str(statsbomb_evidence.get("body") or "")
+            video_evidence = _video_review_evidence(settlement)
+            video_body = str(video_evidence.get("body") or "")
             base_body = (
                 f"\u73a9\u6cd5: {_label(PLAY_LABELS, item.get('play_type'))} | \u9884\u6d4b {item.get('pick') or '-'} / \u5b9e\u9645 {item.get('actual') or '-'}\n"
                 f"\u9519\u56e0: {labels_text}\n"
@@ -3372,6 +3520,8 @@ def build_strategy_error_attribution_summary(
             )
             if evidence_body:
                 base_body = f"{base_body}\n{evidence_body}"
+            if video_body:
+                base_body = f"{base_body}\n{video_body}"
             rows.append(
                 {
                     "title": f"{settlement.get('league') or '-'} | {settlement.get('home_team') or '-'} vs {settlement.get('away_team') or '-'}",
@@ -5400,6 +5550,7 @@ def build_strategy_evaluation_agent_summary(
     allowlist_summary: Mapping[str, object] | object | None = None,
     jc_feedback: Mapping[str, object] | object | None = None,
     event_review: Mapping[str, object] | object | None = None,
+    video_review_memory: Mapping[str, object] | object | None = None,
 ) -> dict[str, object]:
     settlement_items = [item for item in settlements if isinstance(item, Mapping)] if isinstance(settlements, Sequence) else []
     settlement_summary = (
@@ -5423,6 +5574,11 @@ def build_strategy_evaluation_agent_summary(
         if event_review is not None
         else build_statsbomb_event_review_summary(settlement_items, statsbomb_event_baseline or {})
     )
+    video_review_memory = (
+        _as_mapping(video_review_memory)
+        if video_review_memory is not None
+        else build_video_review_memory_summary(settlement_items)
+    )
     fewshot_memory = build_statsbomb_fewshot_memory_summary(error_attribution, event_review, statsbomb_fewshot_memory or {})
     fewshot_monitor = build_statsbomb_fewshot_memory_monitor(statsbomb_fewshot_memory or {}, fewshot_memory)
     fewshot_quality = build_statsbomb_fewshot_memory_quality_alerts(fewshot_monitor)
@@ -5441,6 +5597,11 @@ def build_strategy_evaluation_agent_summary(
     statsbomb_against_count = _safe_int(reason_counts.get("statsbomb_xg_against_pick"))
     statsbomb_variance_count = _safe_int(reason_counts.get("statsbomb_finishing_variance"))
     statsbomb_control_gap_count = _safe_int(reason_counts.get("statsbomb_event_control_gap"))
+    video_tempo_shift_count = _safe_int(reason_counts.get("video_tempo_shift"))
+    video_finishing_variance_count = _safe_int(reason_counts.get("video_finishing_variance"))
+    video_margin_risk_count = _safe_int(reason_counts.get("video_margin_risk"))
+    video_low_quality_count = _safe_int(reason_counts.get("video_low_quality_evidence"))
+    video_manual_review_count = _safe_int(reason_counts.get("video_manual_review_needed"))
     event_review_sample_count = _safe_int(event_review.get("sample_count"))
     event_review_variance_count = _safe_int(event_review.get("finishing_variance_count"))
     event_review_control_gap_count = _safe_int(event_review.get("control_gap_count"))
@@ -5527,6 +5688,34 @@ def build_strategy_evaluation_agent_summary(
             }
         )
         memory_tags.append("finishing_variance")
+    if _safe_int(video_review_memory.get("review_count")):
+        for tag in _as_list(video_review_memory.get("memory_tags")):
+            tag_text = str(tag)
+            if tag_text and tag_text not in memory_tags:
+                memory_tags.append(tag_text)
+        if video_tempo_shift_count or video_finishing_variance_count or video_margin_risk_count:
+            status_text = "watch" if status_text == "healthy" else status_text
+            score -= min(12, (video_tempo_shift_count + video_finishing_variance_count + video_margin_risk_count) * 3)
+            recommendations.append(
+                {
+                    "title": "纳入AI视频复盘记忆",
+                    "body": (
+                        f"{video_review_memory.get('summary_text') or '-'}。"
+                        f"节奏变化 {video_tempo_shift_count}，终结波动 {video_finishing_variance_count}，胜差风险 {video_margin_risk_count}。"
+                        "这些结论只用于赛后 Evaluation Agent 归因，不进入赛前预测特征。"
+                    ),
+                }
+            )
+        if video_low_quality_count or video_manual_review_count:
+            recommendations.append(
+                {
+                    "title": "补强视频证据",
+                    "body": (
+                        f"视频证据不足 {video_low_quality_count} / 需人工复核 {video_manual_review_count}。"
+                        "优先补充更密集抽帧、清晰回放或事件标注，再写入复盘记忆。"
+                    ),
+                }
+            )
     if event_review_sample_count:
         memory_tags.append("statsbomb_post_match_review")
         if event_review_variance_count or event_review_control_gap_count:
@@ -5607,6 +5796,7 @@ def build_strategy_evaluation_agent_summary(
         "error_attribution": error_attribution,
         "jc_bucket_feedback": jc_feedback,
         "statsbomb_event_review": event_review,
+        "video_review_memory": video_review_memory,
         "statsbomb_fewshot_memory": fewshot_memory,
         "statsbomb_fewshot_monitor": fewshot_monitor,
         "statsbomb_fewshot_quality": fewshot_quality,
@@ -8492,6 +8682,7 @@ def build_high_accuracy_strategy_dashboard(
     jc_bucket_feedback = build_jc_bucket_feedback_summary(resolved, settlement_items)
     live_feedback_loop = build_high_accuracy_live_feedback_summary(resolved)
     statsbomb_event_review = build_statsbomb_event_review_summary(settlement_items, statsbomb_event_baseline or {})
+    video_review_memory = build_video_review_memory_summary(settlement_items)
     evaluation_agent = build_strategy_evaluation_agent_summary(
         resolved,
         settlement_items,
@@ -8502,6 +8693,7 @@ def build_high_accuracy_strategy_dashboard(
         allowlist_summary=allowlist_summary,
         jc_feedback=jc_bucket_feedback,
         event_review=statsbomb_event_review,
+        video_review_memory=video_review_memory,
     )
     statsbomb_fewshot_monitor = _as_mapping(evaluation_agent.get("statsbomb_fewshot_monitor"))
     statsbomb_fewshot_quality = _as_mapping(evaluation_agent.get("statsbomb_fewshot_quality"))
@@ -8674,6 +8866,15 @@ def build_high_accuracy_strategy_dashboard(
             else "neutral",
         },
         {
+            "label": "AI Video",
+            "value": str(video_review_memory.get("summary_text") or "-"),
+            "tone": "warning"
+            if str(video_review_memory.get("status") or "") == "needs_more_evidence"
+            else "good"
+            if _safe_int(video_review_memory.get("actionable_count"))
+            else "neutral",
+        },
+        {
             "label": "SB Memory",
             "value": str(statsbomb_fewshot_monitor.get("summary_text") or "-"),
             "tone": "good"
@@ -8828,6 +9029,7 @@ def build_high_accuracy_strategy_dashboard(
         "agent_replay_guard_tuning": agent_replay_guard_tuning,
         "evaluation_agent": evaluation_agent,
         "statsbomb_event_review": statsbomb_event_review,
+        "video_review_memory": video_review_memory,
         "statsbomb_fewshot_monitor": statsbomb_fewshot_monitor,
         "statsbomb_fewshot_health": statsbomb_fewshot_health,
         "statsbomb_fewshot_health_drivers": statsbomb_health_drivers,
