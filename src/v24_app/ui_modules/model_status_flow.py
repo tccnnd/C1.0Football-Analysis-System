@@ -743,6 +743,109 @@ def build_play_model_takeover_gate_rows(status: Mapping[str, object] | object) -
     return rows
 
 
+def build_play_model_takeover_gate_action_rows(
+    status: Mapping[str, object] | object,
+    *,
+    limit: int = 5,
+) -> list[dict[str, str]]:
+    gate = _takeover_gate_from_status(status)
+    if not gate:
+        return [
+            {
+                "title": "Run play-model backtest",
+                "body": "No takeover gate result yet. Generate allow/watch/block decision first.",
+                "action_key": "run_play_model_backtest",
+                "tone": "neutral",
+            }
+        ][: max(0, int(limit))]
+
+    gate_status = str(gate.get("status") or "").strip().lower()
+    issues = gate.get("issues", []) if isinstance(gate.get("issues"), list) else []
+    rows: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    def _append_action(title: str, body: str, action_key: str, tone: str) -> None:
+        if action_key in seen:
+            return
+        seen.add(action_key)
+        rows.append(
+            {
+                "title": title,
+                "body": body,
+                "action_key": action_key,
+                "tone": tone,
+            }
+        )
+
+    issue_map = {
+        "validation_sample_count_low": [
+            ("Expand validation samples", "Increase validation horizon to improve takeover confidence.", "run_play_model_backtest", "warning"),
+            ("Import historical samples", "Import and merge historical samples, then rerun backtest.", "import_historical_samples", "warning"),
+        ],
+        "score_model_regression": [
+            ("Retrain scoreline model", "Score model regressed; retrain and verify holdout stability.", "train_play_models", "danger"),
+            ("Pause scoreline takeover", "Keep scoreline model in shadow/watch until regression is resolved.", "pause_scoreline_takeover", "danger"),
+        ],
+        "total_goals_model_no_uplift": [
+            ("Continue shadow mode", "Keep total-goals model as shadow evidence until uplift is positive.", "continue_shadow_watch", "warning"),
+            ("Recalibrate total goals policy", "Rerun total-goals calibration and compare against current policy.", "calibrate_play_model_policy", "warning"),
+        ],
+        "training_gate_not_ready": [
+            ("Fix training gate first", "Resolve training gate blockers before formal takeover review.", "refresh_training_health", "danger"),
+        ],
+    }
+
+    for item in issues:
+        if not isinstance(item, Mapping):
+            continue
+        issue_code = str(item.get("code") or "")
+        for action in issue_map.get(issue_code, []):
+            _append_action(*action)
+
+    if gate_status == "allow":
+        _append_action(
+            "Calibrate takeover policy",
+            "Gate is allow. Run policy calibration to update takeover thresholds.",
+            "calibrate_play_model_policy",
+            "good",
+        )
+        _append_action(
+            "Start formal takeover review",
+            "Proceed with guarded formal takeover review and monitor audit transitions.",
+            "review_formal_takeover",
+            "good",
+        )
+    elif gate_status == "watch":
+        _append_action(
+            "Continue shadow observation",
+            "Keep formal takeover disabled and collect another stable backtest window.",
+            "continue_shadow_watch",
+            "warning",
+        )
+        _append_action(
+            "Retrain play models",
+            "Retrain play models before next takeover decision checkpoint.",
+            "train_play_models",
+            "warning",
+        )
+    elif gate_status == "block":
+        _append_action(
+            "Keep takeover blocked",
+            "Do not enter formal takeover until blocking issues are closed.",
+            "continue_shadow_watch",
+            "danger",
+        )
+
+    if not rows:
+        _append_action(
+            "Run play-model backtest",
+            "No specific issue mapping found. Re-run backtest and review gate details.",
+            "run_play_model_backtest",
+            "neutral",
+        )
+    return rows[: max(0, int(limit))]
+
+
 def build_play_model_takeover_gate_audit_rows(status: Mapping[str, object] | object) -> list[dict[str, str]]:
     resolved = status if isinstance(status, Mapping) else {}
     history = resolved.get("takeover_gate_history", []) if isinstance(resolved, Mapping) else []
@@ -1064,6 +1167,11 @@ def build_play_model_policy_status_text(status: Mapping[str, object] | object) -
     takeover_gate_audit_text = "\n".join(
         f"- {row.get('title', '-')}: {row.get('body', '-')}" for row in takeover_gate_audit_rows
     )
+    takeover_gate_action_rows = build_play_model_takeover_gate_action_rows(resolved, limit=5)
+    takeover_gate_action_text = "\n".join(
+        f"- {row.get('title', '-')}: {row.get('body', '-')} | action_key={row.get('action_key', '-')}"
+        for row in takeover_gate_action_rows
+    )
     return (
         "玩法接管策略\n"
         + f"- 更新时间: {resolved.get('updated_at') or '-'}\n"
@@ -1084,4 +1192,6 @@ def build_play_model_policy_status_text(status: Mapping[str, object] | object) -
         + takeover_gate_text
         + "\n\nTakeover gate audit\n"
         + takeover_gate_audit_text
+        + "\n\nTakeover gate actions\n"
+        + takeover_gate_action_text
     )

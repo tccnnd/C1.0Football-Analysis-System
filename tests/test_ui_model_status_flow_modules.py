@@ -28,6 +28,7 @@ from v24_app.ui_modules import (
     build_play_model_policy_apply_success_message,
     build_play_model_policy_decision_rows,
     build_play_model_policy_status_text,
+    build_play_model_takeover_gate_action_rows,
     build_play_model_takeover_gate_audit_rows,
     build_play_model_takeover_gate_rows,
     build_play_model_training_status_text,
@@ -412,6 +413,43 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
         self.assertIn("Takeover gate: BLOCK", policy_text)
         self.assertIn("Do not allow play-model takeover.", policy_text)
 
+    def test_play_model_takeover_gate_action_rows_for_block_watch_allow(self) -> None:
+        block_rows = build_play_model_takeover_gate_action_rows(
+            {
+                "takeover_gate": {
+                    "status": "block",
+                    "issues": [{"code": "validation_sample_count_low"}, {"code": "score_model_regression"}],
+                }
+            }
+        )
+        block_keys = [row["action_key"] for row in block_rows]
+        self.assertIn("import_historical_samples", block_keys)
+        self.assertIn("pause_scoreline_takeover", block_keys)
+
+        watch_rows = build_play_model_takeover_gate_action_rows(
+            {
+                "takeover_gate": {
+                    "status": "watch",
+                    "issues": [{"code": "total_goals_model_no_uplift"}],
+                }
+            }
+        )
+        watch_keys = [row["action_key"] for row in watch_rows]
+        self.assertIn("continue_shadow_watch", watch_keys)
+        self.assertIn("train_play_models", watch_keys)
+
+        allow_rows = build_play_model_takeover_gate_action_rows(
+            {
+                "takeover_gate": {
+                    "status": "allow",
+                    "issues": [],
+                }
+            }
+        )
+        allow_keys = [row["action_key"] for row in allow_rows]
+        self.assertIn("calibrate_play_model_policy", allow_keys)
+        self.assertIn("review_formal_takeover", allow_keys)
+
     def test_play_model_policy_text_shows_raw_effective_and_gate_block(self) -> None:
         policy_text = build_play_model_policy_status_text(
             {
@@ -471,6 +509,9 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
         self.assertIn("Takeover gate audit: 2 transition(s)", policy_text)
         self.assertIn("latest block->watch", policy_text)
         self.assertIn("total_goals_delta -0.50%", policy_text)
+        self.assertIn("Takeover gate actions", policy_text)
+        self.assertIn("action_key=continue_shadow_watch", policy_text)
+        self.assertIn("action_key=train_play_models", policy_text)
         self.assertIn("当前接管被守门策略阻断", policy_text)
 
         rows = build_play_model_policy_decision_rows(
