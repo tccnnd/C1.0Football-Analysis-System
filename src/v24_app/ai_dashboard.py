@@ -5016,6 +5016,7 @@ class SmartMatchDashboard:
             None,
             get_draw_release_guard_policy_status(),
             draw_guard_history,
+            video_review_fewshot_memory=get_video_review_fewshot_memory(),
         )
         policy_effect = dashboard.get("policy_effect_review", {}) if isinstance(dashboard.get("policy_effect_review"), dict) else {}
         now = datetime.now()
@@ -5050,6 +5051,7 @@ class SmartMatchDashboard:
             get_statsbomb_event_baseline(),
             get_statsbomb_sandbox_fewshot_memory(),
             include_statsbomb_backfill_candidates=True,
+            video_review_fewshot_memory=get_video_review_fewshot_memory(),
         )
         queue = dashboard.get("statsbomb_backfill_queue", {}) if isinstance(dashboard.get("statsbomb_backfill_queue"), dict) else {}
         now = datetime.now()
@@ -5074,6 +5076,7 @@ class SmartMatchDashboard:
             baseline,
             memory,
             include_statsbomb_backfill_candidates=True,
+            video_review_fewshot_memory=get_video_review_fewshot_memory(),
         )
         queue = dashboard.get("statsbomb_backfill_queue", {}) if isinstance(dashboard.get("statsbomb_backfill_queue"), dict) else {}
         now = datetime.now()
@@ -5746,6 +5749,7 @@ class SmartMatchDashboard:
             policy_history,
             get_statsbomb_event_baseline(),
             get_statsbomb_sandbox_fewshot_memory(),
+            video_review_fewshot_memory=get_video_review_fewshot_memory(),
         )
         monitor = dashboard.get("policy_stability_monitor", {}) if isinstance(dashboard.get("policy_stability_monitor"), dict) else {}
         trend_effect = dashboard.get("trend_tuning_effect_review", {}) if isinstance(dashboard.get("trend_tuning_effect_review"), dict) else {}
@@ -6652,6 +6656,7 @@ class SmartMatchDashboard:
             historical_replay,
             draw_guard_status,
             draw_guard_history,
+            video_review_fewshot_memory=get_video_review_fewshot_memory(),
         )
         release_pool_rows = self._strategy_release_pool_rows(settlements, release_loop=release_loop)
         shell = self._page_shell(
@@ -7187,6 +7192,18 @@ class SmartMatchDashboard:
         for item in evaluation_agent.get("recommendations", []) if isinstance(evaluation_agent.get("recommendations"), list) else []:
             if isinstance(item, dict):
                 self._strategy_row(right, str(item.get("title") or "-"), str(item.get("body") or "-"))
+        video_fewshot_memory = evaluation_agent.get("video_review_fewshot_memory", {}) if isinstance(evaluation_agent.get("video_review_fewshot_memory"), dict) else {}
+        video_memory_rows = video_fewshot_memory.get("rows", []) if isinstance(video_fewshot_memory.get("rows"), list) else []
+        if video_memory_rows:
+            self._strategy_section_title(right, "AI Video Few-shot \u8bb0\u5fc6")
+            self._strategy_row(
+                right,
+                str(video_fewshot_memory.get("summary_text") or "-"),
+                str(video_fewshot_memory.get("leakage_note") or "-"),
+            )
+            for row in video_memory_rows:
+                if isinstance(row, dict):
+                    self._strategy_row(right, str(row.get("title") or "-"), f"{row.get('body', '-')}\n{row.get('completion', '-')}")
         fewshot_memory = evaluation_agent.get("statsbomb_fewshot_memory", {}) if isinstance(evaluation_agent.get("statsbomb_fewshot_memory"), dict) else {}
         memory_rows = fewshot_memory.get("rows", []) if isinstance(fewshot_memory.get("rows"), list) else []
         if memory_rows:

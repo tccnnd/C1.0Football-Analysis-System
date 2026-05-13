@@ -1064,6 +1064,97 @@ def build_statsbomb_fewshot_memory_summary(
     }
 
 
+def _video_review_fewshot_query_tags(
+    error_attribution: Mapping[str, object] | object,
+    video_review_memory: Mapping[str, object] | object,
+) -> list[str]:
+    attribution = _as_mapping(error_attribution)
+    reason_counts = _as_mapping(attribution.get("reason_counts"))
+    review = _as_mapping(video_review_memory)
+    review_tags = [str(tag) for tag in _as_list(review.get("memory_tags")) if str(tag)]
+    video_codes = (
+        "video_tempo_shift",
+        "video_finishing_variance",
+        "video_margin_risk",
+        "video_low_quality_evidence",
+        "video_manual_review_needed",
+    )
+    has_video_signal = any(_safe_int(reason_counts.get(code)) > 0 for code in video_codes) or bool(review_tags)
+    if not has_video_signal:
+        return []
+    tags: list[str] = ["video_post_match_review"]
+    for code in video_codes:
+        if _safe_int(reason_counts.get(code)) > 0 or code in review_tags:
+            tags.append(code)
+    if _safe_int(attribution.get("miss_count")):
+        tags.append("strategy_miss")
+    deduped: list[str] = []
+    for tag in tags:
+        if tag not in deduped:
+            deduped.append(tag)
+    return deduped
+
+
+def build_video_review_fewshot_memory_summary(
+    error_attribution: Mapping[str, object] | object,
+    video_review_memory: Mapping[str, object] | object,
+    memory: Mapping[str, object] | object | None = None,
+    *,
+    limit: int = 3,
+) -> dict[str, object]:
+    items = _statsbomb_memory_items(memory or {})
+    query_tags = _video_review_fewshot_query_tags(error_attribution, video_review_memory)
+    rows: list[dict[str, object]] = []
+    for item in items:
+        labels = _as_mapping(item.get("labels"))
+        tags = [str(tag) for tag in _as_list(labels.get("tags")) if str(tag)]
+        matched = [tag for tag in query_tags if tag in tags]
+        if not matched:
+            continue
+        features = _as_mapping(item.get("features"))
+        meta = _as_mapping(item.get("meta"))
+        source = str(meta.get("source") or "-")
+        score = len(matched) * 10
+        if source == "video_manual_annotation":
+            score += 4
+        if labels.get("is_hit") is False and "strategy_miss" in query_tags:
+            score += 4
+        if labels.get("root_cause") in matched:
+            score += 3
+        rows.append(
+            {
+                "id": item.get("id") or "-",
+                "score": score,
+                "matched_tags": matched,
+                "title": f"{meta.get('match_date') or '-'} | {meta.get('league') or '-'} | {meta.get('home_team') or '-'} vs {meta.get('away_team') or '-'}",
+                "body": (
+                    f"{labels.get('simulated_pick') or '-'} -> {labels.get('actual') or '-'} | "
+                    f"{'hit' if labels.get('is_hit') is True else 'miss'} | "
+                    f"{labels.get('root_cause') or '-'} | source {source} | "
+                    f"evidence {float(_safe_float(features.get('evidence_score'), 0.0) or 0.0):.2f}"
+                ),
+                "completion": item.get("completion") or "-",
+                "tags": tags,
+                "source": source,
+            }
+        )
+    rows.sort(key=lambda row: (-_safe_int(row.get("score")), str(row.get("title") or "")))
+    limited = rows[: max(0, int(limit))]
+    memory_summary = _as_mapping(_as_mapping(memory or {}).get("summary"))
+    return {
+        "status": "ready" if items else "missing",
+        "sample_count": len(items),
+        "matched_count": len(rows),
+        "query_tags": query_tags,
+        "manual_annotation_sample_count": _safe_int(memory_summary.get("manual_annotation_sample_count")),
+        "auto_hypothesis_sample_count": _safe_int(memory_summary.get("auto_hypothesis_sample_count")),
+        "rows": limited,
+        "summary_text": f"Video memory {len(items)} | matched {len(rows)} | tags {', '.join(query_tags[:4]) or '-'}",
+        "leakage_note": _as_mapping(memory or {}).get("leakage_note")
+        or "These few-shot samples use post-match video evidence and must not be used as pre-match prediction features.",
+    }
+
+
 def build_statsbomb_fewshot_memory_monitor(
     memory: Mapping[str, object] | object | None = None,
     current_memory_summary: Mapping[str, object] | object | None = None,
@@ -5551,6 +5642,7 @@ def build_strategy_evaluation_agent_summary(
     jc_feedback: Mapping[str, object] | object | None = None,
     event_review: Mapping[str, object] | object | None = None,
     video_review_memory: Mapping[str, object] | object | None = None,
+    video_review_fewshot_memory: Mapping[str, object] | object | None = None,
 ) -> dict[str, object]:
     settlement_items = [item for item in settlements if isinstance(item, Mapping)] if isinstance(settlements, Sequence) else []
     settlement_summary = (
@@ -5582,6 +5674,11 @@ def build_strategy_evaluation_agent_summary(
     fewshot_memory = build_statsbomb_fewshot_memory_summary(error_attribution, event_review, statsbomb_fewshot_memory or {})
     fewshot_monitor = build_statsbomb_fewshot_memory_monitor(statsbomb_fewshot_memory or {}, fewshot_memory)
     fewshot_quality = build_statsbomb_fewshot_memory_quality_alerts(fewshot_monitor)
+    video_fewshot_memory = build_video_review_fewshot_memory_summary(
+        error_attribution,
+        video_review_memory,
+        video_review_fewshot_memory or {},
+    )
     known_count = _safe_int(settlement_summary.get("known_count"))
     hit_rate = settlement_summary.get("hit_rate")
     hit_rate_value = _safe_float(hit_rate, -1.0) if hit_rate is not None else -1.0
@@ -5743,6 +5840,18 @@ def build_strategy_evaluation_agent_summary(
                 ),
             }
         )
+    if _safe_int(video_fewshot_memory.get("matched_count")):
+        if "video_review_fewshot_memory" not in memory_tags:
+            memory_tags.append("video_review_fewshot_memory")
+        recommendations.append(
+            {
+                "title": "\u53c2\u8003AI\u89c6\u9891\u5386\u53f2\u590d\u76d8\u8bb0\u5fc6",
+                "body": (
+                    f"{video_fewshot_memory.get('summary_text') or '-'}\u3002"
+                    "\u5efa\u8bae\u5c06\u76f8\u4f3c\u89c6\u9891\u6807\u6ce8\u6848\u4f8b\u7528\u4e8e\u8d5b\u540e\u9519\u56e0\u89e3\u91ca\uff0c\u4e0d\u5f71\u54cd\u8d5b\u524d\u7279\u5f81\u548c\u9884\u6d4b\u3002"
+                ),
+            }
+        )
     if _safe_int(fewshot_quality.get("alert_count")):
         status_text = "watch" if status_text == "healthy" else status_text
         score += _safe_int(fewshot_quality.get("score_delta"))
@@ -5797,6 +5906,7 @@ def build_strategy_evaluation_agent_summary(
         "jc_bucket_feedback": jc_feedback,
         "statsbomb_event_review": event_review,
         "video_review_memory": video_review_memory,
+        "video_review_fewshot_memory": video_fewshot_memory,
         "statsbomb_fewshot_memory": fewshot_memory,
         "statsbomb_fewshot_monitor": fewshot_monitor,
         "statsbomb_fewshot_quality": fewshot_quality,
@@ -8611,6 +8721,7 @@ def build_high_accuracy_strategy_dashboard(
     draw_release_guard_policy_history: Sequence[Mapping[str, object]] | object | None = None,
     *,
     include_statsbomb_backfill_candidates: bool = False,
+    video_review_fewshot_memory: Mapping[str, object] | object | None = None,
 ) -> dict[str, object]:
     resolved = _as_mapping(status)
     settlement_items = [item for item in settlements if isinstance(item, Mapping)] if isinstance(settlements, Sequence) else []
@@ -8694,9 +8805,11 @@ def build_high_accuracy_strategy_dashboard(
         jc_feedback=jc_bucket_feedback,
         event_review=statsbomb_event_review,
         video_review_memory=video_review_memory,
+        video_review_fewshot_memory=video_review_fewshot_memory or {},
     )
     statsbomb_fewshot_monitor = _as_mapping(evaluation_agent.get("statsbomb_fewshot_monitor"))
     statsbomb_fewshot_quality = _as_mapping(evaluation_agent.get("statsbomb_fewshot_quality"))
+    video_fewshot_memory = _as_mapping(evaluation_agent.get("video_review_fewshot_memory"))
     statsbomb_fewshot_health = build_statsbomb_fewshot_memory_health_summary(
         statsbomb_fewshot_monitor,
         statsbomb_fewshot_quality,
@@ -8875,6 +8988,15 @@ def build_high_accuracy_strategy_dashboard(
             else "neutral",
         },
         {
+            "label": "Video Memory",
+            "value": str(video_fewshot_memory.get("summary_text") or "-"),
+            "tone": "good"
+            if _safe_int(video_fewshot_memory.get("matched_count"))
+            else "neutral"
+            if _safe_int(video_fewshot_memory.get("sample_count"))
+            else "warning",
+        },
+        {
             "label": "SB Memory",
             "value": str(statsbomb_fewshot_monitor.get("summary_text") or "-"),
             "tone": "good"
@@ -9030,6 +9152,7 @@ def build_high_accuracy_strategy_dashboard(
         "evaluation_agent": evaluation_agent,
         "statsbomb_event_review": statsbomb_event_review,
         "video_review_memory": video_review_memory,
+        "video_review_fewshot_memory": video_fewshot_memory,
         "statsbomb_fewshot_monitor": statsbomb_fewshot_monitor,
         "statsbomb_fewshot_health": statsbomb_fewshot_health,
         "statsbomb_fewshot_health_drivers": statsbomb_health_drivers,

@@ -42,6 +42,7 @@ from v24_app.ui_modules import (
     build_market_entropy_backtest_summary,
     build_strategy_evaluation_agent_summary,
     build_strategy_error_attribution_summary,
+    build_video_review_fewshot_memory_summary,
     build_video_review_memory_summary,
     build_video_review_fewshot_draft_review_filename,
     build_video_review_fewshot_draft_review_lines,
@@ -2598,6 +2599,77 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("Video Review Few-shot Merge Apply Preview", "\n".join(preview_lines))
         self.assertIn("Video Review Few-shot Merge Apply", "\n".join(result_lines))
         self.assertIn("video:new", "\n".join(result_lines))
+
+    def test_evaluation_agent_uses_video_review_fewshot_memory(self) -> None:
+        memory_item = self._video_fewshot_item(
+            "video:official",
+            match_id="historic-video",
+            review_id="vr-historic",
+            annotation_id="ann-historic",
+        )
+        memory = {
+            "purpose": "evaluation_agent_video_fewshot_post_match_review",
+            "summary": {"sample_count": 1, "manual_annotation_sample_count": 1},
+            "items": [{**memory_item, "review_status": "approved"}],
+            "leakage_note": "post-match video only",
+        }
+        error_attribution = {"reason_counts": {"video_margin_risk": 1}, "miss_count": 1}
+        current_video = {"review_count": 1, "memory_tags": ["video_margin_risk"]}
+
+        video_memory = build_video_review_fewshot_memory_summary(error_attribution, current_video, memory)
+        evaluation = build_strategy_evaluation_agent_summary(
+            {"enabled": True},
+            [],
+            error_attribution=error_attribution,
+            video_review_memory=current_video,
+            video_review_fewshot_memory=memory,
+        )
+
+        self.assertEqual(video_memory["matched_count"], 1)
+        self.assertIn("video_margin_risk", video_memory["query_tags"])
+        self.assertEqual(evaluation["video_review_fewshot_memory"]["matched_count"], 1)
+        self.assertIn("video_review_fewshot_memory", evaluation["memory_tags"])
+        self.assertTrue(any("AI" in item["title"] and "视频" in item["title"] for item in evaluation["recommendations"]))
+
+    def test_dashboard_exposes_video_review_fewshot_memory_card(self) -> None:
+        memory = {
+            "items": [
+                {
+                    **self._video_fewshot_item("video:official", match_id="historic-video", review_id="vr-historic", annotation_id="ann-historic"),
+                    "review_status": "approved",
+                }
+            ]
+        }
+        settlements = [
+            {
+                "match_date": "2026-05-14",
+                "league": "Test League",
+                "home_team": "Alpha",
+                "away_team": "Bravo",
+                "high_accuracy_strategy_items": [
+                    {"play_type": "market_1x2", "pick": "HOME", "actual": "DRAW", "is_hit": False}
+                ],
+                "video_review": {
+                    "agent_review": {
+                        "vision_model_status": "offline_visual_evidence_ready",
+                        "evidence_level": "high",
+                        "evidence_score": 0.82,
+                        "event_hypotheses": [
+                            {"code": "set_piece_or_transition_risk", "confidence": 0.84, "title": "margin risk"},
+                        ],
+                    }
+                },
+            }
+        ]
+
+        dashboard = build_high_accuracy_strategy_dashboard(
+            {"enabled": True},
+            settlements,
+            video_review_fewshot_memory=memory,
+        )
+
+        self.assertEqual(dashboard["video_review_fewshot_memory"]["matched_count"], 1)
+        self.assertTrue(any(card["label"] == "Video Memory" for card in dashboard["metrics"]))
 
     def test_evaluation_agent_uses_statsbomb_fewshot_memory(self) -> None:
         settlements = [
