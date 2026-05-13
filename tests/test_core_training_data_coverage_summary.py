@@ -107,6 +107,76 @@ class CoreTrainingDataCoverageSummaryTests(unittest.TestCase):
         self.assertEqual(status["world_cup_history"]["year_count"], 2)
         self.assertEqual(status["statsbomb_events"]["review_feature_count"], 2)
 
+    def test_training_data_coverage_includes_statsbomb_audit(self) -> None:
+        settlements = [
+            {
+                "match_id": "m1",
+                "match_date": "2024-04-14",
+                "league": "1. Bundesliga",
+                "home_team": "Bayer Leverkusen",
+                "away_team": "Werder Bremen",
+            },
+            {
+                "match_id": "m2",
+                "match_date": "2024-04-14",
+                "league": "1. Bundesliga",
+                "home_team": "Leverkusen",
+                "away_team": "Bremen",
+            },
+            {
+                "match_id": "m3",
+                "match_date": "2024-05-01",
+                "league": "Other",
+                "home_team": "A",
+                "away_team": "B",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "data" / "state"
+            state.mkdir(parents=True)
+            (state / "statsbomb_event_summaries.json").write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "source_match_id": "m1",
+                                "match_date": "2024-04-14",
+                                "league": "1. Bundesliga",
+                                "home_team": "Bayer Leverkusen",
+                                "away_team": "Werder Bremen",
+                            },
+                            {
+                                "source_match_id": "m9",
+                                "match_date": "2024-04-14",
+                                "league": "1. Bundesliga",
+                                "home_team": "Bayer Leverkusen",
+                                "away_team": "Bremen",
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (state / "statsbomb_review_training_samples.json").write_text(json.dumps({"items": [], "summary": {}}), encoding="utf-8")
+            store = core.StateStore(root)
+
+            with (
+                patch("v24_app.core.PROJECT_DIR", root),
+                patch("v24_app.core.STATE_STORE", store),
+                patch("v24_app.core.get_recent_settlements", return_value=settlements),
+            ):
+                status = core.get_training_data_coverage_status()
+
+        audit = status["statsbomb_events"]["coverage_audit"]
+        self.assertEqual(status["statsbomb_events"]["coverage_gap_count"], 2)
+        self.assertEqual(status["statsbomb_events"]["coverage_candidate_count"], 2)
+        self.assertEqual(audit["settlement_count"], 3)
+        self.assertEqual(audit["exact_match_count"], 1)
+        self.assertEqual(audit["candidate_count"], 2)
+        self.assertEqual(audit["no_same_date_count"], 1)
+        self.assertEqual(audit["same_date_unmatched_count"], 1)
+
     def test_training_health_is_healthy_when_thresholds_are_met(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -263,6 +333,10 @@ class CoreTrainingDataCoverageSummaryTests(unittest.TestCase):
         self.assertEqual(result["action_key"], "build_statsbomb_review_samples")
         self.assertEqual(payload["summary"]["sample_count"], 1)
         self.assertEqual(result["result"]["sample_count"], 1)
+        self.assertEqual(result["generated_sample_count"], 1)
+        self.assertEqual(result["skipped_reasons"], {"missing_statsbomb": 0, "unknown_label": 0})
+        self.assertTrue(result["output_path"].endswith("statsbomb_review_training_samples.json"))
+        self.assertIn("after_status", result)
         self.assertIn("training_gate", result)
 
     def test_training_model_gate_recommends_xgb_training_when_data_is_ready(self) -> None:

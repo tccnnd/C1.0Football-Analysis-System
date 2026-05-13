@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import json
 import hashlib
+import re
 import shutil
 import subprocess
 import threading
 import time
+import csv
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from difflib import SequenceMatcher
 from itertools import product
 from math import log, log2, sqrt
 from pathlib import Path
@@ -4145,6 +4148,133 @@ def _summarize_play_model_takeover_gate_history(items: list[dict]) -> dict:
     }
 
 
+def _write_play_model_takeover_gate_audit_markdown(
+    history_items: list[dict],
+    summary: dict,
+    report_path: Path,
+) -> None:
+    lines = [
+        "# Play Model Takeover Gate Audit Report",
+        "",
+        f"- Generated At: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- History Count: {int(summary.get('history_count', len(history_items)) or 0)}",
+        f"- Latest Transition: {summary.get('latest_transition') or '-'}",
+        f"- Latest Status: {summary.get('latest_status') or '-'}",
+        f"- Latest Reason: {summary.get('latest_reason') or '-'}",
+        f"- Latest Updated At: {summary.get('latest_updated_at') or '-'}",
+        "",
+        "| Updated At | Transition | Status | Reason | Samples | TotalGoals Delta | Score Delta | Policy Impact | Backtest | Report |",
+        "|---|---|---|---|---:|---:|---:|---|---|---|",
+    ]
+    for item in history_items:
+        if not isinstance(item, dict):
+            continue
+        metrics = item.get("metrics", {}) if isinstance(item.get("metrics"), dict) else {}
+        validation = item.get("validation", {}) if isinstance(item.get("validation"), dict) else {}
+        sample_count = int(metrics.get("validation_sample_count", validation.get("sample_count", 0)) or 0)
+        total_delta = _safe_float(metrics.get("total_goals_model_delta"), 0.0)
+        score_delta = _safe_float(metrics.get("score_model_delta"), 0.0)
+        lines.append(
+            "| "
+            + f"{item.get('updated_at') or '-'} | "
+            + f"{item.get('transition') or '-'} | "
+            + f"{item.get('status') or '-'} | "
+            + f"{item.get('reason') or '-'} | "
+            + f"{sample_count} | "
+            + f"{total_delta:+.2%} | "
+            + f"{score_delta:+.2%} | "
+            + f"{item.get('policy_impact') or '-'} | "
+            + f"{'ok' if bool(item.get('backtest_ok')) else 'not_ok'} | "
+            + f"{item.get('report_path') or '-'} |"
+        )
+    report_path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def _write_play_model_takeover_gate_audit_csv(history_items: list[dict], report_path: Path) -> None:
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    with report_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "version_id",
+                "updated_at",
+                "previous_status",
+                "status",
+                "transition",
+                "reason",
+                "policy_impact",
+                "blocking_count",
+                "warning_count",
+                "issue_codes",
+                "validation_sample_count",
+                "total_goals_model_delta",
+                "score_model_delta",
+                "backtest_ok",
+                "backtest_reason",
+                "report_path",
+            ],
+        )
+        writer.writeheader()
+        for item in history_items:
+            if not isinstance(item, dict):
+                continue
+            metrics = item.get("metrics", {}) if isinstance(item.get("metrics"), dict) else {}
+            validation = item.get("validation", {}) if isinstance(item.get("validation"), dict) else {}
+            writer.writerow(
+                {
+                    "version_id": item.get("version_id"),
+                    "updated_at": item.get("updated_at"),
+                    "previous_status": item.get("previous_status"),
+                    "status": item.get("status"),
+                    "transition": item.get("transition"),
+                    "reason": item.get("reason"),
+                    "policy_impact": item.get("policy_impact"),
+                    "blocking_count": int(item.get("blocking_count", 0) or 0),
+                    "warning_count": int(item.get("warning_count", 0) or 0),
+                    "issue_codes": ",".join(
+                        str(code) for code in item.get("issue_codes", []) if str(code).strip()
+                    ),
+                    "validation_sample_count": int(metrics.get("validation_sample_count", validation.get("sample_count", 0)) or 0),
+                    "total_goals_model_delta": round(_safe_float(metrics.get("total_goals_model_delta"), 0.0), 6),
+                    "score_model_delta": round(_safe_float(metrics.get("score_model_delta"), 0.0), 6),
+                    "backtest_ok": bool(item.get("backtest_ok")),
+                    "backtest_reason": item.get("backtest_reason"),
+                    "report_path": item.get("report_path"),
+                }
+            )
+
+
+def export_play_model_takeover_gate_audit_report(*, limit: int = 200) -> dict:
+    history_items = get_play_model_takeover_gate_history(limit=0)
+    if limit > 0:
+        history_items = history_items[: int(limit)]
+    summary = _summarize_play_model_takeover_gate_history(history_items)
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    markdown_path = REPORT_DIR / f"play_model_takeover_gate_audit_{timestamp}.md"
+    csv_path = REPORT_DIR / f"play_model_takeover_gate_audit_{timestamp}.csv"
+    _write_play_model_takeover_gate_audit_markdown(history_items, summary, markdown_path)
+    _write_play_model_takeover_gate_audit_csv(history_items, csv_path)
+
+    report = _load_play_model_policy_report()
+    report["takeover_gate_audit_report"] = {
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "history_count": int(summary.get("history_count", len(history_items)) or 0),
+        "latest_transition": summary.get("latest_transition"),
+        "latest_reason": summary.get("latest_reason"),
+        "markdown_path": str(markdown_path),
+        "csv_path": str(csv_path),
+    }
+    _save_play_model_policy_report(report)
+    return {
+        "ok": True,
+        "history_count": int(summary.get("history_count", len(history_items)) or 0),
+        "summary": summary,
+        "markdown_path": str(markdown_path),
+        "csv_path": str(csv_path),
+    }
+
+
 def _append_play_model_takeover_gate_history_entry(
     gate: dict,
     previous_gate: dict | None,
@@ -4283,6 +4413,7 @@ def get_play_model_policy_status() -> dict:
         "takeover_gate_audit": _summarize_play_model_takeover_gate_history(takeover_gate_history),
         "takeover_gate_history": takeover_gate_history_recent,
         "takeover_gate_history_count": len(takeover_gate_history),
+        "takeover_gate_audit_report": report.get("takeover_gate_audit_report", {}),
         "source": str(PLAY_MODEL_POLICY_FILE),
         "history_source": str(PLAY_MODEL_POLICY_HISTORY_FILE),
         "takeover_gate_history_source": str(PLAY_MODEL_TAKEOVER_GATE_HISTORY_FILE),
@@ -4510,13 +4641,15 @@ def _build_training_health_diagnostics(
 
     statsbomb_match_count = int(statsbomb_events.get("match_count", 0) or 0)
     statsbomb_review_sample_count = int(statsbomb_events.get("review_sample_count", 0) or 0)
+    statsbomb_coverage_gap_count = int(statsbomb_events.get("coverage_gap_count", 0) or 0)
+    statsbomb_coverage_candidate_count = int(statsbomb_events.get("coverage_candidate_count", 0) or 0)
     if statsbomb_match_count > 0 and statsbomb_review_sample_count <= 0:
         issues.append(
             _training_health_issue(
                 "statsbomb_review_samples_missing",
                 "warning",
-                "StatsBomb事件存在，但复盘训练样本为0",
-                "将事件摘要转成复盘训练样本，补齐视频/事件复盘学习链路。",
+                f"StatsBomb事件存在，但复盘训练样本为0（覆盖缺口 {statsbomb_coverage_gap_count}，候选 {statsbomb_coverage_candidate_count}）",
+                f"将事件摘要转成复盘训练样本，优先补齐覆盖缺口 {statsbomb_coverage_gap_count} 个并复核候选 {statsbomb_coverage_candidate_count} 个。",
             )
         )
 
@@ -4604,10 +4737,16 @@ def get_training_data_coverage_status() -> dict:
     league_profiles = league_profile_payload.get("leagues", {})
     league_profile_count = len(league_profiles) if isinstance(league_profiles, dict) else 0
 
+    statsbomb_payload = _load_state_payload("statsbomb_event_summaries.json")
+    statsbomb_summary_items = _state_payload_items(statsbomb_payload)
     statsbomb_summary = _load_state_items_summary("statsbomb_event_summaries.json", date_key="match_date")
     statsbomb_review_payload = _load_state_payload("statsbomb_review_training_samples.json")
     statsbomb_review_items = _state_payload_items(statsbomb_review_payload)
     statsbomb_review_summary = statsbomb_review_payload.get("summary", {}) if isinstance(statsbomb_review_payload.get("summary"), dict) else {}
+    statsbomb_coverage_audit = _build_statsbomb_coverage_audit(
+        get_recent_settlements(limit=0),
+        statsbomb_summary_items,
+    )
 
     club_ratings = STATE_STORE.load_ratings()
     national_team_ratings = STATE_STORE.load_national_team_ratings()
@@ -4651,6 +4790,9 @@ def get_training_data_coverage_status() -> dict:
             "review_sample_count": len(statsbomb_review_items),
             "review_updated_at": statsbomb_review_payload.get("updated_at"),
             "review_feature_count": len(statsbomb_review_summary.get("feature_order", [])) if isinstance(statsbomb_review_summary.get("feature_order"), list) else 0,
+            "coverage_audit": statsbomb_coverage_audit,
+            "coverage_gap_count": int(statsbomb_coverage_audit.get("coverage_gap_count", 0) or 0),
+            "coverage_candidate_count": int(statsbomb_coverage_audit.get("candidate_count", 0) or 0),
             "summary_source": str(_state_summary_path(PROJECT_DIR / "data" / "state" / "statsbomb_event_summaries.json")),
         },
         "rating_pools": {
@@ -5052,6 +5194,12 @@ def repair_training_data_health(action_key: str, *, input_path: Path | str | Non
         "ok": bool(result.get("ok", True)) if isinstance(result, dict) else True,
         "message": message,
         "result": result,
+        "generated_sample_count": int(result.get("sample_count", 0) or 0) if isinstance(result, dict) else 0,
+        "skipped_reasons": {
+            "missing_statsbomb": int(result.get("skipped_missing_statsbomb", 0) or 0) if isinstance(result, dict) else 0,
+            "unknown_label": int(result.get("skipped_unknown_label", 0) or 0) if isinstance(result, dict) else 0,
+        },
+        "output_path": str(result.get("output_path", "")) if isinstance(result, dict) else "",
         "before_status": (before.get("training_health") or {}).get("status") if isinstance(before.get("training_health"), dict) else None,
         "after_status": (after.get("training_health") or {}).get("status") if isinstance(after.get("training_health"), dict) else None,
         "after": after,
@@ -12037,6 +12185,187 @@ def _video_review_frame_visual_analysis(frames: list[dict]) -> dict:
     }
 
 
+def _video_review_evidence_score(visual_analysis: dict, settlement: dict, error_causes: list[str]) -> dict:
+    visual = visual_analysis if isinstance(visual_analysis, dict) else {}
+    tags = {str(tag) for tag in visual.get("tags", []) if str(tag)} if isinstance(visual.get("tags"), list) else set()
+    status = str(visual.get("status") or "")
+    frame_count = int(_safe_int(visual.get("frame_count"), 0) or 0)
+    usable_count = int(_safe_int(visual.get("usable_frame_count"), 0) or 0)
+    avg_motion = _safe_float(visual.get("avg_motion_score"), 0.0)
+    avg_edge = _safe_float(visual.get("avg_edge_score"), 0.0)
+    avg_contrast = _safe_float(visual.get("avg_contrast"), 0.0)
+    model_miss_count = len([tag for tag in error_causes if str(tag).endswith("_miss") or tag == "prediction_direction_miss"])
+    if status != "ready" or usable_count <= 0:
+        return {
+            "score": 0.0,
+            "level": "low",
+            "review_confidence": 0.0,
+            "frame_count": frame_count,
+            "usable_frame_count": usable_count,
+            "components": {
+                "sample": 0.0,
+                "motion": 0.0,
+                "edge": 0.0,
+                "contrast": 0.0,
+                "model_miss_count": model_miss_count,
+            },
+            "quality_flags": sorted(tags),
+            "reason": "no_readable_visual_evidence",
+        }
+
+    sample_signal = min(1.0, usable_count / 6.0)
+    motion_signal = min(1.0, avg_motion / 18.0)
+    edge_signal = min(1.0, avg_edge / 8.0)
+    contrast_signal = min(1.0, avg_contrast / 32.0)
+    penalty = 0.0
+    if "low_detail_frames" in tags:
+        penalty += 0.16
+    if "low_light_evidence" in tags or "overexposed_evidence" in tags:
+        penalty += 0.14
+    if "low_motion_evidence" in tags and model_miss_count:
+        penalty += 0.10
+    score = max(
+        0.0,
+        min(
+            1.0,
+            sample_signal * 0.34
+            + motion_signal * 0.26
+            + edge_signal * 0.22
+            + contrast_signal * 0.18
+            - penalty,
+        ),
+    )
+    level = "high" if score >= 0.72 else "medium" if score >= 0.45 else "low"
+    return {
+        "score": round(score, 2),
+        "level": level,
+        "review_confidence": round(score, 2),
+        "frame_count": frame_count,
+        "usable_frame_count": usable_count,
+        "components": {
+            "sample": round(sample_signal, 2),
+            "motion": round(motion_signal, 2),
+            "edge": round(edge_signal, 2),
+            "contrast": round(contrast_signal, 2),
+            "penalty": round(penalty, 2),
+            "model_miss_count": model_miss_count,
+        },
+        "quality_flags": sorted(tags),
+        "reason": "visual_evidence_scored",
+    }
+
+
+def _video_review_event_hypotheses(
+    settlement: dict,
+    visual_analysis: dict,
+    error_causes: list[str],
+    evidence_score: dict | None = None,
+) -> list[dict]:
+    visual = visual_analysis if isinstance(visual_analysis, dict) else {}
+    tags = {str(tag) for tag in error_causes if str(tag)}
+    visual_tags = {str(tag) for tag in visual.get("tags", []) if str(tag)} if isinstance(visual.get("tags"), list) else set()
+    evidence = evidence_score if isinstance(evidence_score, dict) else _video_review_evidence_score(visual, settlement, error_causes)
+    score = _safe_float(evidence.get("score"), 0.0)
+    level = str(evidence.get("level") or "low")
+    avg_motion = _safe_float(visual.get("avg_motion_score"), 0.0)
+    avg_edge = _safe_float(visual.get("avg_edge_score"), 0.0)
+    key_frames = visual.get("key_frames") if isinstance(visual.get("key_frames"), list) else []
+    key_frame_indexes = [str(row.get("index")) for row in key_frames[:5] if isinstance(row, dict) and row.get("index") is not None]
+    hypotheses: list[dict] = []
+
+    def add(code: str, title: str, confidence: float, evidence_text: str, recommendation: str) -> None:
+        hypotheses.append(
+            {
+                "code": code,
+                "title": title,
+                "confidence": round(max(0.0, min(1.0, confidence)), 2),
+                "evidence": evidence_text,
+                "recommendation": recommendation,
+            }
+        )
+
+    if level == "low" or str(visual.get("status") or "") != "ready":
+        add(
+            "low_quality_video_evidence",
+            "Video evidence is not strong enough",
+            max(0.15, score),
+            f"usable_frames={evidence.get('usable_frame_count', 0)}/{evidence.get('frame_count', 0)} | tags={','.join(sorted(visual_tags)) or '-'}",
+            "Increase frame density, import a clearer replay, or add manual event annotations before changing model weights.",
+        )
+        return hypotheses
+
+    if "tempo_or_total_goals_miss" in tags and (avg_motion >= 12 or "high_scene_change" in visual_tags):
+        add(
+            "tempo_shift",
+            "Match tempo or transition rhythm likely shifted",
+            max(score, min(0.9, avg_motion / 24.0)),
+            f"avg_motion={avg_motion:.1f} | key_frames={','.join(key_frame_indexes) or '-'}",
+            "Mark fast-transition periods and compare them with the total-goals pre-match assumptions.",
+        )
+    if "scoreline_path_miss" in tags or ("prediction_direction_miss" in tags and avg_motion < 12):
+        add(
+            "finishing_variance",
+            "Scoreline path may be driven by finishing variance",
+            max(0.35, score * 0.85),
+            f"score={settlement.get('home_goals', '-')}-{settlement.get('away_goals', '-')} | key_frames={','.join(key_frame_indexes) or '-'}",
+            "Review shot quality and goal timing before treating the miss as a direction-model failure.",
+        )
+    if ("handicap_margin_miss" in tags or "prediction_direction_miss" in tags) and (avg_motion >= 8 or avg_edge >= 7):
+        add(
+            "set_piece_or_transition_risk",
+            "Set-piece or transition risk may explain margin deviation",
+            max(0.4, score),
+            f"avg_motion={avg_motion:.1f} | avg_edge={avg_edge:.1f} | key_frames={','.join(key_frame_indexes) or '-'}",
+            "Tag goals, big chances, set pieces, and defensive transition failures for Evaluation Agent memory.",
+        )
+    if "no_obvious_model_error" in tags and not hypotheses:
+        add(
+            "model_alignment_evidence",
+            "Video evidence does not contradict the model outcome",
+            max(0.45, score),
+            f"visual_level={level} | key_frames={','.join(key_frame_indexes) or '-'}",
+            "Keep this sample as positive review evidence and use it during stability validation.",
+        )
+    if not hypotheses:
+        add(
+            "manual_tactical_review_needed",
+            "Visual evidence is usable but not decisive",
+            max(0.3, score * 0.75),
+            f"visual_level={level} | key_frames={','.join(key_frame_indexes) or '-'}",
+            "Review key frames manually and attach tactical labels before updating model assumptions.",
+        )
+    return sorted(hypotheses, key=lambda item: _safe_float(item.get("confidence"), 0.0), reverse=True)[:5]
+
+
+def _video_review_recommended_followup(evidence_score: dict, hypotheses: list[dict], error_causes: list[str]) -> dict:
+    level = str(evidence_score.get("level") or "low") if isinstance(evidence_score, dict) else "low"
+    codes = [str(item.get("code") or "") for item in hypotheses if isinstance(item, dict)]
+    if level == "low" or "low_quality_video_evidence" in codes:
+        return {
+            "code": "collect_more_video_evidence",
+            "message": "补充更密集抽帧、清晰回放或人工事件标注后，再进入 Evaluation Agent 复盘记忆。",
+        }
+    if "tempo_shift" in codes:
+        return {
+            "code": "annotate_tempo_turning_points",
+            "message": "优先标注节奏拐点和转换进攻，再交给 Evaluation Agent 更新大小球复盘记忆。",
+        }
+    if "set_piece_or_transition_risk" in codes:
+        return {
+            "code": "annotate_margin_risk_events",
+            "message": "优先标注定位球、反击和防线失位，再交给 Evaluation Agent 修正让球/胜差一致性记忆。",
+        }
+    if "finishing_variance" in codes:
+        return {
+            "code": "review_finishing_variance",
+            "message": "复核射门质量与进球时间线，再交给 Evaluation Agent 判断是否写入方向模型。",
+        }
+    return {
+        "code": "feed_video_findings_into_evaluation_agent",
+        "message": "视频证据可用，进入 Evaluation Agent 复盘记忆并等待更多样本验证。",
+    }
+
+
 def _video_review_narrative(settlement: dict, visual_analysis: dict, error_causes: list[str]) -> dict:
     match_title = f"{settlement.get('home_team') or '-'} vs {settlement.get('away_team') or '-'}"
     score = f"{settlement.get('home_goals', '-')}-{settlement.get('away_goals', '-')}"
@@ -12100,7 +12429,16 @@ def _video_review_ai_summary(settlement: dict, *, frame_count: int, notes: str, 
                 tags.append(tag)
     visual_status = str(visual.get("status") or "")
     vision_model_status = "offline_visual_evidence_ready" if visual_status == "ready" else "pending_manual_or_llm_vision_review"
+    evidence_score = _video_review_evidence_score(visual, settlement, tags)
+    event_hypotheses = _video_review_event_hypotheses(settlement, visual, tags, evidence_score)
+    recommended_followup = _video_review_recommended_followup(evidence_score, event_hypotheses, tags)
     narrative = _video_review_narrative(settlement, visual, tags)
+    narrative = dict(narrative)
+    narrative["evidence_score"] = evidence_score.get("score")
+    narrative["evidence_level"] = evidence_score.get("level")
+    narrative["event_hypotheses"] = event_hypotheses[:3]
+    if recommended_followup.get("message"):
+        narrative["recommendation"] = recommended_followup["message"]
     return {
         "agent": "VideoReview Agent",
         "status": "visual_review_ready" if visual_status == "ready" else "frames_ready" if frame_count else "metadata_ready",
@@ -12108,6 +12446,12 @@ def _video_review_ai_summary(settlement: dict, *, frame_count: int, notes: str, 
         "frame_count": frame_count,
         "visual_summary": visual.get("summary_text") or "-",
         "key_frame_count": len(visual.get("key_frames") or []) if isinstance(visual.get("key_frames"), list) else 0,
+        "evidence_score": evidence_score.get("score"),
+        "evidence_level": evidence_score.get("level"),
+        "review_confidence": evidence_score.get("review_confidence"),
+        "evidence_quality": evidence_score,
+        "event_hypotheses": event_hypotheses,
+        "recommended_followup": recommended_followup,
         "narrative_review": narrative,
         "narrative_summary": narrative.get("summary_text") or "-",
         "prediction_alignment": "aligned" if settlement.get("is_correct") is True else "needs_review" if settlement.get("is_correct") is False else "unknown",
@@ -12608,6 +12952,130 @@ def _load_statsbomb_event_summary_index() -> dict[str, dict]:
             if key and key not in index:
                 index[key] = item
     return index
+
+
+def _statsbomb_coverage_audit_exact_keys(item: dict) -> set[str]:
+    keys = {
+        _statsbomb_key(item.get("match_id")),
+        _statsbomb_key(item.get("source_match_id")),
+        _statsbomb_key(item.get("match_date"), item.get("home_team"), item.get("away_team")),
+        _statsbomb_key(item.get("match_date"), item.get("league"), item.get("home_team"), item.get("away_team")),
+    }
+    return {key for key in keys if key}
+
+
+def _statsbomb_coverage_candidate_score(settlement: dict, statsbomb: dict) -> float:
+    def similarity(left: object, right: object) -> float:
+        left_text = re.sub(r"\s+", " ", normalize_text(left).lower()).strip()
+        right_text = re.sub(r"\s+", " ", normalize_text(right).lower()).strip()
+        if not left_text or not right_text:
+            return 0.0
+        ratio = SequenceMatcher(None, left_text, right_text).ratio()
+        left_tokens = set(left_text.split())
+        right_tokens = set(right_text.split())
+        overlap = len(left_tokens & right_tokens) / max(len(left_tokens | right_tokens), 1)
+        return max(ratio, overlap)
+
+    direct = (similarity(settlement.get("home_team"), statsbomb.get("home_team")) + similarity(settlement.get("away_team"), statsbomb.get("away_team"))) / 2.0
+    swapped = (similarity(settlement.get("home_team"), statsbomb.get("away_team")) + similarity(settlement.get("away_team"), statsbomb.get("home_team"))) / 2.0
+    return round(max(direct, swapped), 4)
+
+
+def _build_statsbomb_coverage_audit(
+    settlements: list[dict],
+    statsbomb_items: list[dict],
+    *,
+    candidate_limit: int = 30,
+    min_candidate_score: float = 0.55,
+) -> dict[str, object]:
+    statsbomb_index: dict[str, dict] = {}
+    statsbomb_by_date: dict[str, list[dict]] = {}
+    for item in statsbomb_items:
+        if not isinstance(item, dict):
+            continue
+        for key in _statsbomb_coverage_audit_exact_keys(item):
+            statsbomb_index.setdefault(key, item)
+        date_key = normalize_text(item.get("match_date", "")).lower().strip()
+        if date_key:
+            statsbomb_by_date.setdefault(date_key, []).append(item)
+
+    exact_rows: list[dict[str, object]] = []
+    candidate_rows: list[dict[str, object]] = []
+    no_same_date = 0
+    settlement_items = [item for item in settlements if isinstance(item, dict)]
+    for settlement in settlement_items:
+        matched = None
+        for key in _statsbomb_coverage_audit_exact_keys(settlement):
+            if key in statsbomb_index:
+                matched = statsbomb_index[key]
+                break
+        if matched is not None:
+            exact_rows.append(
+                {
+                    "match_id": settlement.get("match_id"),
+                    "statsbomb_source_match_id": matched.get("source_match_id"),
+                    "match_date": settlement.get("match_date"),
+                    "home_team": settlement.get("home_team"),
+                    "away_team": settlement.get("away_team"),
+                }
+            )
+            continue
+
+        same_date = statsbomb_by_date.get(normalize_text(settlement.get("match_date", "")).lower().strip(), [])
+        if not same_date:
+            no_same_date += 1
+            continue
+        scored = [(_statsbomb_coverage_candidate_score(settlement, item), item) for item in same_date]
+        scored.sort(key=lambda item: (-float(item[0] or 0.0), str(item[1].get("home_team") or "")))
+        for score, item in scored[:3]:
+            if score < float(min_candidate_score):
+                continue
+            candidate_rows.append(
+                {
+                    "score": score,
+                    "settlement": {
+                        "match_id": settlement.get("match_id"),
+                        "match_date": settlement.get("match_date"),
+                        "league": settlement.get("league"),
+                        "home_team": settlement.get("home_team"),
+                        "away_team": settlement.get("away_team"),
+                    },
+                    "statsbomb": {
+                        "source_match_id": item.get("source_match_id"),
+                        "match_date": item.get("match_date"),
+                        "league": item.get("league"),
+                        "home_team": item.get("home_team"),
+                        "away_team": item.get("away_team"),
+                    },
+                }
+            )
+
+    candidate_rows.sort(key=lambda item: (-float(item.get("score") or 0.0), str(item.get("settlement", {}).get("match_id") or "")))
+    settlement_count = len(settlement_items)
+    exact_count = len(exact_rows)
+    candidate_count = len(candidate_rows)
+    coverage_gap_count = max(0, settlement_count - exact_count)
+    same_date_unmatched_count = max(0, settlement_count - exact_count - no_same_date)
+    recommendation = (
+        "expand_statsbomb_import"
+        if no_same_date >= max(1, settlement_count - exact_count)
+        else "review_team_aliases"
+        if candidate_count
+        else "collect_more_overlap"
+    )
+    return {
+        "settlement_count": settlement_count,
+        "statsbomb_match_count": len(statsbomb_items),
+        "exact_match_count": exact_count,
+        "exact_match_rate": round(exact_count / settlement_count, 4) if settlement_count else 0.0,
+        "candidate_count": candidate_count,
+        "coverage_gap_count": coverage_gap_count,
+        "no_same_date_count": no_same_date,
+        "same_date_unmatched_count": same_date_unmatched_count,
+        "exact_rows": exact_rows[: max(0, int(candidate_limit))],
+        "candidate_rows": candidate_rows[: max(0, int(candidate_limit))],
+        "recommendation": recommendation,
+    }
 
 
 def _match_statsbomb_event_summary(settlement: dict, index: dict[str, dict]) -> dict | None:

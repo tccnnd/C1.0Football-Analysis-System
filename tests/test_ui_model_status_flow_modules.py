@@ -96,12 +96,20 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
             policy_status={},
             coverage_status={
                 "xgb_samples": {"sample_count": 10, "valid_feature_count": 9, "league_count": 2},
-                "statsbomb_events": {"match_count": 3, "review_sample_count": 2, "review_feature_count": 38},
+                "statsbomb_events": {
+                    "match_count": 3,
+                    "review_sample_count": 2,
+                    "review_feature_count": 38,
+                    "coverage_gap_count": 4,
+                    "coverage_candidate_count": 1,
+                },
             },
         )
 
         self.assertIn("StatsBomb事件: 3 场", text)
         self.assertIn("复盘样本=2", text)
+        self.assertIn("覆盖缺口=4", text)
+        self.assertIn("候选=1", text)
 
     def test_model_training_overview_shows_training_health_issues(self) -> None:
         text = build_model_training_overview_text(

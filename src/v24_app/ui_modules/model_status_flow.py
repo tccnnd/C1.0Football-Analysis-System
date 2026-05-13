@@ -113,6 +113,7 @@ def training_health_action_button_text(action_key: object) -> str:
         "run_play_model_backtest": "运行稳定性回测",
         "refresh_training_health": "刷新诊断",
     }
+    labels["export_play_model_takeover_gate_audit_report"] = "导出守门审计报告"
     return labels.get(str(action_key or ""), "刷新诊断")
 
 
@@ -362,7 +363,7 @@ def build_model_training_overview_text(
         f"- 联赛样例: {', '.join(samples.get('league_examples', []) or []) or '-'}",
         f"- 联赛历史: {club_history.get('match_count', 0)} 场 | {club_history.get('date_start') or '-'} -> {club_history.get('date_end') or '-'} | profile={club_history.get('league_profile_count', 0)}",
         f"- 世界杯历史: {world_cup.get('match_count', 0)} 场 | {world_cup.get('year_start') or '-'}-{world_cup.get('year_end') or '-'} | 届数={world_cup.get('year_count', 0)}",
-        f"- StatsBomb事件: {statsbomb.get('match_count', 0)} 场 | 复盘样本={statsbomb.get('review_sample_count', 0)} | 特征={statsbomb.get('review_feature_count', 0)}",
+        f"- StatsBomb事件: {statsbomb.get('match_count', 0)} 场 | 复盘样本={statsbomb.get('review_sample_count', 0)} | 特征={statsbomb.get('review_feature_count', 0)} | 覆盖缺口={statsbomb.get('coverage_gap_count', 0)} | 候选={statsbomb.get('coverage_candidate_count', 0)}",
         f"- ELO评分池: 俱乐部 {rating_pools.get('club_team_count', 0)} 队 | 国家队 {rating_pools.get('national_team_count', 0)} 队",
         f"- 训练健康: {training_health.get('status', '-')} | blocking={training_health.get('blocking_count', 0)} | warning={training_health.get('warning_count', 0)}",
         *health_issue_lines,
@@ -815,6 +816,12 @@ def build_play_model_takeover_gate_action_rows(
             "review_formal_takeover",
             "good",
         )
+        _append_action(
+            "Export gate audit report",
+            "Export markdown/csv audit report for long-horizon stability review.",
+            "export_play_model_takeover_gate_audit_report",
+            "good",
+        )
     elif gate_status == "watch":
         _append_action(
             "Continue shadow observation",
@@ -843,6 +850,12 @@ def build_play_model_takeover_gate_action_rows(
             "run_play_model_backtest",
             "neutral",
         )
+    _append_action(
+        "Export gate audit report",
+        "Export markdown/csv audit report for long-horizon stability review.",
+        "export_play_model_takeover_gate_audit_report",
+        "neutral",
+    )
     return rows[: max(0, int(limit))]
 
 
