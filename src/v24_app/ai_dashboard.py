@@ -34,6 +34,7 @@ from .core import (
     get_high_accuracy_strategy_status,
     get_recent_settlements,
     get_video_review_for_match,
+    get_video_review_fewshot_memory,
     get_result_recovery_runs,
     get_statsbomb_event_baseline,
     get_statsbomb_sandbox_fewshot_memory,
@@ -49,6 +50,7 @@ from .core import (
     run_draw_specialist_backtest,
     run_high_accuracy_strategy_backtest,
     run_play_model_backtest,
+    VIDEO_REVIEW_FEWSHOT_MEMORY_FILE,
     STATSBOMB_SANDBOX_FEWSHOT_FILE,
     train_play_models_now,
     warmup_prediction_models,
@@ -120,6 +122,21 @@ from .ui_modules import (
     build_statsbomb_fewshot_memory_audit_report_lines,
     build_statsbomb_fewshot_memory_monitor,
     build_statsbomb_fewshot_memory_quality_alerts,
+    build_video_review_fewshot_draft_review_filename,
+    build_video_review_fewshot_draft_review_lines,
+    build_video_review_fewshot_merge_apply_preview,
+    build_video_review_fewshot_merge_apply_preview_filename,
+    build_video_review_fewshot_merge_apply_preview_lines,
+    build_video_review_fewshot_merge_apply_report_filename,
+    build_video_review_fewshot_merge_apply_report_lines,
+    build_video_review_fewshot_merge_apply_result,
+    build_video_review_fewshot_merge_bundle,
+    build_video_review_fewshot_merge_bundle_filename,
+    build_video_review_fewshot_merge_bundle_report_filename,
+    build_video_review_fewshot_merge_bundle_report_lines,
+    build_video_review_fewshot_merge_plan,
+    build_video_review_fewshot_merge_plan_filename,
+    build_video_review_fewshot_merge_plan_lines,
     build_strategy_allowlist_filename,
     build_strategy_allowlist_report_lines,
     build_strategy_policy_audit_csv_filename,
@@ -3593,6 +3610,32 @@ class SmartMatchDashboard:
             padx=14,
             pady=6,
         ).pack(side=tk.LEFT, padx=(10, 0))
+        tk.Button(
+            review_actions,
+            text="\u9884\u89c8\u6837\u672c\u5408\u5e76",
+            command=self.preview_video_review_fewshot_merge_bundle,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=14,
+            pady=6,
+        ).pack(side=tk.LEFT, padx=(10, 0))
+        tk.Button(
+            review_actions,
+            text="\u5e94\u7528\u89c6\u9891\u8bb0\u5fc6",
+            command=self.apply_video_review_fewshot_merge_bundle,
+            bg=PANEL_2,
+            fg="#fecaca",
+            activebackground="#451a1a",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=14,
+            pady=6,
+        ).pack(side=tk.LEFT, padx=(10, 0))
 
         tk.Label(right, text="\u95ed\u73af\u590d\u76d8", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
         detail = tk.Text(
@@ -3732,7 +3775,7 @@ class SmartMatchDashboard:
         )
         self.open_review_center()
 
-    def export_video_review_fewshot_samples(self) -> Path | None:
+    def export_video_review_fewshot_samples(self) -> tuple[Path, Path, Path, Path, Path] | None:
         result = export_video_review_fewshot_samples_now(limit=120)
         output_path = Path(str(result.get("output_path") or ""))
         sample_count = int(result.get("sample_count", 0) or 0)
@@ -3742,18 +3785,161 @@ class SmartMatchDashboard:
             self.status_var.set("\u89c6\u9891\u590d\u76d8\u6837\u672c\u6682\u65e0\u53ef\u5bfc\u51fa\u5185\u5bb9")
             messagebox.showinfo("\u89c6\u9891\u590d\u76d8\u6837\u672c", "\u6682\u65e0\u4eba\u5de5\u6807\u6ce8\u6216\u89c6\u9891\u4e8b\u4ef6\u5047\u8bbe\u53ef\u5bfc\u51fa\u3002")
             return None
+        try:
+            payload = json.loads(output_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            messagebox.showerror("\u89c6\u9891\u590d\u76d8\u6837\u672c", f"\u8bfb\u53d6\u5bfc\u51fa\u8349\u7a3f\u5931\u8d25:\n{output_path}\n\n{exc}")
+            return None
+        now = datetime.now()
+        memory = get_video_review_fewshot_memory()
+        merge_plan = build_video_review_fewshot_merge_plan(payload, memory)
+        merge_bundle = build_video_review_fewshot_merge_bundle(merge_plan, generated_at=now)
+        REPORT_DIR.mkdir(parents=True, exist_ok=True)
+        review_path = REPORT_DIR / build_video_review_fewshot_draft_review_filename(now)
+        plan_path = REPORT_DIR / build_video_review_fewshot_merge_plan_filename(now)
+        bundle_path = REPORT_DIR / build_video_review_fewshot_merge_bundle_filename(now)
+        bundle_review_path = REPORT_DIR / build_video_review_fewshot_merge_bundle_report_filename(now)
+        review_path.write_text("\n".join(build_video_review_fewshot_draft_review_lines(payload)), encoding="utf-8")
+        plan_path.write_text("\n".join(build_video_review_fewshot_merge_plan_lines(merge_plan)), encoding="utf-8")
+        bundle_path.write_text(json.dumps(merge_bundle, ensure_ascii=False, indent=2), encoding="utf-8")
+        bundle_review_path.write_text("\n".join(build_video_review_fewshot_merge_bundle_report_lines(merge_bundle)), encoding="utf-8")
+        validation = merge_plan.get("validation", {}) if isinstance(merge_plan.get("validation"), dict) else {}
+        validation_text = str(validation.get("summary_text") or "-")
         self.status_var.set(f"\u89c6\u9891\u590d\u76d8\u6837\u672c\u5df2\u5bfc\u51fa: {sample_count} \u6761")
         messagebox.showinfo(
             "\u89c6\u9891\u590d\u76d8\u6837\u672c",
             (
                 f"\u5df2\u751f\u6210 Evaluation Agent \u89c6\u9891\u590d\u76d8\u6837\u672c:\n{output_path}\n\n"
+                f"\u5ba1\u67e5\u62a5\u544a:\n{review_path}\n\n"
+                f"\u5408\u5e76\u8ba1\u5212:\n{plan_path}\n\n"
+                f"\u53ef\u5e94\u7528\u5305:\n{bundle_path}\n\n"
+                f"\u5305\u5ba1\u67e5:\n{bundle_review_path}\n\n"
                 f"\u6837\u672c: {sample_count}\n"
                 f"\u4eba\u5de5\u6807\u6ce8: {manual_count}\n"
                 f"\u81ea\u52a8\u5047\u8bbe: {auto_count}\n\n"
+                f"\u6821\u9a8c: {validation_text}\n\n"
                 "\u8be5\u6570\u636e\u4ec5\u7528\u4e8e\u8d5b\u540e\u590d\u76d8\uff0c\u4e0d\u8fdb\u5165\u8d5b\u524d\u9884\u6d4b\u7279\u5f81\u3002"
             ),
         )
-        return output_path
+        return output_path, review_path, plan_path, bundle_path, bundle_review_path
+
+    def preview_video_review_fewshot_merge_bundle(self) -> Path | None:
+        REPORT_DIR.mkdir(parents=True, exist_ok=True)
+        selected = filedialog.askopenfilename(
+            title="Select video review few-shot merge bundle",
+            initialdir=str(REPORT_DIR),
+            filetypes=[
+                ("Video review merge bundle", "video_review_fewshot_merge_bundle_*.json"),
+                ("JSON", "*.json"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not selected:
+            return None
+        source_path = Path(selected)
+        try:
+            bundle = json.loads(source_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            messagebox.showerror("\u89c6\u9891 few-shot \u9884\u89c8", f"\u8bfb\u53d6 bundle \u5931\u8d25:\n{source_path}\n\n{exc}")
+            return None
+        now = datetime.now()
+        preview = build_video_review_fewshot_merge_apply_preview(
+            bundle,
+            get_video_review_fewshot_memory(),
+            generated_at=now,
+        )
+        preview_path = REPORT_DIR / build_video_review_fewshot_merge_apply_preview_filename(now)
+        preview_path.write_text("\n".join(build_video_review_fewshot_merge_apply_preview_lines(preview)), encoding="utf-8")
+        summary = preview.get("summary", {}) if isinstance(preview.get("summary"), dict) else {}
+        self.status_var.set(
+            f"\u89c6\u9891 few-shot preview: {preview.get('status', '-')} | append {summary.get('append_count', 0)} | skipped {summary.get('skipped_count', 0)}"
+        )
+        messagebox.showinfo(
+            "\u89c6\u9891 few-shot \u9884\u89c8",
+            (
+                f"\u5df2\u751f\u6210 dry-run \u9884\u89c8:\n{preview_path}\n\n"
+                f"\u72b6\u6001: {preview.get('status', '-')}\n"
+                f"\u5c06\u8ffd\u52a0: {summary.get('append_count', 0)}\n"
+                f"\u8df3\u8fc7: {summary.get('skipped_count', 0)}"
+            ),
+        )
+        return preview_path
+
+    def apply_video_review_fewshot_merge_bundle(self) -> tuple[Path, Path | None] | None:
+        REPORT_DIR.mkdir(parents=True, exist_ok=True)
+        selected = filedialog.askopenfilename(
+            title="Select video review few-shot merge bundle to apply",
+            initialdir=str(REPORT_DIR),
+            filetypes=[
+                ("Video review merge bundle", "video_review_fewshot_merge_bundle_*.json"),
+                ("JSON", "*.json"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not selected:
+            return None
+        source_path = Path(selected)
+        try:
+            bundle = json.loads(source_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            messagebox.showerror("\u89c6\u9891 few-shot \u5e94\u7528", f"\u8bfb\u53d6 bundle \u5931\u8d25:\n{source_path}\n\n{exc}")
+            return None
+        now = datetime.now()
+        result = build_video_review_fewshot_merge_apply_result(
+            bundle,
+            get_video_review_fewshot_memory(),
+            generated_at=now,
+        )
+        report_path = REPORT_DIR / build_video_review_fewshot_merge_apply_report_filename(now)
+        report_path.write_text("\n".join(build_video_review_fewshot_merge_apply_report_lines(result)), encoding="utf-8")
+        summary = result.get("summary", {}) if isinstance(result.get("summary"), dict) else {}
+        if result.get("status") != "ready_to_write":
+            self.status_var.set(f"\u89c6\u9891 few-shot apply blocked: {result.get('status', '-')} | report {report_path.name}")
+            messagebox.showwarning(
+                "\u89c6\u9891 few-shot \u5e94\u7528",
+                f"\u5e94\u7528\u88ab\u963b\u65ad\u6216\u65e0\u53ef\u8ffd\u52a0\u6837\u672c\u3002\n\n\u62a5\u544a:\n{report_path}\n\n\u72b6\u6001: {result.get('status', '-')}",
+            )
+            return report_path, None
+        applied_count = int(summary.get("applied_count", 0) or 0)
+        final_count = int(summary.get("final_count", 0) or 0)
+        preview = result.get("preview") if isinstance(result.get("preview"), dict) else {}
+        backup_name = str(preview.get("backup_filename") or "")
+        confirmed = messagebox.askyesno(
+            "\u89c6\u9891 few-shot \u5e94\u7528",
+            (
+                "\u8fd9\u4f1a\u5c06\u5ba1\u6838\u540e\u7684\u8d5b\u540e\u89c6\u9891 few-shot \u6837\u672c\u5199\u5165 Evaluation Agent \u6b63\u5f0f\u89c6\u9891\u8bb0\u5fc6\u6c60\u3002\n\n"
+                f"Bundle:\n{source_path}\n\n"
+                f"\u5e94\u7528\u6837\u672c: {applied_count}\n"
+                f"\u6700\u7ec8\u8bb0\u5fc6\u6837\u672c: {final_count}\n"
+                f"\u5907\u4efd\u6587\u4ef6: {backup_name or '-'}\n\n"
+                "\u7ee7\u7eed\uff1f"
+            ),
+        )
+        if not confirmed:
+            self.status_var.set(f"\u89c6\u9891 few-shot apply cancelled: {report_path.name}")
+            return report_path, None
+        updated_memory = result.get("updated_memory") if isinstance(result.get("updated_memory"), dict) else None
+        if not updated_memory:
+            messagebox.showerror("\u89c6\u9891 few-shot \u5e94\u7528", "\u5e94\u7528\u7ed3\u679c\u6ca1\u6709\u751f\u6210\u66f4\u65b0\u540e\u7684\u8bb0\u5fc6 payload\u3002")
+            return report_path, None
+        VIDEO_REVIEW_FEWSHOT_MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        backup_path: Path | None = None
+        if VIDEO_REVIEW_FEWSHOT_MEMORY_FILE.exists():
+            backup_path = VIDEO_REVIEW_FEWSHOT_MEMORY_FILE.parent / (
+                backup_name or f"{VIDEO_REVIEW_FEWSHOT_MEMORY_FILE.name}.backup_{now.strftime('%Y%m%d_%H%M%S')}.json"
+            )
+            shutil.copy2(VIDEO_REVIEW_FEWSHOT_MEMORY_FILE, backup_path)
+        tmp_path = VIDEO_REVIEW_FEWSHOT_MEMORY_FILE.with_suffix(".json.tmp")
+        tmp_path.write_text(json.dumps(updated_memory, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path.replace(VIDEO_REVIEW_FEWSHOT_MEMORY_FILE)
+        invalidate_statsbomb_state_cache(VIDEO_REVIEW_FEWSHOT_MEMORY_FILE)
+        self.status_var.set(f"\u89c6\u9891 few-shot applied: +{applied_count} | total {final_count}")
+        self._refresh_current_view_after_release_state_change()
+        messagebox.showinfo(
+            "\u89c6\u9891 few-shot \u5e94\u7528",
+            f"\u5df2\u5e94\u7528 {applied_count} \u6761\u6837\u672c\u3002\n\n\u8bb0\u5fc6\u6c60:\n{VIDEO_REVIEW_FEWSHOT_MEMORY_FILE}\n\n\u5907\u4efd:\n{backup_path or '-'}\n\n\u62a5\u544a:\n{report_path}",
+        )
+        return report_path, backup_path
 
     def open_recovery_run_center(self) -> None:
         self.current_view = "recovery_runs"

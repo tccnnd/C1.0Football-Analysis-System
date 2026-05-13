@@ -309,6 +309,25 @@ class CoreVideoReviewTests(unittest.TestCase):
         self.assertEqual(payload["purpose"], "evaluation_agent_video_fewshot_post_match_review")
         self.assertIn("video_tempo_shift", payload["items"][0]["labels"]["tags"])
 
+    def test_video_review_fewshot_memory_uses_official_memory_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            memory_file = Path(tmp_dir) / "video_review_fewshot_memory.json"
+            memory_file.write_text(
+                json.dumps(
+                    {
+                        "purpose": "evaluation_agent_video_fewshot_post_match_review",
+                        "items": [{"id": "official:video"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.object(core, "VIDEO_REVIEW_FEWSHOT_MEMORY_FILE", memory_file):
+                core.invalidate_statsbomb_state_cache(memory_file)
+                memory = core.get_video_review_fewshot_memory()
+
+        self.assertEqual(memory["items"][0]["id"], "official:video")
+        self.assertEqual(memory["purpose"], "evaluation_agent_video_fewshot_post_match_review")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -63,6 +63,7 @@ REPORT_DIR = PROJECT_DIR / "reports"
 VIDEO_REVIEW_DIR = PROJECT_DIR / "data" / "video_reviews"
 VIDEO_REVIEW_FILE = PROJECT_DIR / "data" / "state" / "video_reviews.json"
 VIDEO_REVIEW_FEWSHOT_FILE = PROJECT_DIR / "data" / "state" / "video_review_fewshot_samples.json"
+VIDEO_REVIEW_FEWSHOT_MEMORY_FILE = PROJECT_DIR / "data" / "state" / "video_review_fewshot_memory.json"
 STATSBOMB_EVENT_SUMMARIES_FILE = PROJECT_DIR / "data" / "state" / "statsbomb_event_summaries.json"
 STATSBOMB_EVENT_BASELINE_FILE = PROJECT_DIR / "data" / "state" / "statsbomb_event_baseline.json"
 STATSBOMB_SANDBOX_FEWSHOT_FILE = PROJECT_DIR / "data" / "state" / "statsbomb_sandbox_fewshot_samples.json"
@@ -7344,7 +7345,7 @@ def get_statsbomb_sandbox_fewshot_memory() -> dict:
 
 
 def get_video_review_fewshot_memory() -> dict:
-    return _load_cached_statsbomb_state_json(VIDEO_REVIEW_FEWSHOT_FILE)
+    return _load_cached_statsbomb_state_json(VIDEO_REVIEW_FEWSHOT_MEMORY_FILE)
 
 
 def _build_high_accuracy_strategy_pool(candidates: list[dict]) -> list[dict]:

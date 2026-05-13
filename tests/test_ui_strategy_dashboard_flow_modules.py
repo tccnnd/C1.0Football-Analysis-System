@@ -43,6 +43,22 @@ from v24_app.ui_modules import (
     build_strategy_evaluation_agent_summary,
     build_strategy_error_attribution_summary,
     build_video_review_memory_summary,
+    build_video_review_fewshot_draft_review_filename,
+    build_video_review_fewshot_draft_review_lines,
+    build_video_review_fewshot_merge_apply_preview,
+    build_video_review_fewshot_merge_apply_preview_filename,
+    build_video_review_fewshot_merge_apply_preview_lines,
+    build_video_review_fewshot_merge_apply_report_filename,
+    build_video_review_fewshot_merge_apply_report_lines,
+    build_video_review_fewshot_merge_apply_result,
+    build_video_review_fewshot_merge_bundle,
+    build_video_review_fewshot_merge_bundle_filename,
+    build_video_review_fewshot_merge_bundle_report_filename,
+    build_video_review_fewshot_merge_bundle_report_lines,
+    build_video_review_fewshot_merge_plan,
+    build_video_review_fewshot_merge_plan_filename,
+    build_video_review_fewshot_merge_plan_lines,
+    validate_video_review_fewshot_payload,
     build_statsbomb_fewshot_backfill_queue,
     build_statsbomb_fewshot_backfill_report_filename,
     build_statsbomb_fewshot_backfill_report_lines,
@@ -2441,6 +2457,147 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("video_post_match_review", evaluation["memory_tags"])
         self.assertIn("video_tempo_shift", evaluation["memory_tags"])
         self.assertTrue(any("AI视频" in item["title"] for item in evaluation["recommendations"]))
+
+    def _video_fewshot_item(
+        self,
+        item_id: str,
+        *,
+        match_id: str = "m-video",
+        review_id: str = "vr-1",
+        annotation_id: str = "ann-1",
+        source: str = "video_manual_annotation",
+        root_cause: str = "video_margin_risk",
+    ) -> dict[str, object]:
+        return {
+            "id": item_id,
+            "review_status": "draft",
+            "prompt": "review video evidence",
+            "completion": "post-match video review memory",
+            "labels": {
+                "simulated_pick": "HOME",
+                "actual": "DRAW",
+                "is_hit": False,
+                "root_cause": root_cause,
+                "tags": ["video_post_match_review", source, "strategy_miss", root_cause],
+            },
+            "features": {
+                "evidence_score": 0.82,
+                "review_confidence": 0.80,
+                "hypothesis_confidence": 0.78,
+                "frame_index": 3.0,
+                "timestamp_seconds": 75.0,
+            },
+            "meta": {
+                "source": source,
+                "match_id": match_id,
+                "review_id": review_id,
+                "annotation_id": annotation_id,
+                "event_type": "counter_attack",
+                "hypothesis_code": "set_piece_or_transition_risk",
+                "match_date": "2026-05-14",
+                "league": "Test League",
+                "home_team": "Alpha",
+                "away_team": "Bravo",
+                "score": "1-1",
+            },
+        }
+
+    def test_video_review_fewshot_merge_plan_builds_bundle_and_reports(self) -> None:
+        old_item = self._video_fewshot_item("video:old", match_id="old", review_id="vr-old", annotation_id="ann-old")
+        new_item = self._video_fewshot_item("video:new", match_id="new", review_id="vr-new", annotation_id="ann-new")
+        draft = {
+            "updated_at": "2026-05-14 10:00:00",
+            "summary": {"sample_count": 2, "manual_annotation_sample_count": 2, "auto_hypothesis_sample_count": 0},
+            "leakage_note": "post-match video evidence only",
+            "items": [old_item, new_item],
+        }
+        memory = {"items": [old_item]}
+
+        validation = validate_video_review_fewshot_payload(draft)
+        review_lines = build_video_review_fewshot_draft_review_lines(draft)
+        plan = build_video_review_fewshot_merge_plan(draft, memory)
+        plan_lines = build_video_review_fewshot_merge_plan_lines(plan)
+        bundle = build_video_review_fewshot_merge_bundle(plan, generated_at=datetime(2026, 5, 14, 10, 5, 30))
+        bundle_lines = build_video_review_fewshot_merge_bundle_report_lines(bundle)
+
+        self.assertEqual(validation["status"], "ready")
+        self.assertEqual(plan["status"], "ready")
+        self.assertEqual(plan["mergeable_count"], 1)
+        self.assertEqual(plan["skipped_count"], 1)
+        self.assertTrue(any(row["reason"] == "already_in_memory" for row in plan["skipped_rows"]))
+        self.assertEqual(bundle["status"], "pending_manual_apply")
+        self.assertEqual(bundle["summary"]["bundle_count"], 1)
+        self.assertEqual(bundle["items"][0]["id"], "video:new")
+        self.assertEqual(
+            build_video_review_fewshot_draft_review_filename(datetime(2026, 5, 14, 10, 5, 30)),
+            "video_review_fewshot_draft_review_20260514_100530.md",
+        )
+        self.assertEqual(
+            build_video_review_fewshot_merge_plan_filename(datetime(2026, 5, 14, 10, 5, 30)),
+            "video_review_fewshot_merge_plan_20260514_100530.md",
+        )
+        self.assertEqual(
+            build_video_review_fewshot_merge_bundle_filename(datetime(2026, 5, 14, 10, 5, 30)),
+            "video_review_fewshot_merge_bundle_20260514_100530.json",
+        )
+        self.assertEqual(
+            build_video_review_fewshot_merge_bundle_report_filename(datetime(2026, 5, 14, 10, 5, 30)),
+            "video_review_fewshot_merge_bundle_review_20260514_100530.md",
+        )
+        self.assertIn("Video Review Few-shot Draft Review", "\n".join(review_lines))
+        self.assertIn("video:new", "\n".join(plan_lines))
+        self.assertIn("video_manual_annotation", "\n".join(bundle_lines))
+
+    def test_video_review_fewshot_apply_preview_and_result_update_memory(self) -> None:
+        old_item = self._video_fewshot_item("video:old", match_id="old", review_id="vr-old", annotation_id="ann-old")
+        new_item = self._video_fewshot_item("video:new", match_id="new", review_id="vr-new", annotation_id="ann-new")
+        duplicate_new = self._video_fewshot_item("video:new-dupe", match_id="new", review_id="vr-new", annotation_id="ann-new")
+        bundle = {
+            "purpose": "video_review_manual_apply_bundle",
+            "status": "pending_manual_apply",
+            "approval_required": True,
+            "items": [new_item, old_item, duplicate_new],
+        }
+        existing = {
+            "purpose": "evaluation_agent_video_fewshot_post_match_review",
+            "summary": {"sample_count": 1},
+            "items": [{**old_item, "review_status": "approved"}],
+        }
+
+        preview = build_video_review_fewshot_merge_apply_preview(bundle, existing, generated_at=datetime(2026, 5, 14, 10, 10, 30))
+        preview_lines = build_video_review_fewshot_merge_apply_preview_lines(preview)
+        result = build_video_review_fewshot_merge_apply_result(
+            {**bundle, "items": [new_item]},
+            existing,
+            generated_at=datetime(2026, 5, 14, 10, 10, 30),
+        )
+        result_lines = build_video_review_fewshot_merge_apply_report_lines(result)
+        updated_memory = result["updated_memory"]
+
+        self.assertEqual(preview["status"], "ready_for_manual_apply")
+        self.assertTrue(preview["dry_run"])
+        self.assertTrue(preview["no_state_write"])
+        self.assertEqual(preview["summary"]["append_count"], 1)
+        self.assertEqual(preview["summary"]["skipped_count"], 2)
+        self.assertTrue(any(row["reason"] == "already_in_memory" for row in preview["skipped_rows"]))
+        self.assertTrue(any(row["reason"] == "duplicate_in_bundle" for row in preview["skipped_rows"]))
+        self.assertEqual(result["status"], "ready_to_write")
+        self.assertEqual(result["summary"]["applied_count"], 1)
+        self.assertEqual(result["summary"]["final_count"], 2)
+        self.assertEqual(updated_memory["summary"]["sample_count"], 2)
+        self.assertEqual(updated_memory["summary"]["miss_count"], 2)
+        self.assertEqual(updated_memory["items"][1]["review_status"], "approved")
+        self.assertEqual(
+            build_video_review_fewshot_merge_apply_preview_filename(datetime(2026, 5, 14, 10, 10, 30)),
+            "video_review_fewshot_merge_apply_preview_20260514_101030.md",
+        )
+        self.assertEqual(
+            build_video_review_fewshot_merge_apply_report_filename(datetime(2026, 5, 14, 10, 10, 30)),
+            "video_review_fewshot_merge_applied_20260514_101030.md",
+        )
+        self.assertIn("Video Review Few-shot Merge Apply Preview", "\n".join(preview_lines))
+        self.assertIn("Video Review Few-shot Merge Apply", "\n".join(result_lines))
+        self.assertIn("video:new", "\n".join(result_lines))
 
     def test_evaluation_agent_uses_statsbomb_fewshot_memory(self) -> None:
         settlements = [
