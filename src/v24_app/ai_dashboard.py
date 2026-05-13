@@ -11,7 +11,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from .background_tasks import BackgroundTaskCenter, BackgroundTaskRecord
 from .core import (
@@ -21,6 +21,7 @@ from .core import (
     auto_settle_finished_matches,
     build_historical_strategy_replay_samples,
     build_result_recovery_snapshot_audit,
+    add_video_review_annotation,
     create_video_review,
     extract_video_review_frames_now,
     fetch_matches_v24,
@@ -31,6 +32,7 @@ from .core import (
     get_play_model_training_status,
     get_high_accuracy_strategy_status,
     get_recent_settlements,
+    get_video_review_for_match,
     get_result_recovery_runs,
     get_statsbomb_event_baseline,
     get_statsbomb_sandbox_fewshot_memory,
@@ -3564,6 +3566,19 @@ class SmartMatchDashboard:
             padx=14,
             pady=6,
         ).pack(side=tk.LEFT)
+        tk.Button(
+            review_actions,
+            text="\u6807\u6ce8\u89c6\u9891\u4e8b\u4ef6",
+            command=lambda: self.annotate_video_review_for_selection(review_tree, settlements),
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=14,
+            pady=6,
+        ).pack(side=tk.LEFT, padx=(10, 0))
 
         tk.Label(right, text="\u95ed\u73af\u590d\u76d8", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
         detail = tk.Text(
@@ -3643,6 +3658,64 @@ class SmartMatchDashboard:
             f"VideoReview Agent \u5df2\u5efa\u7acb\n\nreview_id: {review.get('review_id', '-')}\n\u8ba1\u5212\u62bd\u5e27: {len(frame_plan)}\n\u72b6\u6001: metadata_ready\n\n\u5df2\u63d0\u4ea4\u540e\u53f0\u62bd\u5e27\u4efb\u52a1\u3002",
         )
         self.run_video_review_frame_extraction_task(str(review.get("review_id") or ""))
+        self.open_review_center()
+
+    def annotate_video_review_for_selection(self, review_tree: ttk.Treeview, settlements: list[dict]) -> None:
+        if not settlements:
+            messagebox.showinfo("\u89c6\u9891\u6807\u6ce8", "\u5f53\u524d\u6ca1\u6709\u53ef\u6807\u6ce8\u7684\u5df2\u7ed3\u7b97\u8d5b\u4e8b\u3002")
+            return
+        selection = review_tree.selection()
+        if not selection:
+            messagebox.showinfo("\u89c6\u9891\u6807\u6ce8", "\u8bf7\u5148\u9009\u62e9\u4e00\u573a\u590d\u76d8\u8d5b\u4e8b\u3002")
+            return
+        try:
+            settlement = settlements[int(selection[0])]
+        except (TypeError, ValueError, IndexError):
+            messagebox.showinfo("\u89c6\u9891\u6807\u6ce8", "\u9009\u4e2d\u8d5b\u4e8b\u65e0\u6548\uff0c\u8bf7\u91cd\u65b0\u9009\u62e9\u3002")
+            return
+        video_review = settlement.get("video_review") if isinstance(settlement.get("video_review"), dict) else {}
+        if not video_review:
+            video_review = get_video_review_for_match(str(settlement.get("match_id") or ""))
+        review_id = str(video_review.get("review_id") or "").strip()
+        if not review_id:
+            messagebox.showinfo("\u89c6\u9891\u6807\u6ce8", "\u8bf7\u5148\u4e3a\u8be5\u573a\u6bd4\u8d5b\u5bfc\u5165\u89c6\u9891\u590d\u76d8\u3002")
+            return
+        supported = "goal, red_card, set_piece, counter_attack, tempo_shift, penalty, injury, tactical_shift, defensive_error, shot_quality"
+        event_type = simpledialog.askstring("\u89c6\u9891\u4e8b\u4ef6", f"\u4e8b\u4ef6\u7c7b\u578b:\n{supported}", parent=self.root)
+        if not event_type:
+            return
+        position = simpledialog.askstring("\u89c6\u9891\u4e8b\u4ef6", "\u4f4d\u7f6e\uff08\u53ef\u9009\uff09\uff1a\u8f93\u5165 f12 \u8868\u793a\u7b2c12\u5e27\uff0c\u6216\u8f93\u5165 75 \u8868\u793a75\u79d2\u3002", parent=self.root)
+        note = simpledialog.askstring("\u89c6\u9891\u4e8b\u4ef6", "\u5907\u6ce8\uff08\u53ef\u9009\uff09\uff1a\u4f8b\u5982\u8fdb\u7403\u524d\u8fde\u7eed\u53cd\u51fb\u3001\u9632\u7ebf\u5931\u4f4d\u3002", parent=self.root) or ""
+        frame_index = None
+        timestamp_seconds = None
+        position_text = str(position or "").strip().lower()
+        if position_text.startswith("f"):
+            try:
+                frame_index = int(float(position_text[1:]))
+            except (TypeError, ValueError):
+                frame_index = None
+        elif position_text:
+            try:
+                timestamp_seconds = float(position_text)
+            except (TypeError, ValueError):
+                timestamp_seconds = None
+        result = add_video_review_annotation(
+            review_id,
+            event_type=event_type,
+            frame_index=frame_index,
+            timestamp_seconds=timestamp_seconds,
+            note=note,
+            created_by="app_operator",
+        )
+        if not bool(result.get("ok")):
+            messagebox.showerror("\u89c6\u9891\u6807\u6ce8", f"\u6807\u6ce8\u5931\u8d25: {result.get('reason', '-')}")
+            return
+        annotation = result.get("annotation") if isinstance(result.get("annotation"), dict) else {}
+        self.status_var.set(f"\u89c6\u9891\u4e8b\u4ef6\u5df2\u6807\u6ce8: {annotation.get('event_label', event_type)}")
+        messagebox.showinfo(
+            "\u89c6\u9891\u6807\u6ce8",
+            f"\u5df2\u5199\u5165 VideoReview Agent\n\n\u7c7b\u578b: {annotation.get('event_label', event_type)}\n\u6807\u6ce8ID: {annotation.get('annotation_id', '-')}\n\n\u8be5\u6807\u6ce8\u5c06\u8fdb\u5165 Evaluation Agent \u8d5b\u540e\u590d\u76d8\u8bb0\u5fc6\u3002",
+        )
         self.open_review_center()
 
     def open_recovery_run_center(self) -> None:
@@ -4366,9 +4439,20 @@ class SmartMatchDashboard:
         narrative = video_agent.get("narrative_review") if isinstance(video_agent.get("narrative_review"), dict) else {}
         event_hypotheses = video_agent.get("event_hypotheses") if isinstance(video_agent.get("event_hypotheses"), list) else []
         video_followup = video_agent.get("recommended_followup") if isinstance(video_agent.get("recommended_followup"), dict) else {}
+        manual_annotations = video_review.get("manual_annotations") if isinstance(video_review.get("manual_annotations"), list) else []
         video_hypothesis_lines = [
             f"- 事件假设: {item.get('code') or '-'} | {_pct1(item.get('confidence'))} | {item.get('title') or '-'}"
             for item in event_hypotheses[:3]
+            if isinstance(item, dict)
+        ]
+        video_annotation_lines = [
+            (
+                f"- 人工标注: {item.get('event_label') or item.get('event_type') or '-'} | "
+                f"frame {item.get('frame_index') if item.get('frame_index') is not None else '-'} | "
+                f"{item.get('timestamp_seconds') if item.get('timestamp_seconds') is not None else '-'}s | "
+                f"{item.get('note') or '-'}"
+            )
+            for item in manual_annotations[-5:]
             if isinstance(item, dict)
         ]
         if video_review:
@@ -4386,6 +4470,7 @@ class SmartMatchDashboard:
                 f"- 预测对齐: {video_agent.get('prediction_alignment') or '-'}",
                 f"- 视频归因: {', '.join(video_agent.get('error_causes') or []) if isinstance(video_agent.get('error_causes'), list) else '-'}",
                 *video_hypothesis_lines,
+                *video_annotation_lines,
             ]
         else:
             video_lines = [

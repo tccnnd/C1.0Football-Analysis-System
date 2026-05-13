@@ -222,6 +222,52 @@ class CoreVideoReviewTests(unittest.TestCase):
         self.assertEqual(summary["recommended_followup"]["code"], "annotate_tempo_turning_points")
         self.assertEqual(summary["narrative_review"]["evidence_level"], summary["evidence_level"])
 
+    def test_add_video_review_annotation_updates_agent_memory(self) -> None:
+        settlement = {
+            "match_id": "m-5",
+            "match_date": "2026-05-14",
+            "league": "Test League",
+            "home_team": "Alpha",
+            "away_team": "Bravo",
+            "home_goals": 1,
+            "away_goals": 0,
+            "result": "主胜",
+            "is_correct": False,
+            "handicap_is_correct": False,
+        }
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            video_path = root / "replay.mp4"
+            video_path.write_bytes(b"fake-video")
+            review_file = root / "video_reviews.json"
+            review_dir = root / "video_review_frames"
+
+            with patch.object(core, "STATE_STORE", _VideoReviewStore(settlement)):
+                with patch.object(core, "VIDEO_REVIEW_FILE", review_file):
+                    with patch.object(core, "VIDEO_REVIEW_DIR", review_dir):
+                        with patch("v24_app.core.shutil.which", return_value=None):
+                            created = core.create_video_review("m-5", video_path)
+                        result = core.add_video_review_annotation(
+                            created["review"]["review_id"],
+                            event_type="counter_attack",
+                            frame_index=3,
+                            timestamp_seconds=75,
+                            note="fast break before the goal",
+                        )
+                        review = core.get_video_review_for_match("m-5")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["annotation"]["event_type"], "counter_attack")
+        self.assertEqual(review["manual_annotation_count"], 1)
+        self.assertEqual(review["manual_annotations"][0]["frame_index"], 3)
+        agent_review = review["agent_review"]
+        self.assertEqual(agent_review["manual_annotation_count"], 1)
+        self.assertIn("counter_attack", agent_review["manual_event_tags"])
+        hypothesis_codes = {item["code"] for item in agent_review["event_hypotheses"]}
+        self.assertIn("set_piece_or_transition_risk", hypothesis_codes)
+        self.assertEqual(agent_review["recommended_followup"]["code"], "feed_manual_video_annotations_into_evaluation_agent")
+        self.assertIn("review_manual_video_annotations", agent_review["next_actions"])
+
 
 if __name__ == "__main__":
     unittest.main()

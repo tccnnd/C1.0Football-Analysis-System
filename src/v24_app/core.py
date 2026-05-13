@@ -12366,6 +12366,100 @@ def _video_review_recommended_followup(evidence_score: dict, hypotheses: list[di
     }
 
 
+VIDEO_REVIEW_MANUAL_EVENT_LABELS = {
+    "goal": "进球",
+    "red_card": "红牌",
+    "set_piece": "定位球",
+    "counter_attack": "反击",
+    "tempo_shift": "节奏拐点",
+    "penalty": "点球",
+    "injury": "伤停",
+    "tactical_shift": "战术变化",
+    "defensive_error": "防线失位",
+    "shot_quality": "射门质量",
+}
+
+VIDEO_REVIEW_MANUAL_EVENT_HYPOTHESES = {
+    "goal": "finishing_variance",
+    "shot_quality": "finishing_variance",
+    "set_piece": "set_piece_or_transition_risk",
+    "counter_attack": "set_piece_or_transition_risk",
+    "defensive_error": "set_piece_or_transition_risk",
+    "tempo_shift": "tempo_shift",
+    "tactical_shift": "tempo_shift",
+    "red_card": "manual_tactical_review_needed",
+    "injury": "manual_tactical_review_needed",
+    "penalty": "manual_tactical_review_needed",
+}
+
+
+def _video_review_manual_annotation_hypothesis(annotation: dict) -> dict:
+    event_type = str(annotation.get("event_type") or "").strip()
+    mapped_code = VIDEO_REVIEW_MANUAL_EVENT_HYPOTHESES.get(event_type, "manual_tactical_review_needed")
+    label = VIDEO_REVIEW_MANUAL_EVENT_LABELS.get(event_type, event_type or "manual")
+    frame_index = annotation.get("frame_index")
+    timestamp = annotation.get("timestamp_seconds")
+    note = str(annotation.get("note") or "").strip()
+    evidence_bits = [f"event={event_type or '-'}"]
+    if frame_index not in (None, ""):
+        evidence_bits.append(f"frame={frame_index}")
+    if timestamp not in (None, ""):
+        evidence_bits.append(f"time={_safe_float(timestamp):.0f}s")
+    if note:
+        evidence_bits.append(f"note={note[:80]}")
+    return {
+        "code": mapped_code,
+        "title": f"Manual annotation: {label}",
+        "confidence": round(max(0.35, min(1.0, _safe_float(annotation.get("confidence"), 0.78))), 2),
+        "evidence": " | ".join(evidence_bits),
+        "recommendation": "Feed the manual video annotation into Evaluation Agent post-match memory.",
+        "source": "manual_annotation",
+        "annotation_id": annotation.get("annotation_id"),
+        "event_type": event_type,
+    }
+
+
+def _apply_video_review_manual_annotations(review: dict, agent_review: dict) -> dict:
+    annotations = [dict(item) for item in review.get("manual_annotations", []) if isinstance(item, dict)]
+    if not annotations:
+        return agent_review
+    updated = dict(agent_review)
+    existing = [
+        dict(item)
+        for item in updated.get("event_hypotheses", [])
+        if isinstance(item, dict) and str(item.get("source") or "") != "manual_annotation"
+    ]
+    manual_hypotheses = [_video_review_manual_annotation_hypothesis(item) for item in annotations]
+    merged = sorted(
+        existing + manual_hypotheses,
+        key=lambda item: (-_safe_float(item.get("confidence"), 0.0), str(item.get("code") or "")),
+    )
+    event_tags: list[str] = []
+    for item in annotations:
+        event_type = str(item.get("event_type") or "").strip()
+        if event_type and event_type not in event_tags:
+            event_tags.append(event_type)
+    updated["event_hypotheses"] = merged[:8]
+    updated["manual_annotation_count"] = len(annotations)
+    updated["manual_event_tags"] = event_tags
+    updated["last_manual_annotation_at"] = annotations[-1].get("created_at")
+    updated["recommended_followup"] = {
+        "code": "feed_manual_video_annotations_into_evaluation_agent",
+        "message": "已补充人工事件标注，进入 Evaluation Agent 赛后复盘记忆并用于后续错因归类。",
+    }
+    narrative = dict(updated.get("narrative_review") or {})
+    narrative["manual_annotation_count"] = len(annotations)
+    narrative["manual_annotations"] = annotations[-5:]
+    narrative["event_hypotheses"] = merged[:3]
+    narrative["recommendation"] = updated["recommended_followup"]["message"]
+    updated["narrative_review"] = narrative
+    next_actions = [str(action) for action in updated.get("next_actions", []) if str(action)]
+    if "review_manual_video_annotations" not in next_actions:
+        next_actions.append("review_manual_video_annotations")
+    updated["next_actions"] = next_actions
+    return updated
+
+
 def _video_review_narrative(settlement: dict, visual_analysis: dict, error_causes: list[str]) -> dict:
     match_title = f"{settlement.get('home_team') or '-'} vs {settlement.get('away_team') or '-'}"
     score = f"{settlement.get('home_goals', '-')}-{settlement.get('away_goals', '-')}"
@@ -12592,17 +12686,18 @@ def extract_video_review_frames_now(
         {},
     )
     if settlement:
-        review["agent_review"] = _video_review_ai_summary(
+        agent_review = _video_review_ai_summary(
             settlement,
             frame_count=len(frames),
             notes=str((review.get("agent_review") or {}).get("operator_notes") or "") if isinstance(review.get("agent_review"), dict) else "",
             visual_analysis=visual_analysis,
         )
+        review["agent_review"] = _apply_video_review_manual_annotations(review, agent_review)
     elif isinstance(review.get("agent_review"), dict):
         agent_review = dict(review["agent_review"])
         agent_review["frame_count"] = len(frames)
         agent_review["status"] = "frames_ready" if frames else "metadata_ready"
-        review["agent_review"] = agent_review
+        review["agent_review"] = _apply_video_review_manual_annotations(review, agent_review)
 
     items[target_index] = review
     _save_video_review_items(items)
@@ -12614,6 +12709,70 @@ def extract_video_review_frames_now(
         "extraction": extraction,
         "review": review,
         "summary_text": f"video_review={resolved_id} | frames={len(frames)} | status={extraction.get('status', '-')}",
+    }
+
+
+def add_video_review_annotation(
+    review_id: str,
+    *,
+    event_type: str,
+    timestamp_seconds: float | int | None = None,
+    frame_index: int | None = None,
+    note: str = "",
+    confidence: float = 0.78,
+    created_by: str = "operator",
+) -> dict:
+    resolved_id = str(review_id or "").strip()
+    if not resolved_id:
+        return {"ok": False, "reason": "missing_review_id"}
+    resolved_type = str(event_type or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if not resolved_type:
+        return {"ok": False, "reason": "missing_event_type"}
+    if resolved_type not in VIDEO_REVIEW_MANUAL_EVENT_LABELS:
+        return {
+            "ok": False,
+            "reason": "unsupported_event_type",
+            "supported_event_types": sorted(VIDEO_REVIEW_MANUAL_EVENT_LABELS),
+        }
+    items = _load_video_review_items()
+    target_index = next(
+        (index for index, item in enumerate(items) if isinstance(item, dict) and str(item.get("review_id") or "") == resolved_id),
+        None,
+    )
+    if target_index is None:
+        return {"ok": False, "reason": "review_not_found", "review_id": resolved_id}
+
+    review = dict(items[target_index])
+    annotations = [dict(item) for item in review.get("manual_annotations", []) if isinstance(item, dict)]
+    created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    annotation_seed = f"{resolved_id}|{created_at}|{len(annotations)}|{resolved_type}|{note}"
+    annotation = {
+        "annotation_id": hashlib.sha1(annotation_seed.encode("utf-8")).hexdigest()[:14],
+        "created_at": created_at,
+        "created_by": str(created_by or "operator"),
+        "event_type": resolved_type,
+        "event_label": VIDEO_REVIEW_MANUAL_EVENT_LABELS[resolved_type],
+        "timestamp_seconds": round(_safe_float(timestamp_seconds), 2) if timestamp_seconds not in (None, "") else None,
+        "frame_index": _safe_int(frame_index) if frame_index not in (None, "") else None,
+        "confidence": round(max(0.35, min(1.0, _safe_float(confidence, 0.78))), 2),
+        "note": str(note or "").strip(),
+        "source": "manual",
+    }
+    annotations.append(annotation)
+    review["manual_annotations"] = annotations[-100:]
+    review["manual_annotation_count"] = len(review["manual_annotations"])
+    agent_review = dict(review.get("agent_review") or {})
+    review["agent_review"] = _apply_video_review_manual_annotations(review, agent_review)
+    review["updated_at"] = created_at
+    items[target_index] = review
+    _save_video_review_items(items)
+    return {
+        "ok": True,
+        "reason": "ok",
+        "review_id": resolved_id,
+        "annotation": annotation,
+        "review": review,
+        "summary_text": f"video_review={resolved_id} | manual_annotations={len(review['manual_annotations'])}",
     }
 
 
