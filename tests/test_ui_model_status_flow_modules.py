@@ -28,6 +28,7 @@ from v24_app.ui_modules import (
     build_play_model_policy_apply_success_message,
     build_play_model_policy_decision_rows,
     build_play_model_policy_status_text,
+    build_play_model_takeover_gate_audit_rows,
     build_play_model_takeover_gate_rows,
     build_play_model_training_status_text,
     build_play_threshold_apply_status_text,
@@ -425,6 +426,39 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
                 },
                 "policy_blocked_by_gate": True,
                 "takeover_gate": {"status": "watch", "recommendation": "Shadow only."},
+                "takeover_gate_history_count": 2,
+                "takeover_gate_audit": {
+                    "history_count": 2,
+                    "latest_transition": "block->watch",
+                    "latest_reason": "total_goals_model_no_uplift",
+                    "latest_validation_sample_count": 320,
+                    "latest_total_goals_model_delta": -0.005,
+                    "latest_score_model_delta": 0.002,
+                    "latest_policy_impact": "formal_takeover_disabled",
+                    "latest_report_path": "reports/play.md",
+                },
+                "takeover_gate_history": [
+                    {
+                        "status": "watch",
+                        "transition": "block->watch",
+                        "reason": "total_goals_model_no_uplift",
+                        "updated_at": "2026-05-13 11:00:00",
+                        "policy_impact": "formal_takeover_disabled",
+                        "metrics": {
+                            "validation_sample_count": 320,
+                            "total_goals_model_delta": -0.005,
+                            "score_model_delta": 0.002,
+                        },
+                        "report_path": "reports/play.md",
+                    },
+                    {
+                        "status": "block",
+                        "transition": "none->block",
+                        "reason": "validation_sample_count_low",
+                        "updated_at": "2026-05-13 10:00:00",
+                        "policy_impact": "formal_takeover_disabled",
+                    },
+                ],
             }
         )
 
@@ -433,6 +467,10 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
         self.assertIn("Effective scoreline takeover: enabled=False", policy_text)
         self.assertIn("Raw total goals takeover: enabled=True", policy_text)
         self.assertIn("Effective total goals takeover: enabled=False", policy_text)
+        self.assertIn("Takeover gate audit", policy_text)
+        self.assertIn("Takeover gate audit: 2 transition(s)", policy_text)
+        self.assertIn("latest block->watch", policy_text)
+        self.assertIn("total_goals_delta -0.50%", policy_text)
         self.assertIn("当前接管被守门策略阻断", policy_text)
 
         rows = build_play_model_policy_decision_rows(
@@ -451,6 +489,38 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
         self.assertIn("raw takeover True | effective takeover False", rows[0]["body"])
         self.assertEqual(rows[1]["title"], "Scoreline takeover: OFF")
         self.assertIn("raw takeover True | effective takeover False", rows[1]["body"])
+
+        audit_rows = build_play_model_takeover_gate_audit_rows(
+            {
+                "takeover_gate_history_count": 2,
+                "takeover_gate_history": [
+                    {
+                        "status": "watch",
+                        "transition": "block->watch",
+                        "reason": "total_goals_model_no_uplift",
+                        "updated_at": "2026-05-13 11:00:00",
+                        "policy_impact": "formal_takeover_disabled",
+                        "metrics": {
+                            "validation_sample_count": 320,
+                            "total_goals_model_delta": -0.005,
+                            "score_model_delta": 0.002,
+                        },
+                        "report_path": "reports/play.md",
+                    },
+                    {
+                        "status": "block",
+                        "transition": "none->block",
+                        "reason": "validation_sample_count_low",
+                        "updated_at": "2026-05-13 10:00:00",
+                        "policy_impact": "formal_takeover_disabled",
+                    },
+                ],
+            }
+        )
+        self.assertEqual(audit_rows[0]["title"], "Takeover gate audit: 2 transition(s)")
+        self.assertEqual(audit_rows[0]["tone"], "warning")
+        self.assertIn("latest block->watch", audit_rows[0]["body"])
+        self.assertEqual(audit_rows[1]["title"], "Previous gate transition: none->block")
 
     def test_play_model_training_and_backtest(self) -> None:
         status_text = build_play_model_training_status_text(

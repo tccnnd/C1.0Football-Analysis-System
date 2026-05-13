@@ -201,6 +201,69 @@ class PlayModelBacktestTests(unittest.TestCase):
         self.assertFalse(effective_policy["scoreline"]["takeover_enabled"])
         self.assertTrue(raw_policy["total_goals"]["takeover_enabled"])
 
+    def test_takeover_gate_history_records_status_transitions_with_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            policy_file = Path(tmp_dir) / "play_model_policy_v1.json"
+            gate_history_file = Path(tmp_dir) / "play_model_takeover_gate_history_v1.json"
+            with patch.object(core, "PLAY_MODEL_POLICY_FILE", policy_file):
+                with patch.object(core, "PLAY_MODEL_TAKEOVER_GATE_HISTORY_FILE", gate_history_file):
+                    core._PLAY_MODEL_POLICY_CACHE.clear()
+                    core._PLAY_MODEL_POLICY_CACHE.update({"mtime": None, "policy": None, "report": {}})
+
+                    block_gate = {
+                        "status": "block",
+                        "updated_at": "2026-05-13 10:00:00",
+                        "reason": "validation_sample_count_low",
+                        "recommendation": "Keep shadow.",
+                        "policy_impact": "formal_takeover_disabled",
+                        "blocking_count": 1,
+                        "warning_count": 0,
+                        "issues": [{"code": "validation_sample_count_low"}],
+                        "metrics": {
+                            "validation_sample_count": 120,
+                            "total_goals_model_delta": -0.01,
+                            "score_model_delta": -0.02,
+                        },
+                    }
+                    backtest = {
+                        "ok": True,
+                        "reason": "ok",
+                        "validation": {"sample_count": 120, "date_start": "2026-01-01"},
+                        "improvement": {"total_goals_model_delta": -0.01, "score_model_delta": -0.02},
+                        "report_path": "reports/play.md",
+                    }
+
+                    core._save_play_model_takeover_gate_snapshot(block_gate, backtest)
+                    core._save_play_model_takeover_gate_snapshot(block_gate, backtest)
+                    watch_gate = dict(block_gate)
+                    watch_gate.update(
+                        {
+                            "status": "watch",
+                            "updated_at": "2026-05-13 11:00:00",
+                            "reason": "total_goals_model_no_uplift",
+                            "blocking_count": 0,
+                            "warning_count": 1,
+                            "issues": [{"code": "total_goals_model_no_uplift"}],
+                        }
+                    )
+                    core._save_play_model_takeover_gate_snapshot(watch_gate, backtest)
+                    history = core.get_play_model_takeover_gate_history(limit=0)
+                    status = core.get_play_model_policy_status()
+
+        self.assertEqual(len(history), 2)
+        self.assertEqual(history[0]["transition"], "block->watch")
+        self.assertEqual(history[0]["reason"], "total_goals_model_no_uplift")
+        self.assertEqual(history[0]["issue_codes"], ["total_goals_model_no_uplift"])
+        self.assertEqual(history[0]["validation"]["sample_count"], 120)
+        self.assertEqual(history[0]["improvement"]["score_model_delta"], -0.02)
+        self.assertEqual(history[1]["transition"], "none->block")
+        self.assertEqual(status["takeover_gate_history_count"], 2)
+        self.assertEqual(status["takeover_gate_history"][0]["transition"], "block->watch")
+        self.assertEqual(status["takeover_gate_audit"]["latest_transition"], "block->watch")
+        self.assertEqual(status["takeover_gate_audit"]["latest_reason"], "total_goals_model_no_uplift")
+        self.assertEqual(status["takeover_gate_audit"]["latest_validation_sample_count"], 120)
+        self.assertTrue(str(status["takeover_gate_history_source"]).endswith("play_model_takeover_gate_history_v1.json"))
+
     def test_run_draw_specialist_backtest_tracks_precision_recall_and_buckets(self) -> None:
         validation_items = [
             {

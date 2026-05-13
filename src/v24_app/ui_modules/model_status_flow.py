@@ -743,6 +743,60 @@ def build_play_model_takeover_gate_rows(status: Mapping[str, object] | object) -
     return rows
 
 
+def build_play_model_takeover_gate_audit_rows(status: Mapping[str, object] | object) -> list[dict[str, str]]:
+    resolved = status if isinstance(status, Mapping) else {}
+    history = resolved.get("takeover_gate_history", []) if isinstance(resolved, Mapping) else []
+    audit = resolved.get("takeover_gate_audit", {}) if isinstance(resolved.get("takeover_gate_audit"), Mapping) else {}
+    history_items = [item for item in history if isinstance(item, Mapping)] if isinstance(history, list) else []
+    history_count = _safe_int(resolved.get("takeover_gate_history_count"), _safe_int(audit.get("history_count"), len(history_items)))
+    if not history_items:
+        return [
+            {
+                "title": "Takeover gate audit: no transitions",
+                "body": f"history_source {resolved.get('takeover_gate_history_source') or '-'}",
+                "tone": "neutral",
+            }
+        ]
+    latest = history_items[0]
+    latest_metrics = latest.get("metrics", {}) if isinstance(latest.get("metrics"), Mapping) else {}
+    latest_validation = latest.get("validation", {}) if isinstance(latest.get("validation"), Mapping) else {}
+    latest_status = str(latest.get("status") or audit.get("latest_status") or "-")
+    latest_samples = _safe_int(
+        latest_metrics.get("validation_sample_count"),
+        _safe_int(latest_validation.get("sample_count"), _safe_int(audit.get("latest_validation_sample_count"))),
+    )
+    latest_total_delta = _safe_float(
+        latest_metrics.get("total_goals_model_delta"),
+        _safe_float(audit.get("latest_total_goals_model_delta"), 0.0),
+    )
+    latest_score_delta = _safe_float(
+        latest_metrics.get("score_model_delta"),
+        _safe_float(audit.get("latest_score_model_delta"), 0.0),
+    )
+    rows = [
+        {
+            "title": f"Takeover gate audit: {history_count} transition(s)",
+            "body": (
+                f"latest {latest.get('transition') or audit.get('latest_transition') or '-'} | "
+                f"reason {latest.get('reason') or audit.get('latest_reason') or '-'} | updated {latest.get('updated_at') or audit.get('latest_updated_at') or '-'}\n"
+                f"samples {latest_samples} | total_goals_delta {latest_total_delta:+.2%} | score_delta {latest_score_delta:+.2%}\n"
+                f"policy_impact {latest.get('policy_impact') or audit.get('latest_policy_impact') or '-'} | report {latest.get('report_path') or audit.get('latest_report_path') or '-'}"
+            ),
+            "tone": _takeover_gate_tone(latest_status),
+        }
+    ]
+    for item in history_items[1:3]:
+        status_text = str(item.get("status") or "-")
+        rows.append(
+            {
+                "title": f"Previous gate transition: {item.get('transition') or '-'}",
+                "body": f"reason {item.get('reason') or '-'} | updated {item.get('updated_at') or '-'} | impact {item.get('policy_impact') or '-'}",
+                "tone": _takeover_gate_tone(status_text),
+            }
+        )
+    return rows
+
+
 def build_train_play_models_apply_status_text(result: Mapping[str, object] | object) -> str:
     resolved = result if isinstance(result, Mapping) else {}
     trained = bool(resolved.get("trained"))
@@ -1006,6 +1060,10 @@ def build_play_model_policy_status_text(status: Mapping[str, object] | object) -
     takeover_gate_text = "\n".join(
         f"- {row.get('title', '-')}: {row.get('body', '-')}" for row in takeover_gate_rows
     )
+    takeover_gate_audit_rows = build_play_model_takeover_gate_audit_rows(resolved)
+    takeover_gate_audit_text = "\n".join(
+        f"- {row.get('title', '-')}: {row.get('body', '-')}" for row in takeover_gate_audit_rows
+    )
     return (
         "玩法接管策略\n"
         + f"- 更新时间: {resolved.get('updated_at') or '-'}\n"
@@ -1024,4 +1082,6 @@ def build_play_model_policy_status_text(status: Mapping[str, object] | object) -
         + decision_text
         + "\n\nTakeover gate\n"
         + takeover_gate_text
+        + "\n\nTakeover gate audit\n"
+        + takeover_gate_audit_text
     )

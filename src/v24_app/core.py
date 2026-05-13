@@ -66,6 +66,7 @@ ENSEMBLE_WEIGHTS_FILE = PROJECT_DIR / "data" / "models" / "ensemble_weights_v1.j
 PLAY_THRESHOLDS_FILE = PROJECT_DIR / "data" / "models" / "play_thresholds_v1.json"
 PLAY_MODEL_POLICY_FILE = PROJECT_DIR / "data" / "models" / "play_model_policy_v1.json"
 PLAY_MODEL_POLICY_HISTORY_FILE = PROJECT_DIR / "data" / "models" / "play_model_policy_history_v1.json"
+PLAY_MODEL_TAKEOVER_GATE_HISTORY_FILE = PROJECT_DIR / "data" / "models" / "play_model_takeover_gate_history_v1.json"
 DRAW_SPECIALIST_BACKTEST_FILE = PROJECT_DIR / "data" / "models" / "draw_specialist_backtest_v1.json"
 DRAW_RELEASE_GUARD_POLICY_FILE = PROJECT_DIR / "data" / "models" / "draw_release_guard_policy_v1.json"
 DRAW_RELEASE_GUARD_POLICY_HISTORY_FILE = PROJECT_DIR / "data" / "models" / "draw_release_guard_policy_history_v1.json"
@@ -4084,6 +4085,115 @@ def get_play_model_policy_history(*, limit: int = 20) -> list[dict]:
     return items[: max(0, int(limit))]
 
 
+def _load_play_model_takeover_gate_history_entries() -> list[dict]:
+    if not PLAY_MODEL_TAKEOVER_GATE_HISTORY_FILE.exists():
+        return []
+    try:
+        data = json.loads(PLAY_MODEL_TAKEOVER_GATE_HISTORY_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    items = data.get("items") if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        return []
+    return [dict(item) for item in items if isinstance(item, dict)]
+
+
+def _write_play_model_takeover_gate_history_entries(items: list[dict]) -> None:
+    PLAY_MODEL_TAKEOVER_GATE_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "items": items[-300:],
+    }
+    PLAY_MODEL_TAKEOVER_GATE_HISTORY_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def get_play_model_takeover_gate_history(*, limit: int = 20) -> list[dict]:
+    items = _load_play_model_takeover_gate_history_entries()
+    items.sort(key=lambda item: (str(item.get("updated_at") or ""), str(item.get("version_id") or "")), reverse=True)
+    if limit <= 0:
+        return items
+    return items[: max(0, int(limit))]
+
+
+def _summarize_play_model_takeover_gate_history(items: list[dict]) -> dict:
+    if not items:
+        return {
+            "history_count": 0,
+            "latest_status": None,
+            "latest_transition": None,
+            "latest_reason": None,
+            "latest_updated_at": None,
+        }
+    latest = items[0]
+    metrics = latest.get("metrics", {}) if isinstance(latest.get("metrics"), dict) else {}
+    validation = latest.get("validation", {}) if isinstance(latest.get("validation"), dict) else {}
+    return {
+        "history_count": len(items),
+        "latest_status": latest.get("status"),
+        "latest_previous_status": latest.get("previous_status"),
+        "latest_transition": latest.get("transition"),
+        "latest_reason": latest.get("reason"),
+        "latest_updated_at": latest.get("updated_at"),
+        "latest_policy_impact": latest.get("policy_impact"),
+        "latest_backtest_ok": bool(latest.get("backtest_ok")),
+        "latest_validation_sample_count": int(
+            metrics.get("validation_sample_count", validation.get("sample_count", 0)) or 0
+        ),
+        "latest_total_goals_model_delta": _safe_float(metrics.get("total_goals_model_delta"), 0.0),
+        "latest_score_model_delta": _safe_float(metrics.get("score_model_delta"), 0.0),
+        "latest_report_path": latest.get("report_path"),
+    }
+
+
+def _append_play_model_takeover_gate_history_entry(
+    gate: dict,
+    previous_gate: dict | None,
+    backtest_result: dict,
+    *,
+    source: str = "backtest",
+) -> None:
+    if not isinstance(gate, dict):
+        return
+    current_status = normalize_text(gate.get("status"))
+    if current_status not in {"block", "watch", "allow"}:
+        return
+    previous = previous_gate if isinstance(previous_gate, dict) else {}
+    previous_status = normalize_text(previous.get("status"))
+    if previous_status == current_status:
+        return
+    history_items = _load_play_model_takeover_gate_history_entries()
+    updated_at = str(gate.get("updated_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    version_id = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{len(history_items) + 1:04d}"
+    issues = gate.get("issues", []) if isinstance(gate.get("issues"), list) else []
+    history_items.append(
+        {
+            "version_id": version_id,
+            "updated_at": updated_at,
+            "source": str(source or "backtest"),
+            "previous_status": previous_status or None,
+            "status": current_status,
+            "transition": f"{previous_status or 'none'}->{current_status}",
+            "reason": str(gate.get("reason") or "-"),
+            "recommendation": str(gate.get("recommendation") or "-"),
+            "policy_impact": str(gate.get("policy_impact") or "-"),
+            "blocking_count": int(gate.get("blocking_count", 0) or 0),
+            "warning_count": int(gate.get("warning_count", 0) or 0),
+            "issue_codes": [
+                str(item.get("code") or "-")
+                for item in issues
+                if isinstance(item, dict)
+            ],
+            "metrics": json.loads(json.dumps(gate.get("metrics", {}) if isinstance(gate.get("metrics"), dict) else {})),
+            "validation": json.loads(json.dumps(backtest_result.get("validation", {}) if isinstance(backtest_result.get("validation"), dict) else {})),
+            "improvement": json.loads(json.dumps(backtest_result.get("improvement", {}) if isinstance(backtest_result.get("improvement"), dict) else {})),
+            "backtest_ok": bool(backtest_result.get("ok")),
+            "backtest_reason": str(backtest_result.get("reason") or "-"),
+            "report_path": backtest_result.get("report_path"),
+        }
+    )
+    _write_play_model_takeover_gate_history_entries(history_items)
+
+
 def _append_play_model_policy_history_entry(report: dict, previous_report: dict | None, *, source: str = "calibration") -> None:
     if not isinstance(report, dict):
         return
@@ -4157,6 +4267,8 @@ def get_play_model_policy_status() -> dict:
     takeover_gate = report.get("takeover_gate", {}) if isinstance(report.get("takeover_gate"), dict) else {}
     effective_policy = apply_play_model_takeover_gate_to_policy(normalized, takeover_gate)
     policy_blocked_by_gate = _play_model_policy_blocked_by_gate(normalized, effective_policy, takeover_gate)
+    takeover_gate_history = get_play_model_takeover_gate_history(limit=0)
+    takeover_gate_history_recent = takeover_gate_history[:5]
     return {
         "updated_at": report.get("updated_at"),
         "version_id": report.get("version_id", "-"),
@@ -4168,8 +4280,12 @@ def get_play_model_policy_status() -> dict:
         "metrics": report.get("metrics", {}),
         "takeover_gate": takeover_gate,
         "last_backtest": report.get("last_backtest", {}),
+        "takeover_gate_audit": _summarize_play_model_takeover_gate_history(takeover_gate_history),
+        "takeover_gate_history": takeover_gate_history_recent,
+        "takeover_gate_history_count": len(takeover_gate_history),
         "source": str(PLAY_MODEL_POLICY_FILE),
         "history_source": str(PLAY_MODEL_POLICY_HISTORY_FILE),
+        "takeover_gate_history_source": str(PLAY_MODEL_TAKEOVER_GATE_HISTORY_FILE),
     }
 
 
@@ -4871,6 +4987,7 @@ def _save_play_model_takeover_gate_snapshot(gate: dict, backtest_result: dict) -
     if not isinstance(gate, dict):
         return
     report = _load_play_model_policy_report()
+    previous_gate = report.get("takeover_gate", {}) if isinstance(report.get("takeover_gate"), dict) else {}
     report["takeover_gate"] = json.loads(json.dumps(gate))
     report["last_backtest"] = {
         "updated_at": gate.get("updated_at"),
@@ -4881,6 +4998,7 @@ def _save_play_model_takeover_gate_snapshot(gate: dict, backtest_result: dict) -
         "report_path": backtest_result.get("report_path"),
     }
     _save_play_model_policy_report(report)
+    _append_play_model_takeover_gate_history_entry(gate, previous_gate, backtest_result)
 
 
 def repair_training_data_health(action_key: str, *, input_path: Path | str | None = None) -> dict:
