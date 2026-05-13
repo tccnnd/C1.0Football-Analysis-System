@@ -615,8 +615,12 @@ def _policy_reason_label(reason: object) -> str:
 def build_play_model_policy_decision_rows(status: Mapping[str, object] | object) -> list[dict[str, str]]:
     resolved = status if isinstance(status, Mapping) else {}
     policy = resolved.get("policy", {}) if isinstance(resolved, Mapping) else {}
-    scoreline_policy = policy.get("scoreline", {}) if isinstance(policy, Mapping) else {}
-    total_goals_policy = policy.get("total_goals", {}) if isinstance(policy, Mapping) else {}
+    effective_policy = resolved.get("effective_policy", {}) if isinstance(resolved, Mapping) else {}
+    display_policy = effective_policy if isinstance(effective_policy, Mapping) and effective_policy else policy
+    scoreline_policy = display_policy.get("scoreline", {}) if isinstance(display_policy, Mapping) else {}
+    total_goals_policy = display_policy.get("total_goals", {}) if isinstance(display_policy, Mapping) else {}
+    raw_scoreline_policy = policy.get("scoreline", {}) if isinstance(policy, Mapping) else {}
+    raw_total_goals_policy = policy.get("total_goals", {}) if isinstance(policy, Mapping) else {}
     metrics = resolved.get("metrics", {}) if isinstance(resolved, Mapping) else {}
     total_goals_metrics = metrics.get("total_goals", {}) if isinstance(metrics, Mapping) else {}
     total_goals_best = total_goals_metrics.get("best", {}) if isinstance(total_goals_metrics, Mapping) else {}
@@ -637,6 +641,7 @@ def build_play_model_policy_decision_rows(status: Mapping[str, object] | object)
     total_goals_body = (
         f"current {total_goals_current:.2%} | candidate {total_goals_candidate:.2%} | "
         f"uplift {total_goals_uplift:+.2%} / required {total_goals_required:+.2%}{total_goals_holdout_text}\n"
+        f"raw takeover {bool(raw_total_goals_policy.get('takeover_enabled'))} | effective takeover {total_goals_enabled}\n"
         f"reason: {total_goals_reason} | min_conf {float(total_goals_policy.get('min_confidence', 0) or 0):.2f} | "
         f"hits {int(total_goals_best.get('hits', 0) or 0)}/{int(total_goals_best.get('covered', 0) or 0)}"
     )
@@ -655,6 +660,7 @@ def build_play_model_policy_decision_rows(status: Mapping[str, object] | object)
     score_covered = int(scoreline_best.get("score_covered", 0) or 0)
     scoreline_body = (
         f"score {score_hits}/{score_covered} ({score_accuracy:.2%}) | combined {int(scoreline_best.get('combined_hits', 0) or 0)}{scoreline_holdout_text}\n"
+        f"raw takeover {bool(raw_scoreline_policy.get('takeover_enabled'))} | effective takeover {scoreline_enabled}\n"
         f"reason: {scoreline_reason}\n"
         f"regular same {float(scoreline_policy.get('regular_same_outcome_min_confidence', 0) or 0):.2f} | "
         f"regular cross {scoreline_policy.get('regular_cross_outcome_enabled')}@{float(scoreline_policy.get('regular_cross_outcome_min_confidence', 0) or 0):.2f}\n"
@@ -977,10 +983,21 @@ def build_play_model_training_status_text(status: Mapping[str, object] | object)
 def build_play_model_policy_status_text(status: Mapping[str, object] | object) -> str:
     resolved = status if isinstance(status, Mapping) else {}
     policy = resolved.get("policy", {}) if isinstance(resolved, Mapping) else {}
+    effective_policy = resolved.get("effective_policy", {}) if isinstance(resolved, Mapping) else {}
+    if not isinstance(effective_policy, Mapping) or not effective_policy:
+        effective_policy = policy
     scoreline = policy.get("scoreline", {}) if isinstance(policy, Mapping) else {}
     total_goals = policy.get("total_goals", {}) if isinstance(policy, Mapping) else {}
+    effective_scoreline = effective_policy.get("scoreline", {}) if isinstance(effective_policy, Mapping) else {}
+    effective_total_goals = effective_policy.get("total_goals", {}) if isinstance(effective_policy, Mapping) else {}
     metrics = resolved.get("metrics", {}) if isinstance(resolved, Mapping) else {}
     best = metrics.get("scoreline_best", {}) if isinstance(metrics, Mapping) else {}
+    gate_status = str(_takeover_gate_from_status(resolved).get("status") or "").strip().lower()
+    gate_blocked_text = (
+        "- 当前接管被守门策略阻断\n"
+        if bool(resolved.get("policy_blocked_by_gate")) or gate_status in {"block", "watch"}
+        else ""
+    )
     decision_rows = build_play_model_policy_decision_rows(resolved)
     decision_text = "\n".join(
         f"- {row.get('title', '-')}: {row.get('body', '-')}" for row in decision_rows
@@ -997,6 +1014,12 @@ def build_play_model_policy_status_text(status: Mapping[str, object] | object) -
         + f"- 高波动确认: 同向={float(scoreline.get('volatile_same_outcome_min_confidence', 0) or 0):.2f} | 跨向={scoreline.get('volatile_cross_outcome_enabled')}@{float(scoreline.get('volatile_cross_outcome_min_confidence', 0) or 0):.2f}\n"
         + f"- 总进球接管: enabled={total_goals.get('takeover_enabled')} | min_conf={float(total_goals.get('min_confidence', 0) or 0):.2f}\n"
         + f"- 联合最优: 比分={int(best.get('score_hits', 0) or 0)}/{int(best.get('score_covered', 0) or 0)} ({float(best.get('score_accuracy', 0) or 0):.2%}) | 总进球={int(best.get('total_goals_hits', 0) or 0)}/{int(best.get('total_goals_covered', 0) or 0)} ({float(best.get('total_goals_accuracy', 0) or 0):.2%}) | combined={int(best.get('combined_hits', 0) or 0)}\n"
+        + "\nPolicy gate execution\n"
+        + gate_blocked_text
+        + f"- Raw scoreline takeover: enabled={scoreline.get('takeover_enabled')}\n"
+        + f"- Effective scoreline takeover: enabled={effective_scoreline.get('takeover_enabled')}\n"
+        + f"- Raw total goals takeover: enabled={total_goals.get('takeover_enabled')} | min_conf={float(total_goals.get('min_confidence', 0) or 0):.2f}\n"
+        + f"- Effective total goals takeover: enabled={effective_total_goals.get('takeover_enabled')} | min_conf={float(effective_total_goals.get('min_confidence', 0) or 0):.2f}\n"
         + "\nTakeover decisions\n"
         + decision_text
         + "\n\nTakeover gate\n"

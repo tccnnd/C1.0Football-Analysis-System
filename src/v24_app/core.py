@@ -4118,6 +4118,34 @@ def _append_play_model_policy_history_entry(report: dict, previous_report: dict 
     _write_play_model_policy_history_entries(history_items)
 
 
+def apply_play_model_takeover_gate_to_policy(policy: dict | None, takeover_gate: dict | None) -> dict:
+    """Return the play-model policy after takeover-gate execution constraints."""
+    effective = json.loads(json.dumps(DEFAULT_PLAY_MODEL_POLICY))
+    if isinstance(policy, dict):
+        for key, value in policy.items():
+            if key in effective and isinstance(value, dict):
+                effective[key].update(value)
+    gate_status = normalize_text((takeover_gate or {}).get("status") if isinstance(takeover_gate, dict) else "")
+    if gate_status in {"block", "watch"}:
+        effective.setdefault("total_goals", {})["takeover_enabled"] = False
+        effective.setdefault("scoreline", {})["takeover_enabled"] = False
+    return effective
+
+
+def _play_model_policy_blocked_by_gate(policy: dict | None, effective_policy: dict | None, takeover_gate: dict | None) -> bool:
+    gate_status = normalize_text((takeover_gate or {}).get("status") if isinstance(takeover_gate, dict) else "")
+    if gate_status not in {"block", "watch"}:
+        return False
+    raw = policy if isinstance(policy, dict) else {}
+    effective = effective_policy if isinstance(effective_policy, dict) else {}
+    for key in ("total_goals", "scoreline"):
+        raw_item = raw.get(key, {}) if isinstance(raw.get(key), dict) else {}
+        effective_item = effective.get(key, {}) if isinstance(effective.get(key), dict) else {}
+        if bool(raw_item.get("takeover_enabled")) and not bool(effective_item.get("takeover_enabled")):
+            return True
+    return False
+
+
 def get_play_model_policy_status() -> dict:
     report = _load_play_model_policy_report()
     policy = report.get("policy", {})
@@ -4126,14 +4154,19 @@ def get_play_model_policy_status() -> dict:
         for key, value in policy.items():
             if key in normalized and isinstance(value, dict):
                 normalized[key].update(value)
+    takeover_gate = report.get("takeover_gate", {}) if isinstance(report.get("takeover_gate"), dict) else {}
+    effective_policy = apply_play_model_takeover_gate_to_policy(normalized, takeover_gate)
+    policy_blocked_by_gate = _play_model_policy_blocked_by_gate(normalized, effective_policy, takeover_gate)
     return {
         "updated_at": report.get("updated_at"),
         "version_id": report.get("version_id", "-"),
         "mode": report.get("mode", "default"),
         "policy": normalized,
+        "effective_policy": effective_policy,
+        "policy_blocked_by_gate": policy_blocked_by_gate,
         "validation": report.get("validation", {}),
         "metrics": report.get("metrics", {}),
-        "takeover_gate": report.get("takeover_gate", {}),
+        "takeover_gate": takeover_gate,
         "last_backtest": report.get("last_backtest", {}),
         "source": str(PLAY_MODEL_POLICY_FILE),
         "history_source": str(PLAY_MODEL_POLICY_HISTORY_FILE),
@@ -4804,10 +4837,11 @@ def evaluate_play_model_takeover_gate(
     else:
         status = "allow"
         recommendation = "Backtest is stable enough for policy calibration or guarded takeover review."
+    formal_takeover_allowed = status == "allow"
 
     return {
         "status": status,
-        "mode": "watch_only",
+        "mode": "enforced",
         "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "reason": issues[0]["code"] if issues else "stable_backtest",
         "recommendation": recommendation,
@@ -4825,7 +4859,11 @@ def evaluate_play_model_takeover_gate(
             "min_score_model_delta": PLAY_MODEL_TAKEOVER_GATE_SCORE_MIN_DELTA,
             "block_score_model_delta": PLAY_MODEL_TAKEOVER_GATE_SCORE_BLOCK_DELTA,
         },
-        "policy_impact": "status_only",
+        "policy_impact": "formal_takeover_allowed" if formal_takeover_allowed else "formal_takeover_disabled",
+        "enforcement": {
+            "formal_takeover_allowed": formal_takeover_allowed,
+            "effective_policy_required": True,
+        },
     }
 
 
@@ -4903,8 +4941,10 @@ def repair_training_data_health(action_key: str, *, input_path: Path | str | Non
     }
 
 
-def _current_play_model_policy() -> dict:
-    return get_play_model_policy_status().get("policy", json.loads(json.dumps(DEFAULT_PLAY_MODEL_POLICY)))
+def _current_play_model_policy(*, effective: bool = True) -> dict:
+    status = get_play_model_policy_status()
+    key = "effective_policy" if effective else "policy"
+    return status.get(key, json.loads(json.dumps(DEFAULT_PLAY_MODEL_POLICY)))
 
 
 def _bayes_calibration_mtime() -> float | None:
@@ -8799,7 +8839,7 @@ def calibrate_play_model_policy_now(
         return {"calibrated": False, "reason": "no_valid_rows"}
 
     tuning_rows, holdout_rows = _split_play_model_policy_rows(rows)
-    current_policy = _current_play_model_policy()
+    current_policy = _current_play_model_policy(effective=False)
     current_metrics = _play_model_policy_metrics(tuning_rows, current_policy)
     current_score_hits = int(current_metrics.get("score_hits", 0) or 0)
     current_score_total = int(current_metrics.get("score_total", 0) or 0)

@@ -373,8 +373,8 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
     def test_play_model_takeover_gate_rows_and_policy_text(self) -> None:
         gate = {
             "status": "block",
-            "mode": "watch_only",
-            "policy_impact": "status_only",
+            "mode": "enforced",
+            "policy_impact": "formal_takeover_disabled",
             "recommendation": "Do not allow play-model takeover.",
             "metrics": {
                 "training_gate_status": "ready_for_backtest",
@@ -410,6 +410,47 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
         self.assertIn("Takeover gate", policy_text)
         self.assertIn("Takeover gate: BLOCK", policy_text)
         self.assertIn("Do not allow play-model takeover.", policy_text)
+
+    def test_play_model_policy_text_shows_raw_effective_and_gate_block(self) -> None:
+        policy_text = build_play_model_policy_status_text(
+            {
+                "updated_at": "2026-04-04",
+                "policy": {
+                    "scoreline": {"takeover_enabled": True},
+                    "total_goals": {"takeover_enabled": True, "min_confidence": 0.31},
+                },
+                "effective_policy": {
+                    "scoreline": {"takeover_enabled": False},
+                    "total_goals": {"takeover_enabled": False, "min_confidence": 0.31},
+                },
+                "policy_blocked_by_gate": True,
+                "takeover_gate": {"status": "watch", "recommendation": "Shadow only."},
+            }
+        )
+
+        self.assertIn("Policy gate execution", policy_text)
+        self.assertIn("Raw scoreline takeover: enabled=True", policy_text)
+        self.assertIn("Effective scoreline takeover: enabled=False", policy_text)
+        self.assertIn("Raw total goals takeover: enabled=True", policy_text)
+        self.assertIn("Effective total goals takeover: enabled=False", policy_text)
+        self.assertIn("当前接管被守门策略阻断", policy_text)
+
+        rows = build_play_model_policy_decision_rows(
+            {
+                "policy": {
+                    "scoreline": {"takeover_enabled": True},
+                    "total_goals": {"takeover_enabled": True, "min_confidence": 0.31},
+                },
+                "effective_policy": {
+                    "scoreline": {"takeover_enabled": False},
+                    "total_goals": {"takeover_enabled": False, "min_confidence": 0.31},
+                },
+            }
+        )
+        self.assertEqual(rows[0]["title"], "Total Goals takeover: SHADOW")
+        self.assertIn("raw takeover True | effective takeover False", rows[0]["body"])
+        self.assertEqual(rows[1]["title"], "Scoreline takeover: OFF")
+        self.assertIn("raw takeover True | effective takeover False", rows[1]["body"])
 
     def test_play_model_training_and_backtest(self) -> None:
         status_text = build_play_model_training_status_text(

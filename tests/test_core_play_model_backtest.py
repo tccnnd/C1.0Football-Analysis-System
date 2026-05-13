@@ -85,6 +85,9 @@ class PlayModelBacktestTests(unittest.TestCase):
         self.assertEqual(gate["status"], "allow")
         self.assertEqual(gate["reason"], "stable_backtest")
         self.assertEqual(gate["metrics"]["validation_sample_count"], 500)
+        self.assertEqual(gate["mode"], "enforced")
+        self.assertEqual(gate["policy_impact"], "formal_takeover_allowed")
+        self.assertTrue(gate["enforcement"]["formal_takeover_allowed"])
 
     def test_evaluate_play_model_takeover_gate_watches_marginal_delta(self) -> None:
         gate = core.evaluate_play_model_takeover_gate(
@@ -100,6 +103,8 @@ class PlayModelBacktestTests(unittest.TestCase):
         self.assertEqual(gate["status"], "watch")
         self.assertEqual(gate["reason"], "total_goals_model_no_uplift")
         self.assertEqual(gate["warning_count"], 1)
+        self.assertEqual(gate["policy_impact"], "formal_takeover_disabled")
+        self.assertFalse(gate["enforcement"]["formal_takeover_allowed"])
 
     def test_evaluate_play_model_takeover_gate_blocks_when_training_gate_not_ready(self) -> None:
         gate = core.evaluate_play_model_takeover_gate(
@@ -128,6 +133,73 @@ class PlayModelBacktestTests(unittest.TestCase):
 
         self.assertEqual(gate["status"], "block")
         self.assertTrue(any(item.get("code") == "score_model_regression" for item in gate["issues"]))
+
+    def test_apply_play_model_takeover_gate_blocks_effective_policy(self) -> None:
+        policy = {
+            "total_goals": {"takeover_enabled": True, "min_confidence": 0.31},
+            "scoreline": {"takeover_enabled": True},
+        }
+
+        effective = core.apply_play_model_takeover_gate_to_policy(policy, {"status": "block"})
+
+        self.assertTrue(policy["total_goals"]["takeover_enabled"])
+        self.assertFalse(effective["total_goals"]["takeover_enabled"])
+        self.assertFalse(effective["scoreline"]["takeover_enabled"])
+        self.assertEqual(effective["total_goals"]["min_confidence"], 0.31)
+
+    def test_apply_play_model_takeover_gate_watches_effective_policy(self) -> None:
+        policy = {
+            "total_goals": {"takeover_enabled": True, "min_confidence": 0.29},
+            "scoreline": {"takeover_enabled": True},
+        }
+
+        effective = core.apply_play_model_takeover_gate_to_policy(policy, {"status": "watch"})
+
+        self.assertFalse(effective["total_goals"]["takeover_enabled"])
+        self.assertFalse(effective["scoreline"]["takeover_enabled"])
+
+    def test_apply_play_model_takeover_gate_allows_original_policy(self) -> None:
+        policy = {
+            "total_goals": {"takeover_enabled": True, "min_confidence": 0.27},
+            "scoreline": {"takeover_enabled": True},
+        }
+
+        effective = core.apply_play_model_takeover_gate_to_policy(policy, {"status": "allow"})
+
+        self.assertTrue(effective["total_goals"]["takeover_enabled"])
+        self.assertTrue(effective["scoreline"]["takeover_enabled"])
+        self.assertEqual(effective["total_goals"]["min_confidence"], 0.27)
+
+    def test_current_play_model_policy_uses_effective_gate_for_formal_takeover(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            policy_file = Path(tmp_dir) / "play_model_policy_v1.json"
+            policy_file.write_text(
+                json.dumps(
+                    {
+                        "updated_at": "2026-01-01 00:00:00",
+                        "policy": {
+                            "total_goals": {"takeover_enabled": True, "min_confidence": 0.33},
+                            "scoreline": {"takeover_enabled": True},
+                        },
+                        "takeover_gate": {"status": "watch"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.object(core, "PLAY_MODEL_POLICY_FILE", policy_file):
+                core._PLAY_MODEL_POLICY_CACHE.clear()
+                core._PLAY_MODEL_POLICY_CACHE.update({"mtime": None, "policy": None, "report": {}})
+                status = core.get_play_model_policy_status()
+                effective_policy = core._current_play_model_policy()
+                raw_policy = core._current_play_model_policy(effective=False)
+
+        self.assertTrue(status["policy"]["total_goals"]["takeover_enabled"])
+        self.assertFalse(status["effective_policy"]["total_goals"]["takeover_enabled"])
+        self.assertFalse(status["effective_policy"]["scoreline"]["takeover_enabled"])
+        self.assertTrue(status["policy_blocked_by_gate"])
+        self.assertFalse(effective_policy["total_goals"]["takeover_enabled"])
+        self.assertFalse(effective_policy["scoreline"]["takeover_enabled"])
+        self.assertTrue(raw_policy["total_goals"]["takeover_enabled"])
 
     def test_run_draw_specialist_backtest_tracks_precision_recall_and_buckets(self) -> None:
         validation_items = [
