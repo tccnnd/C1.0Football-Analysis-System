@@ -24,6 +24,7 @@ from .core import (
     add_video_review_annotation,
     create_video_review,
     extract_video_review_frames_now,
+    export_video_review_fewshot_samples_now,
     fetch_matches_v24,
     get_draw_specialist_backtest_status,
     get_draw_release_guard_policy_history,
@@ -3579,6 +3580,19 @@ class SmartMatchDashboard:
             padx=14,
             pady=6,
         ).pack(side=tk.LEFT, padx=(10, 0))
+        tk.Button(
+            review_actions,
+            text="\u5bfc\u51fa\u89c6\u9891\u590d\u76d8\u6837\u672c",
+            command=self.export_video_review_fewshot_samples,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=14,
+            pady=6,
+        ).pack(side=tk.LEFT, padx=(10, 0))
 
         tk.Label(right, text="\u95ed\u73af\u590d\u76d8", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
         detail = tk.Text(
@@ -3717,6 +3731,29 @@ class SmartMatchDashboard:
             f"\u5df2\u5199\u5165 VideoReview Agent\n\n\u7c7b\u578b: {annotation.get('event_label', event_type)}\n\u6807\u6ce8ID: {annotation.get('annotation_id', '-')}\n\n\u8be5\u6807\u6ce8\u5c06\u8fdb\u5165 Evaluation Agent \u8d5b\u540e\u590d\u76d8\u8bb0\u5fc6\u3002",
         )
         self.open_review_center()
+
+    def export_video_review_fewshot_samples(self) -> Path | None:
+        result = export_video_review_fewshot_samples_now(limit=120)
+        output_path = Path(str(result.get("output_path") or ""))
+        sample_count = int(result.get("sample_count", 0) or 0)
+        manual_count = int(result.get("manual_annotation_sample_count", 0) or 0)
+        auto_count = int(result.get("auto_hypothesis_sample_count", 0) or 0)
+        if sample_count <= 0:
+            self.status_var.set("\u89c6\u9891\u590d\u76d8\u6837\u672c\u6682\u65e0\u53ef\u5bfc\u51fa\u5185\u5bb9")
+            messagebox.showinfo("\u89c6\u9891\u590d\u76d8\u6837\u672c", "\u6682\u65e0\u4eba\u5de5\u6807\u6ce8\u6216\u89c6\u9891\u4e8b\u4ef6\u5047\u8bbe\u53ef\u5bfc\u51fa\u3002")
+            return None
+        self.status_var.set(f"\u89c6\u9891\u590d\u76d8\u6837\u672c\u5df2\u5bfc\u51fa: {sample_count} \u6761")
+        messagebox.showinfo(
+            "\u89c6\u9891\u590d\u76d8\u6837\u672c",
+            (
+                f"\u5df2\u751f\u6210 Evaluation Agent \u89c6\u9891\u590d\u76d8\u6837\u672c:\n{output_path}\n\n"
+                f"\u6837\u672c: {sample_count}\n"
+                f"\u4eba\u5de5\u6807\u6ce8: {manual_count}\n"
+                f"\u81ea\u52a8\u5047\u8bbe: {auto_count}\n\n"
+                "\u8be5\u6570\u636e\u4ec5\u7528\u4e8e\u8d5b\u540e\u590d\u76d8\uff0c\u4e0d\u8fdb\u5165\u8d5b\u524d\u9884\u6d4b\u7279\u5f81\u3002"
+            ),
+        )
+        return output_path
 
     def open_recovery_run_center(self) -> None:
         self.current_view = "recovery_runs"

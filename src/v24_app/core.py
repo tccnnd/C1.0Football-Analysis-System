@@ -36,6 +36,7 @@ from .training_samples import (
     build_recent_form_feature_map,
     build_team_histories_from_state,
     export_statsbomb_review_training_samples,
+    export_video_review_fewshot_samples,
     import_historical_xgb_samples,
 )
 
@@ -61,6 +62,7 @@ CACHE_FILE = PROJECT_DIR / "data" / "cache" / "500_matches_today.json"
 REPORT_DIR = PROJECT_DIR / "reports"
 VIDEO_REVIEW_DIR = PROJECT_DIR / "data" / "video_reviews"
 VIDEO_REVIEW_FILE = PROJECT_DIR / "data" / "state" / "video_reviews.json"
+VIDEO_REVIEW_FEWSHOT_FILE = PROJECT_DIR / "data" / "state" / "video_review_fewshot_samples.json"
 STATSBOMB_EVENT_SUMMARIES_FILE = PROJECT_DIR / "data" / "state" / "statsbomb_event_summaries.json"
 STATSBOMB_EVENT_BASELINE_FILE = PROJECT_DIR / "data" / "state" / "statsbomb_event_baseline.json"
 STATSBOMB_SANDBOX_FEWSHOT_FILE = PROJECT_DIR / "data" / "state" / "statsbomb_sandbox_fewshot_samples.json"
@@ -7341,6 +7343,10 @@ def get_statsbomb_sandbox_fewshot_memory() -> dict:
     return _load_cached_statsbomb_state_json(STATSBOMB_SANDBOX_FEWSHOT_FILE)
 
 
+def get_video_review_fewshot_memory() -> dict:
+    return _load_cached_statsbomb_state_json(VIDEO_REVIEW_FEWSHOT_FILE)
+
+
 def _build_high_accuracy_strategy_pool(candidates: list[dict]) -> list[dict]:
     pool: list[dict] = []
     seen: set[tuple[str, str, str]] = set()
@@ -12774,6 +12780,17 @@ def add_video_review_annotation(
         "review": review,
         "summary_text": f"video_review={resolved_id} | manual_annotations={len(review['manual_annotations'])}",
     }
+
+
+def export_video_review_fewshot_samples_now(*, limit: int = 80) -> dict:
+    result = export_video_review_fewshot_samples(
+        PROJECT_DIR,
+        get_video_reviews(limit=0),
+        output_path=VIDEO_REVIEW_FEWSHOT_FILE,
+        limit=limit,
+    )
+    invalidate_statsbomb_state_cache(VIDEO_REVIEW_FEWSHOT_FILE)
+    return result
 
 
 def load_c1_comparison_marks_cache() -> dict[str, dict]:

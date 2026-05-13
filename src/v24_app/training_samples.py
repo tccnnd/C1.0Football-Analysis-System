@@ -854,6 +854,211 @@ def export_statsbomb_sandbox_fewshot_samples(
     return {**summary, "output_path": str(resolved_output)}
 
 
+VIDEO_REVIEW_EVENT_ROOT_CAUSES = {
+    "tempo_shift": "video_tempo_shift",
+    "finishing_variance": "video_finishing_variance",
+    "set_piece_or_transition_risk": "video_margin_risk",
+    "low_quality_video_evidence": "video_low_quality_evidence",
+    "manual_tactical_review_needed": "video_manual_review_needed",
+}
+
+
+def _video_review_match_payload(review: dict[str, Any]) -> dict[str, Any]:
+    match = review.get("match") if isinstance(review.get("match"), dict) else {}
+    return {
+        "match_date": _normalize_text(match.get("match_date")),
+        "league": _normalize_text(match.get("league")),
+        "home_team": _normalize_text(match.get("home_team")),
+        "away_team": _normalize_text(match.get("away_team")),
+        "score": _normalize_text(match.get("score")),
+        "result": _normalize_text(match.get("result")),
+    }
+
+
+def _video_review_event_tags(root_cause: str, *, is_hit: bool, source_kind: str, event_type: str = "") -> list[str]:
+    tags = ["video_post_match_review", source_kind]
+    tags.append("strategy_hit" if is_hit else "strategy_miss")
+    if root_cause:
+        tags.append(root_cause)
+    if event_type:
+        tags.append(f"video_event_{event_type}")
+    deduped: list[str] = []
+    for tag in tags:
+        if tag and tag not in deduped:
+            deduped.append(tag)
+    return deduped
+
+
+def _video_review_sample_from_signal(
+    review: dict[str, Any],
+    *,
+    signal: dict[str, Any],
+    source_kind: str,
+    index: int,
+) -> dict[str, Any]:
+    agent = review.get("agent_review") if isinstance(review.get("agent_review"), dict) else {}
+    visual = review.get("visual_analysis") if isinstance(review.get("visual_analysis"), dict) else {}
+    match = _video_review_match_payload(review)
+    review_id = _normalize_text(review.get("review_id")) or f"review-{index}"
+    hypothesis_code = _normalize_text(signal.get("code")) or "manual_tactical_review_needed"
+    root_cause = VIDEO_REVIEW_EVENT_ROOT_CAUSES.get(hypothesis_code, hypothesis_code)
+    event_type = _normalize_text(signal.get("event_type"))
+    annotation_id = _normalize_text(signal.get("annotation_id"))
+    prediction_alignment = _normalize_text(agent.get("prediction_alignment")) or "unknown"
+    is_hit = prediction_alignment == "aligned"
+    confidence = float(_safe_float(signal.get("confidence"), 0.0) or 0.0)
+    evidence_score = float(_safe_float(agent.get("evidence_score"), 0.0) or 0.0)
+    frame_index = _safe_int(signal.get("frame_index"), _safe_int(signal.get("frame"), None))
+    timestamp_seconds = _safe_float(signal.get("timestamp_seconds"), _safe_float(signal.get("time_seconds"), None))
+    title = _normalize_text(signal.get("title")) or f"Video signal: {hypothesis_code}"
+    evidence = _normalize_text(signal.get("evidence")) or _normalize_text(signal.get("note")) or "-"
+    match_title = f"{match['home_team'] or '-'} vs {match['away_team'] or '-'}"
+    prompt = (
+        "请作为 Evaluation Agent 复盘一场使用 AI 视频证据的赛后案例。\n"
+        f"比赛: {match['match_date'] or '-'} | {match['league'] or '-'} | {match_title}\n"
+        f"比分: {match['score'] or '-'} | 预测对齐: {prediction_alignment}\n"
+        f"视频证据: {agent.get('evidence_level') or '-'} / {evidence_score:.2f} | "
+        f"事件: {title} | 证据: {evidence}"
+    )
+    completion = (
+        f"结论: 该视频复盘样本根因为 {root_cause}。"
+        f"事件假设 {hypothesis_code} 置信度 {confidence:.2f}，"
+        "仅用于赛后错因归类与 Evaluation Agent 记忆，不进入赛前预测特征。"
+    )
+    if source_kind == "video_manual_annotation":
+        completion = (
+            f"结论: 人工视频标注支持 {root_cause}。"
+            f"标注事件 {event_type or hypothesis_code} 置信度 {confidence:.2f}，"
+            "应作为赛后复盘记忆，用于修正类似比赛的错因解释。"
+        )
+    sample_id_suffix = annotation_id or f"{source_kind}:{index}:{hypothesis_code}"
+    return {
+        "id": f"video_review:{review_id}:{sample_id_suffix}",
+        "prompt": prompt,
+        "completion": completion,
+        "review_status": "draft",
+        "labels": {
+            "simulated_pick": prediction_alignment.upper() if prediction_alignment else "UNKNOWN",
+            "actual": match["result"] or match["score"] or "-",
+            "is_hit": bool(is_hit),
+            "root_cause": root_cause,
+            "tags": _video_review_event_tags(root_cause, is_hit=is_hit, source_kind=source_kind, event_type=event_type),
+        },
+        "features": {
+            "evidence_score": evidence_score,
+            "review_confidence": float(_safe_float(agent.get("review_confidence"), evidence_score) or 0.0),
+            "hypothesis_confidence": confidence,
+            "manual_annotation_count": float(_safe_int(agent.get("manual_annotation_count"), 0) or 0),
+            "frame_index": float(frame_index or 0),
+            "timestamp_seconds": float(timestamp_seconds or 0.0),
+            "frame_count": float(_safe_int(visual.get("frame_count"), 0) or 0),
+            "usable_frame_count": float(_safe_int(visual.get("usable_frame_count"), 0) or 0),
+            "key_frame_count": float(_safe_int(agent.get("key_frame_count"), 0) or 0),
+        },
+        "meta": {
+            "source": source_kind,
+            "match_id": _normalize_text(review.get("match_id")),
+            "review_id": review_id,
+            "annotation_id": annotation_id,
+            "event_type": event_type,
+            "hypothesis_code": hypothesis_code,
+            "match_date": match["match_date"],
+            "league": match["league"],
+            "home_team": match["home_team"],
+            "away_team": match["away_team"],
+            "score": match["score"],
+            "recommendation": _normalize_text((agent.get("recommended_followup") or {}).get("message") if isinstance(agent.get("recommended_followup"), dict) else ""),
+        },
+    }
+
+
+def build_video_review_fewshot_samples(
+    video_reviews: list[dict[str, Any]],
+    *,
+    limit: int = 80,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    samples: list[dict[str, Any]] = []
+    tag_counts: dict[str, int] = {}
+    skipped_no_signal = 0
+    source_counts = {"video_manual_annotation": 0, "video_auto_hypothesis": 0}
+    for review in video_reviews:
+        if not isinstance(review, dict):
+            continue
+        agent = review.get("agent_review") if isinstance(review.get("agent_review"), dict) else {}
+        annotations = [item for item in review.get("manual_annotations", []) if isinstance(item, dict)]
+        if annotations:
+            for index, annotation in enumerate(annotations, start=1):
+                signal = dict(annotation)
+                event_type = _normalize_text(signal.get("event_type"))
+                mapped = {
+                    "goal": "finishing_variance",
+                    "shot_quality": "finishing_variance",
+                    "set_piece": "set_piece_or_transition_risk",
+                    "counter_attack": "set_piece_or_transition_risk",
+                    "defensive_error": "set_piece_or_transition_risk",
+                    "tempo_shift": "tempo_shift",
+                    "tactical_shift": "tempo_shift",
+                }.get(event_type, "manual_tactical_review_needed")
+                signal["code"] = mapped
+                signal["title"] = signal.get("event_label") or event_type or mapped
+                sample = _video_review_sample_from_signal(review, signal=signal, source_kind="video_manual_annotation", index=index)
+                samples.append(sample)
+                source_counts["video_manual_annotation"] += 1
+            continue
+        hypotheses = [item for item in agent.get("event_hypotheses", []) if isinstance(item, dict)]
+        if not hypotheses:
+            skipped_no_signal += 1
+            continue
+        for index, hypothesis in enumerate(hypotheses[:3], start=1):
+            sample = _video_review_sample_from_signal(review, signal=dict(hypothesis), source_kind="video_auto_hypothesis", index=index)
+            samples.append(sample)
+            source_counts["video_auto_hypothesis"] += 1
+    for sample in samples:
+        labels = sample.get("labels") if isinstance(sample.get("labels"), dict) else {}
+        for tag in labels.get("tags", []) if isinstance(labels.get("tags"), list) else []:
+            tag_counts[str(tag)] = tag_counts.get(str(tag), 0) + 1
+    samples.sort(
+        key=lambda item: (
+            _normalize_text((item.get("meta") or {}).get("source") if isinstance(item.get("meta"), dict) else "") != "video_manual_annotation",
+            -float((item.get("features") or {}).get("hypothesis_confidence", 0.0) if isinstance(item.get("features"), dict) else 0.0),
+            str((item.get("meta") or {}).get("match_date") if isinstance(item.get("meta"), dict) else ""),
+        )
+    )
+    limited = samples[: max(0, int(limit))]
+    summary = {
+        "sample_count": len(limited),
+        "source_review_count": len([item for item in video_reviews if isinstance(item, dict)]),
+        "manual_annotation_sample_count": source_counts["video_manual_annotation"],
+        "auto_hypothesis_sample_count": source_counts["video_auto_hypothesis"],
+        "skipped_no_signal": skipped_no_signal,
+        "tag_counts": dict(sorted(tag_counts.items())),
+        "leakage_note": "These few-shot samples use post-match video evidence and must not be used as pre-match prediction features.",
+    }
+    return limited, summary
+
+
+def export_video_review_fewshot_samples(
+    project_dir: Path,
+    video_reviews: list[dict[str, Any]],
+    output_path: Path | None = None,
+    *,
+    limit: int = 80,
+) -> dict[str, Any]:
+    samples, summary = build_video_review_fewshot_samples(video_reviews, limit=limit)
+    resolved_output = output_path or project_dir / "data" / "state" / "video_review_fewshot_samples.json"
+    resolved_output.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "source": "AI VideoReview Agent manual annotations and event hypotheses",
+        "purpose": "evaluation_agent_video_fewshot_post_match_review",
+        "leakage_note": summary["leakage_note"],
+        "summary": summary,
+        "items": samples,
+    }
+    resolved_output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {**summary, "output_path": str(resolved_output)}
+
+
 def _read_input_records(input_path: Path) -> list[dict[str, Any]]:
     suffix = input_path.suffix.lower()
     if suffix == ".csv":

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -267,6 +268,46 @@ class CoreVideoReviewTests(unittest.TestCase):
         self.assertIn("set_piece_or_transition_risk", hypothesis_codes)
         self.assertEqual(agent_review["recommended_followup"]["code"], "feed_manual_video_annotations_into_evaluation_agent")
         self.assertIn("review_manual_video_annotations", agent_review["next_actions"])
+
+    def test_export_video_review_fewshot_samples_uses_saved_reviews(self) -> None:
+        settlement = {
+            "match_id": "m-6",
+            "match_date": "2026-05-14",
+            "league": "Test League",
+            "home_team": "Alpha",
+            "away_team": "Bravo",
+            "home_goals": 2,
+            "away_goals": 2,
+            "result": "平局",
+            "is_correct": False,
+        }
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            video_path = root / "replay.mp4"
+            video_path.write_bytes(b"fake-video")
+            review_file = root / "video_reviews.json"
+            review_dir = root / "video_review_frames"
+            fewshot_file = root / "video_review_fewshot_samples.json"
+
+            with patch.object(core, "STATE_STORE", _VideoReviewStore(settlement)):
+                with patch.object(core, "VIDEO_REVIEW_FILE", review_file):
+                    with patch.object(core, "VIDEO_REVIEW_DIR", review_dir):
+                        with patch.object(core, "VIDEO_REVIEW_FEWSHOT_FILE", fewshot_file):
+                            with patch("v24_app.core.shutil.which", return_value=None):
+                                created = core.create_video_review("m-6", video_path)
+                            core.add_video_review_annotation(
+                                created["review"]["review_id"],
+                                event_type="tempo_shift",
+                                timestamp_seconds=58,
+                                note="pace changed after substitution",
+                            )
+                            result = core.export_video_review_fewshot_samples_now(limit=10)
+
+            payload = json.loads(fewshot_file.read_text(encoding="utf-8"))
+
+        self.assertEqual(result["sample_count"], 1)
+        self.assertEqual(payload["purpose"], "evaluation_agent_video_fewshot_post_match_review")
+        self.assertIn("video_tempo_shift", payload["items"][0]["labels"]["tags"])
 
 
 if __name__ == "__main__":

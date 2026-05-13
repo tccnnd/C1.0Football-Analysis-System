@@ -16,8 +16,10 @@ from v24_app.training_samples import (
     STATSBOMB_REVIEW_FEATURE_ORDER,
     build_statsbomb_review_training_samples,
     build_statsbomb_sandbox_fewshot_samples,
+    build_video_review_fewshot_samples,
     export_statsbomb_review_training_samples,
     export_statsbomb_sandbox_fewshot_samples,
+    export_video_review_fewshot_samples,
 )
 
 
@@ -124,6 +126,48 @@ def _baseline() -> dict:
     }
 
 
+def _video_review() -> dict:
+    return {
+        "review_id": "vr-1",
+        "match_id": "m-video",
+        "match": {
+            "match_date": "2026-05-14",
+            "league": "Test League",
+            "home_team": "Alpha",
+            "away_team": "Bravo",
+            "score": "1-0",
+            "result": "主胜",
+        },
+        "visual_analysis": {
+            "frame_count": 8,
+            "usable_frame_count": 8,
+        },
+        "manual_annotations": [
+            {
+                "annotation_id": "ann-1",
+                "event_type": "counter_attack",
+                "event_label": "反击",
+                "frame_index": 3,
+                "timestamp_seconds": 75,
+                "confidence": 0.81,
+                "note": "fast break before the goal",
+            }
+        ],
+        "agent_review": {
+            "prediction_alignment": "needs_review",
+            "evidence_level": "high",
+            "evidence_score": 0.82,
+            "review_confidence": 0.82,
+            "key_frame_count": 4,
+            "manual_annotation_count": 1,
+            "recommended_followup": {"message": "feed manual video annotations"},
+            "event_hypotheses": [
+                {"code": "tempo_shift", "confidence": 0.76, "title": "tempo shifted"},
+            ],
+        },
+    }
+
+
 class StatsBombReviewTrainingSamplesTests(unittest.TestCase):
     def test_builds_review_training_sample_without_pre_match_feature_leakage(self) -> None:
         samples, summary = build_statsbomb_review_training_samples([_settlement(), {"match_id": "missing"}])
@@ -177,6 +221,33 @@ class StatsBombReviewTrainingSamplesTests(unittest.TestCase):
         self.assertEqual(payload["purpose"], "evaluation_agent_fewshot_post_match_review")
         self.assertEqual(len(payload["items"]), 1)
         self.assertIn("post-match event data", payload["leakage_note"])
+
+    def test_builds_video_review_fewshot_samples_from_annotations(self) -> None:
+        samples, summary = build_video_review_fewshot_samples([_video_review()])
+
+        self.assertEqual(summary["sample_count"], 1)
+        self.assertEqual(summary["manual_annotation_sample_count"], 1)
+        sample = samples[0]
+        self.assertEqual(sample["review_status"], "draft")
+        self.assertIn("Evaluation Agent", sample["prompt"])
+        self.assertIn("video_post_match_review", sample["labels"]["tags"])
+        self.assertIn("video_manual_annotation", sample["labels"]["tags"])
+        self.assertIn("video_margin_risk", sample["labels"]["tags"])
+        self.assertEqual(sample["labels"]["root_cause"], "video_margin_risk")
+        self.assertEqual(sample["features"]["frame_index"], 3.0)
+        self.assertEqual(sample["meta"]["annotation_id"], "ann-1")
+        self.assertIn("post-match video evidence", summary["leakage_note"])
+
+    def test_export_writes_video_review_fewshot_samples(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            result = export_video_review_fewshot_samples(root, [_video_review()], limit=5)
+            payload = json.loads((root / "data" / "state" / "video_review_fewshot_samples.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(result["sample_count"], 1)
+        self.assertEqual(payload["purpose"], "evaluation_agent_video_fewshot_post_match_review")
+        self.assertEqual(len(payload["items"]), 1)
+        self.assertIn("post-match video evidence", payload["leakage_note"])
 
 
 if __name__ == "__main__":
