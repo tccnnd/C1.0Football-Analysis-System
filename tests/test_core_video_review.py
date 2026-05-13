@@ -67,6 +67,9 @@ class CoreVideoReviewTests(unittest.TestCase):
         self.assertEqual(review["agent_review"]["agent"], "VideoReview Agent")
         self.assertEqual(review["agent_review"]["prediction_alignment"], "needs_review")
         self.assertIn("tempo_or_total_goals_miss", review["agent_review"]["error_causes"])
+        self.assertEqual(review["agent_review"]["evidence_level"], "low")
+        self.assertEqual(review["agent_review"]["event_hypotheses"][0]["code"], "low_quality_video_evidence")
+        self.assertEqual(review["agent_review"]["recommended_followup"]["code"], "collect_more_video_evidence")
         self.assertIn("narrative_review", review["agent_review"])
         self.assertEqual(len(reviews), 1)
         self.assertEqual(enriched[0]["video_review"]["review_id"], review["review_id"])
@@ -166,12 +169,58 @@ class CoreVideoReviewTests(unittest.TestCase):
         self.assertGreater(len(review["visual_analysis"]["key_frames"]), 0)
         self.assertEqual(review["agent_review"]["status"], "visual_review_ready")
         self.assertEqual(review["agent_review"]["vision_model_status"], "offline_visual_evidence_ready")
+        self.assertGreater(review["agent_review"]["evidence_score"], 0)
+        self.assertIn(review["agent_review"]["evidence_level"], {"low", "medium", "high"})
+        hypothesis_codes = {item["code"] for item in review["agent_review"]["event_hypotheses"]}
+        self.assertIn("set_piece_or_transition_risk", hypothesis_codes)
+        self.assertIn("recommended_followup", review["agent_review"])
         self.assertTrue(set(review["visual_analysis"]["tags"]) & set(review["agent_review"]["error_causes"]))
         narrative = review["agent_review"]["narrative_review"]
         self.assertEqual(narrative["status"], "ready")
         self.assertTrue(narrative["findings"])
+        self.assertIn("event_hypotheses", narrative)
         self.assertIn("Evaluation Agent", narrative["recommendation"])
         self.assertIn("Alpha vs Bravo", narrative["summary_text"])
+
+    def test_video_review_ai_summary_generates_tempo_hypothesis(self) -> None:
+        settlement = {
+            "match_id": "m-4",
+            "home_team": "Alpha",
+            "away_team": "Bravo",
+            "home_goals": 3,
+            "away_goals": 2,
+            "result": "主胜",
+            "is_correct": False,
+            "ou_is_correct": False,
+        }
+        visual_analysis = {
+            "status": "ready",
+            "frame_count": 8,
+            "usable_frame_count": 8,
+            "avg_brightness": 112.0,
+            "avg_contrast": 38.0,
+            "avg_edge_score": 9.0,
+            "avg_motion_score": 21.0,
+            "summary_text": "frames 8/8 | brightness 112.0 | contrast 38.0 | motion 21.0",
+            "tags": ["high_scene_change"],
+            "key_frames": [
+                {"index": 2, "timestamp_seconds": 30, "quality": "good", "motion_score": 24.0, "edge_score": 9.5},
+                {"index": 5, "timestamp_seconds": 75, "quality": "good", "motion_score": 19.0, "edge_score": 8.2},
+            ],
+        }
+
+        summary = core._video_review_ai_summary(
+            settlement,
+            frame_count=8,
+            notes="tempo review",
+            visual_analysis=visual_analysis,
+        )
+
+        hypothesis_codes = {item["code"] for item in summary["event_hypotheses"]}
+        self.assertIn("tempo_shift", hypothesis_codes)
+        self.assertGreaterEqual(summary["review_confidence"], 0.7)
+        self.assertEqual(summary["recommended_followup"]["code"], "annotate_tempo_turning_points")
+        self.assertEqual(summary["narrative_review"]["evidence_level"], summary["evidence_level"])
 
 
 if __name__ == "__main__":
