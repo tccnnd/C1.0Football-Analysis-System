@@ -18,10 +18,24 @@ from v24_app.ai_dashboard import (
     build_statsbomb_review_training_action_feedback,
     build_statsbomb_review_training_action_rows,
     build_statsbomb_review_training_feedback_rows,
+    build_statsbomb_review_training_quality_export_message,
 )
 
 
 class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
+    def test_review_training_quality_export_message_summarizes_report(self) -> None:
+        text = build_statsbomb_review_training_quality_export_message(
+            Path("reports/statsbomb_review_training_quality_20260514_120000.md"),
+            {"status": "attention", "sample_count": 18, "issue_count": 2},
+            3,
+        )
+
+        self.assertIn("StatsBomb/Event Proxy 样本质量报告已导出", text)
+        self.assertIn("质量状态: attention", text)
+        self.assertIn("样本: 18", text)
+        self.assertIn("问题数: 2", text)
+        self.assertIn("修复记录: 3", text)
+
     def test_review_training_action_feedback_summarizes_quality_delta(self) -> None:
         feedback = build_statsbomb_review_training_action_feedback(
             "build_statsbomb_review_samples",

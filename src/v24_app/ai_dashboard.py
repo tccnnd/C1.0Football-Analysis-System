@@ -103,7 +103,10 @@ from .ui_modules import (
     build_statsbomb_event_sandbox_report_filename,
     build_statsbomb_event_sandbox_report_lines,
     build_statsbomb_event_sandbox_summary,
+    build_statsbomb_review_training_quality_report_filename,
+    build_statsbomb_review_training_quality_report_lines,
     build_statsbomb_review_training_quality_summary,
+    build_video_review_source_coverage_summary,
     build_statsbomb_fewshot_backfill_report_filename,
     build_statsbomb_fewshot_backfill_report_lines,
     build_statsbomb_fewshot_draft_filename,
@@ -1418,6 +1421,22 @@ def build_statsbomb_review_training_feedback_rows(records: list[dict] | object, 
             }
         )
     return rows
+
+
+def build_statsbomb_review_training_quality_export_message(path: Path, quality: dict, record_count: int) -> str:
+    return "\n".join(
+        [
+            "StatsBomb/Event Proxy 样本质量报告已导出",
+            "",
+            f"文件: {path}",
+            f"质量状态: {quality.get('status') or '-'}",
+            f"样本: {quality.get('sample_count', 0) or 0}",
+            f"问题数: {quality.get('issue_count', 0) or 0}",
+            f"修复记录: {record_count}",
+            "",
+            "该报告只描述赛后复盘样本质量，不代表赛前预测结论。",
+        ]
+    )
 
 
 def _load_statsbomb_review_training_action_feedback_log(
@@ -4400,6 +4419,11 @@ class SmartMatchDashboard:
         snapshot_audit = self._result_recovery_snapshot_audit(lookback_days=lookback_days)
         video_memory_health = self._video_review_fewshot_memory_health_context()
         statsbomb_review_quality = build_statsbomb_review_training_quality_summary(get_statsbomb_review_training_samples())
+        video_source_coverage = build_video_review_source_coverage_summary(
+            settlements,
+            statsbomb_samples=get_statsbomb_review_training_samples(),
+            video_memory=get_video_review_fewshot_memory(),
+        )
         statsbomb_repair_feedback_rows = build_statsbomb_review_training_feedback_rows(
             _load_statsbomb_review_training_action_feedback_log()
         )
@@ -4678,6 +4702,19 @@ class SmartMatchDashboard:
         ).pack(side=tk.LEFT)
         tk.Button(
             review_memory_actions,
+            text="导出事件代理质量报告",
+            command=self.export_statsbomb_review_training_quality_report,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=14,
+            pady=6,
+        ).pack(side=tk.LEFT, padx=(10, 0))
+        tk.Button(
+            review_memory_actions,
             text="\u56de\u6eda\u89c6\u9891\u8bb0\u5fc6",
             command=self.rollback_video_review_fewshot_memory,
             bg=PANEL_2,
@@ -4710,6 +4747,29 @@ class SmartMatchDashboard:
             right,
             "优先补标注/补样",
             self._video_review_fewshot_action_text(video_memory_health.get("action_rows")),
+        )
+        self._strategy_section_title(right, "视频来源覆盖")
+        self._strategy_row(
+            right,
+            f"{video_source_coverage.get('coverage_status', '-')} | settled {video_source_coverage.get('total_settled_count', 0)}",
+            (
+                f"本地视频 {video_source_coverage.get('local_video_count', 0)} | "
+                f"外部回放 {video_source_coverage.get('external_reference_count', 0)} | "
+                f"事件代理 {video_source_coverage.get('statsbomb_event_proxy_count', 0)} | "
+                f"缺证据 {video_source_coverage.get('no_review_evidence_count', 0)}"
+            ),
+        )
+        for row in video_source_coverage.get("rows", []) if isinstance(video_source_coverage.get("rows"), list) else []:
+            if isinstance(row, dict):
+                self._strategy_row(
+                    right,
+                    str(row.get("title") or row.get("label") or "-"),
+                    str(row.get("body") or row.get("suggestion") or "-"),
+                )
+        self._strategy_row(
+            right,
+            "视频降级策略",
+            str(video_source_coverage.get("fallback_policy_text") or "-"),
         )
         self._strategy_section_title(right, "StatsBomb事件代理样本质量")
         for row in statsbomb_review_quality.get("card_rows", []) if isinstance(statsbomb_review_quality.get("card_rows"), list) else []:
@@ -5057,6 +5117,22 @@ class SmartMatchDashboard:
             feedback = build_statsbomb_review_training_action_feedback(action_key, before_quality, after_quality, {"ok": True})
             self._record_statsbomb_review_training_action_feedback(feedback)
             self.open_review_center()
+
+    def export_statsbomb_review_training_quality_report(self) -> Path:
+        quality = self._current_statsbomb_review_training_quality()
+        repair_records = _load_statsbomb_review_training_action_feedback_log()
+        REPORT_DIR.mkdir(parents=True, exist_ok=True)
+        path = REPORT_DIR / build_statsbomb_review_training_quality_report_filename(datetime.now())
+        path.write_text(
+            "\n".join(build_statsbomb_review_training_quality_report_lines(quality, repair_records)),
+            encoding="utf-8",
+        )
+        self.status_var.set(f"事件代理质量报告已导出: {path.name}")
+        messagebox.showinfo(
+            "事件代理质量报告",
+            build_statsbomb_review_training_quality_export_message(path, quality, len(repair_records)),
+        )
+        return path
 
     def export_statsbomb_event_proxy_review_samples(
         self,
