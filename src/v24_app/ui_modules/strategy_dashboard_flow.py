@@ -1168,6 +1168,200 @@ def build_video_review_memory_summary(
     }
 
 
+def build_video_review_source_coverage_summary(
+    settlements: Sequence[Mapping[str, object]] | object,
+    statsbomb_samples: Sequence[Mapping[str, object]] | Mapping[str, object] | object | None = None,
+    video_memory: Mapping[str, object] | object | None = None,
+) -> dict[str, object]:
+    def _list_items(value: Sequence[Mapping[str, object]] | Mapping[str, object] | object | None) -> list[Mapping[str, object]]:
+        if isinstance(value, Mapping):
+            for key in ("items", "rows", "settlements"):
+                resolved = value.get(key)
+                if isinstance(resolved, Sequence) and not isinstance(resolved, (str, bytes)):
+                    return [item for item in resolved if isinstance(item, Mapping)]
+            return []
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+            return [item for item in value if isinstance(item, Mapping)]
+        return []
+
+    def _match_id(item: Mapping[str, object]) -> str:
+        direct = _text(item.get("match_id"), "")
+        if direct:
+            return direct
+        match = _as_mapping(item.get("match"))
+        direct = _text(match.get("match_id"), "")
+        if direct:
+            return direct
+        return _text(item.get("source_match_id"), "")
+
+    def _video_kind(settlement: Mapping[str, object]) -> str:
+        review = _as_mapping(settlement.get("video_review"))
+        video = _as_mapping(review.get("video"))
+        if not video:
+            video = _as_mapping(settlement.get("video"))
+        source_policy = _as_mapping(review.get("source_policy"))
+        source_type = _text(video.get("source_type"), "").strip().lower()
+        path = _text(video.get("path"), "").strip()
+        url = _text(video.get("url"), "").strip()
+        probe_status = _text(video.get("probe_status"), "").strip().lower()
+        if source_type in {"local_file", "local_video", "file"}:
+            return "local_video"
+        if path and source_policy.get("mode") != "reference_only" and probe_status != "external_reference":
+            return "local_video"
+        if source_type == "external_reference" or source_policy.get("mode") == "reference_only" or url or probe_status == "external_reference":
+            return "external_reference"
+        return ""
+
+    settlement_items = _list_items(settlements)
+    sample_items = _list_items(statsbomb_samples)
+    memory_items = _list_items(video_memory)
+    memory_summary = _as_mapping(_as_mapping(video_memory or {}).get("summary"))
+
+    statsbomb_proxy_match_ids: set[str] = set()
+    for sample in sample_items:
+        meta = _as_mapping(sample.get("meta"))
+        source_text = " ".join(
+            [
+                _text(sample.get("source"), ""),
+                _text(meta.get("source"), ""),
+            ]
+        ).strip().lower()
+        if not source_text:
+            continue
+        if "statsbomb" not in source_text and "event_proxy" not in source_text and "event-sandbox" not in source_text:
+            continue
+        match_id = _match_id(sample) or _text(meta.get("match_id"), "") or _text(meta.get("source_match_id"), "")
+        if match_id:
+            statsbomb_proxy_match_ids.add(match_id)
+
+    total_settled_count = len(settlement_items)
+    local_video_count = 0
+    external_reference_count = 0
+    statsbomb_event_proxy_count = 0
+    no_review_evidence_count = 0
+    rows: list[dict[str, object]] = []
+
+    for settlement in settlement_items:
+        video_kind = _video_kind(settlement)
+        summary = _as_mapping(settlement.get("statsbomb_event_summary"))
+        match_id = _match_id(settlement)
+        if video_kind == "local_video":
+            local_video_count += 1
+        elif video_kind == "external_reference":
+            external_reference_count += 1
+        elif summary or (match_id and match_id in statsbomb_proxy_match_ids):
+            statsbomb_event_proxy_count += 1
+        else:
+            no_review_evidence_count += 1
+
+    def _ratio_text(count: int) -> str:
+        return _pct(count / total_settled_count) if total_settled_count else "-"
+
+    local_ratio = local_video_count / total_settled_count if total_settled_count else 0.0
+    external_ratio = external_reference_count / total_settled_count if total_settled_count else 0.0
+    proxy_ratio = statsbomb_event_proxy_count / total_settled_count if total_settled_count else 0.0
+    missing_ratio = no_review_evidence_count / total_settled_count if total_settled_count else 1.0
+
+    if total_settled_count <= 0:
+        coverage_status = "blocked"
+    elif no_review_evidence_count == total_settled_count:
+        coverage_status = "blocked"
+    elif missing_ratio >= 0.5:
+        coverage_status = "blocked"
+    elif no_review_evidence_count > 0:
+        coverage_status = "attention"
+    else:
+        coverage_status = "healthy"
+
+    rows.extend(
+        [
+            {
+                "code": "local_video",
+                "label": "本地视频",
+                "title": f"本地视频 | {local_video_count}",
+                "count": local_video_count,
+                "ratio": local_ratio,
+                "ratio_text": _ratio_text(local_video_count),
+                "coverage_kind": "video_ready",
+                "tone": "good" if local_video_count else "neutral",
+                "suggestion": "可直接导入所选视频复盘并标注事件。",
+                "body": f"数量 {local_video_count} | 占比 {_ratio_text(local_video_count)}\n建议: 可直接导入所选视频复盘并标注事件。",
+            },
+            {
+                "code": "external_reference",
+                "label": "外部回放链接",
+                "title": f"外部回放链接 | {external_reference_count}",
+                "count": external_reference_count,
+                "ratio": external_ratio,
+                "ratio_text": _ratio_text(external_reference_count),
+                "coverage_kind": "video_ready",
+                "tone": "good" if external_reference_count else "neutral",
+                "suggestion": "FIFA+ Archive 当前主要适合世界杯回放；联赛/杯赛如没有合法本地视频文件，APP 会降级使用 StatsBomb/Event Proxy。",
+                "body": (
+                    f"数量 {external_reference_count} | 占比 {_ratio_text(external_reference_count)}\n"
+                    "建议: FIFA+ Archive 当前主要适合世界杯回放；联赛/杯赛如没有合法本地视频文件，APP 会降级使用 StatsBomb/Event Proxy。"
+                ),
+            },
+            {
+                "code": "statsbomb_event_proxy",
+                "label": "StatsBomb/Event Proxy",
+                "title": f"StatsBomb/Event Proxy | {statsbomb_event_proxy_count}",
+                "count": statsbomb_event_proxy_count,
+                "ratio": proxy_ratio,
+                "ratio_text": _ratio_text(statsbomb_event_proxy_count),
+                "coverage_kind": "event_proxy_ready",
+                "tone": "warning" if statsbomb_event_proxy_count else "neutral",
+                "suggestion": "没有视频但有 StatsBomb 事件摘要时，降级使用事件代理做赛后归因。",
+                "body": (
+                    f"数量 {statsbomb_event_proxy_count} | 占比 {_ratio_text(statsbomb_event_proxy_count)}\n"
+                    "建议: 没有视频但有 StatsBomb 事件摘要时，降级使用事件代理做赛后归因。"
+                ),
+            },
+            {
+                "code": "no_review_evidence",
+                "label": "缺少复盘证据",
+                "title": f"缺少复盘证据 | {no_review_evidence_count}",
+                "count": no_review_evidence_count,
+                "ratio": missing_ratio if total_settled_count else 1.0,
+                "ratio_text": _ratio_text(no_review_evidence_count),
+                "coverage_kind": "missing_evidence",
+                "tone": "bad" if no_review_evidence_count else "good",
+                "suggestion": "补齐合法视频、外链或事件代理；否则只能保留低置信复盘。",
+                "body": (
+                    f"数量 {no_review_evidence_count} | 占比 {_ratio_text(no_review_evidence_count)}\n"
+                    "建议: 补齐合法视频、外链或事件代理；否则只能保留低置信复盘。"
+                ),
+            },
+        ]
+    )
+
+    video_memory_sample_count = _safe_int(memory_summary.get("sample_count"), len(memory_items))
+    video_memory_note = (
+        f"现有视频记忆样本 {video_memory_sample_count} 条，仅用于赛后复盘归因，不进入赛前预测特征。"
+        if video_memory_sample_count > 0
+        else "视频记忆仅用于赛后复盘归因，不进入赛前预测特征。"
+    )
+    fallback_policy_text = "\n".join(
+        [
+            "FIFA+ Archive 当前主要适合世界杯回放。",
+            "联赛/杯赛如果没有合法视频文件，APP 会降级使用 StatsBomb/Event Proxy 作为赛后归因来源。",
+            "赛后事件证据只用于复盘归因，不进入赛前预测特征。",
+            video_memory_note,
+        ]
+    )
+
+    return {
+        "total_settled_count": total_settled_count,
+        "local_video_count": local_video_count,
+        "external_reference_count": external_reference_count,
+        "statsbomb_event_proxy_count": statsbomb_event_proxy_count,
+        "no_review_evidence_count": no_review_evidence_count,
+        "coverage_status": coverage_status,
+        "rows": rows,
+        "fallback_policy_text": fallback_policy_text,
+    }
+
+
 def _side_from_margin(value: float, *, threshold: float = 0.0) -> str:
     if value > threshold:
         return "home"

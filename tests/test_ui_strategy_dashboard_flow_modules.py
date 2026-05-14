@@ -70,6 +70,7 @@ from v24_app.ui_modules import (
     build_video_review_fewshot_merge_plan,
     build_video_review_fewshot_merge_plan_filename,
     build_video_review_fewshot_merge_plan_lines,
+    build_video_review_source_coverage_summary,
     validate_video_review_fewshot_payload,
     build_statsbomb_fewshot_backfill_queue,
     build_statsbomb_fewshot_backfill_report_filename,
@@ -2473,6 +2474,142 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("video_post_match_review", evaluation["memory_tags"])
         self.assertIn("video_tempo_shift", evaluation["memory_tags"])
         self.assertTrue(any("AI视频" in item["title"] for item in evaluation["recommendations"]))
+
+    def test_video_review_source_coverage_summary_is_healthy_with_video_sources(self) -> None:
+        settlements = [
+            {
+                "match_id": "m-local",
+                "match_date": "2026-05-14",
+                "league": "FIFA World Cup",
+                "home_team": "Alpha",
+                "away_team": "Bravo",
+                "video_review": {
+                    "video": {
+                        "source_type": "local_file",
+                        "path": "E:/APP/ELO/data/video/local.mp4",
+                        "can_extract_frames": True,
+                    }
+                },
+            },
+            {
+                "match_id": "m-external",
+                "match_date": "2026-05-15",
+                "league": "Champions Cup",
+                "home_team": "Charlie",
+                "away_team": "Delta",
+                "video_review": {
+                    "video": {
+                        "source_type": "external_reference",
+                        "url": "https://example.com/fifa-plus/archive",
+                        "probe_status": "external_reference",
+                    },
+                    "source_policy": {"mode": "reference_only"},
+                },
+            },
+        ]
+
+        summary = build_video_review_source_coverage_summary(
+            settlements,
+            video_memory={"summary": {"sample_count": 2}},
+        )
+
+        self.assertEqual(summary["coverage_status"], "healthy")
+        self.assertEqual(summary["total_settled_count"], 2)
+        self.assertEqual(summary["local_video_count"], 1)
+        self.assertEqual(summary["external_reference_count"], 1)
+        self.assertEqual(summary["statsbomb_event_proxy_count"], 0)
+        self.assertEqual(summary["no_review_evidence_count"], 0)
+        self.assertEqual(len(summary["rows"]), 4)
+        self.assertIn("FIFA+ Archive 当前主要适合世界杯回放", summary["fallback_policy_text"])
+        self.assertIn("赛后事件证据只用于复盘归因，不进入赛前预测特征", summary["fallback_policy_text"])
+        self.assertIn("视频记忆样本 2 条", summary["fallback_policy_text"])
+
+    def test_video_review_source_coverage_summary_degrades_to_statsbomb_proxy(self) -> None:
+        settlements = [
+            {
+                "match_id": "m-proxy-1",
+                "match_date": "2026-05-14",
+                "league": "League A",
+                "home_team": "Alpha",
+                "away_team": "Bravo",
+                "statsbomb_event_summary": {
+                    "event_count": 1200,
+                    "team_stats": {"Alpha": {"xg": 1.1, "shots": 9}, "Bravo": {"xg": 0.8, "shots": 7}},
+                },
+            },
+            {
+                "match_id": "m-proxy-2",
+                "match_date": "2026-05-15",
+                "league": "League A",
+                "home_team": "Charlie",
+                "away_team": "Delta",
+                "statsbomb_event_summary": {
+                    "event_count": 900,
+                    "team_stats": {"Charlie": {"xg": 0.9, "shots": 8}, "Delta": {"xg": 1.0, "shots": 10}},
+                },
+            },
+            {
+                "match_id": "m-proxy-3",
+                "match_date": "2026-05-16",
+                "league": "League B",
+                "home_team": "Echo",
+                "away_team": "Foxtrot",
+            },
+            {
+                "match_id": "m-proxy-4",
+                "match_date": "2026-05-17",
+                "league": "League B",
+                "home_team": "Golf",
+                "away_team": "Hotel",
+            },
+        ]
+        statsbomb_samples = [
+            {
+                "meta": {
+                    "source": "statsbomb_event_sandbox",
+                    "match_id": "m-proxy-3",
+                }
+            }
+        ]
+
+        summary = build_video_review_source_coverage_summary(
+            settlements,
+            statsbomb_samples=statsbomb_samples,
+            video_memory={"rows": [], "summary": {"sample_count": 0}},
+        )
+
+        self.assertEqual(summary["coverage_status"], "attention")
+        self.assertEqual(summary["total_settled_count"], 4)
+        self.assertEqual(summary["local_video_count"], 0)
+        self.assertEqual(summary["external_reference_count"], 0)
+        self.assertEqual(summary["statsbomb_event_proxy_count"], 3)
+        self.assertEqual(summary["no_review_evidence_count"], 1)
+        self.assertTrue(any(row["coverage_kind"] == "event_proxy_ready" for row in summary["rows"]))
+        self.assertTrue(any("StatsBomb/Event Proxy" in row["title"] for row in summary["rows"]))
+        self.assertIn("APP 会降级使用 StatsBomb/Event Proxy", summary["fallback_policy_text"])
+
+    def test_video_review_source_coverage_summary_blocks_on_missing_evidence(self) -> None:
+        settlements = [
+            {
+                "match_id": f"m-missing-{index}",
+                "match_date": f"2026-05-{14 + index:02d}",
+                "league": "League C",
+                "home_team": f"Home{index}",
+                "away_team": f"Away{index}",
+            }
+            for index in range(4)
+        ]
+
+        summary = build_video_review_source_coverage_summary(settlements)
+
+        self.assertEqual(summary["coverage_status"], "blocked")
+        self.assertEqual(summary["total_settled_count"], 4)
+        self.assertEqual(summary["no_review_evidence_count"], 4)
+        self.assertEqual(summary["local_video_count"], 0)
+        self.assertEqual(summary["external_reference_count"], 0)
+        self.assertEqual(summary["statsbomb_event_proxy_count"], 0)
+        self.assertTrue(any(row["coverage_kind"] == "missing_evidence" for row in summary["rows"]))
+        self.assertTrue(any("缺少复盘证据" in row["title"] for row in summary["rows"]))
 
     def _video_fewshot_item(
         self,
