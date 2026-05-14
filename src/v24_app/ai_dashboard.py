@@ -23,6 +23,7 @@ from .core import (
     build_result_recovery_snapshot_audit,
     add_video_review_annotation,
     create_video_review,
+    create_video_review_reference,
     extract_video_review_frames_now,
     export_play_model_takeover_gate_audit_report as export_play_model_takeover_gate_audit_report_now,
     export_video_review_fewshot_samples_now,
@@ -4232,6 +4233,19 @@ class SmartMatchDashboard:
         ).pack(side=tk.LEFT)
         tk.Button(
             review_actions,
+            text="\u7ed1\u5b9a FIFA+ \u56de\u653e\u94fe\u63a5",
+            command=lambda: self.import_video_review_reference_for_selection(review_tree, settlements),
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=14,
+            pady=6,
+        ).pack(side=tk.LEFT, padx=(10, 0))
+        tk.Button(
+            review_actions,
             text="\u6807\u6ce8\u89c6\u9891\u4e8b\u4ef6",
             command=lambda: self.annotate_video_review_for_selection(review_tree, settlements),
             bg=PANEL_2,
@@ -4316,6 +4330,11 @@ class SmartMatchDashboard:
             anchor=tk.W,
             padx=18,
             pady=(16, 10),
+        )
+        self._strategy_row(
+            right,
+            "\u89c6\u9891\u6765\u6e90\u7b56\u7565",
+            "FIFA+ Archive \u6309\u4e16\u754c\u676f\u56de\u653e\u94fe\u63a5\u4f7f\u7528\uff1b\u8054\u8d5b/\u676f\u8d5b\u6ca1\u6709\u5408\u6cd5\u89c6\u9891\u65f6\uff0c\u964d\u7ea7\u4e3a StatsBomb/\u4e8b\u4ef6\u4ee3\u7406\u590d\u76d8\uff0c\u4e0d\u963b\u65ad\u590d\u76d8\u95ed\u73af\u3002",
         )
         self._strategy_row(
             right,
@@ -4406,6 +4425,49 @@ class SmartMatchDashboard:
             f"VideoReview Agent \u5df2\u5efa\u7acb\n\nreview_id: {review.get('review_id', '-')}\n\u8ba1\u5212\u62bd\u5e27: {len(frame_plan)}\n\u72b6\u6001: metadata_ready\n\n\u5df2\u63d0\u4ea4\u540e\u53f0\u62bd\u5e27\u4efb\u52a1\u3002",
         )
         self.run_video_review_frame_extraction_task(str(review.get("review_id") or ""))
+        self.open_review_center()
+
+    def import_video_review_reference_for_selection(self, review_tree: ttk.Treeview, settlements: list[dict]) -> None:
+        if not settlements:
+            messagebox.showinfo("\u89c6\u9891\u590d\u76d8", "\u5f53\u524d\u6ca1\u6709\u53ef\u7ed1\u5b9a\u7684\u5df2\u7ed3\u7b97\u8d5b\u4e8b\u3002")
+            return
+        selection = review_tree.selection()
+        if not selection:
+            messagebox.showinfo("\u89c6\u9891\u590d\u76d8", "\u8bf7\u5148\u9009\u62e9\u4e00\u573a\u590d\u76d8\u8d5b\u4e8b\u3002")
+            return
+        try:
+            settlement = settlements[int(selection[0])]
+        except (TypeError, ValueError, IndexError):
+            messagebox.showinfo("\u89c6\u9891\u590d\u76d8", "\u9009\u4e2d\u8d5b\u4e8b\u65e0\u6548\uff0c\u8bf7\u91cd\u65b0\u9009\u62e9\u3002")
+            return
+        url = simpledialog.askstring(
+            "\u7ed1\u5b9a FIFA+ \u56de\u653e\u94fe\u63a5",
+            "\u7c98\u8d34 FIFA+ Archive \u6216\u5176\u4ed6\u5408\u6cd5\u56de\u653e\u94fe\u63a5\uff1a\n\n\u6ce8\uff1a\u672c\u529f\u80fd\u53ea\u4fdd\u5b58\u94fe\u63a5\u4f5c\u4e3a\u590d\u76d8\u8bc1\u636e\uff0c\u4e0d\u81ea\u52a8\u4e0b\u8f7d\u89c6\u9891\u3002",
+            parent=self.root,
+        )
+        if not url:
+            return
+        source_name = simpledialog.askstring(
+            "\u89c6\u9891\u6765\u6e90",
+            "\u6765\u6e90\u540d\u79f0\uff08\u9ed8\u8ba4 FIFA+ Archive\uff09\uff1a",
+            initialvalue="FIFA+ Archive",
+            parent=self.root,
+        ) or "FIFA+ Archive"
+        result = create_video_review_reference(
+            str(settlement.get("match_id") or ""),
+            url,
+            source_name=source_name,
+            notes="\u901a\u8fc7 APP \u590d\u76d8\u4e2d\u5fc3\u7ed1\u5b9a\u5916\u90e8\u56de\u653e\u94fe\u63a5",
+        )
+        if not bool(result.get("ok")):
+            messagebox.showerror("\u89c6\u9891\u590d\u76d8", f"\u7ed1\u5b9a\u5931\u8d25: {result.get('reason', '-')}")
+            return
+        review = result.get("review") if isinstance(result.get("review"), dict) else {}
+        self.status_var.set(f"\u5916\u90e8\u56de\u653e\u5df2\u7ed1\u5b9a: {review.get('review_id', '-')} / {source_name}")
+        messagebox.showinfo(
+            "\u89c6\u9891\u590d\u76d8",
+            f"\u5df2\u7ed1\u5b9a\u5916\u90e8\u56de\u653e\u94fe\u63a5\n\nreview_id: {review.get('review_id', '-')}\n\u6765\u6e90: {source_name}\n\u72b6\u6001: reference_only\n\n\u540e\u7eed\u53ef\u4f7f\u7528\u201c\u6807\u6ce8\u89c6\u9891\u4e8b\u4ef6\u201d\u6309\u65f6\u95f4\u70b9\u8865\u5145\u590d\u76d8\u8bc1\u636e\u3002",
+        )
         self.open_review_center()
 
     def annotate_video_review_for_selection(self, review_tree: ttk.Treeview, settlements: list[dict]) -> None:
@@ -5479,6 +5541,15 @@ class SmartMatchDashboard:
         event_hypotheses = video_agent.get("event_hypotheses") if isinstance(video_agent.get("event_hypotheses"), list) else []
         video_followup = video_agent.get("recommended_followup") if isinstance(video_agent.get("recommended_followup"), dict) else {}
         manual_annotations = video_review.get("manual_annotations") if isinstance(video_review.get("manual_annotations"), list) else []
+        video_source_type = str(video_payload.get("source_type") or "local_file")
+        video_source_name = str(video_payload.get("source_name") or "-")
+        video_url = str(video_payload.get("url") or "")
+        video_source_lines = [
+            f"- \u6765\u6e90\u7c7b\u578b: {video_source_type}",
+            f"- \u6765\u6e90\u540d\u79f0: {video_source_name}",
+        ]
+        if video_url:
+            video_source_lines.append(f"- \u56de\u653e\u94fe\u63a5: {video_url}")
         video_hypothesis_lines = [
             f"- 事件假设: {item.get('code') or '-'} | {_pct1(item.get('confidence'))} | {item.get('title') or '-'}"
             for item in event_hypotheses[:3]
@@ -5500,6 +5571,7 @@ class SmartMatchDashboard:
                 "AI 视频复盘",
                 f"- 状态: {video_agent.get('status') or '-'} / {video_agent.get('vision_model_status') or '-'}",
                 f"- 视频: {video_payload.get('filename') or '-'}",
+                *video_source_lines,
                 f"- 抽帧: {len(video_review.get('frames') or [])} 已生成 / {len(video_review.get('frame_plan') or [])} 计划",
                 f"- 视觉证据: {visual_analysis.get('summary_text') or video_agent.get('visual_summary') or '-'}",
                 f"- 证据强度: {video_agent.get('evidence_level') or '-'} / {_pct1(video_agent.get('evidence_score'))}",

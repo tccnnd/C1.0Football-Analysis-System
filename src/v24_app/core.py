@@ -12641,6 +12641,83 @@ def create_video_review(
     return {"ok": True, "reason": "ok", "review": item}
 
 
+def create_video_review_reference(
+    match_id: str,
+    video_url: str,
+    *,
+    source_name: str = "FIFA+ Archive",
+    notes: str = "",
+) -> dict:
+    resolved_match_id = str(match_id or "").strip()
+    resolved_url = str(video_url or "").strip()
+    resolved_source = str(source_name or "").strip() or "External replay"
+    if not resolved_match_id:
+        return {"ok": False, "reason": "missing_match_id"}
+    if not resolved_url.startswith(("http://", "https://")):
+        return {"ok": False, "reason": "invalid_video_url", "url": resolved_url}
+    settlement = next(
+        (item for item in STATE_STORE.load_settlements() if isinstance(item, dict) and str(item.get("match_id") or "") == resolved_match_id),
+        {},
+    )
+    if not settlement:
+        return {"ok": False, "reason": "settlement_not_found", "match_id": resolved_match_id}
+
+    created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    review_seed = f"{resolved_match_id}|{resolved_url}|{created_at}"
+    review_id = hashlib.sha1(review_seed.encode("utf-8")).hexdigest()[:16]
+    visual_analysis = _video_review_frame_visual_analysis([])
+    agent_review = _video_review_ai_summary(
+        settlement,
+        frame_count=0,
+        notes=str(notes or f"external replay reference: {resolved_source}"),
+        visual_analysis=visual_analysis,
+    )
+    item = {
+        "review_id": review_id,
+        "created_at": created_at,
+        "match_id": resolved_match_id,
+        "match": {
+            "match_date": settlement.get("match_date"),
+            "league": settlement.get("league"),
+            "home_team": settlement.get("home_team"),
+            "away_team": settlement.get("away_team"),
+            "score": f"{settlement.get('home_goals', '-')}-{settlement.get('away_goals', '-')}",
+            "result": settlement.get("result"),
+        },
+        "video": {
+            "source_type": "external_reference",
+            "source_name": resolved_source,
+            "url": resolved_url,
+            "filename": resolved_source,
+            "path": "",
+            "size_bytes": 0,
+            "probe_status": "external_reference",
+            "duration_seconds": None,
+            "can_extract_frames": False,
+            "copyright_note": "Reference-only replay URL. Do not auto-download or redistribute video.",
+        },
+        "source_policy": {
+            "mode": "reference_only",
+            "recommended_scope": "world_cup_public_archive" if "fifa" in resolved_source.lower() else "external_replay_reference",
+            "fallback": "manual_timestamp_annotation",
+            "leakage_note": "External replay evidence is post-match review material only.",
+        },
+        "frame_interval_seconds": 0,
+        "max_frames": 0,
+        "frame_plan": [],
+        "frames": [],
+        "extraction": {"status": "not_available", "reason": "external_reference_no_local_file"},
+        "visual_analysis": visual_analysis,
+        "agent_review": agent_review,
+        "manual_annotations": [],
+    }
+    items = _load_video_review_items()
+    items = [existing for existing in items if not (isinstance(existing, dict) and str(existing.get("review_id") or "") == review_id)]
+    items.append(item)
+    _save_video_review_items(items)
+    return {"ok": True, "reason": "ok", "review": item}
+
+
 def extract_video_review_frames_now(
     review_id: str,
     *,

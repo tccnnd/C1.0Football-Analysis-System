@@ -85,6 +85,55 @@ class CoreVideoReviewTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "settlement_not_found")
 
+    def test_create_video_review_reference_records_fifa_archive_link(self) -> None:
+        settlement = {
+            "match_id": "m-ref",
+            "match_date": "2026-05-10",
+            "league": "World Cup",
+            "home_team": "Alpha",
+            "away_team": "Bravo",
+            "home_goals": 2,
+            "away_goals": 1,
+            "result": "主胜",
+            "is_correct": False,
+        }
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            review_file = root / "video_reviews.json"
+            review_dir = root / "video_review_frames"
+
+            with patch.object(core, "STATE_STORE", _VideoReviewStore(settlement)):
+                with patch.object(core, "VIDEO_REVIEW_FILE", review_file):
+                    with patch.object(core, "VIDEO_REVIEW_DIR", review_dir):
+                        result = core.create_video_review_reference(
+                            "m-ref",
+                            "https://www.plus.fifa.com/en/player/example",
+                            source_name="FIFA+ Archive",
+                            notes="reference only",
+                        )
+                        annotation = core.add_video_review_annotation(
+                            result["review"]["review_id"],
+                            event_type="tempo_shift",
+                            timestamp_seconds=420,
+                            note="mid-game tempo changed",
+                        )
+                        reviews = core.get_video_reviews(limit=10)
+                        enriched = core.get_recent_settlements(limit=10)
+
+        self.assertTrue(result["ok"])
+        review = result["review"]
+        self.assertEqual(review["video"]["source_type"], "external_reference")
+        self.assertEqual(review["video"]["source_name"], "FIFA+ Archive")
+        self.assertEqual(review["video"]["probe_status"], "external_reference")
+        self.assertFalse(review["video"]["can_extract_frames"])
+        self.assertEqual(review["source_policy"]["mode"], "reference_only")
+        self.assertEqual(review["source_policy"]["recommended_scope"], "world_cup_public_archive")
+        self.assertEqual(review["extraction"]["status"], "not_available")
+        self.assertEqual(review["agent_review"]["status"], "metadata_ready")
+        self.assertTrue(annotation["ok"])
+        self.assertEqual(len(reviews), 1)
+        self.assertEqual(enriched[0]["video_review"]["review_id"], review["review_id"])
+
     def test_extract_video_review_frames_updates_existing_review(self) -> None:
         settlement = {
             "match_id": "m-2",
