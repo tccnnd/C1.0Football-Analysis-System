@@ -42,6 +42,7 @@ from .core import (
     get_strategy_admission_policy_status,
     get_strategy_admission_policy_history,
     invalidate_statsbomb_state_cache,
+    load_c1_comparison_marks_cache,
     mark_strategy_allowlist_snapshots,
     persist_prediction_snapshots,
     predict_match,
@@ -173,6 +174,10 @@ from .ui_modules import (
     build_strategy_release_recovery_alerts,
     build_strategy_release_recovery_loop,
     build_strategy_release_pool_rows,
+    build_c1_rows_from_marks,
+    build_main_flow_governance_status,
+    build_main_flow_governance_status_text,
+    find_release_row,
     compute_strategy_admission_counts,
     filter_strategy_admission_rows,
     format_high_accuracy_strategy_release_explanation,
@@ -523,6 +528,32 @@ def _admission_color(prediction: dict) -> str:
     return YELLOW
 
 
+def _governance_color(status: dict) -> str:
+    tone = str(status.get("tone") or "")
+    if tone == "good":
+        return GREEN
+    if tone == "bad":
+        return RED
+    if tone == "warning":
+        return YELLOW
+    return MUTED
+
+
+def _governance_text(status: dict) -> str:
+    label = str(status.get("label") or "-").strip()
+    return label or "-"
+
+
+def _c1_suggested_action_priority(action: str) -> int:
+    return {
+        "\u963b\u65ad": 0,
+        "\u63a5\u8fd1\u963b\u65ad": 1,
+        "\u8865\u9635\u5bb9": 2,
+        "\u89c2\u5bdf": 3,
+        "\u53ef\u653e\u884c": 4,
+    }.get(str(action or "").strip(), 9)
+
+
 def _competition_mode_label(prediction: dict) -> str:
     if prediction.get("competition_mode") == "world_cup":
         return "\u4e16\u754c\u676f\u6a21\u5f0f"
@@ -635,7 +666,7 @@ def _world_cup_group_context_text(context: dict) -> str:
     )
 
 
-def _analysis_report(row: DashboardRow) -> str:
+def _analysis_report(row: DashboardRow, governance_status: dict | None = None) -> str:
     match = row.match
     pred = row.prediction
     indices = pred.get("indices", {}) if isinstance(pred.get("indices"), dict) else {}
@@ -649,6 +680,9 @@ def _analysis_report(row: DashboardRow) -> str:
     admission_replay_line = f"- Agent Replay\uff1a{admission_replay_text}\n" if admission_replay_text != "-" else ""
     draw_guard_label, draw_guard_body, _draw_guard_tone = _draw_release_guard_summary(pred)
     draw_guard_line = f"- \u5e73\u5c40\u63a5\u7ba1\uff1a{draw_guard_label} | {draw_guard_body}\n"
+    governance_block = ""
+    if governance_status:
+        governance_block = "\n" + build_main_flow_governance_status_text(governance_status) + "\n"
 
     risk_reason = {
         "high": "\u51b7\u95e8\u6307\u6570\u504f\u9ad8\uff0c\u5e02\u573a\u4e0e\u6a21\u578b\u53ef\u80fd\u5b58\u5728\u660e\u663e\u5206\u6b67\u3002",
@@ -677,6 +711,7 @@ def _analysis_report(row: DashboardRow) -> str:
         f"- \u98ce\u9669\u7b49\u7ea7\uff1a{_risk_label(pred.get('risk_level'))}\n"
         f"- \u7efc\u5408\u7f6e\u4fe1\u5ea6\uff1a{_pct1(pred.get('confidence'))}\n"
         f"- \u9884\u8ba1\u603b\u8fdb\u7403\uff1a{_num(pred.get('expected_goals'))}\n\n"
+        f"{governance_block}"
         "\u6982\u7387\u5206\u5e03\n"
         f"- {_prob_text(probs, 'home')} / {_prob_text(probs, 'draw')} / {_prob_text(probs, 'away')}"
         f"{market_line}\n\n"
@@ -841,7 +876,7 @@ def _supervisor_markdown(pred: dict) -> str:
     return "\n".join(lines)
 
 
-def _markdown_report(row: DashboardRow, generated_at: datetime | None = None) -> str:
+def _markdown_report(row: DashboardRow, generated_at: datetime | None = None, governance_status: dict | None = None) -> str:
     now = generated_at or datetime.now()
     match = row.match
     pred = row.prediction
@@ -858,6 +893,14 @@ def _markdown_report(row: DashboardRow, generated_at: datetime | None = None) ->
     market_entropy_section = _market_entropy_markdown(pred)
     handicap_margin_section = _handicap_margin_markdown(pred)
     supervisor_section = _supervisor_markdown(pred)
+    governance_text = build_main_flow_governance_status_text(governance_status) if governance_status else ""
+    governance_section = f"## Main Flow Governance\n\n```text\n{governance_text}\n```\n\n" if governance_text else ""
+    governance_table_rows = ""
+    if governance_status:
+        governance_table_rows = (
+            f"| \u4e3b\u6d41\u7a0b\u6cbb\u7406 | {_md_cell(governance_status.get('label', '-'))} ({_md_cell(governance_status.get('status', '-'))}) |\n"
+            f"| \u6b63\u5f0f\u5efa\u8bae\u53ef\u7528 | {_md_cell('yes' if governance_status.get('formal_allowed') else 'no')} |\n"
+        )
     return (
         f"# {match.home_team} vs {match.away_team} \u8d5b\u4e8b\u5206\u6790\u62a5\u544a\n\n"
         "## 1. 基本信息\n\n"
@@ -876,6 +919,7 @@ def _markdown_report(row: DashboardRow, generated_at: datetime | None = None) ->
         f"| \u51c6\u5165\u539f\u56e0 | {_md_cell(format_strategy_admission_reasons(admission, limit=6))} |\n"
         f"| \u51c6\u5165\u95e8\u69db | {_md_cell(format_strategy_admission_thresholds(admission))} |\n"
         f"| Agent Replay | {_md_cell(format_strategy_admission_replay_guard(admission))} |\n"
+        f"{governance_table_rows}"
         f"| Draw Guard | {_md_cell(_draw_release_guard_summary(pred)[0])} |\n"
         f"| 风险等级 | {_md_cell(_risk_label(pred.get('risk_level')))} |\n"
         f"| 综合置信度 | {_pct1(pred.get('confidence'))} |\n"
@@ -913,10 +957,11 @@ def _markdown_report(row: DashboardRow, generated_at: datetime | None = None) ->
         f"| Kelly 客胜 | {_num(match.kelly_away, 3)} |\n\n"
         "## 7. AI 分析摘要\n\n"
         f"{draw_guard_section}"
+        f"{governance_section}"
         f"{market_entropy_section}"
         f"{handicap_margin_section}"
         f"{supervisor_section}"
-        f"{_analysis_report(row)}\n\n"
+        f"{_analysis_report(row, governance_status=governance_status)}\n\n"
         "## 8. 复核清单\n\n"
         "- [ ] 复核首发阵容与关键伤停\n"
         "- [ ] 复核临场盘口是否继续偏离模型方向\n"
@@ -1040,6 +1085,10 @@ class SmartMatchDashboard:
         self.last_refresh_seconds: float | None = None
         self.last_load_diagnostics: dict[str, object] = {}
         self.load_failures: list[dict[str, str]] = []
+        self.c1_comparison_marks: dict[str, dict] = {}
+        self.c1_release_rows: list[dict] = []
+        self.play_model_policy_cache: dict[str, object] = {}
+        self.strategy_release_recovery_cache: dict[str, object] = {}
         self.event_log: list[tuple[str, str, str]] = []
         self.current_nav_index = 0
         self.current_view = "home"
@@ -1901,6 +1950,41 @@ class SmartMatchDashboard:
         self.status_var.set(f"加载失败: {exc}")
         messagebox.showerror("加载失败", str(exc))
 
+    def _refresh_governance_context(self) -> None:
+        predictions = {row.match.match_id: row.prediction for row in self.rows}
+        try:
+            marks = load_c1_comparison_marks_cache()
+            self.c1_comparison_marks = marks if isinstance(marks, dict) else {}
+            self.c1_release_rows = build_c1_rows_from_marks(
+                matches=[row.match for row in self.rows],
+                marks=self.c1_comparison_marks,
+                predictions=predictions,
+                action_priority_fn=_c1_suggested_action_priority,
+            )
+        except Exception as exc:
+            self.c1_comparison_marks = {}
+            self.c1_release_rows = []
+            self._log_event("WARN", f"C1 \u6cbb\u7406\u72b6\u6001\u8bfb\u53d6\u5931\u8d25: {exc}")
+        self.play_model_policy_cache = self._play_model_policy_status()
+        try:
+            loop = self._strategy_release_recovery_loop()
+            self.strategy_release_recovery_cache = loop if isinstance(loop, dict) else {}
+        except Exception as exc:
+            self.strategy_release_recovery_cache = {}
+            self._log_event("WARN", f"\u653e\u884c\u56de\u6536\u95ed\u73af\u8bfb\u53d6\u5931\u8d25: {exc}")
+
+    def _current_release_row(self, match_id: str) -> dict:
+        return find_release_row(self.c1_release_rows, match_id)
+
+    def _main_flow_governance_status(self, row: DashboardRow) -> dict:
+        return build_main_flow_governance_status(
+            prediction=row.prediction,
+            c1_release_row=self._current_release_row(row.match.match_id),
+            play_policy_status=self.play_model_policy_cache,
+            recovery_loop=self.strategy_release_recovery_cache,
+            match_id=row.match.match_id,
+        )
+
     def _apply_rows(
         self,
         rows: list[DashboardRow],
@@ -1916,6 +2000,7 @@ class SmartMatchDashboard:
         failures = self.last_load_diagnostics.get("failures", [])
         self.load_failures = list(failures) if isinstance(failures, list) else []
         self.date_var.set(datetime.now().strftime("(%Y-%m-%d)"))
+        self._refresh_governance_context()
         self._refresh_metrics()
         if self._widget_alive("match_list"):
             self._refresh_matches()
@@ -2084,6 +2169,7 @@ class SmartMatchDashboard:
     def _match_row(self, row: DashboardRow) -> None:
         match = row.match
         pred = row.prediction
+        governance = self._main_flow_governance_status(row)
         frame = tk.Frame(self.match_list, bg=PANEL_2, highlightbackground="#172638", highlightthickness=1)
         frame.pack(fill=tk.X, pady=3)
         frame.configure(cursor="hand2")
@@ -2098,7 +2184,8 @@ class SmartMatchDashboard:
             ("风险等级", _risk_label(pred.get("risk_level")), _risk_color(pred.get("risk_level")), 112),
             ("置信度", _pct(pred.get("confidence")), TEXT, 88),
             ("策略准入", _admission_text(pred), _admission_color(pred), 96),
-            ("推荐策略", _strategy_text(pred), TEXT, 168),
+            ("\u4e3b\u6d41\u7a0b", _governance_text(governance), _governance_color(governance), 126),
+            ("推荐策略", _strategy_text(pred), TEXT, 150),
         ]:
             block = tk.Frame(frame, bg=PANEL_2, width=width)
             block.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 6), pady=8)
@@ -2154,10 +2241,12 @@ class SmartMatchDashboard:
         summary = tk.Frame(shell, bg=BG)
         summary.pack(fill=tk.X, pady=(0, 16))
         pred = row.prediction
+        governance = self._main_flow_governance_status(row)
         draw_guard_label, _draw_guard_body, draw_guard_tone = _draw_release_guard_summary(pred)
         for label, value, color in [
             ("\u98ce\u9669\u7b49\u7ea7", _risk_label(pred.get("risk_level")), _risk_color(pred.get("risk_level"))),
             ("策略准入", _admission_text(pred), _admission_color(pred)),
+            ("\u4e3b\u6d41\u7a0b", _governance_text(governance), _governance_color(governance)),
             ("\u63a8\u8350\u7b56\u7565", _strategy_text(pred), TEXT),
             ("\u7f6e\u4fe1\u5ea6", _pct1(pred.get("confidence")), "#7aa2ff"),
             ("\u5e73\u5c40\u63a5\u7ba1", draw_guard_label, self._tone_color(draw_guard_tone)),
@@ -2191,7 +2280,7 @@ class SmartMatchDashboard:
             pady=8,
         )
         text.pack(fill=tk.BOTH, expand=True, padx=2, pady=(0, 14))
-        text.insert("1.0", _analysis_report(row))
+        text.insert("1.0", _analysis_report(row, governance_status=governance))
         text.configure(state=tk.DISABLED)
 
     def _agent_status_color(self, status: object) -> str:
@@ -2329,7 +2418,7 @@ class SmartMatchDashboard:
         now = datetime.now()
         name = f"ai_match_report_{now.strftime('%Y%m%d_%H%M%S')}_{_slug(row.match.home_team)}_vs_{_slug(row.match.away_team)}.md"
         path = REPORT_DIR / name
-        path.write_text(_markdown_report(row, generated_at=now), encoding="utf-8")
+        path.write_text(_markdown_report(row, generated_at=now, governance_status=self._main_flow_governance_status(row)), encoding="utf-8")
         self.status_var.set(f"\u62a5\u544a\u5df2\u4fdd\u5b58: {path.name}")
         messagebox.showinfo("\u4fdd\u5b58\u62a5\u544a", f"\u5df2\u751f\u6210\u62a5\u544a:\n{path}")
         return path

@@ -164,6 +164,11 @@ from .c1_main_list_flow import (
     restore_c1_marks_for_matches,
     should_show_match_for_filter,
 )
+from .main_flow_governance import (
+    build_main_flow_governance_status,
+    build_main_flow_governance_status_text,
+    summarize_main_flow_governance_statuses,
+)
 from .parlay_flow import build_parlay_detail_lines, refresh_parlay_recommendations
 from .handicap_monitor_flow import (
     build_handicap_dashboard_text,
@@ -461,6 +466,9 @@ __all__ = [
     "compute_c1_action_counts",
     "restore_c1_marks_for_matches",
     "should_show_match_for_filter",
+    "build_main_flow_governance_status",
+    "build_main_flow_governance_status_text",
+    "summarize_main_flow_governance_statuses",
     "build_parlay_detail_lines",
     "refresh_parlay_recommendations",
     "build_handicap_dashboard_text",
