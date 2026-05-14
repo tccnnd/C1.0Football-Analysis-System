@@ -1416,6 +1416,35 @@ class SmartMatchDashboard:
             button.pack(side=tk.LEFT, padx=(0, 6))
             self.admission_filter_buttons[key] = button
 
+        governance_filter_bar = tk.Frame(matches_card, bg=PANEL)
+        governance_filter_bar.pack(fill=tk.X, padx=18, pady=(0, 10))
+        tk.Label(governance_filter_bar, text="\u4e3b\u6d41\u7a0b\u6cbb\u7406", bg=PANEL, fg=MUTED, font=("Microsoft YaHei UI", 10, "bold")).pack(side=tk.LEFT, padx=(0, 8))
+        self.governance_filter_buttons = {}
+        for key, label in [
+            ("all", "\u5168\u90e8"),
+            ("formal_ready", "\u6b63\u5f0f\u5efa\u8bae"),
+            ("needs_c1_review", "C1 \u5f85\u5ba1"),
+            ("blocked", "\u963b\u65ad"),
+            ("needs_recovery", "\u5f85\u56de\u6536"),
+            ("observe", "\u89c2\u5bdf"),
+        ]:
+            button = tk.Button(
+                governance_filter_bar,
+                text=label,
+                command=lambda key=key: self._set_governance_filter(key),
+                bg=PANEL_2,
+                fg=TEXT,
+                activebackground="#172638",
+                activeforeground="white",
+                relief=tk.FLAT,
+                font=("Microsoft YaHei UI", 9, "bold"),
+                padx=12,
+                pady=5,
+            )
+            button.pack(side=tk.LEFT, padx=(0, 6))
+            self.governance_filter_buttons[key] = button
+        self._refresh_governance_filter_buttons(self.main_flow_governance_counts)
+
         self.match_list_wrap = tk.Frame(matches_card, bg=PANEL, height=510)
         self.match_list_wrap.pack(fill=tk.BOTH, expand=True, padx=18, pady=(0, 14))
         self.match_list_wrap.pack_propagate(False)
@@ -1978,11 +2007,22 @@ class SmartMatchDashboard:
         except Exception as exc:
             self.strategy_release_recovery_cache = {}
             self._log_event("WARN", f"\u653e\u884c\u56de\u6536\u95ed\u73af\u8bfb\u53d6\u5931\u8d25: {exc}")
+        statuses: list[dict] = []
+        self.main_flow_governance_status_by_match_id = {}
+        for row in self.rows:
+            status = self._main_flow_governance_status(row)
+            statuses.append(status)
+            self.main_flow_governance_status_by_match_id[row.match.match_id] = status
+        self.main_flow_governance_counts = summarize_main_flow_governance_statuses(statuses)
+        self._refresh_governance_filter_buttons(self.main_flow_governance_counts)
 
     def _current_release_row(self, match_id: str) -> dict:
         return find_release_row(self.c1_release_rows, match_id)
 
     def _main_flow_governance_status(self, row: DashboardRow) -> dict:
+        cached = getattr(self, "main_flow_governance_status_by_match_id", {}).get(row.match.match_id)
+        if isinstance(cached, dict):
+            return cached
         return build_main_flow_governance_status(
             prediction=row.prediction,
             c1_release_row=self._current_release_row(row.match.match_id),
@@ -2171,6 +2211,11 @@ class SmartMatchDashboard:
         counts = compute_strategy_admission_counts(self.rows)
         self._refresh_admission_filter_buttons(counts)
         filtered_rows = filter_strategy_admission_rows(self.rows, self.admission_filter)
+        filtered_rows = filter_main_flow_governance_rows(
+            filtered_rows,
+            self.governance_filter,
+            status_fn=self._main_flow_governance_status,
+        )
         ranked = sorted(
             filtered_rows,
             key=lambda row: (
