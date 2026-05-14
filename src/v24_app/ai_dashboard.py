@@ -2000,6 +2000,179 @@ def build_video_review_evidence_gap_batch_status_rows(state: dict | object, *, l
     return rows
 
 
+def build_video_review_evidence_gap_batch_filter_options(state: dict | object) -> dict[str, object]:
+    batches = [
+        _recompute_video_review_evidence_gap_batch(dict(item))
+        for item in ((state.get("batches") if isinstance(state, dict) else []) or [])
+        if isinstance(item, dict)
+    ]
+    batch_options = [
+        {"label": "最新批次", "value": "latest"},
+        {"label": "全部批次", "value": "all"},
+    ]
+    for batch in batches:
+        batch_id = str(batch.get("batch_id") or "").strip()
+        if batch_id:
+            pending = int(batch.get("pending_count", 0) or 0)
+            total = int(batch.get("total_count", 0) or 0)
+            batch_options.append({"label": f"{batch_id} ({pending}/{total} 待处理)", "value": batch_id})
+    return {
+        "batch_options": batch_options,
+        "status_options": [
+            {"label": "全部状态", "value": "all"},
+            {"label": "未处理", "value": "pending"},
+            {"label": "已处理", "value": "resolved"},
+        ],
+        "priority_options": [
+            {"label": "全部优先级", "value": "all"},
+            {"label": "P0", "value": "P0"},
+            {"label": "P1", "value": "P1"},
+            {"label": "P2", "value": "P2"},
+            {"label": "P3", "value": "P3"},
+        ],
+        "evidence_options": [
+            {"label": "全部证据", "value": "all"},
+            {"label": "缺证据", "value": "missing"},
+            {"label": "视频证据", "value": "video"},
+            {"label": "事件代理", "value": "event_proxy"},
+            {"label": "本地视频", "value": "local_video"},
+            {"label": "外部回放", "value": "external_reference"},
+            {"label": "StatsBomb/Event Proxy", "value": "statsbomb_event_proxy"},
+        ],
+    }
+
+
+def build_video_review_evidence_gap_batch_filter_result(
+    state: dict | object,
+    *,
+    batch_filter: str = "latest",
+    status_filter: str = "all",
+    priority_filter: str = "all",
+    evidence_filter: str = "all",
+) -> dict[str, object]:
+    def _evidence_kind(item: dict) -> str:
+        kind = str(item.get("evidence_kind") or "").strip()
+        if kind:
+            return kind
+        return "missing" if str(item.get("status") or "") != "resolved" else "-"
+
+    def _evidence_matches(kind: str, expected: str) -> bool:
+        if expected == "all":
+            return True
+        if expected == "video":
+            return kind in {"local_video", "external_reference"}
+        if expected == "event_proxy":
+            return kind == "statsbomb_event_proxy"
+        return kind == expected
+
+    batches = [
+        _recompute_video_review_evidence_gap_batch(dict(item))
+        for item in ((state.get("batches") if isinstance(state, dict) else []) or [])
+        if isinstance(item, dict)
+    ]
+    selected_batches: list[dict]
+    resolved_batch_filter = str(batch_filter or "latest")
+    if resolved_batch_filter == "all":
+        selected_batches = batches
+    elif resolved_batch_filter == "latest":
+        selected_batches = batches[:1]
+    else:
+        selected_batches = [batch for batch in batches if str(batch.get("batch_id") or "") == resolved_batch_filter]
+
+    selected_items: list[dict[str, object]] = []
+    for batch in selected_batches:
+        batch_id = str(batch.get("batch_id") or "-")
+        for item in [entry for entry in batch.get("items", []) if isinstance(entry, dict)]:
+            status = str(item.get("status") or "pending")
+            priority = str(item.get("priority_label") or "-")
+            evidence_kind = _evidence_kind(item)
+            if status_filter != "all" and status != status_filter:
+                continue
+            if priority_filter != "all" and priority != priority_filter:
+                continue
+            if not _evidence_matches(evidence_kind, str(evidence_filter or "all")):
+                continue
+            selected_items.append(
+                {
+                    "batch_id": batch_id,
+                    "match_id": str(item.get("match_id") or "-"),
+                    "title": str(item.get("title") or "-"),
+                    "priority_label": priority,
+                    "priority_score": int(item.get("priority_score", 0) or 0),
+                    "priority_reasons": item.get("priority_reasons") if isinstance(item.get("priority_reasons"), list) else [],
+                    "status": status,
+                    "evidence_kind": evidence_kind,
+                    "source_name": str(item.get("source_name") or "-"),
+                    "handled_at": str(item.get("handled_at") or "-"),
+                    "handled_by": str(item.get("handled_by") or "-"),
+                    "review_id": str(item.get("review_id") or "-"),
+                    "report_path": str(batch.get("report_path") or "-"),
+                }
+            )
+
+    pending_count = sum(1 for item in selected_items if item.get("status") != "resolved")
+    resolved_count = sum(1 for item in selected_items if item.get("status") == "resolved")
+    video_count = sum(1 for item in selected_items if item.get("evidence_kind") in {"local_video", "external_reference"})
+    event_proxy_count = sum(1 for item in selected_items if item.get("evidence_kind") == "statsbomb_event_proxy")
+    missing_count = sum(1 for item in selected_items if item.get("evidence_kind") == "missing")
+    priority_counts = Counter(str(item.get("priority_label") or "-") for item in selected_items)
+    return {
+        "filters": {
+            "batch": resolved_batch_filter,
+            "status": status_filter,
+            "priority": priority_filter,
+            "evidence": evidence_filter,
+        },
+        "items": selected_items,
+        "summary": {
+            "total_count": len(selected_items),
+            "pending_count": pending_count,
+            "resolved_count": resolved_count,
+            "video_count": video_count,
+            "event_proxy_count": event_proxy_count,
+            "missing_count": missing_count,
+            "priority_counts": dict(priority_counts),
+            "summary_text": (
+                f"匹配 {len(selected_items)} 项 | 未处理 {pending_count} | 已处理 {resolved_count} | "
+                f"视频 {video_count} | 事件代理 {event_proxy_count} | 缺证据 {missing_count}"
+            ),
+        },
+    }
+
+
+def build_video_review_evidence_gap_batch_filter_rows(
+    filter_result: dict | object,
+    *,
+    limit: int = 80,
+) -> list[dict[str, object]]:
+    items = filter_result.get("items") if isinstance(filter_result, dict) else []
+    if not isinstance(items, list):
+        return []
+    rows: list[dict[str, object]] = []
+    for item in [entry for entry in items if isinstance(entry, dict)][: max(0, int(limit))]:
+        status = str(item.get("status") or "pending")
+        evidence = str(item.get("evidence_kind") or "-")
+        rows.append(
+            {
+                "batch_id": str(item.get("batch_id") or "-"),
+                "match_id": str(item.get("match_id") or "-"),
+                "priority": str(item.get("priority_label") or "-"),
+                "score": str(item.get("priority_score") or 0),
+                "status": "已处理" if status == "resolved" else "未处理",
+                "evidence": evidence,
+                "source": str(item.get("source_name") or "-"),
+                "handled_at": str(item.get("handled_at") or "-"),
+                "title": str(item.get("title") or "-"),
+                "body": (
+                    f"{item.get('batch_id', '-')} | {item.get('match_id', '-')}\n"
+                    f"证据: {evidence} | 来源: {item.get('source_name', '-') or '-'} | 处理时间: {item.get('handled_at', '-') or '-'}"
+                ),
+                "tone": "good" if status == "resolved" else "warning",
+            }
+        )
+    return rows
+
+
 def build_video_review_evidence_gap_feedback(
     settlement: dict,
     result: dict | None = None,
@@ -5454,6 +5627,19 @@ class SmartMatchDashboard:
         ).pack(side=tk.LEFT, padx=(10, 0))
         tk.Button(
             review_memory_actions,
+            text="筛选缺口批次",
+            command=self.open_video_review_evidence_gap_batch_filter_window,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=14,
+            pady=6,
+        ).pack(side=tk.LEFT, padx=(10, 0))
+        tk.Button(
+            review_memory_actions,
             text="\u56de\u6eda\u89c6\u9891\u8bb0\u5fc6",
             command=self.rollback_video_review_fewshot_memory,
             bg=PANEL_2,
@@ -5963,6 +6149,188 @@ class SmartMatchDashboard:
             build_video_review_evidence_gap_batch_plan_export_message(path, rows, batch_record),
         )
         return path
+
+    def open_video_review_evidence_gap_batch_filter_window(self) -> None:
+        state = _load_video_review_evidence_gap_batch_state()
+        options = build_video_review_evidence_gap_batch_filter_options(state)
+
+        def _options(key: str) -> list[dict]:
+            values = options.get(key) if isinstance(options.get(key), list) else []
+            return [item for item in values if isinstance(item, dict)]
+
+        def _labels(key: str) -> list[str]:
+            return [str(item.get("label") or item.get("value") or "-") for item in _options(key)]
+
+        def _value_for_label(key: str, label: str) -> str:
+            for item in _options(key):
+                if str(item.get("label") or item.get("value") or "-") == label:
+                    return str(item.get("value") or "all")
+            first = _options(key)[0] if _options(key) else {}
+            return str(first.get("value") or "all")
+
+        window = tk.Toplevel(self.root)
+        window.title("复盘证据缺口批次筛选")
+        window.geometry("1080x660")
+        window.configure(bg=BG)
+
+        shell = tk.Frame(window, bg=BG)
+        shell.pack(fill=tk.BOTH, expand=True, padx=16, pady=16)
+
+        tk.Label(shell, text="复盘证据缺口批次筛选", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 15, "bold")).pack(anchor=tk.W)
+        summary_var = tk.StringVar(value="-")
+        tk.Label(shell, textvariable=summary_var, bg=BG, fg=MUTED, font=("Microsoft YaHei UI", 10)).pack(anchor=tk.W, pady=(4, 12))
+
+        controls = tk.Frame(shell, bg=BG)
+        controls.pack(fill=tk.X, pady=(0, 12))
+        batch_var = tk.StringVar(value=(_labels("batch_options") or ["最新批次"])[0])
+        status_var = tk.StringVar(value=(_labels("status_options") or ["全部状态"])[0])
+        priority_var = tk.StringVar(value=(_labels("priority_options") or ["全部优先级"])[0])
+        evidence_var = tk.StringVar(value=(_labels("evidence_options") or ["全部证据"])[0])
+
+        def _combo(label: str, variable: tk.StringVar, values: list[str]) -> ttk.Combobox:
+            wrap = tk.Frame(controls, bg=BG)
+            wrap.pack(side=tk.LEFT, padx=(0, 10))
+            tk.Label(wrap, text=label, bg=BG, fg=MUTED, font=("Microsoft YaHei UI", 9)).pack(anchor=tk.W)
+            combo = ttk.Combobox(wrap, textvariable=variable, values=values, state="readonly", width=22)
+            combo.pack(anchor=tk.W)
+            return combo
+
+        batch_combo = _combo("批次", batch_var, _labels("batch_options"))
+        status_combo = _combo("状态", status_var, _labels("status_options"))
+        priority_combo = _combo("优先级", priority_var, _labels("priority_options"))
+        evidence_combo = _combo("证据", evidence_var, _labels("evidence_options"))
+
+        table_wrap = tk.Frame(shell, bg=PANEL)
+        table_wrap.pack(fill=tk.BOTH, expand=True)
+        self._configure_dark_tree_style("EvidenceGapBatch.Treeview", rowheight=27)
+        columns = ("priority", "score", "status", "evidence", "source", "handled_at", "match_id", "title")
+        tree = ttk.Treeview(table_wrap, columns=columns, show="headings", style="EvidenceGapBatch.Treeview", height=14)
+        headings = {
+            "priority": "优先级",
+            "score": "分数",
+            "status": "状态",
+            "evidence": "证据",
+            "source": "来源",
+            "handled_at": "处理时间",
+            "match_id": "match_id",
+            "title": "场次",
+        }
+        widths = {
+            "priority": 64,
+            "score": 54,
+            "status": 72,
+            "evidence": 132,
+            "source": 130,
+            "handled_at": 138,
+            "match_id": 130,
+            "title": 280,
+        }
+        for key in columns:
+            tree.heading(key, text=headings[key])
+            tree.column(key, width=widths[key], minwidth=50, stretch=key == "title", anchor=tk.W)
+        scrollbar = tk.Scrollbar(table_wrap, orient=tk.VERTICAL, command=tree.yview)
+        tree.configure(yscrollcommand=scrollbar.set)
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(10, 0), pady=10)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y, pady=10, padx=(0, 10))
+
+        detail = tk.Text(
+            shell,
+            bg=PANEL,
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief=tk.FLAT,
+            wrap=tk.WORD,
+            font=("Microsoft YaHei UI", 10),
+            height=7,
+        )
+        detail.pack(fill=tk.X, pady=(12, 0))
+        rows_cache: list[dict[str, object]] = []
+
+        def _show_detail(index: int | None = None) -> None:
+            detail.configure(state=tk.NORMAL)
+            detail.delete("1.0", tk.END)
+            if index is None or index < 0 or index >= len(rows_cache):
+                detail.insert(tk.END, "选择一条批次记录查看处理来源、证据类型和报告路径。")
+            else:
+                row = rows_cache[index]
+                detail.insert(
+                    tk.END,
+                    (
+                        f"{row.get('title', '-')}\n"
+                        f"批次: {row.get('batch_id', '-')}\n"
+                        f"match_id: {row.get('match_id', '-')}\n"
+                        f"优先级: {row.get('priority', '-')} / score {row.get('score', '-')}\n"
+                        f"状态: {row.get('status', '-')} | 证据: {row.get('evidence', '-')} | 来源: {row.get('source', '-')}\n"
+                        f"处理时间: {row.get('handled_at', '-')}"
+                    ),
+                )
+            detail.configure(state=tk.DISABLED)
+
+        def _refresh(_event=None) -> None:
+            nonlocal rows_cache
+            result = build_video_review_evidence_gap_batch_filter_result(
+                _load_video_review_evidence_gap_batch_state(),
+                batch_filter=_value_for_label("batch_options", batch_var.get()),
+                status_filter=_value_for_label("status_options", status_var.get()),
+                priority_filter=_value_for_label("priority_options", priority_var.get()),
+                evidence_filter=_value_for_label("evidence_options", evidence_var.get()),
+            )
+            summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+            summary_var.set(str(summary.get("summary_text") or "-"))
+            rows_cache = build_video_review_evidence_gap_batch_filter_rows(result, limit=200)
+            for item_id in tree.get_children():
+                tree.delete(item_id)
+            if not rows_cache:
+                tree.insert("", tk.END, iid="empty", values=("-", "-", "-", "-", "-", "-", "-", "暂无匹配的缺口批次记录"))
+                _show_detail(None)
+                return
+            for index, row in enumerate(rows_cache):
+                tree.insert(
+                    "",
+                    tk.END,
+                    iid=str(index),
+                    values=(
+                        row.get("priority", "-"),
+                        row.get("score", "-"),
+                        row.get("status", "-"),
+                        row.get("evidence", "-"),
+                        row.get("source", "-"),
+                        row.get("handled_at", "-"),
+                        row.get("match_id", "-"),
+                        row.get("title", "-"),
+                    ),
+                )
+            tree.selection_set("0")
+            tree.focus("0")
+            _show_detail(0)
+
+        for combo in (batch_combo, status_combo, priority_combo, evidence_combo):
+            combo.bind("<<ComboboxSelected>>", _refresh)
+
+        tk.Button(
+            controls,
+            text="刷新",
+            command=_refresh,
+            bg=BLUE,
+            fg="white",
+            activebackground="#3d5ee7",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=16,
+            pady=5,
+        ).pack(side=tk.LEFT, padx=(6, 0), pady=(17, 0))
+
+        def _on_select(_event=None) -> None:
+            selection = tree.selection()
+            if selection and rows_cache:
+                try:
+                    _show_detail(int(selection[0]))
+                except (TypeError, ValueError):
+                    _show_detail(None)
+
+        tree.bind("<<TreeviewSelect>>", _on_select)
+        _refresh()
 
     def export_statsbomb_review_training_quality_report(self) -> Path:
         quality = self._current_statsbomb_review_training_quality()

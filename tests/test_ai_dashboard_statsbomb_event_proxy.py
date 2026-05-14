@@ -23,6 +23,9 @@ from v24_app.ai_dashboard import (
     build_video_review_evidence_gap_batch_id,
     build_video_review_evidence_gap_batch_record,
     build_video_review_evidence_gap_action_rows,
+    build_video_review_evidence_gap_batch_filter_options,
+    build_video_review_evidence_gap_batch_filter_result,
+    build_video_review_evidence_gap_batch_filter_rows,
     build_video_review_evidence_gap_batch_plan_export_message,
     build_video_review_evidence_gap_batch_plan_filename,
     build_video_review_evidence_gap_batch_plan_lines,
@@ -286,6 +289,132 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertIn("完成率 100%", rows[0]["title"])
         self.assertIn("FIFA+ Archive", rows[0]["body"])
         self.assertIn("external_reference", rows[0]["body"])
+
+    def test_video_review_evidence_gap_batch_filter_options_include_latest_and_filters(self) -> None:
+        state = {
+            "batches": [
+                {
+                    "batch_id": "evidence_gap_batch_latest",
+                    "items": [{"match_id": "gap-1", "status": "pending"}],
+                }
+            ]
+        }
+
+        options = build_video_review_evidence_gap_batch_filter_options(state)
+
+        self.assertEqual(options["batch_options"][0]["value"], "latest")
+        self.assertEqual(options["batch_options"][1]["value"], "all")
+        self.assertIn({"label": "未处理", "value": "pending"}, options["status_options"])
+        self.assertIn({"label": "P1", "value": "P1"}, options["priority_options"])
+        self.assertIn({"label": "事件代理", "value": "event_proxy"}, options["evidence_options"])
+
+    def test_video_review_evidence_gap_batch_filter_result_defaults_to_latest_batch(self) -> None:
+        state = {
+            "batches": [
+                {
+                    "batch_id": "latest",
+                    "items": [
+                        {"match_id": "latest-p1", "title": "Latest P1", "priority_label": "P1", "status": "pending"},
+                        {
+                            "match_id": "latest-done",
+                            "title": "Latest Done",
+                            "priority_label": "P2",
+                            "status": "resolved",
+                            "evidence_kind": "external_reference",
+                            "source_name": "FIFA+ Archive",
+                            "handled_at": "2026-05-14 13:00:00",
+                        },
+                    ],
+                },
+                {
+                    "batch_id": "older",
+                    "items": [{"match_id": "older-p1", "title": "Older P1", "priority_label": "P1", "status": "pending"}],
+                },
+            ]
+        }
+
+        result = build_video_review_evidence_gap_batch_filter_result(state)
+
+        self.assertEqual([item["match_id"] for item in result["items"]], ["latest-p1", "latest-done"])
+        self.assertEqual(result["summary"]["total_count"], 2)
+        self.assertEqual(result["summary"]["pending_count"], 1)
+        self.assertEqual(result["summary"]["resolved_count"], 1)
+        self.assertEqual(result["summary"]["video_count"], 1)
+        self.assertEqual(result["summary"]["missing_count"], 1)
+        self.assertNotIn("older-p1", [item["match_id"] for item in result["items"]])
+
+    def test_video_review_evidence_gap_batch_filter_result_filters_status_priority_and_evidence(self) -> None:
+        state = {
+            "batches": [
+                {
+                    "batch_id": "latest",
+                    "items": [
+                        {"match_id": "p1-pending", "title": "P1 Pending", "priority_label": "P1", "status": "pending"},
+                        {
+                            "match_id": "p1-video",
+                            "title": "P1 Video",
+                            "priority_label": "P1",
+                            "status": "resolved",
+                            "evidence_kind": "external_reference",
+                            "source_name": "FIFA+ Archive",
+                        },
+                        {
+                            "match_id": "p2-event",
+                            "title": "P2 Event",
+                            "priority_label": "P2",
+                            "status": "resolved",
+                            "evidence_kind": "statsbomb_event_proxy",
+                            "source_name": "StatsBomb/Event Proxy",
+                        },
+                    ],
+                }
+            ]
+        }
+
+        pending_p1 = build_video_review_evidence_gap_batch_filter_result(
+            state,
+            status_filter="pending",
+            priority_filter="P1",
+        )
+        video = build_video_review_evidence_gap_batch_filter_result(state, evidence_filter="video")
+        event_proxy = build_video_review_evidence_gap_batch_filter_result(state, evidence_filter="event_proxy")
+
+        self.assertEqual([item["match_id"] for item in pending_p1["items"]], ["p1-pending"])
+        self.assertEqual([item["match_id"] for item in video["items"]], ["p1-video"])
+        self.assertEqual([item["match_id"] for item in event_proxy["items"]], ["p2-event"])
+
+    def test_video_review_evidence_gap_batch_filter_rows_format_table_data(self) -> None:
+        result = build_video_review_evidence_gap_batch_filter_result(
+            {
+                "batches": [
+                    {
+                        "batch_id": "latest",
+                        "report_path": "reports/plan.md",
+                        "items": [
+                            {
+                                "match_id": "p1-video",
+                                "title": "P1 Video",
+                                "priority_label": "P1",
+                                "priority_score": 60,
+                                "status": "resolved",
+                                "evidence_kind": "external_reference",
+                                "source_name": "FIFA+ Archive",
+                                "handled_at": "2026-05-14 13:00:00",
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+
+        rows = build_video_review_evidence_gap_batch_filter_rows(result)
+
+        self.assertEqual(rows[0]["priority"], "P1")
+        self.assertEqual(rows[0]["score"], "60")
+        self.assertEqual(rows[0]["status"], "已处理")
+        self.assertEqual(rows[0]["evidence"], "external_reference")
+        self.assertIn("FIFA+ Archive", rows[0]["body"])
+        self.assertEqual(rows[0]["tone"], "good")
 
     def test_video_review_evidence_gap_batch_resolution_uses_statsbomb_sample_ids(self) -> None:
         batch = build_video_review_evidence_gap_batch_record(
