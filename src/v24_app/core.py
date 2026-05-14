@@ -7058,6 +7058,12 @@ def build_jc_strategy_auto_calibration(
     if live_feedback is None:
         live_feedback = build_jc_bucket_live_feedback(limit=JC_BUCKET_LIVE_FEEDBACK_WINDOW)
     top_buckets = status.get("top_buckets", []) if isinstance(status, dict) and isinstance(status.get("top_buckets"), list) else []
+    top_bucket_keys = {
+        _jc_bucket_key_from_parts(bucket.get("dimension"), bucket.get("bucket"))
+        for bucket in top_buckets
+        if isinstance(bucket, dict)
+    }
+    top_bucket_keys.discard("")
     stable_buckets = [
         bucket
         for bucket in top_buckets
@@ -7066,8 +7072,9 @@ def build_jc_strategy_auto_calibration(
     ]
     known_feedback = [
         item
-        for item in (live_feedback or {}).values()
+        for key, item in (live_feedback or {}).items()
         if isinstance(item, dict) and int(_safe_int(item.get("live_count"), 0) or 0) >= JC_BUCKET_LIVE_PENDING_SAMPLES
+        and (not top_bucket_keys or str(key) in top_bucket_keys)
     ]
     status_counts: dict[str, int] = defaultdict(int)
     deviations: list[float] = []

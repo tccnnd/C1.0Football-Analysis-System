@@ -669,6 +669,45 @@ class CorePlayThresholdBucketTuningTests(unittest.TestCase):
         self.assertGreaterEqual(calibration["thresholds"]["min_samples"], 220)
         self.assertIn("watch", calibration["thresholds"]["observe_live_statuses"])
 
+    def test_jc_auto_calibration_ignores_unrelated_live_feedback(self) -> None:
+        status = {
+            "enabled": True,
+            "top_buckets": [
+                {
+                    "dimension": "league_confidence_bucket",
+                    "bucket": "Stable League | >=0.65",
+                    "sample_count": 180,
+                    "hit_count": 145,
+                    "accuracy": 0.805,
+                    "wilson_lower": 0.75,
+                    "stability": {"stable": True, "stability_score": 0.8},
+                }
+            ],
+        }
+        unrelated_feedback = {
+            "league_confidence_bucket|Other League | >=0.65": {
+                "status": "downgraded",
+                "live_count": 10,
+                "live_hit_count": 2,
+                "live_hit_rate": 0.20,
+                "deviation": -0.55,
+            },
+            "league_confidence_bucket|Another League | >=0.65": {
+                "status": "watch",
+                "live_count": 10,
+                "live_hit_count": 4,
+                "live_hit_rate": 0.40,
+                "deviation": -0.35,
+            },
+        }
+
+        calibration = core.build_jc_strategy_auto_calibration(status, unrelated_feedback)
+
+        self.assertEqual(calibration["live_bucket_count"], 0)
+        self.assertEqual(calibration["mode"], "cautious")
+        self.assertEqual(calibration["reason"], "few_stable_historical_buckets")
+        self.assertEqual(calibration["thresholds"]["min_samples"], 160)
+
     def test_jc_auto_calibration_can_filter_small_runtime_bucket(self) -> None:
         bucket = {
             "dimension": "league_confidence_bucket",
