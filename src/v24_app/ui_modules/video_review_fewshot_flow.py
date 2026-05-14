@@ -1043,6 +1043,144 @@ def build_video_review_fewshot_memory_health_summary(
     }
 
 
+def build_video_review_fewshot_health_card_rows(
+    monitor: Mapping[str, object] | object | None = None,
+    quality: Mapping[str, object] | object | None = None,
+    health: Mapping[str, object] | object | None = None,
+    *,
+    limit: int = 8,
+) -> list[dict[str, object]]:
+    resolved_monitor = _as_mapping(monitor)
+    resolved_quality = _as_mapping(quality)
+    resolved_health = _as_mapping(health)
+    if not resolved_health:
+        resolved_health = build_video_review_fewshot_memory_health_summary(resolved_monitor, resolved_quality)
+    rows = [
+        {
+            "label": "整体状态",
+            "value": str(resolved_health.get("status") or "missing"),
+            "tone": str(resolved_health.get("tone") or "warning"),
+            "detail": f"blocking={_safe_int(resolved_health.get('blocking_count'))} | warning={_safe_int(resolved_health.get('warning_count'))}",
+        },
+        {
+            "label": "视频样本",
+            "value": str(_safe_int(resolved_monitor.get("sample_count"))),
+            "tone": "good" if _safe_int(resolved_monitor.get("sample_count")) >= 10 else "warning",
+            "detail": f"hit={_safe_int(resolved_monitor.get('hit_count'))} | miss={_safe_int(resolved_monitor.get('miss_count'))}",
+        },
+        {
+            "label": "标签覆盖",
+            "value": str(resolved_monitor.get("coverage_rate_text") or "-"),
+            "tone": "good" if not _as_list(resolved_monitor.get("missing_tags")) else "warning",
+            "detail": f"gaps={len(_as_list(resolved_monitor.get('missing_tags')))} | tags={_safe_int(resolved_monitor.get('tag_count'))}",
+        },
+        {
+            "label": "当前命中",
+            "value": str(_safe_int(resolved_monitor.get("current_matched_count"))),
+            "tone": "good" if _safe_int(resolved_monitor.get("current_matched_count")) else "neutral",
+            "detail": ", ".join(str(tag) for tag in _as_list(resolved_monitor.get("current_query_tags"))[:4]) or "-",
+        },
+        {
+            "label": "重复键",
+            "value": str(_safe_int(resolved_monitor.get("duplicate_key_count"))),
+            "tone": "bad" if _safe_int(resolved_monitor.get("duplicate_key_count")) else "good",
+            "detail": "identity collisions" if _safe_int(resolved_monitor.get("duplicate_key_count")) else "clean",
+        },
+        {
+            "label": "错因覆盖",
+            "value": str(_safe_int(resolved_monitor.get("root_cause_count"))),
+            "tone": "good" if _safe_int(resolved_monitor.get("root_cause_count")) >= 2 else "warning",
+            "detail": "root-cause diversity",
+        },
+        {
+            "label": "来源覆盖",
+            "value": str(_safe_int(resolved_monitor.get("source_count"))),
+            "tone": "good" if _safe_int(resolved_monitor.get("source_count")) >= 2 else "warning",
+            "detail": "manual/auto balance",
+        },
+        {
+            "label": "质量告警",
+            "value": str(_safe_int(resolved_quality.get("alert_count"))),
+            "tone": "warning" if _safe_int(resolved_quality.get("alert_count")) else "good",
+            "detail": str(resolved_quality.get("summary_text") or "-"),
+        },
+    ]
+    return rows[: max(0, int(limit))]
+
+
+def _video_action_for_tag(tag: str) -> str:
+    actions = {
+        "video_tempo_shift": "补节奏变化/换人前后的关键帧标注",
+        "video_finishing_variance": "补高质量机会、射门选择和门将表现标注",
+        "video_margin_risk": "补定位球、反击、防线失位和让球风险标注",
+        "video_low_quality_evidence": "补更清晰回放或提高抽帧密度",
+        "video_manual_review_needed": "补人工战术转折点复核",
+        "video_manual_annotation": "对关键帧补人工标注",
+        "video_auto_hypothesis": "先导入视频生成自动事件假设",
+        "strategy_miss": "补未命中案例的视频复盘样本",
+        "strategy_hit": "补命中案例作为正向对照",
+    }
+    return actions.get(tag, f"补 {tag} 对应的视频复盘样本")
+
+
+def build_video_review_fewshot_action_rows(
+    monitor: Mapping[str, object] | object | None = None,
+    quality: Mapping[str, object] | object | None = None,
+    health: Mapping[str, object] | object | None = None,
+    *,
+    limit: int = 5,
+) -> list[dict[str, object]]:
+    resolved_monitor = _as_mapping(monitor)
+    resolved_quality = _as_mapping(quality)
+    resolved_health = _as_mapping(health)
+    if not resolved_health:
+        resolved_health = build_video_review_fewshot_memory_health_summary(resolved_monitor, resolved_quality)
+    rows: list[dict[str, object]] = []
+    seen: set[str] = set()
+
+    def add(code: str, title: str, body: str, *, priority: int, tone: str = "warning") -> None:
+        if code in seen:
+            return
+        seen.add(code)
+        rows.append({"code": code, "title": title, "body": body, "priority": priority, "tone": tone})
+
+    for issue in [_as_mapping(item) for item in _as_list(resolved_health.get("issues"))]:
+        code = str(issue.get("code") or "")
+        if code == "video_memory_duplicate_keys":
+            add(code, "先处理重复视频记忆", str(issue.get("recommendation") or "审计并回滚或去重正式视频记忆池。"), priority=0, tone="bad")
+        elif code == "video_memory_backup_missing":
+            add(code, "先生成视频记忆审计备份", str(issue.get("recommendation") or "应用或回滚前保留至少一个近期备份。"), priority=2)
+        elif code == "video_memory_missing":
+            add(code, "建立正式视频记忆池", str(issue.get("recommendation") or "导出、预览并应用已审核的视频复盘样本。"), priority=1)
+
+    for alert in [_as_mapping(item) for item in _as_list(resolved_quality.get("alerts"))]:
+        tag = str(alert.get("tag") or "")
+        if tag == "video_memory_low_samples":
+            add(tag, "扩大 AI 视频复盘样本", str(alert.get("body") or "优先补最近错判和高置信失误比赛的视频样本。"), priority=3)
+        elif tag == "video_memory_no_current_match":
+            add(tag, "补当前视频错因标签", str(alert.get("body") or "为当前视频信号补相同标签的已审核样本。"), priority=1)
+        elif tag == "video_memory_tag_gap":
+            missing_tags = [str(item) for item in _as_list(resolved_monitor.get("missing_tags")) if str(item)]
+            for index, missing in enumerate(missing_tags[:3]):
+                add(f"gap:{missing}", _video_action_for_tag(missing), f"缺口标签: {missing}", priority=4 + index)
+        elif tag == "video_memory_root_concentration":
+            add(tag, "补不同视频错因类型", str(alert.get("body") or "补充非主流根因样本，避免解释过度集中。"), priority=5)
+        elif tag == "video_memory_source_concentration":
+            add(tag, "平衡人工与自动视频证据", str(alert.get("body") or "补足人工标注或自动假设来源。"), priority=6)
+
+    if not rows:
+        add(
+            "video_memory_ready",
+            "进入稳定性复盘",
+            "视频记忆池暂无阻塞问题，可继续应用新样本后观察 Evaluation Agent 命中与错因解释是否稳定。",
+            priority=99,
+            tone="good",
+        )
+
+    rows.sort(key=lambda row: (_safe_int(row.get("priority"), 99), str(row.get("title") or "")))
+    return rows[: max(0, int(limit))]
+
+
 def build_video_review_fewshot_memory_rollback_report_filename(now: datetime | None = None) -> str:
     current = now or datetime.now()
     return f"video_review_fewshot_memory_rollback_{current.strftime('%Y%m%d_%H%M%S')}.md"

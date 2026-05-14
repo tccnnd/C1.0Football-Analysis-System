@@ -52,6 +52,8 @@ from v24_app.ui_modules import (
     build_video_review_fewshot_merge_apply_report_filename,
     build_video_review_fewshot_merge_apply_report_lines,
     build_video_review_fewshot_merge_apply_result,
+    build_video_review_fewshot_action_rows,
+    build_video_review_fewshot_health_card_rows,
     build_video_review_fewshot_memory_audit_report,
     build_video_review_fewshot_memory_audit_report_filename,
     build_video_review_fewshot_memory_audit_report_lines,
@@ -2650,6 +2652,106 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("Video Review Few-shot Memory Audit", payload)
         self.assertIn("Duplicate Keys", payload)
         self.assertIn("video_memory_duplicate_keys", payload)
+
+    def test_video_review_fewshot_health_cards_flag_duplicate_memory(self) -> None:
+        monitor = {
+            "sample_count": 3,
+            "hit_count": 1,
+            "miss_count": 2,
+            "tag_count": 2,
+            "root_cause_count": 1,
+            "source_count": 1,
+            "coverage_rate_text": "22.2%",
+            "missing_tags": ["video_tempo_shift"],
+            "current_matched_count": 0,
+            "current_query_tags": ["video_tempo_shift"],
+            "duplicate_key_count": 1,
+        }
+        quality = {
+            "alert_count": 1,
+            "summary_text": "alerts 1 | score_delta -3",
+            "alerts": [{"tag": "video_memory_duplicate_keys", "body": "duplicate identity keys"}],
+        }
+        health = {
+            "status": "blocked",
+            "tone": "bad",
+            "blocking_count": 1,
+            "warning_count": 0,
+            "issues": [
+                {
+                    "code": "video_memory_duplicate_keys",
+                    "severity": "blocking",
+                    "recommendation": "Deduplicate official video memory.",
+                }
+            ],
+        }
+
+        cards = build_video_review_fewshot_health_card_rows(monitor, quality, health)
+        actions = build_video_review_fewshot_action_rows(monitor, quality, health)
+        cards_by_label = {str(row["label"]): row for row in cards}
+
+        self.assertEqual(cards_by_label["整体状态"]["tone"], "bad")
+        self.assertEqual(cards_by_label["重复键"]["tone"], "bad")
+        self.assertEqual(actions[0]["code"], "video_memory_duplicate_keys")
+        self.assertIn("重复视频记忆", actions[0]["title"])
+
+    def test_video_review_fewshot_action_rows_map_tag_gaps_to_backfill_advice(self) -> None:
+        monitor = {
+            "sample_count": 8,
+            "hit_count": 3,
+            "miss_count": 5,
+            "tag_count": 4,
+            "root_cause_count": 2,
+            "source_count": 2,
+            "coverage_rate_text": "55.6%",
+            "missing_tags": ["video_tempo_shift", "video_margin_risk"],
+            "current_matched_count": 0,
+            "current_query_tags": ["video_tempo_shift"],
+            "duplicate_key_count": 0,
+        }
+        quality = {
+            "alert_count": 2,
+            "summary_text": "alerts 2 | score_delta -2",
+            "alerts": [
+                {"tag": "video_memory_no_current_match", "body": "current tags have no reviewed memory match"},
+                {"tag": "video_memory_tag_gap", "body": "missing required tags"},
+            ],
+        }
+        health = {"status": "attention", "tone": "warning", "blocking_count": 0, "warning_count": 1, "issues": []}
+
+        actions = build_video_review_fewshot_action_rows(monitor, quality, health)
+        action_text = "\n".join(str(row.get("title") or "") for row in actions)
+
+        self.assertIn("补当前视频错因标签", action_text)
+        self.assertIn("补节奏变化", action_text)
+        self.assertIn("让球风险", action_text)
+
+    def test_video_review_fewshot_action_rows_show_ready_when_healthy(self) -> None:
+        monitor = {
+            "sample_count": 12,
+            "hit_count": 6,
+            "miss_count": 6,
+            "tag_count": 9,
+            "root_cause_count": 3,
+            "source_count": 2,
+            "coverage_rate_text": "100.0%",
+            "missing_tags": [],
+            "current_matched_count": 2,
+            "current_query_tags": ["video_margin_risk"],
+            "duplicate_key_count": 0,
+        }
+        quality = {"alert_count": 0, "summary_text": "alerts 0 | score_delta 0", "alerts": []}
+        health = {"status": "healthy", "tone": "good", "blocking_count": 0, "warning_count": 0, "issues": []}
+
+        cards = build_video_review_fewshot_health_card_rows(monitor, quality, health)
+        actions = build_video_review_fewshot_action_rows(monitor, quality, health)
+        cards_by_label = {str(row["label"]): row for row in cards}
+
+        self.assertEqual(cards_by_label["整体状态"]["tone"], "good")
+        self.assertEqual(cards_by_label["错因覆盖"]["tone"], "good")
+        self.assertEqual(actions[0]["code"], "video_memory_ready")
+        self.assertEqual(actions[0]["tone"], "good")
+        self.assertIn("稳定性复盘", actions[0]["title"])
 
     def test_video_review_fewshot_memory_rollback_preview_validates_backup(self) -> None:
         backup = {

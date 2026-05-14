@@ -130,9 +130,12 @@ from .ui_modules import (
     build_video_review_fewshot_merge_apply_report_filename,
     build_video_review_fewshot_merge_apply_report_lines,
     build_video_review_fewshot_merge_apply_result,
+    build_video_review_fewshot_action_rows,
+    build_video_review_fewshot_health_card_rows,
     build_video_review_fewshot_memory_audit_report,
     build_video_review_fewshot_memory_audit_report_filename,
     build_video_review_fewshot_memory_audit_report_lines,
+    build_video_review_fewshot_memory_health_summary,
     build_video_review_fewshot_memory_monitor,
     build_video_review_fewshot_memory_quality_alerts,
     build_video_review_fewshot_memory_rollback_preview,
@@ -3412,6 +3415,7 @@ class SmartMatchDashboard:
         recovery_summary = self._recovery_run_summary()
         lookback_days = self._recovery_lookback_days()
         snapshot_audit = self._result_recovery_snapshot_audit(lookback_days=lookback_days)
+        video_memory_health = self._video_review_fewshot_memory_health_context()
 
         shell = self._page_shell(
             "\u590d\u76d8\u4e2d\u5fc3",
@@ -3672,6 +3676,23 @@ class SmartMatchDashboard:
             padx=14,
             pady=6,
         ).pack(side=tk.LEFT, padx=(10, 0))
+
+        video_health = video_memory_health.get("health", {}) if isinstance(video_memory_health.get("health"), dict) else {}
+        tk.Label(right, text="AI视频记忆健康", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(
+            anchor=tk.W,
+            padx=18,
+            pady=(16, 10),
+        )
+        self._strategy_row(
+            right,
+            f"{video_health.get('status', '-')} | {video_health.get('summary_text', '-')}",
+            self._video_review_fewshot_card_text(video_memory_health.get("card_rows")),
+        )
+        self._strategy_row(
+            right,
+            "优先补标注/补样",
+            self._video_review_fewshot_action_text(video_memory_health.get("action_rows")),
+        )
 
         tk.Label(right, text="\u95ed\u73af\u590d\u76d8", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
         detail = tk.Text(
@@ -7373,6 +7394,19 @@ class SmartMatchDashboard:
             for row in video_memory_rows:
                 if isinstance(row, dict):
                     self._strategy_row(right, str(row.get("title") or "-"), f"{row.get('body', '-')}\n{row.get('completion', '-')}")
+        video_memory_health = self._video_review_fewshot_memory_health_context(video_fewshot_memory)
+        self._strategy_section_title(right, "AI Video 记忆健康")
+        for row in video_memory_health.get("card_rows", []) if isinstance(video_memory_health.get("card_rows"), list) else []:
+            if isinstance(row, dict):
+                self._strategy_row(
+                    right,
+                    f"{row.get('label', '-')}: {row.get('value', '-')}",
+                    str(row.get("detail") or "-"),
+                )
+        self._strategy_section_title(right, "AI Video 补标注/补样建议")
+        for row in video_memory_health.get("action_rows", []) if isinstance(video_memory_health.get("action_rows"), list) else []:
+            if isinstance(row, dict):
+                self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
         fewshot_memory = evaluation_agent.get("statsbomb_fewshot_memory", {}) if isinstance(evaluation_agent.get("statsbomb_fewshot_memory"), dict) else {}
         memory_rows = fewshot_memory.get("rows", []) if isinstance(fewshot_memory.get("rows"), list) else []
         if memory_rows:
@@ -7735,6 +7769,54 @@ class SmartMatchDashboard:
             snapshots=_load_prediction_snapshot_records(),
             settlements=settlements if settlements is not None else get_recent_settlements(limit=0),
         )
+
+    def _video_review_fewshot_backup_count(self) -> int | None:
+        state_dir = VIDEO_REVIEW_FEWSHOT_MEMORY_FILE.parent
+        try:
+            return len(
+                list(state_dir.glob("video_review_fewshot_memory.backup_*.json"))
+                + list(state_dir.glob("video_review_fewshot_memory.pre_rollback_*.json"))
+            )
+        except OSError:
+            return None
+
+    def _video_review_fewshot_memory_health_context(self, current_memory_summary: dict | None = None) -> dict[str, object]:
+        memory = get_video_review_fewshot_memory()
+        monitor = build_video_review_fewshot_memory_monitor(memory, current_memory_summary or {})
+        quality = build_video_review_fewshot_memory_quality_alerts(monitor)
+        health = build_video_review_fewshot_memory_health_summary(
+            monitor,
+            quality,
+            backup_count=self._video_review_fewshot_backup_count(),
+        )
+        return {
+            "monitor": monitor,
+            "quality": quality,
+            "health": health,
+            "card_rows": build_video_review_fewshot_health_card_rows(monitor, quality, health),
+            "action_rows": build_video_review_fewshot_action_rows(monitor, quality, health),
+        }
+
+    @staticmethod
+    def _video_review_fewshot_card_text(rows: object, *, limit: int = 8) -> str:
+        items = [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+        lines: list[str] = []
+        for row in items[: max(0, int(limit))]:
+            label = str(row.get("label") or "-")
+            value = str(row.get("value") or "-")
+            detail = str(row.get("detail") or "-")
+            lines.append(f"{label}: {value} | {detail}")
+        return "\n".join(lines) or "-"
+
+    @staticmethod
+    def _video_review_fewshot_action_text(rows: object, *, limit: int = 5) -> str:
+        items = [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+        lines: list[str] = []
+        for index, row in enumerate(items[: max(0, int(limit))], start=1):
+            title = str(row.get("title") or "-")
+            body = str(row.get("body") or "-")
+            lines.append(f"{index}. {title} | {body}")
+        return "\n".join(lines) or "-"
 
     def _strategy_release_pool_rows(
         self,
