@@ -15,10 +15,59 @@ if str(SRC_ROOT) not in sys.path:
 from v24_app.ai_dashboard import (
     build_statsbomb_event_proxy_review_samples_message,
     build_statsbomb_event_proxy_review_text,
+    build_statsbomb_review_training_action_rows,
 )
 
 
 class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
+    def test_review_training_action_rows_map_issues_to_executable_actions(self) -> None:
+        rows = build_statsbomb_review_training_action_rows(
+            {
+                "status": "blocked",
+                "sample_count": 0,
+                "issues": [
+                    {
+                        "code": "prediction_miss_skewed",
+                        "severity": "warning",
+                        "message": "标签偏斜",
+                        "recommendation": "补齐弱类别样本",
+                    },
+                    {
+                        "code": "statsbomb_review_samples_missing",
+                        "severity": "blocking",
+                        "message": "样本为空",
+                        "recommendation": "生成复盘样本",
+                    },
+                    {
+                        "code": "statsbomb_review_features_missing",
+                        "severity": "warning",
+                        "message": "缺少特征",
+                        "recommendation": "重建特征",
+                    },
+                ],
+            }
+        )
+
+        self.assertEqual(rows[0]["action_key"], "build_statsbomb_review_samples")
+        self.assertEqual(rows[0]["tone"], "danger")
+        self.assertIn("点击后会重建 StatsBomb/Event Proxy", rows[0]["body"])
+        self.assertEqual(rows[1]["action_key"], "recover_results")
+        self.assertIn("回收后再生成事件代理复盘样本", rows[1]["body"])
+        self.assertEqual(len({row["action_key"] for row in rows}), len(rows))
+
+    def test_review_training_action_rows_offer_backtest_when_healthy(self) -> None:
+        rows = build_statsbomb_review_training_action_rows(
+            {
+                "status": "healthy",
+                "sample_count": 42,
+                "issues": [],
+            }
+        )
+
+        self.assertEqual(rows[0]["action_key"], "run_high_accuracy_strategy_backtest")
+        self.assertEqual(rows[0]["tone"], "good")
+        self.assertIn("42", rows[0]["body"])
+
     def test_review_samples_message_includes_quality_and_repair_guidance(self) -> None:
         text = build_statsbomb_event_proxy_review_samples_message(
             {

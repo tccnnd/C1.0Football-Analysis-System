@@ -1247,6 +1247,76 @@ def build_statsbomb_event_proxy_review_samples_message(result: dict, quality: di
     )
 
 
+def build_statsbomb_review_training_action_rows(quality: dict) -> list[dict[str, object]]:
+    issues = quality.get("issues") if isinstance(quality.get("issues"), list) else []
+    status = str(quality.get("status") or "blocked")
+    sample_count = int(quality.get("sample_count", 0) or 0)
+    rows: list[dict[str, object]] = []
+    seen: set[str] = set()
+
+    def _append(action_key: str, title: str, body: str, *, tone: str = "neutral", issue_code: str = "") -> None:
+        if action_key in seen:
+            return
+        seen.add(action_key)
+        rows.append(
+            {
+                "action_key": action_key,
+                "title": title,
+                "body": body,
+                "tone": tone,
+                "issue_code": issue_code,
+                "enabled": True,
+            }
+        )
+
+    def _issue_rank(issue: dict[str, object]) -> int:
+        severity = str(issue.get("severity") or "")
+        if severity == "blocking":
+            return 0
+        if severity == "warning":
+            return 1
+        return 2
+
+    ranked_issues = sorted([item for item in issues if isinstance(item, dict)], key=_issue_rank)
+    for issue in ranked_issues:
+        code = str(issue.get("code") or "")
+        recommendation = str(issue.get("recommendation") or issue.get("message") or "-")
+        severity = str(issue.get("severity") or "")
+        tone = "danger" if severity == "blocking" else "warning"
+        if code in {"statsbomb_review_samples_missing", "statsbomb_review_sample_count_low", "statsbomb_review_features_missing"}:
+            _append(
+                "build_statsbomb_review_samples",
+                "生成事件代理复盘样本",
+                f"{recommendation}\n点击后会重建 StatsBomb/Event Proxy 复盘样本并刷新质量诊断。",
+                tone=tone,
+                issue_code=code,
+            )
+        elif code.endswith("_missing") or code.endswith("_skewed"):
+            _append(
+                "recover_results",
+                "回收赛果标签",
+                f"{recommendation}\n点击后先回收已完场赛果；回收后再生成事件代理复盘样本。",
+                tone=tone,
+                issue_code=code,
+            )
+
+    if not rows and status == "healthy":
+        _append(
+            "run_high_accuracy_strategy_backtest",
+            "进入策略稳定性回测",
+            f"事件代理复盘样本 {sample_count} 条，当前可用于 Evaluation Agent 权重稳定性验证。",
+            tone="good",
+        )
+    if not rows:
+        _append(
+            "refresh_review_center",
+            "刷新复盘质量看板",
+            "暂无可自动执行的修复动作；重新读取 StatsBomb/Event Proxy 样本质量。",
+            tone="neutral",
+        )
+    return rows[:4]
+
+
 class SmartMatchDashboard:
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -4195,6 +4265,7 @@ class SmartMatchDashboard:
         lookback_days = self._recovery_lookback_days()
         snapshot_audit = self._result_recovery_snapshot_audit(lookback_days=lookback_days)
         video_memory_health = self._video_review_fewshot_memory_health_context()
+        statsbomb_review_quality = build_statsbomb_review_training_quality_summary(get_statsbomb_review_training_samples())
 
         shell = self._page_shell(
             "\u590d\u76d8\u4e2d\u5fc3",
@@ -4503,6 +4574,23 @@ class SmartMatchDashboard:
             "优先补标注/补样",
             self._video_review_fewshot_action_text(video_memory_health.get("action_rows")),
         )
+        self._strategy_section_title(right, "StatsBomb事件代理样本质量")
+        for row in statsbomb_review_quality.get("card_rows", []) if isinstance(statsbomb_review_quality.get("card_rows"), list) else []:
+            if isinstance(row, dict):
+                self._strategy_row(
+                    right,
+                    f"{row.get('label', '-')}: {row.get('value', '-')}",
+                    str(row.get("detail") or "-"),
+                )
+        self._strategy_section_title(right, "事件代理可执行修复")
+        for row in build_statsbomb_review_training_action_rows(statsbomb_review_quality):
+            if isinstance(row, dict):
+                self._strategy_row(
+                    right,
+                    str(row.get("title") or "-"),
+                    str(row.get("body") or "-"),
+                    command=self._statsbomb_review_training_action_command(str(row.get("action_key") or "")),
+                )
 
         tk.Label(right, text="\u95ed\u73af\u590d\u76d8", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
         detail = tk.Text(
@@ -4732,6 +4820,15 @@ class SmartMatchDashboard:
             ),
         )
         return output_path, review_path, plan_path, bundle_path, bundle_review_path
+
+    def _statsbomb_review_training_action_command(self, action_key: str):
+        commands = {
+            "build_statsbomb_review_samples": self.export_statsbomb_event_proxy_review_samples,
+            "recover_results": self.run_result_recovery,
+            "run_high_accuracy_strategy_backtest": self.run_high_accuracy_strategy_backtest_task,
+            "refresh_review_center": self.open_review_center,
+        }
+        return commands.get(action_key)
 
     def export_statsbomb_event_proxy_review_samples(self) -> dict | None:
         try:
