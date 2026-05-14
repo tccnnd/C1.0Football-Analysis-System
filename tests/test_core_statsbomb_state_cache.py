@@ -58,6 +58,17 @@ class CoreStatsBombStateCacheTests(unittest.TestCase):
                 self.assertIsNot(changed, first)
                 self.assertEqual(changed["items"][0]["id"], "new")
 
+    def test_statsbomb_review_training_samples_uses_shared_state_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "statsbomb_review_training_samples.json"
+            path.write_text(json.dumps({"summary": {"sample_count": 2}, "items": [{"match_id": "m1"}]}), encoding="utf-8")
+            with patch.object(core, "STATSBOMB_REVIEW_TRAINING_FILE", path):
+                first = core.get_statsbomb_review_training_samples()
+                second = core.get_statsbomb_review_training_samples()
+
+                self.assertIs(first, second)
+                self.assertEqual(second["summary"]["sample_count"], 2)
+
     def test_statsbomb_state_cache_returns_empty_for_missing_or_invalid_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "missing.json"

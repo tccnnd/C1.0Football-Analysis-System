@@ -102,6 +102,7 @@ from v24_app.ui_modules import (
     build_statsbomb_fewshot_memory_summary,
     build_statsbomb_fewshot_memory_monitor,
     build_statsbomb_fewshot_memory_quality_alerts,
+    build_statsbomb_review_training_weight_signal,
     validate_statsbomb_fewshot_draft_payload,
     build_statsbomb_event_replay_case,
     build_statsbomb_event_review_summary,
@@ -2935,6 +2936,103 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertEqual(evaluation["statsbomb_fewshot_memory"]["matched_count"], 1)
         self.assertIn("statsbomb_fewshot_memory", evaluation["memory_tags"])
         self.assertTrue(any("历史复盘记忆" in item["title"] for item in evaluation["recommendations"]))
+
+    def test_statsbomb_review_training_samples_weight_event_proxy_attribution(self) -> None:
+        settlements = [
+            {
+                "league": "UEFA Euro",
+                "home_team": "Spain",
+                "away_team": "Croatia",
+                "statsbomb_event_summary": {
+                    "event_count": 3500,
+                    "team_stats": {
+                        "Spain": {"xg": 1.12, "shots": 11, "goals": 3},
+                        "Croatia": {"xg": 2.35, "shots": 16, "goals": 0},
+                    },
+                },
+                "high_accuracy_strategy_items": [
+                    {
+                        "play_type": "market_1x2",
+                        "pick": "AWAY",
+                        "actual": "HOME",
+                        "confidence": 0.70,
+                        "min_confidence": 0.65,
+                        "backtest_accuracy": 0.72,
+                        "backtest_samples": 180,
+                        "is_hit": False,
+                    }
+                ],
+            }
+        ]
+        review_samples = {
+            "leakage_note": "post-match event proxy only",
+            "summary": {
+                "sample_count": 60,
+                "feature_order": ["xg_diff", "shot_diff", "event_count"],
+                "label_counts": {"prediction_miss": {"0": 20, "1": 40}},
+            },
+            "items": [{} for _ in range(60)],
+        }
+
+        signal = build_statsbomb_review_training_weight_signal(review_samples)
+        evaluation = build_strategy_evaluation_agent_summary(
+            {"enabled": True},
+            settlements,
+            statsbomb_review_training_samples=review_samples,
+        )
+
+        self.assertEqual(signal["status"], "ready")
+        self.assertGreater(signal["attribution_weights"]["statsbomb_finishing_variance"], 1.2)
+        self.assertEqual(list(evaluation["error_attribution"]["reason_counts"])[0], "statsbomb_finishing_variance")
+        self.assertEqual(evaluation["statsbomb_review_training_signal"]["sample_count"], 60)
+        self.assertIn("statsbomb_review_training_weighted", evaluation["memory_tags"])
+        self.assertTrue(any(item["title"] == "应用StatsBomb事件代理权重" for item in evaluation["recommendations"]))
+
+    def test_dashboard_exposes_statsbomb_review_training_weight_signal(self) -> None:
+        settlements = [
+            {
+                "league": "UEFA Euro",
+                "home_team": "Spain",
+                "away_team": "Croatia",
+                "statsbomb_event_summary": {
+                    "event_count": 3500,
+                    "team_stats": {
+                        "Spain": {"xg": 1.12, "shots": 11, "goals": 3},
+                        "Croatia": {"xg": 2.35, "shots": 16, "goals": 0},
+                    },
+                },
+                "high_accuracy_strategy_items": [
+                    {
+                        "play_type": "market_1x2",
+                        "pick": "AWAY",
+                        "actual": "HOME",
+                        "confidence": 0.70,
+                        "min_confidence": 0.65,
+                        "backtest_accuracy": 0.72,
+                        "backtest_samples": 180,
+                        "is_hit": False,
+                    }
+                ],
+            }
+        ]
+        review_samples = {
+            "summary": {
+                "sample_count": 60,
+                "feature_order": ["xg_diff", "shot_diff", "event_count"],
+                "label_counts": {"prediction_miss": {"0": 20, "1": 40}},
+            },
+            "items": [{} for _ in range(60)],
+        }
+
+        dashboard = build_high_accuracy_strategy_dashboard(
+            {"enabled": True},
+            settlements,
+            statsbomb_review_training_samples=review_samples,
+        )
+
+        self.assertEqual(dashboard["evaluation_agent"]["statsbomb_review_training_signal"]["status"], "ready")
+        self.assertEqual(list(dashboard["error_attribution"]["reason_counts"])[0], "statsbomb_finishing_variance")
+        self.assertTrue(any(card["label"] == "StatsBomb权重" for card in dashboard["metrics"]))
 
     def test_evaluation_agent_accepts_precomputed_dashboard_summaries(self) -> None:
         evaluation = build_strategy_evaluation_agent_summary(

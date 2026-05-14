@@ -598,9 +598,17 @@ ERROR_ATTRIBUTION_LABELS = {
 }
 ERROR_ATTRIBUTION_WEIGHTS = {
     "small_sample": 0.25,
+    "statsbomb_xg_against_pick": 1.15,
+    "statsbomb_finishing_variance": 1.12,
+    "statsbomb_event_control_gap": 1.1,
     "video_low_quality_evidence": 0.35,
     "video_manual_review_needed": 0.5,
 }
+STATSBOMB_EVENT_ATTRIBUTION_CODES = (
+    "statsbomb_xg_against_pick",
+    "statsbomb_finishing_variance",
+    "statsbomb_event_control_gap",
+)
 
 VIDEO_REVIEW_HYPOTHESIS_TO_ERROR_CODE = {
     "tempo_shift": "video_tempo_shift",
@@ -611,11 +619,85 @@ VIDEO_REVIEW_HYPOTHESIS_TO_ERROR_CODE = {
 }
 
 
-def _error_attribution_rank_key(item: tuple[str, int]) -> tuple[float, int, str]:
+def _error_attribution_rank_key(
+    item: tuple[str, int],
+    weights: Mapping[str, object] | None = None,
+) -> tuple[float, int, str]:
     code, count = item
-    weight = _safe_float(ERROR_ATTRIBUTION_WEIGHTS.get(code), 1.0)
+    resolved_weights = _as_mapping(weights) or ERROR_ATTRIBUTION_WEIGHTS
+    weight = _safe_float(resolved_weights.get(code, ERROR_ATTRIBUTION_WEIGHTS.get(code, 1.0)), 1.0)
     priority = 1 if code == "small_sample" else 0
     return (-count * weight, priority, ERROR_ATTRIBUTION_LABELS.get(code, code))
+
+
+def _label_count_pair(label_counts: Mapping[str, object], label: str) -> tuple[int, int]:
+    bucket = _as_mapping(label_counts.get(label))
+    negative = _safe_int(bucket.get("0", bucket.get(0)))
+    positive = _safe_int(bucket.get("1", bucket.get(1)))
+    return negative, positive
+
+
+def build_statsbomb_review_training_weight_signal(
+    payload: Mapping[str, object] | object | None,
+) -> dict[str, object]:
+    resolved = _as_mapping(payload)
+    items = _as_list(resolved.get("items"))
+    summary = _as_mapping(resolved.get("summary"))
+    sample_count = _safe_int(summary.get("sample_count"), len(items))
+    feature_order = _as_list(summary.get("feature_order"))
+    label_counts = _as_mapping(summary.get("label_counts"))
+    prediction_hit_count, prediction_miss_count = _label_count_pair(label_counts, "prediction_miss")
+    prediction_known_count = prediction_hit_count + prediction_miss_count
+    prediction_miss_rate = prediction_miss_count / prediction_known_count if prediction_known_count else None
+
+    status = "missing"
+    if sample_count > 0:
+        status = "weak"
+    if sample_count >= 20 and prediction_known_count >= 10:
+        status = "ready"
+
+    weight = 1.0
+    if sample_count > 0:
+        weight = 1.05
+    if sample_count >= 20 and prediction_known_count >= 10:
+        weight = 1.15
+    if sample_count >= 50:
+        weight = 1.25
+    if sample_count >= 100:
+        weight = 1.35
+    if prediction_miss_rate is not None and prediction_miss_rate >= 0.55:
+        weight += 0.05
+    weight = round(min(1.45, max(1.0, weight)), 2)
+
+    attribution_weights = dict(ERROR_ATTRIBUTION_WEIGHTS)
+    if sample_count > 0:
+        attribution_weights.update(
+            {
+                "statsbomb_xg_against_pick": round(min(1.50, weight + 0.05), 2),
+                "statsbomb_finishing_variance": weight,
+                "statsbomb_event_control_gap": round(min(1.45, weight), 2),
+            }
+        )
+
+    return {
+        "status": status,
+        "sample_count": sample_count,
+        "feature_count": len(feature_order),
+        "prediction_known_count": prediction_known_count,
+        "prediction_miss_count": prediction_miss_count,
+        "prediction_miss_rate": prediction_miss_rate,
+        "prediction_miss_rate_text": _pct(prediction_miss_rate) if prediction_miss_rate is not None else "-",
+        "attribution_weights": attribution_weights,
+        "active_codes": list(STATSBOMB_EVENT_ATTRIBUTION_CODES) if sample_count > 0 else [],
+        "memory_tags": ["statsbomb_review_training_weighted"] if sample_count > 0 else [],
+        "summary_text": (
+            f"StatsBomb review samples {sample_count} | "
+            f"prediction miss {(_pct(prediction_miss_rate) if prediction_miss_rate is not None else '-')} | "
+            f"weight {weight:.2f}"
+        ),
+        "leakage_note": resolved.get("leakage_note")
+        or "StatsBomb review training samples use post-match event evidence and must not be used as pre-match prediction features.",
+    }
 
 
 def _pick_side(value: object) -> str:
@@ -3617,12 +3699,16 @@ def build_strategy_error_attribution_summary(
     settlements: Sequence[Mapping[str, object]] | object,
     *,
     limit: int = 8,
+    error_weight_overrides: Mapping[str, object] | object | None = None,
 ) -> dict[str, object]:
     settlement_items = [item for item in settlements if isinstance(item, Mapping)] if isinstance(settlements, Sequence) else []
     rows: list[dict[str, str]] = []
     counts: dict[str, int] = {}
     miss_count = 0
     unknown_count = 0
+    resolved_weights = dict(ERROR_ATTRIBUTION_WEIGHTS)
+    for key, value in _as_mapping(error_weight_overrides).items():
+        resolved_weights[str(key)] = _safe_float(value, resolved_weights.get(str(key), 1.0))
     for settlement, item in _known_strategy_settlement_items(settlement_items):
         codes = _strategy_error_codes(settlement, item)
         if item.get("is_hit") is False:
@@ -3655,7 +3741,7 @@ def build_strategy_error_attribution_summary(
                     "body": base_body,
                 }
             )
-    ranked = sorted(counts.items(), key=_error_attribution_rank_key)
+    ranked = sorted(counts.items(), key=lambda item: _error_attribution_rank_key(item, resolved_weights))
     top_reason = "-"
     if ranked:
         top_reason = f"{ERROR_ATTRIBUTION_LABELS.get(ranked[0][0], ranked[0][0])} {ranked[0][1]}\u6b21"
@@ -3663,6 +3749,7 @@ def build_strategy_error_attribution_summary(
         "miss_count": miss_count,
         "unknown_count": unknown_count,
         "reason_counts": dict(ranked),
+        "rank_weights": {code: resolved_weights.get(code, 1.0) for code, _count in ranked},
         "top_reason": top_reason,
         "rows": rows[: max(0, int(limit))],
         "summary_text": f"\u9519\u56e0 {miss_count}\u9879 | \u4e3b\u56e0 {top_reason}",
@@ -5679,6 +5766,7 @@ def build_strategy_evaluation_agent_summary(
     event_review: Mapping[str, object] | object | None = None,
     video_review_memory: Mapping[str, object] | object | None = None,
     video_review_fewshot_memory: Mapping[str, object] | object | None = None,
+    statsbomb_review_training_samples: Mapping[str, object] | object | None = None,
 ) -> dict[str, object]:
     settlement_items = [item for item in settlements if isinstance(item, Mapping)] if isinstance(settlements, Sequence) else []
     settlement_summary = (
@@ -5686,10 +5774,15 @@ def build_strategy_evaluation_agent_summary(
         if settlement_summary is not None
         else build_high_accuracy_strategy_settlement_summary(settlement_items)
     )
+    review_training_signal = build_statsbomb_review_training_weight_signal(statsbomb_review_training_samples or {})
+    review_training_weights = _as_mapping(review_training_signal.get("attribution_weights"))
     error_attribution = (
         _as_mapping(error_attribution)
         if error_attribution is not None
-        else build_strategy_error_attribution_summary(settlement_items)
+        else build_strategy_error_attribution_summary(
+            settlement_items,
+            error_weight_overrides=review_training_weights,
+        )
     )
     allowlist_summary = (
         _as_mapping(allowlist_summary)
@@ -5865,6 +5958,22 @@ def build_strategy_evaluation_agent_summary(
                     ),
                 }
             )
+    if _safe_int(review_training_signal.get("sample_count")):
+        for tag in _as_list(review_training_signal.get("memory_tags")):
+            tag_text = str(tag)
+            if tag_text and tag_text not in memory_tags:
+                memory_tags.append(tag_text)
+        if any(_safe_int(reason_counts.get(code)) for code in STATSBOMB_EVENT_ATTRIBUTION_CODES):
+            recommendations.append(
+                {
+                    "title": "应用StatsBomb事件代理权重",
+                    "body": (
+                        f"{review_training_signal.get('summary_text') or '-'}。"
+                        "当前错因包含StatsBomb事件证据，排序已优先参考事件代理训练样本池；"
+                        "该权重仅用于赛后Evaluation Agent归因，不进入赛前预测特征。"
+                    ),
+                }
+            )
     if _safe_int(fewshot_memory.get("matched_count")):
         memory_tags.append("statsbomb_fewshot_memory")
         recommendations.append(
@@ -5941,6 +6050,7 @@ def build_strategy_evaluation_agent_summary(
         "error_attribution": error_attribution,
         "jc_bucket_feedback": jc_feedback,
         "statsbomb_event_review": event_review,
+        "statsbomb_review_training_signal": review_training_signal,
         "video_review_memory": video_review_memory,
         "video_review_fewshot_memory": video_fewshot_memory,
         "statsbomb_fewshot_memory": fewshot_memory,
@@ -8758,6 +8868,7 @@ def build_high_accuracy_strategy_dashboard(
     *,
     include_statsbomb_backfill_candidates: bool = False,
     video_review_fewshot_memory: Mapping[str, object] | object | None = None,
+    statsbomb_review_training_samples: Mapping[str, object] | object | None = None,
 ) -> dict[str, object]:
     resolved = _as_mapping(status)
     settlement_items = [item for item in settlements if isinstance(item, Mapping)] if isinstance(settlements, Sequence) else []
@@ -8765,7 +8876,11 @@ def build_high_accuracy_strategy_dashboard(
     validation = _as_mapping(resolved.get("validation"))
     breaker = _as_mapping(resolved.get("breaker"))
     settlement_summary = build_high_accuracy_strategy_settlement_summary(settlement_items)
-    error_attribution = build_strategy_error_attribution_summary(settlement_items)
+    statsbomb_review_training_signal = build_statsbomb_review_training_weight_signal(statsbomb_review_training_samples or {})
+    error_attribution = build_strategy_error_attribution_summary(
+        settlement_items,
+        error_weight_overrides=_as_mapping(statsbomb_review_training_signal.get("attribution_weights")),
+    )
     historical_replay_summary = _as_mapping(historical_replay)
     historical_replay_settlements = [
         item
@@ -8842,6 +8957,7 @@ def build_high_accuracy_strategy_dashboard(
         event_review=statsbomb_event_review,
         video_review_memory=video_review_memory,
         video_review_fewshot_memory=video_review_fewshot_memory or {},
+        statsbomb_review_training_samples=statsbomb_review_training_samples or {},
     )
     statsbomb_fewshot_monitor = _as_mapping(evaluation_agent.get("statsbomb_fewshot_monitor"))
     statsbomb_fewshot_quality = _as_mapping(evaluation_agent.get("statsbomb_fewshot_quality"))
@@ -8915,6 +9031,15 @@ def build_high_accuracy_strategy_dashboard(
             "label": "\u7b56\u7565\u9519\u56e0",
             "value": str(error_attribution.get("top_reason") or "-"),
             "tone": "warning" if _safe_int(error_attribution.get("miss_count")) else "good",
+        },
+        {
+            "label": "StatsBomb\u6743\u91cd",
+            "value": str(statsbomb_review_training_signal.get("summary_text") or "-"),
+            "tone": "good"
+            if str(statsbomb_review_training_signal.get("status") or "") == "ready"
+            else "warning"
+            if str(statsbomb_review_training_signal.get("status") or "") == "weak"
+            else "neutral",
         },
         {
             "label": "\u5386\u53f2\u56de\u653e",

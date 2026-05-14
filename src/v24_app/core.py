@@ -67,6 +67,7 @@ VIDEO_REVIEW_FEWSHOT_MEMORY_FILE = PROJECT_DIR / "data" / "state" / "video_revie
 STATSBOMB_EVENT_SUMMARIES_FILE = PROJECT_DIR / "data" / "state" / "statsbomb_event_summaries.json"
 STATSBOMB_EVENT_BASELINE_FILE = PROJECT_DIR / "data" / "state" / "statsbomb_event_baseline.json"
 STATSBOMB_SANDBOX_FEWSHOT_FILE = PROJECT_DIR / "data" / "state" / "statsbomb_sandbox_fewshot_samples.json"
+STATSBOMB_REVIEW_TRAINING_FILE = PROJECT_DIR / "data" / "state" / "statsbomb_review_training_samples.json"
 _STATSBOMB_STATE_JSON_CACHE: dict[Path, tuple[tuple[int, int], dict]] = {}
 ENSEMBLE_WEIGHTS_FILE = PROJECT_DIR / "data" / "models" / "ensemble_weights_v1.json"
 PLAY_THRESHOLDS_FILE = PROJECT_DIR / "data" / "models" / "play_thresholds_v1.json"
@@ -7349,6 +7350,10 @@ def get_statsbomb_event_baseline() -> dict:
 
 def get_statsbomb_sandbox_fewshot_memory() -> dict:
     return _load_cached_statsbomb_state_json(STATSBOMB_SANDBOX_FEWSHOT_FILE)
+
+
+def get_statsbomb_review_training_samples() -> dict:
+    return _load_cached_statsbomb_state_json(STATSBOMB_REVIEW_TRAINING_FILE)
 
 
 def get_video_review_fewshot_memory() -> dict:

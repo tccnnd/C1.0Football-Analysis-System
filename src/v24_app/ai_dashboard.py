@@ -40,6 +40,7 @@ from .core import (
     repair_training_data_health,
     get_result_recovery_runs,
     get_statsbomb_event_baseline,
+    get_statsbomb_review_training_samples,
     get_statsbomb_sandbox_fewshot_memory,
     get_strategy_admission_policy_status,
     get_strategy_admission_policy_history,
@@ -6004,6 +6005,7 @@ class SmartMatchDashboard:
             get_draw_release_guard_policy_status(),
             draw_guard_history,
             video_review_fewshot_memory=get_video_review_fewshot_memory(),
+            statsbomb_review_training_samples=get_statsbomb_review_training_samples(),
         )
         policy_effect = dashboard.get("policy_effect_review", {}) if isinstance(dashboard.get("policy_effect_review"), dict) else {}
         now = datetime.now()
@@ -6039,6 +6041,7 @@ class SmartMatchDashboard:
             get_statsbomb_sandbox_fewshot_memory(),
             include_statsbomb_backfill_candidates=True,
             video_review_fewshot_memory=get_video_review_fewshot_memory(),
+            statsbomb_review_training_samples=get_statsbomb_review_training_samples(),
         )
         queue = dashboard.get("statsbomb_backfill_queue", {}) if isinstance(dashboard.get("statsbomb_backfill_queue"), dict) else {}
         now = datetime.now()
@@ -6064,6 +6067,7 @@ class SmartMatchDashboard:
             memory,
             include_statsbomb_backfill_candidates=True,
             video_review_fewshot_memory=get_video_review_fewshot_memory(),
+            statsbomb_review_training_samples=get_statsbomb_review_training_samples(),
         )
         queue = dashboard.get("statsbomb_backfill_queue", {}) if isinstance(dashboard.get("statsbomb_backfill_queue"), dict) else {}
         now = datetime.now()
@@ -6745,6 +6749,7 @@ class SmartMatchDashboard:
             get_statsbomb_event_baseline(),
             get_statsbomb_sandbox_fewshot_memory(),
             video_review_fewshot_memory=get_video_review_fewshot_memory(),
+            statsbomb_review_training_samples=get_statsbomb_review_training_samples(),
         )
         monitor = dashboard.get("policy_stability_monitor", {}) if isinstance(dashboard.get("policy_stability_monitor"), dict) else {}
         trend_effect = dashboard.get("trend_tuning_effect_review", {}) if isinstance(dashboard.get("trend_tuning_effect_review"), dict) else {}
@@ -7652,6 +7657,7 @@ class SmartMatchDashboard:
             draw_guard_status,
             draw_guard_history,
             video_review_fewshot_memory=get_video_review_fewshot_memory(),
+            statsbomb_review_training_samples=get_statsbomb_review_training_samples(),
         )
         release_pool_rows = self._strategy_release_pool_rows(settlements, release_loop=release_loop)
         shell = self._page_shell(
