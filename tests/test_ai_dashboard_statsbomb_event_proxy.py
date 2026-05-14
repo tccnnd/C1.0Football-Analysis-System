@@ -20,6 +20,8 @@ from v24_app.ai_dashboard import (
     build_statsbomb_review_training_feedback_rows,
     build_statsbomb_review_training_quality_export_message,
     build_video_review_evidence_gap_action_rows,
+    build_video_review_evidence_gap_feedback,
+    build_video_review_evidence_gap_feedback_rows,
 )
 
 
@@ -75,6 +77,49 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertEqual(rows[0]["action_key"], "bind_external_reference")
         self.assertIn("优先绑定合法回放链接", rows[0]["body"])
         self.assertIn("低置信复盘", rows[0]["body"])
+
+    def test_video_review_evidence_gap_feedback_tracks_external_reference_resolution(self) -> None:
+        feedback = build_video_review_evidence_gap_feedback(
+            {
+                "match_id": "gap-1",
+                "match_date": "2026-05-18",
+                "league": "League C",
+                "home_team": "India",
+                "away_team": "Juliet",
+            },
+            {"ok": True, "review": {"review_id": "vr-gap-1"}},
+            source_name="FIFA+ Archive",
+        )
+
+        self.assertEqual(feedback["action_key"], "bind_external_reference")
+        self.assertEqual(feedback["match_id"], "gap-1")
+        self.assertEqual(feedback["before_kind"], "missing_evidence")
+        self.assertEqual(feedback["after_kind"], "external_reference")
+        self.assertEqual(feedback["outcome"], "resolved")
+        self.assertEqual(feedback["tone"], "good")
+        self.assertEqual(feedback["source_name"], "FIFA+ Archive")
+        self.assertEqual(feedback["review_id"], "vr-gap-1")
+
+    def test_video_review_evidence_gap_feedback_rows_format_history(self) -> None:
+        rows = build_video_review_evidence_gap_feedback_rows(
+            [
+                {
+                    "occurred_at": "2026-05-14 12:00:00",
+                    "title": "League C | India vs Juliet",
+                    "outcome": "resolved",
+                    "summary_text": "missing_evidence->external_reference",
+                    "source_name": "FIFA+ Archive",
+                    "review_id": "vr-gap-1",
+                    "next_recommendation": "annotate events",
+                    "tone": "good",
+                }
+            ]
+        )
+
+        self.assertEqual(rows[0]["tone"], "good")
+        self.assertIn("resolved", rows[0]["title"])
+        self.assertIn("FIFA+ Archive", rows[0]["body"])
+        self.assertIn("annotate events", rows[0]["body"])
 
     def test_review_training_quality_export_message_summarizes_report(self) -> None:
         text = build_statsbomb_review_training_quality_export_message(

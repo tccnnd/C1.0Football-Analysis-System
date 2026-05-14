@@ -218,6 +218,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 REPORT_DIR = PROJECT_ROOT / "reports"
 SETTINGS_PATH = PROJECT_ROOT / "data" / "state" / "ai_dashboard_settings.json"
 STATSBOMB_REVIEW_REPAIR_ACTION_LOG = PROJECT_ROOT / "data" / "state" / "statsbomb_review_repair_action_log.json"
+VIDEO_REVIEW_EVIDENCE_GAP_ACTION_LOG = PROJECT_ROOT / "data" / "state" / "video_review_evidence_gap_action_log.json"
 
 
 def build_video_review_workflow_action_rows(
@@ -1520,6 +1521,114 @@ def build_video_review_evidence_gap_action_rows(
         if len(rows) >= max(0, int(limit)):
             break
     return rows
+
+
+def build_video_review_evidence_gap_feedback(
+    settlement: dict,
+    result: dict | None = None,
+    *,
+    source_name: str = "",
+    occurred_at: datetime | None = None,
+) -> dict[str, object]:
+    payload = result if isinstance(result, dict) else {}
+    review = settlement.get("video_review") if isinstance(settlement.get("video_review"), dict) else {}
+    video = review.get("video") if isinstance(review.get("video"), dict) else {}
+    if not video and isinstance(settlement.get("video"), dict):
+        video = settlement.get("video") or {}
+    source_policy = review.get("source_policy") if isinstance(review.get("source_policy"), dict) else {}
+    source_type = str(video.get("source_type") or "").strip().lower()
+    has_video = bool(
+        source_type in {"local_file", "local_video", "file", "external_reference"}
+        or video.get("path")
+        or video.get("url")
+        or source_policy.get("mode") == "reference_only"
+        or str(video.get("probe_status") or "").strip().lower() == "external_reference"
+    )
+    if has_video:
+        before_kind = "video_ready"
+    elif settlement.get("statsbomb_event_summary"):
+        before_kind = "event_proxy_ready"
+    else:
+        before_kind = "missing_evidence"
+    ok = bool(payload.get("ok", True))
+    after_kind = "external_reference" if ok else before_kind
+    outcome = "resolved" if ok and before_kind == "missing_evidence" else "updated" if ok else "failed"
+    review_payload = payload.get("review") if isinstance(payload.get("review"), dict) else {}
+    match_id = str(settlement.get("match_id") or "").strip()
+    title = (
+        f"{settlement.get('match_date') or settlement.get('date') or '-'} | "
+        f"{settlement.get('league') or '-'} | "
+        f"{settlement.get('home_team') or '-'} vs {settlement.get('away_team') or '-'}"
+    )
+    return {
+        "action_key": "bind_external_reference",
+        "occurred_at": (occurred_at or datetime.now()).strftime("%Y-%m-%d %H:%M:%S"),
+        "match_id": match_id,
+        "title": title,
+        "before_kind": before_kind,
+        "after_kind": after_kind,
+        "outcome": outcome,
+        "tone": "good" if outcome == "resolved" else "neutral" if outcome == "updated" else "bad",
+        "ok": ok,
+        "source_name": source_name or str(review_payload.get("source_name") or "-"),
+        "review_id": str(review_payload.get("review_id") or "-"),
+        "message": str(payload.get("message") or payload.get("reason") or ""),
+        "summary_text": f"{title}: {before_kind}->{after_kind} | {outcome}",
+        "next_recommendation": (
+            "后续可按时间点补充视频事件标注，或导出视频复盘样本。"
+            if ok
+            else "检查外部回放链接或重新绑定合法视频来源。"
+        ),
+    }
+
+
+def build_video_review_evidence_gap_feedback_rows(records: list[dict] | object, limit: int = 5) -> list[dict[str, object]]:
+    if not isinstance(records, list):
+        return []
+    rows: list[dict[str, object]] = []
+    for record in records[: max(0, int(limit))]:
+        if not isinstance(record, dict):
+            continue
+        rows.append(
+            {
+                "title": f"{record.get('occurred_at', '-')} | {record.get('outcome', '-')} | {record.get('title', '-')}",
+                "body": (
+                    f"{record.get('summary_text', '-')}\n"
+                    f"来源: {record.get('source_name', '-')} | review_id: {record.get('review_id', '-')}\n"
+                    f"下一步: {record.get('next_recommendation', '-')}"
+                ),
+                "tone": str(record.get("tone") or "neutral"),
+            }
+        )
+    return rows
+
+
+def _load_video_review_evidence_gap_feedback_log(
+    path: Path = VIDEO_REVIEW_EVIDENCE_GAP_ACTION_LOG,
+) -> list[dict]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if isinstance(payload, dict):
+        payload = payload.get("records")
+    if not isinstance(payload, list):
+        return []
+    return [item for item in payload if isinstance(item, dict)]
+
+
+def _append_video_review_evidence_gap_feedback_log(
+    record: dict,
+    path: Path = VIDEO_REVIEW_EVIDENCE_GAP_ACTION_LOG,
+    *,
+    limit: int = 50,
+) -> None:
+    records = [dict(record), *_load_video_review_evidence_gap_feedback_log(path)]
+    records = records[: max(1, int(limit))]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps({"records": records}, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(path)
 
 
 def _load_statsbomb_review_training_action_feedback_log(
@@ -4511,6 +4620,9 @@ class SmartMatchDashboard:
             settlements,
             get_statsbomb_review_training_samples(),
         )
+        evidence_gap_feedback_rows = build_video_review_evidence_gap_feedback_rows(
+            _load_video_review_evidence_gap_feedback_log()
+        )
         statsbomb_repair_feedback_rows = build_statsbomb_review_training_feedback_rows(
             _load_statsbomb_review_training_action_feedback_log()
         )
@@ -4874,6 +4986,20 @@ class SmartMatchDashboard:
                 "暂无证据缺口",
                 "当前已结算场次均有视频、外部回放或 StatsBomb/Event Proxy 复盘证据。",
             )
+        self._strategy_section_title(right, "复盘证据处理记录")
+        if evidence_gap_feedback_rows:
+            for row in evidence_gap_feedback_rows:
+                self._strategy_row(
+                    right,
+                    str(row.get("title") or "-"),
+                    str(row.get("body") or "-"),
+                )
+        else:
+            self._strategy_row(
+                right,
+                "暂无处理记录",
+                "绑定外部回放链接后，会记录 missing_evidence -> external_reference 的变化。",
+            )
         self._strategy_section_title(right, "StatsBomb事件代理样本质量")
         for row in statsbomb_review_quality.get("card_rows", []) if isinstance(statsbomb_review_quality.get("card_rows"), list) else []:
             if isinstance(row, dict):
@@ -5006,6 +5132,13 @@ class SmartMatchDashboard:
             messagebox.showerror("\u89c6\u9891\u590d\u76d8", f"\u7ed1\u5b9a\u5931\u8d25: {result.get('reason', '-')}")
             return
         review = result.get("review") if isinstance(result.get("review"), dict) else {}
+        feedback = build_video_review_evidence_gap_feedback(settlement, result, source_name=source_name)
+        try:
+            _append_video_review_evidence_gap_feedback_log(feedback)
+        except Exception as exc:
+            self._log_event("ERROR", f"复盘证据缺口处理记录写入失败: {exc}")
+        else:
+            self._log_event("OK", str(feedback.get("summary_text") or "复盘证据缺口处理已记录"))
         self.status_var.set(f"\u5916\u90e8\u56de\u653e\u5df2\u7ed1\u5b9a: {review.get('review_id', '-')} / {source_name}")
         messagebox.showinfo(
             "\u89c6\u9891\u590d\u76d8",
