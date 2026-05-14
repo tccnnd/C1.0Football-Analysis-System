@@ -2075,6 +2075,10 @@ class SmartMatchDashboard:
         self.show_all_matches = False
         self._refresh_matches()
 
+    def open_governance_filtered_matches(self, selected: str = "formal_ready") -> None:
+        self.governance_filter = selected if selected in {"all", "formal_ready", "observe", "blocked", "needs_c1_review", "needs_recovery"} else "all"
+        self._select_nav(1, self._build_main)
+
     def _widget_alive_for(self, widget: tk.Widget) -> bool:
         try:
             return bool(widget is not None and widget.winfo_exists())
