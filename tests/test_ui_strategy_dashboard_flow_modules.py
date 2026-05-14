@@ -104,6 +104,8 @@ from v24_app.ui_modules import (
     build_statsbomb_fewshot_memory_quality_alerts,
     build_statsbomb_review_training_quality_summary,
     build_statsbomb_review_training_weight_signal,
+    build_statsbomb_review_training_quality_report_filename,
+    build_statsbomb_review_training_quality_report_lines,
     validate_statsbomb_fewshot_draft_payload,
     build_statsbomb_event_replay_case,
     build_statsbomb_event_review_summary,
@@ -3012,6 +3014,91 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertTrue(any(issue["code"] == "prediction_miss_skewed" for issue in skewed["issues"]))
         self.assertEqual(skewed["label_rows"][0]["value"], "29/30")
         self.assertEqual(skewed["weight_rows"][0]["code"], "statsbomb_xg_against_pick")
+
+    def test_statsbomb_review_training_quality_report_filename_is_stable(self) -> None:
+        self.assertEqual(
+            build_statsbomb_review_training_quality_report_filename(datetime(2026, 5, 14, 11, 20, 30)),
+            "statsbomb_review_training_quality_20260514_112030.md",
+        )
+
+    def test_statsbomb_review_training_quality_report_lines_cover_blocked_attention_healthy(self) -> None:
+        blocked_lines = build_statsbomb_review_training_quality_report_lines(
+            build_statsbomb_review_training_quality_summary({})
+        )
+        attention_lines = build_statsbomb_review_training_quality_report_lines(
+            build_statsbomb_review_training_quality_summary(
+                {
+                    "summary": {
+                        "sample_count": 30,
+                        "feature_order": ["xg_diff", "shot_diff", "event_count"],
+                        "label_counts": {"prediction_miss": {"0": 1, "1": 29}},
+                    },
+                    "items": [{} for _ in range(30)],
+                }
+            )
+        )
+        healthy_lines = build_statsbomb_review_training_quality_report_lines(
+            build_statsbomb_review_training_quality_summary(
+                {
+                    "summary": {
+                        "sample_count": 60,
+                        "feature_order": ["xg_diff", "shot_diff", "event_count"],
+                        "label_counts": {
+                            "prediction_miss": {"0": 30, "1": 30},
+                            "handicap_miss": {"0": 32, "1": 28},
+                            "ou_miss": {"0": 31, "1": 29},
+                        },
+                    },
+                    "items": [{} for _ in range(60)],
+                }
+            )
+        )
+
+        self.assertIn("总体质量状态: blocked", "\n".join(blocked_lines))
+        self.assertIn("总体质量状态: attention", "\n".join(attention_lines))
+        self.assertIn("总体质量状态: healthy", "\n".join(healthy_lines))
+        self.assertIn("仅用于赛后复盘，不进入赛前预测特征", "\n".join(healthy_lines))
+
+    def test_statsbomb_review_training_quality_report_lines_include_labels_weights_issues(self) -> None:
+        quality = build_statsbomb_review_training_quality_summary(
+            {
+                "summary": {
+                    "sample_count": 30,
+                    "feature_order": ["xg_diff", "shot_diff", "event_count"],
+                    "label_counts": {"prediction_miss": {"0": 1, "1": 29}},
+                },
+                "items": [{} for _ in range(30)],
+            }
+        )
+        payload = "\n".join(build_statsbomb_review_training_quality_report_lines(quality))
+        self.assertIn("标签分布（label_rows）", payload)
+        self.assertIn("错因权重（weight_rows）", payload)
+        self.assertIn("质量问题与建议（issues）", payload)
+        self.assertIn("prediction_miss", payload)
+        self.assertIn("statsbomb_xg_against_pick", payload)
+        self.assertIn("prediction_miss_skewed", payload)
+
+    def test_statsbomb_review_training_quality_report_lines_include_repair_feedback_records(self) -> None:
+        quality = build_statsbomb_review_training_quality_summary({})
+        feedback_records = [
+            {
+                "action_key": "expand_validation_samples",
+                "outcome": "partial",
+                "sample_change": "+18",
+                "issue_change": "blocking->warning",
+                "next_step": "continue import recent settlements",
+            }
+        ]
+        payload = "\n".join(
+            build_statsbomb_review_training_quality_report_lines(
+                quality,
+                repair_feedback_records=feedback_records,
+            )
+        )
+        self.assertIn("最近修复反馈（repair_feedback_records）", payload)
+        self.assertIn("expand_validation_samples", payload)
+        self.assertIn("blocking->warning", payload)
+        self.assertIn("continue import recent settlements", payload)
 
     def test_dashboard_exposes_statsbomb_review_training_weight_signal(self) -> None:
         settlements = [

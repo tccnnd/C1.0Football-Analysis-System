@@ -840,6 +840,127 @@ def build_statsbomb_review_training_quality_summary(
     }
 
 
+def build_statsbomb_review_training_quality_report_filename(now: datetime | None = None) -> str:
+    current = now or datetime.now()
+    return f"statsbomb_review_training_quality_{current.strftime('%Y%m%d_%H%M%S')}.md"
+
+
+def build_statsbomb_review_training_quality_report_lines(
+    quality: Mapping[str, object] | object,
+    repair_feedback_records: Sequence[Mapping[str, object] | object] | None = None,
+) -> list[str]:
+    resolved = _as_mapping(quality)
+    label_rows = [row for row in _as_list(resolved.get("label_rows")) if isinstance(row, Mapping)]
+    weight_rows = [row for row in _as_list(resolved.get("weight_rows")) if isinstance(row, Mapping)]
+    issues = [row for row in _as_list(resolved.get("issues")) if isinstance(row, Mapping)]
+    feedback_rows = [row for row in _as_list(repair_feedback_records) if isinstance(row, Mapping)]
+    lines = [
+        "# StatsBomb/Event Proxy 样本质量报告",
+        "",
+        f"- 总体质量状态: {resolved.get('status') or '-'}",
+        f"- 样本数: {_safe_int(resolved.get('sample_count'))}",
+        f"- 特征数: {_safe_int(resolved.get('feature_count'))}",
+        f"- issue_count: {_safe_int(resolved.get('issue_count'))}",
+        f"- 摘要: {resolved.get('summary_text') or '-'}",
+        "- 约束: StatsBomb/Event Proxy 仅用于赛后复盘，不进入赛前预测特征。",
+        "",
+        "## 标签分布（label_rows）",
+        "",
+        "| 标签 | 值 | 已知样本 | hit | miss | miss_rate |",
+        "| --- | --- | ---: | ---: | ---: | --- |",
+    ]
+    if not label_rows:
+        lines.append("| - | - | 0 | 0 | 0 | - |")
+    for row in label_rows:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    _md_cell(row.get("label") or row.get("code")),
+                    _md_cell(row.get("value")),
+                    str(_safe_int(row.get("known_count"))),
+                    str(_safe_int(row.get("hit_count"))),
+                    str(_safe_int(row.get("miss_count"))),
+                    _md_cell(_pct(row.get("miss_rate")) if row.get("miss_rate") is not None else "-"),
+                ]
+            )
+            + " |"
+        )
+    lines.extend(
+        [
+            "",
+            "## 错因权重（weight_rows）",
+            "",
+            "| 代码 | 权重 | 说明 |",
+            "| --- | ---: | --- |",
+        ]
+    )
+    if not weight_rows:
+        lines.append("| - | 1.00 | - |")
+    for row in weight_rows:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    _md_cell(row.get("code")),
+                    _md_cell(row.get("value")),
+                    _md_cell(row.get("detail")),
+                ]
+            )
+            + " |"
+        )
+    lines.extend(
+        [
+            "",
+            "## 质量问题与建议（issues）",
+            "",
+            "| 问题代码 | 严重级别 | 说明 | 建议 |",
+            "| --- | --- | --- | --- |",
+        ]
+    )
+    if not issues:
+        lines.append("| - | - | - | - |")
+    for issue in issues:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    _md_cell(issue.get("code")),
+                    _md_cell(issue.get("severity")),
+                    _md_cell(issue.get("message")),
+                    _md_cell(issue.get("recommendation")),
+                ]
+            )
+            + " |"
+        )
+    lines.extend(
+        [
+            "",
+            "## 最近修复反馈（repair_feedback_records）",
+            "",
+            "| action_key | outcome | 样本变化 | 问题变化 | 下一步建议 |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+    )
+    if not feedback_rows:
+        lines.append("| - | - | - | - | - |")
+    for row in feedback_rows[:20]:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    _md_cell(row.get("action_key")),
+                    _md_cell(row.get("outcome")),
+                    _md_cell(row.get("sample_change") or row.get("sample_delta")),
+                    _md_cell(row.get("issue_change") or row.get("issue_delta")),
+                    _md_cell(row.get("next_step") or row.get("next_recommendation")),
+                ]
+            )
+            + " |"
+        )
+    return lines
+
+
 def _pick_side(value: object) -> str:
     text = _text(value, "").upper()
     if text in {"HOME", "HOME_WIN", "H", "1"} or "HOME" in text:
