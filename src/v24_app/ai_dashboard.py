@@ -1484,6 +1484,105 @@ def build_video_review_evidence_gap_action_rows(
             or str(video.get("probe_status") or "").strip().lower() == "external_reference"
         )
 
+    def _as_float(value: object) -> float:
+        try:
+            return float(value or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _is_false(value: object) -> bool:
+        if value is False:
+            return True
+        text = str(value).strip().lower()
+        return text in {"false", "0", "miss", "missed", "no", "错", "未命中"}
+
+    def _date_sort_value(value: object) -> float:
+        text = str(value or "").strip()
+        for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M"):
+            try:
+                return datetime.strptime(text, fmt).timestamp()
+            except ValueError:
+                continue
+        return 0.0
+
+    def _priority(settlement: dict) -> tuple[int, list[str]]:
+        score = 0
+        reasons: list[str] = []
+        confidence = max(
+            _as_float(settlement.get("prediction_confidence")),
+            _as_float(settlement.get("confidence")),
+        )
+        if _is_false(settlement.get("is_correct")):
+            if confidence >= 0.65:
+                score += 60
+                reasons.append("高置信1X2失误")
+            else:
+                score += 25
+                reasons.append("1X2失误")
+
+        miss_fields = [
+            ("handicap_is_correct", "让球"),
+            ("ou_is_correct", "大小球"),
+            ("total_goals_is_correct", "总进球"),
+            ("score_is_correct", "比分"),
+        ]
+        miss_labels = [label for key, label in miss_fields if _is_false(settlement.get(key))]
+        if miss_labels:
+            score += min(24, 8 * len(miss_labels))
+            reasons.append("多玩法失误: " + "/".join(miss_labels[:3]))
+
+        strategy_items = settlement.get("high_accuracy_strategy_items")
+        if isinstance(strategy_items, list):
+            missed_items = [
+                item
+                for item in strategy_items
+                if isinstance(item, dict)
+                and (_is_false(item.get("is_hit")) or _is_false(item.get("is_correct")))
+            ]
+            if missed_items:
+                score += 35
+                max_item_conf = max((_as_float(item.get("confidence")) for item in missed_items), default=0.0)
+                if max_item_conf >= 0.65:
+                    score += 10
+                reasons.append("高准策略失误")
+
+        allowlist_decision = str(settlement.get("strategy_allowlist_decision") or "").strip().lower()
+        allowlist_status = str(settlement.get("strategy_allowlist_status") or "").strip().lower()
+        if allowlist_decision == "allow" or allowlist_status == "settled" or settlement.get("strategy_allowlist_file"):
+            score += 20
+            reasons.append("放行策略复盘")
+
+        league_text = str(settlement.get("league") or "").lower()
+        important_tokens = (
+            "world cup",
+            "世界杯",
+            "fifa",
+            "uefa",
+            "euro",
+            "champions",
+            "premier",
+            "la liga",
+            "serie a",
+            "bundesliga",
+            "ligue 1",
+        )
+        if any(token in league_text for token in important_tokens):
+            score += 12
+            reasons.append("重点赛事")
+
+        if not reasons:
+            reasons.append("常规缺证据")
+        return score, reasons
+
+    def _priority_label(score: int) -> str:
+        if score >= 90:
+            return "P0"
+        if score >= 60:
+            return "P1"
+        if score >= 30:
+            return "P2"
+        return "P3"
+
     proxy_ids: set[str] = set()
     for sample in _items(statsbomb_samples):
         meta = sample.get("meta") if isinstance(sample.get("meta"), dict) else {}
@@ -1504,6 +1603,8 @@ def build_video_review_evidence_gap_action_rows(
         league = str(settlement.get("league") or "-")
         date_text = str(settlement.get("match_date") or settlement.get("date") or "-")
         title = f"{date_text} | {league} | {home} vs {away}"
+        priority_score, priority_reasons = _priority(settlement)
+        priority_label = _priority_label(priority_score)
         rows.append(
             {
                 "index": index,
@@ -1511,16 +1612,28 @@ def build_video_review_evidence_gap_action_rows(
                 "title": title,
                 "action_key": "bind_external_reference",
                 "tone": "warning",
+                "priority_score": priority_score,
+                "priority_label": priority_label,
+                "priority_reasons": priority_reasons,
+                "date_sort": _date_sort_value(date_text),
                 "body": (
+                    f"优先级 {priority_label} / score {priority_score} | 原因: {', '.join(priority_reasons[:4])}\n"
                     "缺少本地视频、外部回放链接和 StatsBomb/Event Proxy 证据。\n"
                     "优先绑定合法回放链接；如后续补到 StatsBomb 事件摘要，再生成事件代理复盘样本；否则仅保留低置信复盘。"
                 ),
                 "settlement": settlement,
             }
         )
-        if len(rows) >= max(0, int(limit)):
-            break
-    return rows
+    rows.sort(
+        key=lambda row: (
+            -int(row.get("priority_score", 0) or 0),
+            -float(row.get("date_sort", 0.0) or 0.0),
+            int(row.get("index", 0) or 0),
+        )
+    )
+    for row in rows:
+        row.pop("date_sort", None)
+    return rows[: max(0, int(limit))]
 
 
 def build_video_review_evidence_gap_feedback(

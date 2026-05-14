@@ -77,6 +77,45 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertEqual(rows[0]["action_key"], "bind_external_reference")
         self.assertIn("优先绑定合法回放链接", rows[0]["body"])
         self.assertIn("低置信复盘", rows[0]["body"])
+        self.assertIn("priority_score", rows[0])
+
+    def test_video_review_evidence_gap_action_rows_prioritize_high_value_misses(self) -> None:
+        rows = build_video_review_evidence_gap_action_rows(
+            [
+                {
+                    "match_id": "recent-normal",
+                    "match_date": "2026-05-20",
+                    "league": "League B",
+                    "home_team": "Recent",
+                    "away_team": "Normal",
+                },
+                {
+                    "match_id": "high-conf-miss",
+                    "match_date": "2026-05-18",
+                    "league": "FIFA World Cup",
+                    "home_team": "High",
+                    "away_team": "Miss",
+                    "is_correct": False,
+                    "prediction_confidence": 0.72,
+                },
+                {
+                    "match_id": "strategy-miss",
+                    "match_date": "2026-05-19",
+                    "league": "League A",
+                    "home_team": "Strategy",
+                    "away_team": "Miss",
+                    "high_accuracy_strategy_items": [{"is_hit": False, "confidence": 0.71}],
+                    "strategy_allowlist_decision": "allow",
+                },
+            ]
+        )
+
+        self.assertEqual([row["match_id"] for row in rows], ["high-conf-miss", "strategy-miss", "recent-normal"])
+        self.assertGreater(rows[0]["priority_score"], rows[1]["priority_score"])
+        self.assertEqual(rows[0]["priority_label"], "P1")
+        self.assertIn("高置信1X2失误", rows[0]["priority_reasons"])
+        self.assertIn("重点赛事", rows[0]["priority_reasons"])
+        self.assertIn("优先级 P1", rows[0]["body"])
 
     def test_video_review_evidence_gap_feedback_tracks_external_reference_resolution(self) -> None:
         feedback = build_video_review_evidence_gap_feedback(
