@@ -19,10 +19,63 @@ from v24_app.ai_dashboard import (
     build_statsbomb_review_training_action_rows,
     build_statsbomb_review_training_feedback_rows,
     build_statsbomb_review_training_quality_export_message,
+    build_video_review_evidence_gap_action_rows,
 )
 
 
 class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
+    def test_video_review_evidence_gap_action_rows_only_include_missing_evidence(self) -> None:
+        rows = build_video_review_evidence_gap_action_rows(
+            [
+                {
+                    "match_id": "video-ready",
+                    "match_date": "2026-05-14",
+                    "league": "League A",
+                    "home_team": "Alpha",
+                    "away_team": "Bravo",
+                    "video_review": {"video": {"source_type": "external_reference", "url": "https://example.com/replay"}},
+                },
+                {
+                    "match_id": "event-proxy-ready",
+                    "match_date": "2026-05-15",
+                    "league": "League A",
+                    "home_team": "Charlie",
+                    "away_team": "Delta",
+                    "statsbomb_event_summary": {"event_count": 1000},
+                },
+                {
+                    "match_id": "sample-proxy-ready",
+                    "match_date": "2026-05-16",
+                    "league": "League B",
+                    "home_team": "Echo",
+                    "away_team": "Foxtrot",
+                },
+                {
+                    "match_id": "missing-evidence",
+                    "match_date": "2026-05-17",
+                    "league": "League B",
+                    "home_team": "Golf",
+                    "away_team": "Hotel",
+                },
+            ],
+            {
+                "items": [
+                    {
+                        "meta": {
+                            "source": "statsbomb_event_sandbox",
+                            "match_id": "sample-proxy-ready",
+                        }
+                    }
+                ]
+            },
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["match_id"], "missing-evidence")
+        self.assertEqual(rows[0]["action_key"], "bind_external_reference")
+        self.assertIn("优先绑定合法回放链接", rows[0]["body"])
+        self.assertIn("低置信复盘", rows[0]["body"])
+
     def test_review_training_quality_export_message_summarizes_report(self) -> None:
         text = build_statsbomb_review_training_quality_export_message(
             Path("reports/statsbomb_review_training_quality_20260514_120000.md"),

@@ -1439,6 +1439,89 @@ def build_statsbomb_review_training_quality_export_message(path: Path, quality: 
     )
 
 
+def build_video_review_evidence_gap_action_rows(
+    settlements: list[dict] | object,
+    statsbomb_samples: dict | list | object | None = None,
+    *,
+    limit: int = 6,
+) -> list[dict[str, object]]:
+    def _items(value: object) -> list[dict]:
+        if isinstance(value, dict):
+            for key in ("items", "rows", "settlements"):
+                resolved = value.get(key)
+                if isinstance(resolved, list):
+                    return [item for item in resolved if isinstance(item, dict)]
+            return []
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+        return []
+
+    def _match_id(item: dict) -> str:
+        match = item.get("match") if isinstance(item.get("match"), dict) else {}
+        meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+        return str(
+            item.get("match_id")
+            or match.get("match_id")
+            or meta.get("match_id")
+            or item.get("source_match_id")
+            or meta.get("source_match_id")
+            or ""
+        ).strip()
+
+    def _has_video(settlement: dict) -> bool:
+        review = settlement.get("video_review") if isinstance(settlement.get("video_review"), dict) else {}
+        video = review.get("video") if isinstance(review.get("video"), dict) else {}
+        if not video and isinstance(settlement.get("video"), dict):
+            video = settlement.get("video") or {}
+        source_policy = review.get("source_policy") if isinstance(review.get("source_policy"), dict) else {}
+        source_type = str(video.get("source_type") or "").strip().lower()
+        return bool(
+            source_type in {"local_file", "local_video", "file", "external_reference"}
+            or video.get("path")
+            or video.get("url")
+            or source_policy.get("mode") == "reference_only"
+            or str(video.get("probe_status") or "").strip().lower() == "external_reference"
+        )
+
+    proxy_ids: set[str] = set()
+    for sample in _items(statsbomb_samples):
+        meta = sample.get("meta") if isinstance(sample.get("meta"), dict) else {}
+        source_text = f"{sample.get('source') or ''} {meta.get('source') or ''}".lower()
+        if "statsbomb" in source_text or "event_proxy" in source_text or "event-sandbox" in source_text:
+            sample_match_id = _match_id(sample)
+            if sample_match_id:
+                proxy_ids.add(sample_match_id)
+
+    rows: list[dict[str, object]] = []
+    for index, settlement in enumerate(_items(settlements)):
+        match_id = _match_id(settlement)
+        has_proxy = bool(settlement.get("statsbomb_event_summary")) or bool(match_id and match_id in proxy_ids)
+        if _has_video(settlement) or has_proxy:
+            continue
+        home = str(settlement.get("home_team") or "-")
+        away = str(settlement.get("away_team") or "-")
+        league = str(settlement.get("league") or "-")
+        date_text = str(settlement.get("match_date") or settlement.get("date") or "-")
+        title = f"{date_text} | {league} | {home} vs {away}"
+        rows.append(
+            {
+                "index": index,
+                "match_id": match_id,
+                "title": title,
+                "action_key": "bind_external_reference",
+                "tone": "warning",
+                "body": (
+                    "缺少本地视频、外部回放链接和 StatsBomb/Event Proxy 证据。\n"
+                    "优先绑定合法回放链接；如后续补到 StatsBomb 事件摘要，再生成事件代理复盘样本；否则仅保留低置信复盘。"
+                ),
+                "settlement": settlement,
+            }
+        )
+        if len(rows) >= max(0, int(limit)):
+            break
+    return rows
+
+
 def _load_statsbomb_review_training_action_feedback_log(
     path: Path = STATSBOMB_REVIEW_REPAIR_ACTION_LOG,
 ) -> list[dict]:
@@ -4424,6 +4507,10 @@ class SmartMatchDashboard:
             statsbomb_samples=get_statsbomb_review_training_samples(),
             video_memory=get_video_review_fewshot_memory(),
         )
+        evidence_gap_rows = build_video_review_evidence_gap_action_rows(
+            settlements,
+            get_statsbomb_review_training_samples(),
+        )
         statsbomb_repair_feedback_rows = build_statsbomb_review_training_feedback_rows(
             _load_statsbomb_review_training_action_feedback_log()
         )
@@ -4771,6 +4858,22 @@ class SmartMatchDashboard:
             "视频降级策略",
             str(video_source_coverage.get("fallback_policy_text") or "-"),
         )
+        self._strategy_section_title(right, "复盘证据缺口行动")
+        if evidence_gap_rows:
+            for row in evidence_gap_rows:
+                settlement = row.get("settlement") if isinstance(row.get("settlement"), dict) else {}
+                self._strategy_row(
+                    right,
+                    str(row.get("title") or "-"),
+                    str(row.get("body") or "-"),
+                    command=(lambda item=settlement: self.import_video_review_reference_for_settlement(item)),
+                )
+        else:
+            self._strategy_row(
+                right,
+                "暂无证据缺口",
+                "当前已结算场次均有视频、外部回放或 StatsBomb/Event Proxy 复盘证据。",
+            )
         self._strategy_section_title(right, "StatsBomb事件代理样本质量")
         for row in statsbomb_review_quality.get("card_rows", []) if isinstance(statsbomb_review_quality.get("card_rows"), list) else []:
             if isinstance(row, dict):
@@ -4879,19 +4982,7 @@ class SmartMatchDashboard:
         self.run_video_review_frame_extraction_task(str(review.get("review_id") or ""))
         self.open_review_center()
 
-    def import_video_review_reference_for_selection(self, review_tree: ttk.Treeview, settlements: list[dict]) -> None:
-        if not settlements:
-            messagebox.showinfo("\u89c6\u9891\u590d\u76d8", "\u5f53\u524d\u6ca1\u6709\u53ef\u7ed1\u5b9a\u7684\u5df2\u7ed3\u7b97\u8d5b\u4e8b\u3002")
-            return
-        selection = review_tree.selection()
-        if not selection:
-            messagebox.showinfo("\u89c6\u9891\u590d\u76d8", "\u8bf7\u5148\u9009\u62e9\u4e00\u573a\u590d\u76d8\u8d5b\u4e8b\u3002")
-            return
-        try:
-            settlement = settlements[int(selection[0])]
-        except (TypeError, ValueError, IndexError):
-            messagebox.showinfo("\u89c6\u9891\u590d\u76d8", "\u9009\u4e2d\u8d5b\u4e8b\u65e0\u6548\uff0c\u8bf7\u91cd\u65b0\u9009\u62e9\u3002")
-            return
+    def import_video_review_reference_for_settlement(self, settlement: dict) -> None:
         url = simpledialog.askstring(
             "\u7ed1\u5b9a FIFA+ \u56de\u653e\u94fe\u63a5",
             "\u7c98\u8d34 FIFA+ Archive \u6216\u5176\u4ed6\u5408\u6cd5\u56de\u653e\u94fe\u63a5\uff1a\n\n\u6ce8\uff1a\u672c\u529f\u80fd\u53ea\u4fdd\u5b58\u94fe\u63a5\u4f5c\u4e3a\u590d\u76d8\u8bc1\u636e\uff0c\u4e0d\u81ea\u52a8\u4e0b\u8f7d\u89c6\u9891\u3002",
@@ -4921,6 +5012,22 @@ class SmartMatchDashboard:
             f"\u5df2\u7ed1\u5b9a\u5916\u90e8\u56de\u653e\u94fe\u63a5\n\nreview_id: {review.get('review_id', '-')}\n\u6765\u6e90: {source_name}\n\u72b6\u6001: reference_only\n\n\u540e\u7eed\u53ef\u4f7f\u7528\u201c\u6807\u6ce8\u89c6\u9891\u4e8b\u4ef6\u201d\u6309\u65f6\u95f4\u70b9\u8865\u5145\u590d\u76d8\u8bc1\u636e\u3002",
         )
         self.open_review_center()
+
+    def import_video_review_reference_for_selection(self, review_tree: ttk.Treeview, settlements: list[dict]) -> None:
+        if not settlements:
+            messagebox.showinfo("\u89c6\u9891\u590d\u76d8", "\u5f53\u524d\u6ca1\u6709\u53ef\u7ed1\u5b9a\u7684\u5df2\u7ed3\u7b97\u8d5b\u4e8b\u3002")
+            return
+        selection = review_tree.selection()
+        if not selection:
+            messagebox.showinfo("\u89c6\u9891\u590d\u76d8", "\u8bf7\u5148\u9009\u62e9\u4e00\u573a\u590d\u76d8\u8d5b\u4e8b\u3002")
+            return
+        try:
+            settlement = settlements[int(selection[0])]
+        except (TypeError, ValueError, IndexError):
+            messagebox.showinfo("\u89c6\u9891\u590d\u76d8", "\u9009\u4e2d\u8d5b\u4e8b\u65e0\u6548\uff0c\u8bf7\u91cd\u65b0\u9009\u62e9\u3002")
+            return
+        self.import_video_review_reference_for_settlement(settlement)
+        return
 
     def annotate_video_review_for_selection(self, review_tree: ttk.Treeview, settlements: list[dict]) -> None:
         if not settlements:
