@@ -258,6 +258,35 @@ class DashboardRow:
     prediction: dict
 
 
+def build_main_flow_governance_issue_detail_text(
+    row: DashboardRow,
+    governance_status: dict | None = None,
+) -> str:
+    match = row.match
+    pred = row.prediction
+    admission = _admission_payload(pred)
+    draw_guard_label, _draw_guard_body, _draw_guard_tone = _draw_release_guard_summary(pred)
+    lines = [
+        f"对阵：{match.home_team} vs {match.away_team}",
+        f"联赛：{match.league}",
+        f"开赛：{match.match_date} {match.match_time}",
+        "",
+        "问题上下文",
+        f"- 风险等级：{_risk_label(pred.get('risk_level'))}",
+        f"- 置信度：{_pct1(pred.get('confidence'))}",
+        f"- 推荐策略：{_strategy_text(pred)}",
+        f"- 策略准入：{_admission_text(pred)}",
+        f"- 主玩法：{str(admission.get('top_play') or '-').strip() or '-'}",
+        f"- 主选项：{str(admission.get('top_pick') or '-').strip() or '-'}",
+        f"- 平局接管：{draw_guard_label}",
+        f"- 比赛模式：{_competition_mode_label(pred)}",
+        f"- 评分池：{_rating_pool_label(pred)}",
+    ]
+    if governance_status:
+        lines.extend(["", "治理链路", build_main_flow_governance_status_text(governance_status)])
+    return "\n".join(lines)
+
+
 def _match_load_failure(match: AppMatch, stage: str, exc: Exception) -> dict[str, str]:
     return {
         "stage": stage,
@@ -1341,6 +1370,7 @@ class SmartMatchDashboard:
         shortcuts = [
             ("\u8d5b\u4e8b\u5206\u6790", "\u67e5\u770b\u91cd\u70b9\u8d5b\u4e8b\u3001\u98ce\u9669\u548c\u7f6e\u4fe1\u5ea6\u5206\u5e03", lambda: self._select_nav(1, self._build_main)),
             ("\u4e3b\u6d41\u7a0b\u6cbb\u7406", "\u5148\u770b\u6b63\u5f0f\u5efa\u8bae\uff0c\u518d\u67e5 C1 \u5f85\u5ba1\u548c\u963b\u65ad", lambda: self.open_governance_filtered_matches("formal_ready")),
+            ("\u6cbb\u7406\u8be6\u60c5", "\u6e05\u7406 C1 \u5f85\u5ba1\u4e0e\u963b\u65ad\u573a\u6b21\uff0c\u67e5\u770b\u51b3\u7b56\u94fe", self.open_governance_issue_center),
             ("\u590d\u76d8\u4e2d\u5fc3", "\u56de\u6536\u8d5b\u679c\u5e76\u67e5\u770b\u547d\u4e2d\u7387\u4e0e\u9ad8\u7f6e\u4fe1\u5931\u8bef", self.open_review_center),
             ("\u8d5b\u524d\u5feb\u7167", "\u67e5\u770b\u5df2\u4fdd\u5b58\u7684\u8d5b\u524d\u9884\u6d4b\uff0c\u7b49\u5b8c\u573a\u540e\u8fdb\u884c\u590d\u76d8", self.open_snapshot_center),
             ("\u76d1\u63a7\u4e2d\u5fc3", "\u67e5\u770b Agent \u72b6\u6001\u3001\u8fd0\u884c\u65e5\u5fd7\u548c\u8017\u65f6", self.open_monitor_center),
@@ -2529,6 +2559,314 @@ class SmartMatchDashboard:
         self.status_var.set(f"\u62a5\u544a\u5df2\u4fdd\u5b58: {path.name}")
         messagebox.showinfo("\u4fdd\u5b58\u62a5\u544a", f"\u5df2\u751f\u6210\u62a5\u544a:\n{path}")
         return path
+
+    def open_governance_issue_center(self) -> None:
+        self.current_nav_index = 1
+        self.current_view = "governance_issue"
+        self._refresh_nav_highlight()
+
+        governance_counts = self.main_flow_governance_counts if isinstance(self.main_flow_governance_counts, dict) else {}
+        issue_rows: list[tuple[DashboardRow, dict]] = []
+        for row in self.rows:
+            governance = self._main_flow_governance_status(row)
+            if str(governance.get("status") or "") in {"blocked", "needs_c1_review"}:
+                issue_rows.append((row, governance))
+        issue_rows.sort(
+            key=lambda item: (
+                0 if str(item[1].get("status") or "") == "blocked" else 1,
+                -float(item[0].prediction.get("confidence", 0) or 0),
+                item[0].match.match_date,
+                item[0].match.match_time,
+                item[0].match.home_team,
+            )
+        )
+
+        shell = self._page_shell("治理详情", "聚焦 C1 待审与阻断场次，查看主阻断、决策链和补齐建议")
+        header = tk.Frame(shell, bg=BG)
+        header.pack(fill=tk.X)
+        tk.Button(
+            header,
+            text="返回主流程",
+            command=self._build_main,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground=TEXT,
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=16,
+            pady=6,
+        ).pack(side=tk.RIGHT, padx=(8, 0))
+        tk.Button(
+            header,
+            text="正式建议",
+            command=lambda: self.open_governance_filtered_matches("formal_ready"),
+            bg=BLUE,
+            fg="white",
+            activebackground="#3d5ee7",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=16,
+            pady=6,
+        ).pack(side=tk.RIGHT)
+
+        metrics = tk.Frame(shell, bg=BG)
+        metrics.pack(fill=tk.X, pady=(0, 16))
+        issue_total = int(governance_counts.get("blocked", 0) or 0) + int(governance_counts.get("needs_c1_review", 0) or 0)
+        for label, value, color in [
+            ("问题场次", str(issue_total), RED if issue_total else GREEN),
+            ("阻断", str(governance_counts.get("blocked", 0)), RED if int(governance_counts.get("blocked", 0) or 0) else GREEN),
+            ("C1 待审", str(governance_counts.get("needs_c1_review", 0)), YELLOW if int(governance_counts.get("needs_c1_review", 0) or 0) else GREEN),
+            ("正式建议", str(governance_counts.get("formal_ready", 0)), GREEN),
+        ]:
+            self._detail_metric(metrics, label, value, color)
+
+        body = tk.Frame(shell, bg=BG)
+        body.pack(fill=tk.BOTH, expand=True)
+
+        left = self._card(body, PANEL)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 14))
+        right = self._card(body, PANEL)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        tk.Label(left, text="问题列表", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
+        issue_summary_var = tk.StringVar(value="")
+        tk.Label(left, textvariable=issue_summary_var, bg=PANEL, fg=MUTED, font=("Microsoft YaHei UI", 9)).pack(anchor=tk.W, padx=18, pady=(0, 10))
+
+        issue_filter = "all"
+        filter_bar = tk.Frame(left, bg=PANEL)
+        filter_bar.pack(fill=tk.X, padx=18, pady=(0, 10))
+        tk.Label(filter_bar, text="筛选", bg=PANEL, fg=MUTED, font=("Microsoft YaHei UI", 10, "bold")).pack(side=tk.LEFT, padx=(0, 8))
+        issue_filter_buttons: dict[str, tk.Button] = {}
+
+        issue_wrap = tk.Frame(left, bg=PANEL, height=470)
+        issue_wrap.pack(fill=tk.BOTH, expand=True, padx=18, pady=(0, 14))
+        issue_wrap.pack_propagate(False)
+        issue_canvas = tk.Canvas(issue_wrap, bg=PANEL, bd=0, highlightthickness=0)
+        issue_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        issue_scrollbar = tk.Scrollbar(issue_wrap, orient=tk.VERTICAL, command=issue_canvas.yview)
+        issue_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        issue_canvas.configure(yscrollcommand=issue_scrollbar.set)
+        issue_list = tk.Frame(issue_canvas, bg=PANEL)
+        issue_list_window = issue_canvas.create_window((0, 0), window=issue_list, anchor=tk.NW)
+        issue_list.bind("<Configure>", lambda _event: issue_canvas.configure(scrollregion=issue_canvas.bbox("all")))
+        issue_canvas.bind("<Configure>", lambda event: issue_canvas.itemconfigure(issue_list_window, width=event.width))
+        self._bind_canvas_mousewheel(issue_list, issue_canvas)
+
+        tk.Label(right, text="选中详情", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
+        selected_var = tk.StringVar(value="请选择左侧问题场次")
+        tk.Label(right, textvariable=selected_var, bg=PANEL, fg=MUTED, font=("Microsoft YaHei UI", 9)).pack(anchor=tk.W, padx=18, pady=(0, 10))
+        action_bar = tk.Frame(right, bg=PANEL)
+        action_bar.pack(fill=tk.X, padx=18, pady=(0, 10))
+        open_detail_button = tk.Button(
+            action_bar,
+            text="打开比赛详情",
+            command=lambda: None,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground=TEXT,
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=14,
+            pady=6,
+            state=tk.DISABLED,
+        )
+        open_detail_button.pack(side=tk.LEFT)
+        tk.Button(
+            action_bar,
+            text="问题转正式建议",
+            command=lambda: self.open_governance_filtered_matches("formal_ready"),
+            bg=BLUE,
+            fg="white",
+            activebackground="#3d5ee7",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=14,
+            pady=6,
+        ).pack(side=tk.LEFT, padx=(8, 0))
+
+        detail_text = tk.Text(
+            right,
+            wrap=tk.WORD,
+            bg=PANEL,
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10),
+            padx=16,
+            pady=8,
+        )
+        detail_text.pack(fill=tk.BOTH, expand=True, padx=2, pady=(0, 14))
+
+        filtered_rows: list[tuple[DashboardRow, dict]] = []
+        selected_index = -1
+        row_frames: list[tuple[tk.Frame, DashboardRow, dict]] = []
+
+        def refresh_filter_buttons() -> None:
+            labels = {
+                "all": "全部问题",
+                "needs_c1_review": "仅 C1 待审",
+                "blocked": "仅阻断",
+            }
+            colors = {
+                "all": BLUE,
+                "needs_c1_review": YELLOW,
+                "blocked": RED,
+            }
+            for key, button in issue_filter_buttons.items():
+                active = key == issue_filter
+                button.configure(
+                    text=f"{labels.get(key, key)}",
+                    bg=colors.get(key, BLUE) if active else PANEL_2,
+                    fg="white" if active else TEXT,
+                    activebackground=colors.get(key, BLUE) if active else "#172638",
+                )
+
+        def set_filter(selected: str) -> None:
+            nonlocal issue_filter
+            issue_filter = selected if selected in {"all", "needs_c1_review", "blocked"} else "all"
+            refresh_filter_buttons()
+            refresh_issue_list()
+
+        for key, label in [
+            ("all", "全部问题"),
+            ("needs_c1_review", "C1 待审"),
+            ("blocked", "阻断"),
+        ]:
+            button = tk.Button(
+                filter_bar,
+                text=label,
+                command=lambda key=key: set_filter(key),
+                bg=PANEL_2,
+                fg=TEXT,
+                activebackground="#172638",
+                activeforeground="white",
+                relief=tk.FLAT,
+                font=("Microsoft YaHei UI", 9, "bold"),
+                padx=12,
+                pady=5,
+            )
+            button.pack(side=tk.LEFT, padx=(0, 6))
+            issue_filter_buttons[key] = button
+
+        def set_selected(index: int) -> None:
+            nonlocal selected_index
+            if index < 0 or index >= len(filtered_rows):
+                return
+            selected_index = index
+            row, governance = filtered_rows[index]
+            selected_var.set(
+                f"{governance.get('label', '-')} | {row.match.home_team} vs {row.match.away_team} | {governance.get('primary_blocker', '-')}"
+            )
+            detail_text.configure(state=tk.NORMAL)
+            detail_text.delete("1.0", tk.END)
+            detail_text.insert("1.0", build_main_flow_governance_issue_detail_text(row, governance))
+            detail_text.configure(state=tk.DISABLED)
+            open_detail_button.configure(
+                state=tk.NORMAL,
+                command=lambda current=row: self.open_match_detail(current),
+            )
+            for frame, item_row, item_governance in row_frames:
+                selected = item_row is row
+                frame.configure(
+                    highlightbackground=_governance_color(item_governance) if selected else "#172638",
+                    highlightthickness=2 if selected else 1,
+                )
+
+        def refresh_issue_list() -> None:
+            nonlocal filtered_rows, selected_index, row_frames
+            for child in issue_list.winfo_children():
+                child.destroy()
+            row_frames = []
+            filtered_rows = [
+                item
+                for item in issue_rows
+                if issue_filter == "all" or str(item[1].get("status") or "") == issue_filter
+            ]
+            issue_summary_var.set(
+                f"匹配 {len(filtered_rows)}/{len(issue_rows)} | 阻断 {int(governance_counts.get('blocked', 0) or 0)} | C1 待审 {int(governance_counts.get('needs_c1_review', 0) or 0)}"
+            )
+
+            if not filtered_rows:
+                selected_index = -1
+                selected_var.set("当前筛选没有问题场次")
+                detail_text.configure(state=tk.NORMAL)
+                detail_text.delete("1.0", tk.END)
+                detail_text.insert("1.0", "当前筛选没有 C1 待审或阻断场次。")
+                detail_text.configure(state=tk.DISABLED)
+                open_detail_button.configure(state=tk.DISABLED, command=lambda: None)
+                tk.Label(
+                    issue_list,
+                    text="当前筛选没有 C1 待审或阻断场次。",
+                    bg=PANEL,
+                    fg=MUTED,
+                    font=("Microsoft YaHei UI", 11),
+                ).pack(anchor=tk.W, pady=18)
+                issue_canvas.configure(scrollregion=issue_canvas.bbox("all"))
+                issue_canvas.yview_moveto(0)
+                return
+
+            for index, (row, governance) in enumerate(filtered_rows):
+                color = _governance_color(governance)
+                frame = tk.Frame(issue_list, bg=PANEL_2, highlightbackground="#172638", highlightthickness=1)
+                frame.pack(fill=tk.X, pady=4)
+                frame.configure(cursor="hand2")
+                top = tk.Frame(frame, bg=PANEL_2)
+                top.pack(fill=tk.X, padx=12, pady=(10, 4))
+                tk.Label(
+                    top,
+                    text=f"{row.match.home_team} vs {row.match.away_team}",
+                    bg=PANEL_2,
+                    fg=TEXT,
+                    font=("Microsoft YaHei UI", 10, "bold"),
+                    wraplength=220,
+                    justify=tk.LEFT,
+                ).pack(anchor=tk.W)
+                tk.Label(
+                    top,
+                    text=f"{row.match.league} | {row.match.match_date} {row.match.match_time}",
+                    bg=PANEL_2,
+                    fg=MUTED,
+                    font=("Microsoft YaHei UI", 8),
+                ).pack(anchor=tk.W, pady=(1, 0))
+                tk.Label(
+                    frame,
+                    text=str(governance.get("label") or governance.get("status") or "-"),
+                    bg=PANEL_2,
+                    fg=color,
+                    font=("Microsoft YaHei UI", 9, "bold"),
+                ).pack(anchor=tk.W, padx=12)
+                tk.Label(
+                    frame,
+                    text=f"{governance.get('primary_blocker', '-')} | {governance.get('recommendation', '-')}",
+                    bg=PANEL_2,
+                    fg=TEXT,
+                    font=("Microsoft YaHei UI", 9),
+                    wraplength=260,
+                    justify=tk.LEFT,
+                ).pack(anchor=tk.W, padx=12, pady=(4, 10))
+                row_frames.append((frame, row, governance))
+
+                def bind_click(widget: tk.Widget, current_index: int = index) -> None:
+                    widget.bind("<Button-1>", lambda _event, idx=current_index: set_selected(idx))
+                    try:
+                        widget.configure(cursor="hand2")
+                    except tk.TclError:
+                        pass
+                    for child in widget.winfo_children():
+                        bind_click(child, current_index)
+
+                bind_click(frame)
+
+            issue_canvas.configure(scrollregion=issue_canvas.bbox("all"))
+            issue_canvas.yview_moveto(0)
+            set_selected(0)
+
+        refresh_filter_buttons()
+        refresh_issue_list()
 
     def open_history_reports(self) -> None:
         self.current_nav_index = 3
