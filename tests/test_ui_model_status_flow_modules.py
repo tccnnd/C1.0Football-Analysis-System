@@ -30,6 +30,8 @@ from v24_app.ui_modules import (
     build_play_model_policy_status_text,
     build_play_model_takeover_gate_action_rows,
     build_play_model_takeover_gate_audit_rows,
+    build_play_model_takeover_gate_audit_export_message,
+    build_play_model_takeover_gate_audit_export_status_text,
     build_play_model_takeover_gate_rows,
     build_play_model_training_status_text,
     build_play_threshold_apply_status_text,
@@ -570,6 +572,51 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
         self.assertEqual(audit_rows[0]["tone"], "warning")
         self.assertIn("latest block->watch", audit_rows[0]["body"])
         self.assertEqual(audit_rows[1]["title"], "Previous gate transition: none->block")
+
+    def test_play_model_policy_text_shows_takeover_gate_export_report(self) -> None:
+        policy_text = build_play_model_policy_status_text(
+            {
+                "updated_at": "2026-05-14",
+                "policy": {"scoreline": {"takeover_enabled": True}, "total_goals": {"takeover_enabled": True}},
+                "effective_policy": {"scoreline": {"takeover_enabled": True}, "total_goals": {"takeover_enabled": True}},
+                "takeover_gate": {"status": "allow", "recommendation": "Stable."},
+                "takeover_gate_audit_report": {
+                    "updated_at": "2026-05-14 12:00:00",
+                    "history_count": 3,
+                    "latest_transition": "watch->allow",
+                    "markdown_path": "reports/play_model_takeover_gate_audit_20260514_120000.md",
+                    "csv_path": "reports/play_model_takeover_gate_audit_20260514_120000.csv",
+                },
+            }
+        )
+
+        self.assertIn("Takeover gate exported report", policy_text)
+        self.assertIn("History count: 3", policy_text)
+        self.assertIn("watch->allow", policy_text)
+        self.assertIn("play_model_takeover_gate_audit_20260514_120000.md", policy_text)
+
+    def test_takeover_gate_audit_export_message_summarizes_outputs(self) -> None:
+        result = {
+            "ok": True,
+            "history_count": 3,
+            "summary": {
+                "latest_transition": "watch->allow",
+                "latest_status": "allow",
+                "latest_reason": "stable_backtest",
+            },
+            "markdown_path": "reports/play_model_takeover_gate_audit_20260514_120000.md",
+            "csv_path": "reports/play_model_takeover_gate_audit_20260514_120000.csv",
+        }
+
+        status_text = build_play_model_takeover_gate_audit_export_status_text(result)
+        message = build_play_model_takeover_gate_audit_export_message(result)
+        failed = build_play_model_takeover_gate_audit_export_message({"ok": False, "reason": "no_history"})
+
+        self.assertIn("transitions 3", status_text)
+        self.assertIn("watch->allow", message)
+        self.assertIn("Markdown:", message)
+        self.assertIn("CSV:", message)
+        self.assertIn("no_history", failed)
 
     def test_play_model_training_and_backtest(self) -> None:
         status_text = build_play_model_training_status_text(

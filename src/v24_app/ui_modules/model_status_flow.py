@@ -913,6 +913,31 @@ def build_play_model_takeover_gate_audit_rows(status: Mapping[str, object] | obj
     return rows
 
 
+def build_play_model_takeover_gate_audit_export_status_text(result: Mapping[str, object] | object) -> str:
+    resolved = result if isinstance(result, Mapping) else {}
+    if not bool(resolved.get("ok")):
+        return f"接管守门审计导出失败 | {resolved.get('reason') or '-'}"
+    return (
+        f"接管守门审计已导出 | transitions {int(resolved.get('history_count', 0) or 0)} | "
+        f"{resolved.get('markdown_path') or '-'}"
+    )
+
+
+def build_play_model_takeover_gate_audit_export_message(result: Mapping[str, object] | object) -> str:
+    resolved = result if isinstance(result, Mapping) else {}
+    if not bool(resolved.get("ok")):
+        return f"接管守门审计报告导出未完成\n原因: {resolved.get('reason') or '-'}"
+    summary = resolved.get("summary", {}) if isinstance(resolved.get("summary"), Mapping) else {}
+    return (
+        "接管守门审计报告已导出\n"
+        + f"- Transitions: {int(resolved.get('history_count', 0) or 0)}\n"
+        + f"- Latest: {summary.get('latest_transition') or '-'} | {summary.get('latest_status') or '-'}\n"
+        + f"- Reason: {summary.get('latest_reason') or '-'}\n\n"
+        + f"Markdown:\n{resolved.get('markdown_path') or '-'}\n\n"
+        + f"CSV:\n{resolved.get('csv_path') or '-'}"
+    )
+
+
 def build_train_play_models_apply_status_text(result: Mapping[str, object] | object) -> str:
     resolved = result if isinstance(result, Mapping) else {}
     trained = bool(resolved.get("trained"))
@@ -1185,6 +1210,17 @@ def build_play_model_policy_status_text(status: Mapping[str, object] | object) -
         f"- {row.get('title', '-')}: {row.get('body', '-')} | action_key={row.get('action_key', '-')}"
         for row in takeover_gate_action_rows
     )
+    takeover_gate_export = resolved.get("takeover_gate_audit_report", {}) if isinstance(resolved.get("takeover_gate_audit_report"), Mapping) else {}
+    takeover_gate_export_text = (
+        "\n\nTakeover gate exported report\n"
+        + f"- Updated: {takeover_gate_export.get('updated_at') or '-'}\n"
+        + f"- History count: {takeover_gate_export.get('history_count', 0)}\n"
+        + f"- Latest transition: {takeover_gate_export.get('latest_transition') or '-'}\n"
+        + f"- Markdown: {takeover_gate_export.get('markdown_path') or '-'}\n"
+        + f"- CSV: {takeover_gate_export.get('csv_path') or '-'}"
+        if takeover_gate_export
+        else ""
+    )
     return (
         "玩法接管策略\n"
         + f"- 更新时间: {resolved.get('updated_at') or '-'}\n"
@@ -1207,4 +1243,5 @@ def build_play_model_policy_status_text(status: Mapping[str, object] | object) -
         + takeover_gate_audit_text
         + "\n\nTakeover gate actions\n"
         + takeover_gate_action_text
+        + takeover_gate_export_text
     )
