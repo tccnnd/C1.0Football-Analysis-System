@@ -1636,6 +1636,105 @@ def build_video_review_evidence_gap_action_rows(
     return rows[: max(0, int(limit))]
 
 
+def build_video_review_evidence_gap_batch_plan_filename(now: datetime | None = None) -> str:
+    current = now or datetime.now()
+    return f"video_review_evidence_gap_batch_plan_{current.strftime('%Y%m%d_%H%M%S')}.md"
+
+
+def build_video_review_evidence_gap_batch_plan_lines(
+    rows: list[dict] | object,
+    *,
+    generated_at: datetime | None = None,
+) -> list[str]:
+    def _clean(value: object) -> str:
+        text = str(value if value not in (None, "") else "-").replace("\n", " ").strip()
+        return text.replace("|", "\\|") or "-"
+
+    def _row_items(value: object) -> list[dict]:
+        if not isinstance(value, list):
+            return []
+        return [item for item in value if isinstance(item, dict)]
+
+    def _suggested_action(priority_label: str) -> str:
+        if priority_label in {"P0", "P1"}:
+            return "优先绑定合法回放链接，并补关键事件时间点"
+        if priority_label == "P2":
+            return "补合法回放链接；无回放时转 StatsBomb/Event Proxy 复盘样本"
+        return "后置处理；保留低置信复盘或等待事件代理样本"
+
+    generated = generated_at or datetime.now()
+    gap_rows = _row_items(rows)
+    lines = [
+        "# 视频复盘证据缺口批次计划",
+        "",
+        f"- Generated At: {generated.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- Total Gap Rows: {len(gap_rows)}",
+        "- Priority Rule: P0/P1 优先处理高置信 1X2 失误、多玩法失误、高准策略失误、放行策略复盘和重点赛事。",
+        "- Source Boundary: use legal replay links only; no auto video download; StatsBomb/Event Proxy is post-match review evidence only and must not enter pre-match features.",
+        "",
+        "## 处理批次",
+        "",
+    ]
+    if not gap_rows:
+        lines.append("- 当前没有待处理证据缺口。")
+        return lines
+
+    lines.extend(
+        [
+            "| 优先级 | 分数 | 日期 | 联赛 | 对阵 | match_id | 原因 | 建议动作 |",
+            "| --- | ---: | --- | --- | --- | --- | --- | --- |",
+        ]
+    )
+    for row in gap_rows:
+        settlement = row.get("settlement") if isinstance(row.get("settlement"), dict) else {}
+        home = settlement.get("home_team") or "-"
+        away = settlement.get("away_team") or "-"
+        priority_label = str(row.get("priority_label") or "P3")
+        reasons = row.get("priority_reasons") if isinstance(row.get("priority_reasons"), list) else []
+        reason_text = ", ".join(str(reason) for reason in reasons[:5]) or "-"
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    _clean(priority_label),
+                    _clean(row.get("priority_score", 0)),
+                    _clean(settlement.get("match_date") or settlement.get("date") or "-"),
+                    _clean(settlement.get("league") or "-"),
+                    _clean(f"{home} vs {away}"),
+                    _clean(row.get("match_id") or settlement.get("match_id") or "-"),
+                    _clean(reason_text),
+                    _clean(_suggested_action(priority_label)),
+                ]
+            )
+            + " |"
+        )
+    lines.extend(
+        [
+            "",
+            "## 执行边界",
+            "",
+            "- 只绑定合法回放链接或本地授权视频文件，不自动下载第三方视频。",
+            "- StatsBomb/Event Proxy 只作为赛后复盘证据，不写入赛前预测特征。",
+            "- 处理 P0/P1 后应重新生成视频复盘样本或事件代理复盘样本，再进入记忆合并审计。",
+        ]
+    )
+    return lines
+
+
+def build_video_review_evidence_gap_batch_plan_export_message(path: Path, rows: list[dict] | object) -> str:
+    count = len(rows) if isinstance(rows, list) else 0
+    return "\n".join(
+        [
+            "复盘证据缺口批次计划已导出",
+            "",
+            f"文件: {path}",
+            f"待处理: {count} 场",
+            "",
+            "边界: 只使用合法回放链接或授权本地视频；不自动下载视频；StatsBomb/Event Proxy 仅用于赛后复盘。",
+        ]
+    )
+
+
 def build_video_review_evidence_gap_feedback(
     settlement: dict,
     result: dict | None = None,
@@ -5027,6 +5126,19 @@ class SmartMatchDashboard:
         ).pack(side=tk.LEFT, padx=(10, 0))
         tk.Button(
             review_memory_actions,
+            text="导出缺口批次计划",
+            command=self.export_video_review_evidence_gap_batch_plan,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=14,
+            pady=6,
+        ).pack(side=tk.LEFT, padx=(10, 0))
+        tk.Button(
+            review_memory_actions,
             text="\u56de\u6eda\u89c6\u9891\u8bb0\u5fc6",
             command=self.rollback_video_review_fewshot_memory,
             bg=PANEL_2,
@@ -5470,6 +5582,27 @@ class SmartMatchDashboard:
             feedback = build_statsbomb_review_training_action_feedback(action_key, before_quality, after_quality, {"ok": True})
             self._record_statsbomb_review_training_action_feedback(feedback)
             self.open_review_center()
+
+    def export_video_review_evidence_gap_batch_plan(self) -> Path:
+        settlements = list(reversed(get_recent_settlements(limit=200)))
+        rows = build_video_review_evidence_gap_action_rows(
+            settlements,
+            get_statsbomb_review_training_samples(),
+            limit=20,
+        )
+        now = datetime.now()
+        REPORT_DIR.mkdir(parents=True, exist_ok=True)
+        path = REPORT_DIR / build_video_review_evidence_gap_batch_plan_filename(now)
+        path.write_text(
+            "\n".join(build_video_review_evidence_gap_batch_plan_lines(rows, generated_at=now)),
+            encoding="utf-8",
+        )
+        self.status_var.set(f"复盘证据缺口批次计划已导出: {path.name} | {len(rows)} 场")
+        messagebox.showinfo(
+            "复盘证据缺口批次计划",
+            build_video_review_evidence_gap_batch_plan_export_message(path, rows),
+        )
+        return path
 
     def export_statsbomb_review_training_quality_report(self) -> Path:
         quality = self._current_statsbomb_review_training_quality()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 
@@ -20,6 +21,9 @@ from v24_app.ai_dashboard import (
     build_statsbomb_review_training_feedback_rows,
     build_statsbomb_review_training_quality_export_message,
     build_video_review_evidence_gap_action_rows,
+    build_video_review_evidence_gap_batch_plan_export_message,
+    build_video_review_evidence_gap_batch_plan_filename,
+    build_video_review_evidence_gap_batch_plan_lines,
     build_video_review_evidence_gap_feedback,
     build_video_review_evidence_gap_feedback_rows,
 )
@@ -116,6 +120,77 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertIn("高置信1X2失误", rows[0]["priority_reasons"])
         self.assertIn("重点赛事", rows[0]["priority_reasons"])
         self.assertIn("优先级 P1", rows[0]["body"])
+
+    def test_video_review_evidence_gap_batch_plan_filename_is_stable(self) -> None:
+        self.assertEqual(
+            build_video_review_evidence_gap_batch_plan_filename(datetime(2026, 5, 14, 12, 3, 4)),
+            "video_review_evidence_gap_batch_plan_20260514_120304.md",
+        )
+
+    def test_video_review_evidence_gap_batch_plan_lines_include_priority_and_boundaries(self) -> None:
+        rows = build_video_review_evidence_gap_action_rows(
+            [
+                {
+                    "match_id": "high-conf-miss",
+                    "match_date": "2026-05-18",
+                    "league": "FIFA World Cup",
+                    "home_team": "High",
+                    "away_team": "Miss",
+                    "is_correct": False,
+                    "prediction_confidence": 0.72,
+                },
+                {
+                    "match_id": "strategy-miss",
+                    "match_date": "2026-05-19",
+                    "league": "League A",
+                    "home_team": "Strategy",
+                    "away_team": "Miss",
+                    "high_accuracy_strategy_items": [{"is_hit": False, "confidence": 0.71}],
+                    "strategy_allowlist_decision": "allow",
+                },
+            ],
+            limit=2,
+        )
+
+        text = "\n".join(
+            build_video_review_evidence_gap_batch_plan_lines(
+                rows,
+                generated_at=datetime(2026, 5, 14, 12, 0, 0),
+            )
+        )
+
+        self.assertIn("Total Gap Rows: 2", text)
+        self.assertIn("| P1 | 72 | 2026-05-18 | FIFA World Cup | High vs Miss | high-conf-miss |", text)
+        self.assertIn("高置信1X2失误", text)
+        self.assertIn("重点赛事", text)
+        self.assertIn("优先绑定合法回放链接", text)
+        self.assertIn("legal replay links only", text)
+        self.assertIn("no auto video download", text)
+        self.assertIn("post-match review evidence only", text)
+        self.assertIn("pre-match features", text)
+
+    def test_video_review_evidence_gap_batch_plan_lines_handle_empty_rows(self) -> None:
+        text = "\n".join(
+            build_video_review_evidence_gap_batch_plan_lines(
+                [],
+                generated_at=datetime(2026, 5, 14, 12, 0, 0),
+            )
+        )
+
+        self.assertIn("Total Gap Rows: 0", text)
+        self.assertIn("当前没有待处理证据缺口", text)
+        self.assertIn("legal replay links only", text)
+
+    def test_video_review_evidence_gap_batch_plan_export_message_summarizes_path(self) -> None:
+        text = build_video_review_evidence_gap_batch_plan_export_message(
+            Path("reports/video_review_evidence_gap_batch_plan_20260514_120304.md"),
+            [{"match_id": "gap-1"}, {"match_id": "gap-2"}],
+        )
+
+        self.assertIn("复盘证据缺口批次计划已导出", text)
+        self.assertIn("video_review_evidence_gap_batch_plan_20260514_120304.md", text)
+        self.assertIn("待处理: 2 场", text)
+        self.assertIn("不自动下载视频", text)
 
     def test_video_review_evidence_gap_feedback_tracks_external_reference_resolution(self) -> None:
         feedback = build_video_review_evidence_gap_feedback(
