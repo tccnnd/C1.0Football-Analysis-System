@@ -1476,6 +1476,7 @@ class SmartMatchDashboard:
         self.result_recovery_running = False
         self.model_warmup_running = False
         self.model_warmup_report: dict[str, object] = {}
+        self.pending_statsbomb_review_repair_before_quality: dict[str, object] | None = None
         self.background_tasks = BackgroundTaskCenter(
             max_thread_workers=4,
             max_process_workers=2,
@@ -2115,6 +2116,8 @@ class SmartMatchDashboard:
             "prediction_cache_count": len(self.rows),
             "live_feedback_before": self._live_feedback_recovery_checkpoint(),
         }
+        if trigger == "statsbomb_review_repair" and isinstance(self.pending_statsbomb_review_repair_before_quality, dict):
+            record["statsbomb_review_repair_before_quality"] = dict(self.pending_statsbomb_review_repair_before_quality)
         self.result_recovery_run_record = dict(record)
         self._record_result_recovery_run(record)
         return record
@@ -4986,6 +4989,43 @@ class SmartMatchDashboard:
             return
         self._log_event("OK", str(feedback.get("summary_text") or "事件代理修复闭环已记录"))
 
+    def _rebuild_statsbomb_review_samples_after_recovery(self, recovery_result: dict) -> str:
+        record = self.result_recovery_run_record if isinstance(self.result_recovery_run_record, dict) else {}
+        if str(record.get("trigger") or "") != "statsbomb_review_repair":
+            return ""
+        before_quality = record.get("statsbomb_review_repair_before_quality")
+        if not isinstance(before_quality, dict):
+            before_quality = self.pending_statsbomb_review_repair_before_quality
+        if not isinstance(before_quality, dict):
+            before_quality = self._current_statsbomb_review_training_quality()
+        try:
+            result = repair_training_data_health("build_statsbomb_review_samples")
+            if bool(result.get("ok", True)):
+                invalidate_statsbomb_state_cache(STATSBOMB_REVIEW_TRAINING_FILE)
+                after_quality = self._current_statsbomb_review_training_quality()
+            else:
+                after_quality = before_quality
+        except Exception as exc:
+            result = {
+                "ok": False,
+                "message": f"result recovery completed but StatsBomb review sample rebuild failed: {exc}",
+            }
+            after_quality = before_quality
+        fallback_message = (
+            f"result recovery settled {int(recovery_result.get('new_settled', 0) or 0)}; "
+            f"rebuilt StatsBomb/Event Proxy review samples"
+        )
+        result["message"] = str(result.get("message") or fallback_message)
+        feedback = build_statsbomb_review_training_action_feedback(
+            "recover_results_rebuild_samples",
+            before_quality,
+            after_quality,
+            result,
+        )
+        self._record_statsbomb_review_training_action_feedback(feedback)
+        self.pending_statsbomb_review_repair_before_quality = None
+        return f"{feedback.get('summary_text', '-')}\n下一步: {feedback.get('next_recommendation', '-')}"
+
     def run_statsbomb_review_training_action(self, action_key: str) -> None:
         before_quality = self._current_statsbomb_review_training_quality()
         if action_key == "build_statsbomb_review_samples":
@@ -4999,6 +5039,7 @@ class SmartMatchDashboard:
                 {"ok": True, "queued": True, "message": "result recovery queued"},
             )
             self._record_statsbomb_review_training_action_feedback(feedback)
+            self.pending_statsbomb_review_repair_before_quality = dict(before_quality)
             self.run_result_recovery(trigger="statsbomb_review_repair", show_popup=True)
             return
         if action_key == "run_high_accuracy_strategy_backtest":
@@ -5651,6 +5692,7 @@ class SmartMatchDashboard:
         except Exception as exc:
             self._log_event("ERROR", f"\u653e\u884c\u56de\u6536\u95ed\u73af\u62a5\u544a\u81ea\u52a8\u751f\u6210\u5931\u8d25: {exc}")
         report_suffix = f" | \u95ed\u73af\u62a5\u544a {report_path.name}" if report_path is not None else ""
+        statsbomb_repair_feedback_text = self._rebuild_statsbomb_review_samples_after_recovery(result)
         message = f"\u8d5b\u679c\u56de\u6536\u5b8c\u6210: \u5b8c\u573a {fetched} | \u4fee\u590d\u5feb\u7167 {restored} | \u65b0\u7ed3\u7b97 {new_settled} | \u6570\u636e\u6e90 {source} | \u8017\u65f6 {elapsed:.2f}s{report_suffix}"
         self.status_var.set(message)
         self._log_event("OK", message)
@@ -5670,6 +5712,8 @@ class SmartMatchDashboard:
             detail = f"{detail}\n\n\u5b9e\u76d8\u53cd\u9988\u9a8c\u8bc1:\n{live_feedback_validation.get('summary_text') or '-'}"
         if report_path is not None:
             detail = f"{detail}\n\n\u653e\u884c\u56de\u6536\u95ed\u73af\u62a5\u544a:\n{report_path}"
+        if statsbomb_repair_feedback_text:
+            detail = f"{detail}\n\nStatsBomb/Event Proxy 修复闭环:\n{statsbomb_repair_feedback_text}"
         self._schedule_auto_result_recovery()
         if show_popup:
             messagebox.showinfo("\u8d5b\u679c\u56de\u6536", detail)

@@ -47,6 +47,19 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertIn("blocked->attention", feedback["summary_text"])
         self.assertEqual(feedback["next_recommendation"], "继续补样本")
 
+    def test_review_training_action_feedback_supports_recovery_rebuild(self) -> None:
+        feedback = build_statsbomb_review_training_action_feedback(
+            "recover_results_rebuild_samples",
+            {"status": "attention", "sample_count": 8, "issue_count": 2, "issues": []},
+            {"status": "healthy", "sample_count": 24, "issue_count": 0, "issues": []},
+            {"ok": True, "message": "result recovery completed"},
+        )
+
+        self.assertEqual(feedback["outcome"], "improved")
+        self.assertEqual(feedback["after_status"], "healthy")
+        self.assertEqual(feedback["sample_delta"], 16)
+        self.assertEqual(feedback["next_recommendation"], "质量已恢复健康，可进入回测/训练稳定性验证。")
+
     def test_review_training_action_feedback_marks_failed_and_queued(self) -> None:
         quality = {"status": "attention", "sample_count": 10, "issue_count": 1, "issues": []}
         failed = build_statsbomb_review_training_action_feedback(
