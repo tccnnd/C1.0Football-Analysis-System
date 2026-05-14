@@ -13,6 +13,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from v24_app.ui_modules import (
+    filter_main_flow_governance_rows,
     build_main_flow_governance_status,
     build_main_flow_governance_status_text,
     summarize_main_flow_governance_statuses,
@@ -169,6 +170,22 @@ class UIMainFlowGovernanceModuleTests(unittest.TestCase):
         self.assertIn("Decision chain", text)
         self.assertEqual(counts["formal_ready"], 1)
         self.assertEqual(counts["needs_c1_review"], 1)
+
+    def test_filter_main_flow_governance_rows(self) -> None:
+        rows = [{"id": "a"}, {"id": "b"}, {"id": "c"}]
+        statuses = {
+            "a": {"status": "formal_ready"},
+            "b": {"status": "blocked"},
+            "c": {"status": "needs_recovery"},
+        }
+
+        def status_fn(item: dict) -> dict:
+            return statuses[item["id"]]
+
+        self.assertEqual([item["id"] for item in filter_main_flow_governance_rows(rows, "all", status_fn=status_fn)], ["a", "b", "c"])
+        self.assertEqual([item["id"] for item in filter_main_flow_governance_rows(rows, "formal_ready", status_fn=status_fn)], ["a"])
+        self.assertEqual([item["id"] for item in filter_main_flow_governance_rows(rows, "blocked", status_fn=status_fn)], ["b"])
+        self.assertEqual([item["id"] for item in filter_main_flow_governance_rows(rows, "needs_recovery", status_fn=status_fn)], ["c"])
 
 
 if __name__ == "__main__":

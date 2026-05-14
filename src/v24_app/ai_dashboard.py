@@ -2065,6 +2065,8 @@ class SmartMatchDashboard:
         self.date_var.set(datetime.now().strftime("(%Y-%m-%d)"))
         self._refresh_governance_context()
         self._refresh_metrics()
+        if self.current_view == "home":
+            self.show_home_overview()
         if self._widget_alive("match_list"):
             self._refresh_matches()
         if self._widget_alive("risk_chart"):
