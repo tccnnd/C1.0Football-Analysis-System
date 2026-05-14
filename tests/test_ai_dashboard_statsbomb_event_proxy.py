@@ -12,10 +12,64 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from v24_app.ai_dashboard import build_statsbomb_event_proxy_review_text
+from v24_app.ai_dashboard import (
+    build_statsbomb_event_proxy_review_samples_message,
+    build_statsbomb_event_proxy_review_text,
+)
 
 
 class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
+    def test_review_samples_message_includes_quality_and_repair_guidance(self) -> None:
+        text = build_statsbomb_event_proxy_review_samples_message(
+            {
+                "generated_sample_count": 12,
+                "skipped_reasons": {"missing_statsbomb": 2, "unknown_label": 1},
+                "output_path": "data/state/statsbomb_review_training_samples.json",
+            },
+            {
+                "status": "attention",
+                "issue_count": 2,
+                "label_rows": [
+                    {
+                        "label": "1X2错因标签",
+                        "value": "8/12",
+                        "detail": "hit=4 | miss=8 | miss_rate=66.7%",
+                    }
+                ],
+                "weight_rows": [
+                    {
+                        "label": "终结波动",
+                        "value": "1.35",
+                        "detail": "仅用于Evaluation Agent错因排序",
+                    }
+                ],
+                "issues": [
+                    {
+                        "code": "xgb_label_class_missing",
+                        "severity": "warning",
+                        "message": "补平局/客胜弱类别",
+                        "recommendation": "补齐弱类别样本",
+                    },
+                    {
+                        "code": "statsbomb_review_samples_missing",
+                        "severity": "blocking",
+                        "message": "先补样本",
+                        "recommendation": "生成事件代理复盘样本",
+                    },
+                ],
+                "leakage_note": "仅赛后使用，不能进入赛前特征",
+            },
+        )
+
+        self.assertIn("样本: 12", text)
+        self.assertIn("质量状态: attention | issues=2", text)
+        self.assertIn("标签分布:", text)
+        self.assertIn("1X2错因标签: 8/12", text)
+        self.assertIn("事件错因权重:", text)
+        self.assertIn("终结波动: 1.35", text)
+        self.assertLess(text.index("先补样本"), text.index("补平局/客胜弱类别"))
+        self.assertIn("仅赛后使用，不能进入赛前特征", text)
+
     def test_missing_event_summary_returns_fallback_guidance(self) -> None:
         text = build_statsbomb_event_proxy_review_text(
             {

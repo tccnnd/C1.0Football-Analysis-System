@@ -57,6 +57,7 @@ from .core import (
     run_play_model_backtest,
     VIDEO_REVIEW_FEWSHOT_MEMORY_FILE,
     STATSBOMB_SANDBOX_FEWSHOT_FILE,
+    STATSBOMB_REVIEW_TRAINING_FILE,
     train_play_models_now,
     warmup_prediction_models,
 )
@@ -102,6 +103,7 @@ from .ui_modules import (
     build_statsbomb_event_sandbox_report_filename,
     build_statsbomb_event_sandbox_report_lines,
     build_statsbomb_event_sandbox_summary,
+    build_statsbomb_review_training_quality_summary,
     build_statsbomb_fewshot_backfill_report_filename,
     build_statsbomb_fewshot_backfill_report_lines,
     build_statsbomb_fewshot_draft_filename,
@@ -1155,6 +1157,92 @@ def build_statsbomb_event_proxy_review_text(item: dict) -> str:
             f"- 进球时间: first={summary.get('first_goal_minute', '-')} / last={summary.get('last_goal_minute', '-')}",
             f"- 代理结论: {conclusion}",
             "- 使用边界: 仅用于赛后归因和训练样本复盘，不进入赛前预测特征，避免赛果信息泄漏。",
+        ]
+    )
+
+
+def build_statsbomb_event_proxy_review_samples_message(result: dict, quality: dict) -> str:
+    def _as_int(value: object, default: int = 0) -> int:
+        try:
+            return int(value if value is not None else default)
+        except (TypeError, ValueError):
+            return default
+
+    def _first_present(*values: object) -> object:
+        for value in values:
+            if value is not None and value != "":
+                return value
+        return None
+
+    def _top_rows(rows: object, limit: int = 3) -> list[str]:
+        if not isinstance(rows, list):
+            return ["- 暂无"]
+        output: list[str] = []
+        for row in rows[:limit]:
+            if not isinstance(row, dict):
+                continue
+            label = str(row.get("label") or row.get("code") or "-")
+            value = str(row.get("value") or "-")
+            detail = str(row.get("detail") or "").strip()
+            output.append(f"- {label}: {value}" + (f" ({detail})" if detail else ""))
+        return output or ["- 暂无"]
+
+    skipped = result.get("skipped_reasons") if isinstance(result.get("skipped_reasons"), dict) else {}
+    sample_count = _as_int(
+        _first_present(result.get("generated_sample_count"), result.get("sample_count"), quality.get("sample_count"))
+    )
+    missing_statsbomb = _as_int(skipped.get("missing_statsbomb"))
+    unknown_label = _as_int(skipped.get("unknown_label"))
+    output_path = str(result.get("output_path") or "-")
+    issues = quality.get("issues") if isinstance(quality.get("issues"), list) else []
+    issue_count = _as_int(quality.get("issue_count"), len(issues))
+    quality_status = str(quality.get("status") or "-")
+    leakage_note = str(
+        quality.get("leakage_note")
+        or "StatsBomb review training samples use post-match event evidence and must not be used as pre-match prediction features."
+    )
+
+    def _issue_rank(issue: object) -> int:
+        if not isinstance(issue, dict):
+            return 9
+        severity = str(issue.get("severity") or "")
+        if severity == "blocking":
+            return 0
+        if severity == "warning":
+            return 1
+        return 2
+
+    ranked_issues = sorted([issue for issue in issues if isinstance(issue, dict)], key=_issue_rank)
+    if ranked_issues:
+        recommendation_lines = [
+            f"{index}. {issue.get('message') or issue.get('code') or '-'} -> {issue.get('recommendation') or '-'}"
+            for index, issue in enumerate(ranked_issues[:3], 1)
+        ]
+    else:
+        recommendation_lines = ["1. 暂无质量问题，可进入回测/训练稳定性验证。"]
+
+    return "\n".join(
+        [
+            "StatsBomb/Event Proxy 复盘样本已生成",
+            "",
+            f"样本: {sample_count}",
+            f"缺 StatsBomb 事件: {missing_statsbomb}",
+            f"未知标签: {unknown_label}",
+            f"输出: {output_path}",
+            "",
+            f"质量状态: {quality_status} | issues={issue_count}",
+            "",
+            "标签分布:",
+            *_top_rows(quality.get("label_rows")),
+            "",
+            "事件错因权重:",
+            *_top_rows(quality.get("weight_rows")),
+            "",
+            "修复建议:",
+            *recommendation_lines,
+            "",
+            f"泄漏边界: {leakage_note}",
+            "该数据仅用于赛后复盘和误差归因，不进入赛前预测特征。",
         ]
     )
 
@@ -4652,25 +4740,32 @@ class SmartMatchDashboard:
             messagebox.showerror("\u4e8b\u4ef6\u4ee3\u7406\u590d\u76d8", f"\u751f\u6210\u5931\u8d25:\n{exc}")
             return None
         sample_count = int(result.get("generated_sample_count", 0) or 0)
-        skipped = result.get("skipped_reasons") if isinstance(result.get("skipped_reasons"), dict) else {}
-        missing_statsbomb = int(skipped.get("missing_statsbomb", 0) or 0)
-        unknown_label = int(skipped.get("unknown_label", 0) or 0)
-        output_path = str(result.get("output_path") or "-")
         if not bool(result.get("ok", True)):
             self.status_var.set("\u4e8b\u4ef6\u4ee3\u7406\u590d\u76d8\u6837\u672c\u751f\u6210\u5931\u8d25")
             messagebox.showerror("\u4e8b\u4ef6\u4ee3\u7406\u590d\u76d8", str(result.get("message") or result.get("reason") or "-"))
             return result
-        self.status_var.set(f"\u4e8b\u4ef6\u4ee3\u7406\u590d\u76d8\u6837\u672c\u5df2\u751f\u6210: {sample_count} \u6761")
+        try:
+            invalidate_statsbomb_state_cache(STATSBOMB_REVIEW_TRAINING_FILE)
+            quality = build_statsbomb_review_training_quality_summary(get_statsbomb_review_training_samples())
+        except Exception as exc:
+            quality = {
+                "status": "attention",
+                "issue_count": 1,
+                "issues": [
+                    {
+                        "code": "statsbomb_review_quality_refresh_failed",
+                        "severity": "warning",
+                        "message": "事件代理复盘质量刷新失败",
+                        "recommendation": f"重新打开复盘中心或检查训练样本文件: {exc}",
+                    }
+                ],
+            }
+        quality_status = str(quality.get("status") or "-")
+        self.status_var.set(f"\u4e8b\u4ef6\u4ee3\u7406\u590d\u76d8\u6837\u672c\u5df2\u751f\u6210: {sample_count} \u6761 | \u8d28\u91cf {quality_status}")
+        self.open_review_center()
         messagebox.showinfo(
             "\u4e8b\u4ef6\u4ee3\u7406\u590d\u76d8",
-            (
-                "StatsBomb/Event Proxy \u590d\u76d8\u6837\u672c\u5df2\u751f\u6210\n\n"
-                f"\u6837\u672c: {sample_count}\n"
-                f"\u7f3a StatsBomb \u4e8b\u4ef6: {missing_statsbomb}\n"
-                f"\u672a\u77e5\u6807\u7b7e: {unknown_label}\n"
-                f"\u8f93\u51fa: {output_path}\n\n"
-                "\u8be5\u6570\u636e\u4ec5\u7528\u4e8e\u8d5b\u540e\u590d\u76d8\u548c\u8bef\u5dee\u5f52\u56e0\uff0c\u4e0d\u8fdb\u5165\u8d5b\u524d\u9884\u6d4b\u7279\u5f81\u3002"
-            ),
+            build_statsbomb_event_proxy_review_samples_message(result, quality),
         )
         return result
 
