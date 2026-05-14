@@ -130,6 +130,14 @@ from .ui_modules import (
     build_video_review_fewshot_merge_apply_report_filename,
     build_video_review_fewshot_merge_apply_report_lines,
     build_video_review_fewshot_merge_apply_result,
+    build_video_review_fewshot_memory_audit_report,
+    build_video_review_fewshot_memory_audit_report_filename,
+    build_video_review_fewshot_memory_audit_report_lines,
+    build_video_review_fewshot_memory_monitor,
+    build_video_review_fewshot_memory_quality_alerts,
+    build_video_review_fewshot_memory_rollback_preview,
+    build_video_review_fewshot_memory_rollback_report_filename,
+    build_video_review_fewshot_memory_rollback_report_lines,
     build_video_review_fewshot_merge_bundle,
     build_video_review_fewshot_merge_bundle_filename,
     build_video_review_fewshot_merge_bundle_report_filename,
@@ -3636,6 +3644,34 @@ class SmartMatchDashboard:
             padx=14,
             pady=6,
         ).pack(side=tk.LEFT, padx=(10, 0))
+        review_memory_actions = tk.Frame(left, bg=PANEL)
+        review_memory_actions.pack(fill=tk.X, padx=18, pady=(0, 12))
+        tk.Button(
+            review_memory_actions,
+            text="\u5ba1\u8ba1\u89c6\u9891\u8bb0\u5fc6",
+            command=self.export_video_review_fewshot_memory_audit,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=14,
+            pady=6,
+        ).pack(side=tk.LEFT)
+        tk.Button(
+            review_memory_actions,
+            text="\u56de\u6eda\u89c6\u9891\u8bb0\u5fc6",
+            command=self.rollback_video_review_fewshot_memory,
+            bg=PANEL_2,
+            fg="#fecaca",
+            activebackground="#451a1a",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=14,
+            pady=6,
+        ).pack(side=tk.LEFT, padx=(10, 0))
 
         tk.Label(right, text="\u95ed\u73af\u590d\u76d8", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
         detail = tk.Text(
@@ -3940,6 +3976,131 @@ class SmartMatchDashboard:
             f"\u5df2\u5e94\u7528 {applied_count} \u6761\u6837\u672c\u3002\n\n\u8bb0\u5fc6\u6c60:\n{VIDEO_REVIEW_FEWSHOT_MEMORY_FILE}\n\n\u5907\u4efd:\n{backup_path or '-'}\n\n\u62a5\u544a:\n{report_path}",
         )
         return report_path, backup_path
+
+    def rollback_video_review_fewshot_memory(self) -> tuple[Path, Path | None] | None:
+        state_dir = VIDEO_REVIEW_FEWSHOT_MEMORY_FILE.parent
+        state_dir.mkdir(parents=True, exist_ok=True)
+        selected = filedialog.askopenfilename(
+            title="Select video review few-shot memory backup",
+            initialdir=str(state_dir),
+            filetypes=[
+                ("Video review few-shot backup", "video_review_fewshot_memory.backup_*.json"),
+                ("Video review pre-rollback backup", "video_review_fewshot_memory.pre_rollback_*.json"),
+                ("JSON", "*.json"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not selected:
+            return None
+        backup_path = Path(selected)
+        try:
+            backup_payload = json.loads(backup_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            messagebox.showerror("\u89c6\u9891 few-shot \u56de\u6eda", f"\u8bfb\u53d6\u5907\u4efd\u5931\u8d25:\n{backup_path}\n\n{exc}")
+            return None
+        current_payload = get_video_review_fewshot_memory()
+        now = datetime.now()
+        preview = build_video_review_fewshot_memory_rollback_preview(
+            backup_payload,
+            current_payload,
+            backup_name=backup_path.name,
+            generated_at=now,
+        )
+        REPORT_DIR.mkdir(parents=True, exist_ok=True)
+        report_path = REPORT_DIR / build_video_review_fewshot_memory_rollback_report_filename(now)
+        report_path.write_text(
+            "\n".join(build_video_review_fewshot_memory_rollback_report_lines(preview)),
+            encoding="utf-8",
+        )
+        summary = preview.get("summary", {}) if isinstance(preview.get("summary"), dict) else {}
+        if preview.get("status") != "ready_to_restore":
+            self.status_var.set(f"\u89c6\u9891 few-shot rollback blocked: {report_path.name}")
+            messagebox.showwarning(
+                "\u89c6\u9891 few-shot \u56de\u6eda",
+                f"\u56de\u6eda\u88ab\u963b\u65ad\u3002\n\n\u62a5\u544a:\n{report_path}\n\n\u72b6\u6001: {preview.get('status', '-')}",
+            )
+            return report_path, None
+        confirmed = messagebox.askyesno(
+            "\u89c6\u9891 few-shot \u56de\u6eda",
+            (
+                "\u8fd9\u4f1a\u7528\u9009\u4e2d\u5907\u4efd\u6062\u590d Evaluation Agent \u89c6\u9891 few-shot \u6b63\u5f0f\u8bb0\u5fc6\u6c60\u3002\n\n"
+                f"\u5907\u4efd:\n{backup_path}\n\n"
+                f"\u5907\u4efd\u6837\u672c: {summary.get('backup_count', 0)}\n"
+                f"\u5f53\u524d\u6837\u672c: {summary.get('current_count', 0)}\n"
+                f"\u6062\u590d\u540e\u5dee\u503c: {summary.get('delta', 0)}\n\n"
+                "\u7ee7\u7eed\uff1f"
+            ),
+        )
+        if not confirmed:
+            self.status_var.set(f"\u89c6\u9891 few-shot rollback cancelled: {report_path.name}")
+            return report_path, None
+        safety_backup_path: Path | None = None
+        if VIDEO_REVIEW_FEWSHOT_MEMORY_FILE.exists():
+            safety_backup_path = state_dir / f"video_review_fewshot_memory.pre_rollback_{now.strftime('%Y%m%d_%H%M%S')}.json"
+            shutil.copy2(VIDEO_REVIEW_FEWSHOT_MEMORY_FILE, safety_backup_path)
+        tmp_path = VIDEO_REVIEW_FEWSHOT_MEMORY_FILE.with_suffix(".json.tmp")
+        tmp_path.write_text(json.dumps(backup_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path.replace(VIDEO_REVIEW_FEWSHOT_MEMORY_FILE)
+        invalidate_statsbomb_state_cache(VIDEO_REVIEW_FEWSHOT_MEMORY_FILE)
+        self.status_var.set(f"\u89c6\u9891 few-shot rollback restored: {summary.get('backup_count', 0)} samples")
+        self._refresh_current_view_after_release_state_change()
+        messagebox.showinfo(
+            "\u89c6\u9891 few-shot \u56de\u6eda",
+            f"\u56de\u6eda\u5df2\u5b8c\u6210\u3002\n\n\u6062\u590d\u6765\u6e90:\n{backup_path}\n\n\u5b89\u5168\u5907\u4efd:\n{safety_backup_path or '-'}\n\n\u62a5\u544a:\n{report_path}",
+        )
+        return report_path, safety_backup_path
+
+    def export_video_review_fewshot_memory_audit(self) -> Path:
+        memory = get_video_review_fewshot_memory()
+        monitor = build_video_review_fewshot_memory_monitor(memory, {})
+        quality = build_video_review_fewshot_memory_quality_alerts(monitor)
+        state_dir = VIDEO_REVIEW_FEWSHOT_MEMORY_FILE.parent
+        backup_files = sorted(
+            list(state_dir.glob("video_review_fewshot_memory.backup_*.json"))
+            + list(state_dir.glob("video_review_fewshot_memory.pre_rollback_*.json")),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        backup_rows = [
+            {
+                "name": path.name,
+                "size": path.stat().st_size,
+                "modified_at": datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            for path in backup_files[:20]
+        ]
+        REPORT_DIR.mkdir(parents=True, exist_ok=True)
+        operation_files = sorted(
+            list(REPORT_DIR.glob("video_review_fewshot_merge_applied_*.md"))
+            + list(REPORT_DIR.glob("video_review_fewshot_memory_rollback_*.md")),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        operation_rows = [
+            {
+                "name": path.name,
+                "type": "rollback" if "rollback" in path.name else "apply",
+                "modified_at": datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            for path in operation_files[:20]
+        ]
+        now = datetime.now()
+        audit = build_video_review_fewshot_memory_audit_report(
+            memory,
+            monitor,
+            quality,
+            backup_rows=backup_rows,
+            operation_rows=operation_rows,
+            generated_at=now,
+        )
+        path = REPORT_DIR / build_video_review_fewshot_memory_audit_report_filename(now)
+        path.write_text("\n".join(build_video_review_fewshot_memory_audit_report_lines(audit)), encoding="utf-8")
+        summary = audit.get("summary", {}) if isinstance(audit.get("summary"), dict) else {}
+        self.status_var.set(
+            f"\u89c6\u9891 few-shot audit: samples {summary.get('sample_count', 0)} | backups {summary.get('backup_count', 0)} | alerts {summary.get('alert_count', 0)}"
+        )
+        messagebox.showinfo("\u89c6\u9891 few-shot \u5ba1\u8ba1", f"\u5df2\u751f\u6210\u5ba1\u8ba1\u62a5\u544a:\n{path}")
+        return path
 
     def open_recovery_run_center(self) -> None:
         self.current_view = "recovery_runs"
@@ -5361,7 +5522,15 @@ class SmartMatchDashboard:
             + list(REPORT_DIR.glob("statsbomb_fewshot_merge_apply_preview_*.md"))
             + list(REPORT_DIR.glob("statsbomb_fewshot_merge_applied_*.md"))
             + list(REPORT_DIR.glob("statsbomb_fewshot_memory_rollback_*.md"))
-            + list(REPORT_DIR.glob("statsbomb_fewshot_memory_audit_*.md")),
+            + list(REPORT_DIR.glob("statsbomb_fewshot_memory_audit_*.md"))
+            + list(REPORT_DIR.glob("video_review_fewshot_draft_review_*.md"))
+            + list(REPORT_DIR.glob("video_review_fewshot_merge_plan_*.md"))
+            + list(REPORT_DIR.glob("video_review_fewshot_merge_bundle_*.json"))
+            + list(REPORT_DIR.glob("video_review_fewshot_merge_bundle_review_*.md"))
+            + list(REPORT_DIR.glob("video_review_fewshot_merge_apply_preview_*.md"))
+            + list(REPORT_DIR.glob("video_review_fewshot_merge_applied_*.md"))
+            + list(REPORT_DIR.glob("video_review_fewshot_memory_rollback_*.md"))
+            + list(REPORT_DIR.glob("video_review_fewshot_memory_audit_*.md")),
             key=lambda path: path.stat().st_mtime,
             reverse=True,
         )

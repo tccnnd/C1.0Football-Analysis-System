@@ -52,6 +52,15 @@ from v24_app.ui_modules import (
     build_video_review_fewshot_merge_apply_report_filename,
     build_video_review_fewshot_merge_apply_report_lines,
     build_video_review_fewshot_merge_apply_result,
+    build_video_review_fewshot_memory_audit_report,
+    build_video_review_fewshot_memory_audit_report_filename,
+    build_video_review_fewshot_memory_audit_report_lines,
+    build_video_review_fewshot_memory_health_summary,
+    build_video_review_fewshot_memory_monitor,
+    build_video_review_fewshot_memory_quality_alerts,
+    build_video_review_fewshot_memory_rollback_preview,
+    build_video_review_fewshot_memory_rollback_report_filename,
+    build_video_review_fewshot_memory_rollback_report_lines,
     build_video_review_fewshot_merge_bundle,
     build_video_review_fewshot_merge_bundle_filename,
     build_video_review_fewshot_merge_bundle_report_filename,
@@ -2599,6 +2608,87 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("Video Review Few-shot Merge Apply Preview", "\n".join(preview_lines))
         self.assertIn("Video Review Few-shot Merge Apply", "\n".join(result_lines))
         self.assertIn("video:new", "\n".join(result_lines))
+
+    def test_video_review_fewshot_memory_audit_flags_gaps_and_duplicates(self) -> None:
+        item = {**self._video_fewshot_item("video:1", match_id="m1", review_id="vr-1", annotation_id="ann-1"), "review_status": "approved"}
+        duplicate = {**self._video_fewshot_item("video:2", match_id="m1", review_id="vr-1", annotation_id="ann-1"), "review_status": "approved"}
+        other = {**self._video_fewshot_item("video:3", match_id="m2", review_id="vr-2", annotation_id="ann-2"), "review_status": "approved"}
+        memory = {
+            "updated_at": "2026-05-14 10:00:00",
+            "purpose": "evaluation_agent_video_fewshot_post_match_review",
+            "items": [item, duplicate, other],
+            "leakage_note": "post-match video only",
+        }
+
+        monitor = build_video_review_fewshot_memory_monitor(
+            memory,
+            {"matched_count": 0, "query_tags": ["video_tempo_shift"]},
+        )
+        quality = build_video_review_fewshot_memory_quality_alerts(monitor, min_samples=5, concentration_threshold=0.60)
+        health = build_video_review_fewshot_memory_health_summary(monitor, quality, backup_count=0)
+        audit = build_video_review_fewshot_memory_audit_report(
+            memory,
+            monitor,
+            quality,
+            backup_rows=[],
+            operation_rows=[{"name": "video_review_fewshot_merge_applied_20260514_100000.md", "type": "apply", "modified_at": "2026-05-14 10:00:00"}],
+            generated_at=datetime(2026, 5, 14, 10, 20, 30),
+        )
+        lines = build_video_review_fewshot_memory_audit_report_lines(audit)
+        payload = "\n".join(lines)
+
+        self.assertEqual(monitor["sample_count"], 3)
+        self.assertGreater(monitor["duplicate_key_count"], 0)
+        self.assertTrue(any(alert["tag"] == "video_memory_duplicate_keys" for alert in quality["alerts"]))
+        self.assertEqual(health["status"], "blocked")
+        self.assertTrue(any(issue["code"] == "video_memory_backup_missing" for issue in health["issues"]))
+        self.assertEqual(audit["summary"]["duplicate_key_count"], monitor["duplicate_key_count"])
+        self.assertEqual(
+            build_video_review_fewshot_memory_audit_report_filename(datetime(2026, 5, 14, 10, 20, 30)),
+            "video_review_fewshot_memory_audit_20260514_102030.md",
+        )
+        self.assertIn("Video Review Few-shot Memory Audit", payload)
+        self.assertIn("Duplicate Keys", payload)
+        self.assertIn("video_memory_duplicate_keys", payload)
+
+    def test_video_review_fewshot_memory_rollback_preview_validates_backup(self) -> None:
+        backup = {
+            "updated_at": "2026-05-14 10:00:00",
+            "purpose": "evaluation_agent_video_fewshot_post_match_review",
+            "items": [
+                {**self._video_fewshot_item("video:backup", match_id="m1", review_id="vr-1", annotation_id="ann-1"), "review_status": "approved"}
+            ],
+            "leakage_note": "post-match video only",
+        }
+        current = {
+            "updated_at": "2026-05-14 11:00:00",
+            "purpose": "evaluation_agent_video_fewshot_post_match_review",
+            "items": [
+                {**self._video_fewshot_item("video:backup", match_id="m1", review_id="vr-1", annotation_id="ann-1"), "review_status": "approved"},
+                {**self._video_fewshot_item("video:new", match_id="m2", review_id="vr-2", annotation_id="ann-2"), "review_status": "approved"},
+            ],
+        }
+
+        preview = build_video_review_fewshot_memory_rollback_preview(
+            backup,
+            current,
+            backup_name="video_review_fewshot_memory.backup_20260514_100000.json",
+            generated_at=datetime(2026, 5, 14, 10, 25, 30),
+        )
+        lines = build_video_review_fewshot_memory_rollback_report_lines(preview)
+        blocked = build_video_review_fewshot_memory_rollback_preview({}, current)
+
+        self.assertEqual(preview["status"], "ready_to_restore")
+        self.assertEqual(preview["summary"]["backup_count"], 1)
+        self.assertEqual(preview["summary"]["current_count"], 2)
+        self.assertEqual(preview["summary"]["delta"], -1)
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(
+            build_video_review_fewshot_memory_rollback_report_filename(datetime(2026, 5, 14, 10, 25, 30)),
+            "video_review_fewshot_memory_rollback_20260514_102530.md",
+        )
+        self.assertIn("Video Review Few-shot Memory Rollback", "\n".join(lines))
+        self.assertIn("ready_to_restore", "\n".join(lines))
 
     def test_evaluation_agent_uses_video_review_fewshot_memory(self) -> None:
         memory_item = self._video_fewshot_item(

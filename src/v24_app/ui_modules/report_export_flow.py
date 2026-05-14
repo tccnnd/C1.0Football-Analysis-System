@@ -19,6 +19,13 @@ REPORT_TYPE_PREFIXES: tuple[tuple[str, str], ...] = (
     ("statsbomb_fewshot_merge_applied_", "StatsBomb\u5e94\u7528"),
     ("statsbomb_fewshot_memory_rollback_", "StatsBomb\u56de\u6eda"),
     ("statsbomb_fewshot_memory_audit_", "StatsBomb\u5ba1\u8ba1"),
+    ("video_review_fewshot_draft_review_", "AI\u89c6\u9891\u8349\u7a3f"),
+    ("video_review_fewshot_merge_plan_", "AI\u89c6\u9891\u5408\u5e76"),
+    ("video_review_fewshot_merge_bundle_review_", "AI\u89c6\u9891\u5408\u5e76"),
+    ("video_review_fewshot_merge_apply_preview_", "AI\u89c6\u9891\u5e94\u7528"),
+    ("video_review_fewshot_merge_applied_", "AI\u89c6\u9891\u5e94\u7528"),
+    ("video_review_fewshot_memory_rollback_", "AI\u89c6\u9891\u56de\u6eda"),
+    ("video_review_fewshot_memory_audit_", "AI\u89c6\u9891\u5ba1\u8ba1"),
 )
 
 

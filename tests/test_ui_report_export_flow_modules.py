@@ -118,6 +118,7 @@ class UIReportExportFlowModuleTests(unittest.TestCase):
         self.assertEqual(rows[0]["name"], loop_report.name)
         self.assertEqual(rows[0]["label"], "\u653e\u884c\u95ed\u73af")
         self.assertEqual(rows[1]["label"], "\u5355\u573a\u5206\u6790")
+        self.assertEqual(classify_dashboard_report_file(Path("video_review_fewshot_memory_audit_20260514_120000.md")), "AI\u89c6\u9891\u5ba1\u8ba1")
         self.assertEqual(classify_dashboard_report_file(Path("unknown_report.md")), "\u5176\u4ed6\u62a5\u544a")
 
     def test_dashboard_report_filters_by_type_and_query(self) -> None:
