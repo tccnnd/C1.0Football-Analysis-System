@@ -20,12 +20,19 @@ from v24_app.ai_dashboard import (
     build_statsbomb_review_training_action_rows,
     build_statsbomb_review_training_feedback_rows,
     build_statsbomb_review_training_quality_export_message,
+    build_video_review_evidence_gap_batch_id,
+    build_video_review_evidence_gap_batch_record,
     build_video_review_evidence_gap_action_rows,
     build_video_review_evidence_gap_batch_plan_export_message,
     build_video_review_evidence_gap_batch_plan_filename,
     build_video_review_evidence_gap_batch_plan_lines,
+    build_video_review_evidence_gap_batch_state_with_record,
+    build_video_review_evidence_gap_batch_state_with_resolution,
+    build_video_review_evidence_gap_batch_status,
+    build_video_review_evidence_gap_batch_status_rows,
     build_video_review_evidence_gap_feedback,
     build_video_review_evidence_gap_feedback_rows,
+    collect_video_review_evidence_gap_sample_match_ids,
 )
 
 
@@ -123,6 +130,10 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
 
     def test_video_review_evidence_gap_batch_plan_filename_is_stable(self) -> None:
         self.assertEqual(
+            build_video_review_evidence_gap_batch_id(datetime(2026, 5, 14, 12, 3, 4)),
+            "evidence_gap_batch_20260514_120304",
+        )
+        self.assertEqual(
             build_video_review_evidence_gap_batch_plan_filename(datetime(2026, 5, 14, 12, 3, 4)),
             "video_review_evidence_gap_batch_plan_20260514_120304.md",
         )
@@ -156,9 +167,11 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
             build_video_review_evidence_gap_batch_plan_lines(
                 rows,
                 generated_at=datetime(2026, 5, 14, 12, 0, 0),
+                batch_id="evidence_gap_batch_20260514_120000",
             )
         )
 
+        self.assertIn("Batch ID: evidence_gap_batch_20260514_120000", text)
         self.assertIn("Total Gap Rows: 2", text)
         self.assertIn("| P1 | 72 | 2026-05-18 | FIFA World Cup | High vs Miss | high-conf-miss |", text)
         self.assertIn("高置信1X2失误", text)
@@ -185,12 +198,128 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         text = build_video_review_evidence_gap_batch_plan_export_message(
             Path("reports/video_review_evidence_gap_batch_plan_20260514_120304.md"),
             [{"match_id": "gap-1"}, {"match_id": "gap-2"}],
+            {"batch_id": "evidence_gap_batch_20260514_120304"},
         )
 
         self.assertIn("复盘证据缺口批次计划已导出", text)
+        self.assertIn("evidence_gap_batch_20260514_120304", text)
         self.assertIn("video_review_evidence_gap_batch_plan_20260514_120304.md", text)
         self.assertIn("待处理: 2 场", text)
         self.assertIn("不自动下载视频", text)
+
+    def test_video_review_evidence_gap_batch_record_tracks_completion(self) -> None:
+        rows = build_video_review_evidence_gap_action_rows(
+            [
+                {
+                    "match_id": "gap-1",
+                    "match_date": "2026-05-18",
+                    "league": "League C",
+                    "home_team": "India",
+                    "away_team": "Juliet",
+                },
+                {
+                    "match_id": "gap-2",
+                    "match_date": "2026-05-19",
+                    "league": "League C",
+                    "home_team": "Kilo",
+                    "away_team": "Lima",
+                },
+            ],
+            limit=2,
+        )
+        batch = build_video_review_evidence_gap_batch_record(
+            rows,
+            Path("reports/plan.md"),
+            generated_at=datetime(2026, 5, 14, 12, 0, 0),
+            batch_id="evidence_gap_batch_test",
+        )
+        state = build_video_review_evidence_gap_batch_state_with_record({}, batch)
+
+        status = build_video_review_evidence_gap_batch_status(state)
+        self.assertEqual(status["status"], "pending")
+        self.assertEqual(status["total_count"], 2)
+        self.assertEqual(status["pending_count"], 2)
+
+        updated_state, update = build_video_review_evidence_gap_batch_state_with_resolution(
+            state,
+            "gap-1",
+            evidence_kind="external_reference",
+            source_name="FIFA+ Archive",
+            review_id="vr-gap-1",
+            handled_at=datetime(2026, 5, 14, 13, 0, 0),
+        )
+        updated_status = build_video_review_evidence_gap_batch_status(updated_state)
+        latest_items = updated_state["batches"][0]["items"]
+
+        self.assertEqual(update["updated_count"], 1)
+        self.assertEqual(update["batch_ids"], ["evidence_gap_batch_test"])
+        self.assertEqual(updated_status["status"], "active")
+        self.assertEqual(updated_status["completed_count"], 1)
+        self.assertEqual(updated_status["pending_count"], 1)
+        resolved_item = next(item for item in latest_items if item["match_id"] == "gap-1")
+        pending_item = next(item for item in latest_items if item["match_id"] == "gap-2")
+        self.assertEqual(resolved_item["status"], "resolved")
+        self.assertEqual(resolved_item["source_name"], "FIFA+ Archive")
+        self.assertEqual(resolved_item["evidence_kind"], "external_reference")
+        self.assertEqual(pending_item["status"], "pending")
+
+    def test_video_review_evidence_gap_batch_status_rows_show_latest_source(self) -> None:
+        batch = {
+            "batch_id": "evidence_gap_batch_test",
+            "created_at": "2026-05-14 12:00:00",
+            "report_path": "reports/plan.md",
+            "items": [
+                {
+                    "match_id": "gap-1",
+                    "title": "League C | India vs Juliet",
+                    "status": "resolved",
+                    "handled_at": "2026-05-14 13:00:00",
+                    "source_name": "FIFA+ Archive",
+                    "evidence_kind": "external_reference",
+                }
+            ],
+        }
+
+        rows = build_video_review_evidence_gap_batch_status_rows({"batches": [batch]})
+
+        self.assertEqual(rows[0]["tone"], "good")
+        self.assertIn("完成率 100%", rows[0]["title"])
+        self.assertIn("FIFA+ Archive", rows[0]["body"])
+        self.assertIn("external_reference", rows[0]["body"])
+
+    def test_video_review_evidence_gap_batch_resolution_uses_statsbomb_sample_ids(self) -> None:
+        batch = build_video_review_evidence_gap_batch_record(
+            [
+                {
+                    "match_id": "sample-gap",
+                    "title": "2026-05-18 | League C | India vs Juliet",
+                    "priority_label": "P2",
+                    "priority_score": 35,
+                    "priority_reasons": ["常规缺证据"],
+                    "settlement": {"match_id": "sample-gap"},
+                }
+            ],
+            Path("reports/plan.md"),
+            batch_id="evidence_gap_batch_test",
+            generated_at=datetime(2026, 5, 14, 12, 0, 0),
+        )
+        state = build_video_review_evidence_gap_batch_state_with_record({}, batch)
+        sample_ids = collect_video_review_evidence_gap_sample_match_ids(
+            {"items": [{"meta": {"source": "statsbomb_event_sandbox", "match_id": "sample-gap"}}]}
+        )
+
+        updated_state, update = build_video_review_evidence_gap_batch_state_with_resolution(
+            state,
+            sample_ids,
+            evidence_kind="statsbomb_event_proxy",
+            source_name="StatsBomb/Event Proxy",
+            review_id="statsbomb_review_training_samples",
+        )
+
+        self.assertEqual(sample_ids, {"sample-gap"})
+        self.assertEqual(update["updated_count"], 1)
+        self.assertEqual(updated_state["batches"][0]["status"], "completed")
+        self.assertEqual(updated_state["batches"][0]["items"][0]["evidence_kind"], "statsbomb_event_proxy")
 
     def test_video_review_evidence_gap_feedback_tracks_external_reference_resolution(self) -> None:
         feedback = build_video_review_evidence_gap_feedback(

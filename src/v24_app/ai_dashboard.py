@@ -219,6 +219,7 @@ REPORT_DIR = PROJECT_ROOT / "reports"
 SETTINGS_PATH = PROJECT_ROOT / "data" / "state" / "ai_dashboard_settings.json"
 STATSBOMB_REVIEW_REPAIR_ACTION_LOG = PROJECT_ROOT / "data" / "state" / "statsbomb_review_repair_action_log.json"
 VIDEO_REVIEW_EVIDENCE_GAP_ACTION_LOG = PROJECT_ROOT / "data" / "state" / "video_review_evidence_gap_action_log.json"
+VIDEO_REVIEW_EVIDENCE_GAP_BATCH_STATE = PROJECT_ROOT / "data" / "state" / "video_review_evidence_gap_batches.json"
 
 
 def build_video_review_workflow_action_rows(
@@ -1641,10 +1642,16 @@ def build_video_review_evidence_gap_batch_plan_filename(now: datetime | None = N
     return f"video_review_evidence_gap_batch_plan_{current.strftime('%Y%m%d_%H%M%S')}.md"
 
 
+def build_video_review_evidence_gap_batch_id(now: datetime | None = None) -> str:
+    current = now or datetime.now()
+    return f"evidence_gap_batch_{current.strftime('%Y%m%d_%H%M%S')}"
+
+
 def build_video_review_evidence_gap_batch_plan_lines(
     rows: list[dict] | object,
     *,
     generated_at: datetime | None = None,
+    batch_id: str | object = "",
 ) -> list[str]:
     def _clean(value: object) -> str:
         text = str(value if value not in (None, "") else "-").replace("\n", " ").strip()
@@ -1668,6 +1675,7 @@ def build_video_review_evidence_gap_batch_plan_lines(
         "# 视频复盘证据缺口批次计划",
         "",
         f"- Generated At: {generated.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- Batch ID: {str(batch_id or '-').strip() or '-'}",
         f"- Total Gap Rows: {len(gap_rows)}",
         "- Priority Rule: P0/P1 优先处理高置信 1X2 失误、多玩法失误、高准策略失误、放行策略复盘和重点赛事。",
         "- Source Boundary: use legal replay links only; no auto video download; StatsBomb/Event Proxy is post-match review evidence only and must not enter pre-match features.",
@@ -1721,18 +1729,275 @@ def build_video_review_evidence_gap_batch_plan_lines(
     return lines
 
 
-def build_video_review_evidence_gap_batch_plan_export_message(path: Path, rows: list[dict] | object) -> str:
+def build_video_review_evidence_gap_batch_plan_export_message(
+    path: Path,
+    rows: list[dict] | object,
+    batch_record: dict | object | None = None,
+) -> str:
     count = len(rows) if isinstance(rows, list) else 0
+    batch = batch_record if isinstance(batch_record, dict) else {}
+    batch_id = str(batch.get("batch_id") or "-")
     return "\n".join(
         [
             "复盘证据缺口批次计划已导出",
             "",
             f"文件: {path}",
+            f"批次: {batch_id}",
             f"待处理: {count} 场",
             "",
             "边界: 只使用合法回放链接或授权本地视频；不自动下载视频；StatsBomb/Event Proxy 仅用于赛后复盘。",
         ]
     )
+
+
+def _recompute_video_review_evidence_gap_batch(batch: dict) -> dict:
+    items = [item for item in batch.get("items", []) if isinstance(item, dict)]
+    total_count = len(items)
+    completed_count = sum(1 for item in items if str(item.get("status") or "") == "resolved")
+    pending_count = max(0, total_count - completed_count)
+    completion_rate = 1.0 if total_count == 0 else completed_count / total_count
+    if pending_count <= 0:
+        status = "completed"
+    elif completed_count > 0:
+        status = "active"
+    else:
+        status = "pending"
+    batch["items"] = items
+    batch["total_count"] = total_count
+    batch["completed_count"] = completed_count
+    batch["pending_count"] = pending_count
+    batch["completion_rate"] = round(completion_rate, 4)
+    batch["status"] = status
+    return batch
+
+
+def build_video_review_evidence_gap_batch_record(
+    rows: list[dict] | object,
+    report_path: Path | str,
+    *,
+    generated_at: datetime | None = None,
+    batch_id: str | object = "",
+) -> dict[str, object]:
+    generated = generated_at or datetime.now()
+    resolved_batch_id = str(batch_id or build_video_review_evidence_gap_batch_id(generated)).strip()
+    row_items = [item for item in rows if isinstance(item, dict)] if isinstance(rows, list) else []
+    batch_items: list[dict[str, object]] = []
+    for index, row in enumerate(row_items):
+        settlement = row.get("settlement") if isinstance(row.get("settlement"), dict) else {}
+        match_id = str(row.get("match_id") or settlement.get("match_id") or "").strip()
+        title = str(row.get("title") or "-")
+        batch_items.append(
+            {
+                "index": index,
+                "match_id": match_id,
+                "title": title,
+                "priority_label": str(row.get("priority_label") or "P3"),
+                "priority_score": int(row.get("priority_score", 0) or 0),
+                "priority_reasons": [
+                    str(reason)
+                    for reason in (row.get("priority_reasons") if isinstance(row.get("priority_reasons"), list) else [])
+                ],
+                "status": "pending",
+                "created_at": generated.strftime("%Y-%m-%d %H:%M:%S"),
+                "handled_at": "",
+                "handled_by": "",
+                "source_name": "",
+                "evidence_kind": "",
+                "review_id": "",
+            }
+        )
+    batch = {
+        "batch_id": resolved_batch_id,
+        "created_at": generated.strftime("%Y-%m-%d %H:%M:%S"),
+        "report_path": str(report_path),
+        "items": batch_items,
+    }
+    return _recompute_video_review_evidence_gap_batch(batch)
+
+
+def build_video_review_evidence_gap_batch_state_with_record(
+    state: dict | object,
+    batch_record: dict | object,
+    *,
+    limit: int = 20,
+) -> dict[str, object]:
+    batch = dict(batch_record) if isinstance(batch_record, dict) else {}
+    batches = [item for item in ((state.get("batches") if isinstance(state, dict) else []) or []) if isinstance(item, dict)]
+    batch_id = str(batch.get("batch_id") or "").strip()
+    if batch_id:
+        batches = [item for item in batches if str(item.get("batch_id") or "") != batch_id]
+    batches = [batch, *batches] if batch else batches
+    batches = [_recompute_video_review_evidence_gap_batch(dict(item)) for item in batches[: max(1, int(limit))]]
+    updated_at = str(batch.get("created_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    return {"schema_version": 1, "updated_at": updated_at, "batches": batches}
+
+
+def collect_video_review_evidence_gap_sample_match_ids(samples: dict | list | object) -> set[str]:
+    def _items(value: object) -> list[dict]:
+        if isinstance(value, dict):
+            for key in ("items", "rows", "samples"):
+                resolved = value.get(key)
+                if isinstance(resolved, list):
+                    return [item for item in resolved if isinstance(item, dict)]
+            return []
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+        return []
+
+    match_ids: set[str] = set()
+    for sample in _items(samples):
+        match = sample.get("match") if isinstance(sample.get("match"), dict) else {}
+        meta = sample.get("meta") if isinstance(sample.get("meta"), dict) else {}
+        match_id = str(
+            sample.get("match_id")
+            or match.get("match_id")
+            or meta.get("match_id")
+            or sample.get("source_match_id")
+            or meta.get("source_match_id")
+            or ""
+        ).strip()
+        if match_id:
+            match_ids.add(match_id)
+    return match_ids
+
+
+def build_video_review_evidence_gap_batch_state_with_resolution(
+    state: dict | object,
+    match_ids: set[str] | list[str] | tuple[str, ...] | str | object,
+    *,
+    evidence_kind: str,
+    source_name: str = "",
+    review_id: str = "",
+    handled_by: str = "app_operator",
+    handled_at: datetime | None = None,
+) -> tuple[dict[str, object], dict[str, object]]:
+    if isinstance(match_ids, str):
+        normalized_ids = {match_ids.strip()} if match_ids.strip() else set()
+    elif isinstance(match_ids, (set, list, tuple)):
+        normalized_ids = {str(match_id).strip() for match_id in match_ids if str(match_id).strip()}
+    else:
+        normalized_ids = set()
+    batches = [item for item in ((state.get("batches") if isinstance(state, dict) else []) or []) if isinstance(item, dict)]
+    handled_text = (handled_at or datetime.now()).strftime("%Y-%m-%d %H:%M:%S")
+    updated_count = 0
+    touched_batches: list[str] = []
+    touched_match_ids: set[str] = set()
+    updated_batches: list[dict] = []
+    for batch in batches:
+        next_batch = dict(batch)
+        next_items: list[dict] = []
+        batch_changed = False
+        for item in [entry for entry in next_batch.get("items", []) if isinstance(entry, dict)]:
+            next_item = dict(item)
+            item_match_id = str(next_item.get("match_id") or "").strip()
+            if item_match_id in normalized_ids and str(next_item.get("status") or "") != "resolved":
+                next_item.update(
+                    {
+                        "status": "resolved",
+                        "handled_at": handled_text,
+                        "handled_by": handled_by,
+                        "source_name": source_name,
+                        "evidence_kind": evidence_kind,
+                        "review_id": review_id,
+                    }
+                )
+                updated_count += 1
+                batch_changed = True
+                touched_match_ids.add(item_match_id)
+            next_items.append(next_item)
+        next_batch["items"] = next_items
+        if batch_changed:
+            touched_batches.append(str(next_batch.get("batch_id") or "-"))
+        updated_batches.append(_recompute_video_review_evidence_gap_batch(next_batch))
+    updated_state = {
+        "schema_version": 1,
+        "updated_at": handled_text if updated_count else str((state.get("updated_at") if isinstance(state, dict) else "") or ""),
+        "batches": updated_batches,
+    }
+    update = {
+        "updated_count": updated_count,
+        "batch_ids": touched_batches,
+        "match_ids": sorted(touched_match_ids),
+        "evidence_kind": evidence_kind,
+        "source_name": source_name,
+        "review_id": review_id,
+        "handled_at": handled_text,
+    }
+    return updated_state, update
+
+
+def build_video_review_evidence_gap_batch_status(state: dict | object) -> dict[str, object]:
+    batches = [item for item in ((state.get("batches") if isinstance(state, dict) else []) or []) if isinstance(item, dict)]
+    if not batches:
+        return {
+            "status": "no_batch",
+            "summary_text": "暂无缺口处理批次",
+            "batch_count": 0,
+            "total_count": 0,
+            "completed_count": 0,
+            "pending_count": 0,
+            "completion_rate": 0.0,
+            "latest_batch": {},
+        }
+    recomputed = [_recompute_video_review_evidence_gap_batch(dict(batch)) for batch in batches]
+    total_count = sum(int(batch.get("total_count", 0) or 0) for batch in recomputed)
+    completed_count = sum(int(batch.get("completed_count", 0) or 0) for batch in recomputed)
+    pending_count = sum(int(batch.get("pending_count", 0) or 0) for batch in recomputed)
+    completion_rate = 1.0 if total_count == 0 else completed_count / total_count
+    latest = recomputed[0]
+    status = "completed" if pending_count == 0 else "active" if completed_count else "pending"
+    return {
+        "status": status,
+        "summary_text": f"批次 {len(recomputed)} 个 | 已处理 {completed_count}/{total_count} | 待处理 {pending_count}",
+        "batch_count": len(recomputed),
+        "total_count": total_count,
+        "completed_count": completed_count,
+        "pending_count": pending_count,
+        "completion_rate": round(completion_rate, 4),
+        "latest_batch": latest,
+    }
+
+
+def build_video_review_evidence_gap_batch_status_rows(state: dict | object, *, limit: int = 3) -> list[dict[str, object]]:
+    batches = [item for item in ((state.get("batches") if isinstance(state, dict) else []) or []) if isinstance(item, dict)]
+    if not batches:
+        return [
+            {
+                "title": "暂无缺口批次",
+                "body": "导出缺口批次计划后，系统会跟踪绑定回放或生成事件代理样本后的处理进度。",
+                "tone": "neutral",
+            }
+        ]
+    rows: list[dict[str, object]] = []
+    for batch in [_recompute_video_review_evidence_gap_batch(dict(item)) for item in batches[: max(0, int(limit))]]:
+        pending = int(batch.get("pending_count", 0) or 0)
+        completed = int(batch.get("completed_count", 0) or 0)
+        total = int(batch.get("total_count", 0) or 0)
+        rate = float(batch.get("completion_rate", 0) or 0)
+        handled_items = [
+            item
+            for item in batch.get("items", [])
+            if isinstance(item, dict) and str(item.get("status") or "") == "resolved"
+        ]
+        latest_handled = handled_items[-1] if handled_items else {}
+        latest_text = (
+            f"最近处理: {latest_handled.get('handled_at', '-')} | "
+            f"{latest_handled.get('source_name', '-') or '-'} | {latest_handled.get('evidence_kind', '-') or '-'}"
+            if latest_handled
+            else "最近处理: -"
+        )
+        rows.append(
+            {
+                "title": f"{batch.get('batch_id', '-')} | 完成率 {rate:.0%}",
+                "body": (
+                    f"状态: {batch.get('status', '-')} | 总数 {total} | 已处理 {completed} | 待处理 {pending}\n"
+                    f"报告: {batch.get('report_path', '-')}\n"
+                    f"{latest_text}"
+                ),
+                "tone": "good" if pending == 0 else "warning" if completed else "neutral",
+            }
+        )
+    return rows
 
 
 def build_video_review_evidence_gap_feedback(
@@ -1841,6 +2106,53 @@ def _append_video_review_evidence_gap_feedback_log(
     tmp_path = path.with_suffix(".tmp")
     tmp_path.write_text(json.dumps({"records": records}, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp_path.replace(path)
+
+
+def _load_video_review_evidence_gap_batch_state(
+    path: Path = VIDEO_REVIEW_EVIDENCE_GAP_BATCH_STATE,
+) -> dict:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"schema_version": 1, "batches": []}
+    if not isinstance(payload, dict):
+        return {"schema_version": 1, "batches": []}
+    batches = payload.get("batches")
+    if not isinstance(batches, list):
+        payload["batches"] = []
+    return payload
+
+
+def _save_video_review_evidence_gap_batch_state(
+    state: dict,
+    path: Path = VIDEO_REVIEW_EVIDENCE_GAP_BATCH_STATE,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def _record_video_review_evidence_gap_batch_resolution(
+    match_ids: set[str] | list[str] | tuple[str, ...] | str | object,
+    *,
+    evidence_kind: str,
+    source_name: str = "",
+    review_id: str = "",
+    handled_by: str = "app_operator",
+) -> dict[str, object]:
+    state = _load_video_review_evidence_gap_batch_state()
+    updated_state, update = build_video_review_evidence_gap_batch_state_with_resolution(
+        state,
+        match_ids,
+        evidence_kind=evidence_kind,
+        source_name=source_name,
+        review_id=review_id,
+        handled_by=handled_by,
+    )
+    if int(update.get("updated_count", 0) or 0) > 0:
+        _save_video_review_evidence_gap_batch_state(updated_state)
+    return update
 
 
 def _load_statsbomb_review_training_action_feedback_log(
@@ -4835,6 +5147,9 @@ class SmartMatchDashboard:
         evidence_gap_feedback_rows = build_video_review_evidence_gap_feedback_rows(
             _load_video_review_evidence_gap_feedback_log()
         )
+        evidence_gap_batch_state = _load_video_review_evidence_gap_batch_state()
+        evidence_gap_batch_status = build_video_review_evidence_gap_batch_status(evidence_gap_batch_state)
+        evidence_gap_batch_rows = build_video_review_evidence_gap_batch_status_rows(evidence_gap_batch_state)
         statsbomb_repair_feedback_rows = build_statsbomb_review_training_feedback_rows(
             _load_statsbomb_review_training_action_feedback_log()
         )
@@ -5196,6 +5511,20 @@ class SmartMatchDashboard:
             str(video_source_coverage.get("fallback_policy_text") or "-"),
         )
         self._strategy_section_title(right, "复盘证据缺口行动")
+        self._strategy_row(
+            right,
+            f"缺口批次执行 | {evidence_gap_batch_status.get('status', '-')}",
+            (
+                f"{evidence_gap_batch_status.get('summary_text', '-')}\n"
+                f"完成率: {float(evidence_gap_batch_status.get('completion_rate', 0) or 0):.0%}"
+            ),
+        )
+        for row in evidence_gap_batch_rows:
+            self._strategy_row(
+                right,
+                str(row.get("title") or "-"),
+                str(row.get("body") or "-"),
+            )
         if evidence_gap_rows:
             for row in evidence_gap_rows:
                 settlement = row.get("settlement") if isinstance(row.get("settlement"), dict) else {}
@@ -5325,6 +5654,18 @@ class SmartMatchDashboard:
             return
         review = result.get("review") if isinstance(result.get("review"), dict) else {}
         frame_plan = review.get("frame_plan") if isinstance(review.get("frame_plan"), list) else []
+        try:
+            batch_update = _record_video_review_evidence_gap_batch_resolution(
+                str(settlement.get("match_id") or ""),
+                evidence_kind="local_video",
+                source_name="local_file",
+                review_id=str(review.get("review_id") or "-"),
+            )
+        except Exception as exc:
+            self._log_event("ERROR", f"复盘证据缺口批次回写失败: {exc}")
+        else:
+            if int(batch_update.get("updated_count", 0) or 0) > 0:
+                self._log_event("OK", f"复盘证据缺口批次已回写: {batch_update.get('updated_count', 0)} 场")
         self.status_var.set(f"\u89c6\u9891\u590d\u76d8\u5df2\u5efa\u7acb: {review.get('review_id', '-')} / \u8ba1\u5212\u62bd\u5e27 {len(frame_plan)}")
         messagebox.showinfo(
             "\u89c6\u9891\u590d\u76d8",
@@ -5364,6 +5705,18 @@ class SmartMatchDashboard:
             self._log_event("ERROR", f"复盘证据缺口处理记录写入失败: {exc}")
         else:
             self._log_event("OK", str(feedback.get("summary_text") or "复盘证据缺口处理已记录"))
+        try:
+            batch_update = _record_video_review_evidence_gap_batch_resolution(
+                str(feedback.get("match_id") or settlement.get("match_id") or ""),
+                evidence_kind="external_reference",
+                source_name=source_name,
+                review_id=str(review.get("review_id") or feedback.get("review_id") or "-"),
+            )
+        except Exception as exc:
+            self._log_event("ERROR", f"复盘证据缺口批次回写失败: {exc}")
+        else:
+            if int(batch_update.get("updated_count", 0) or 0) > 0:
+                self._log_event("OK", f"复盘证据缺口批次已回写: {batch_update.get('updated_count', 0)} 场")
         self.status_var.set(f"\u5916\u90e8\u56de\u653e\u5df2\u7ed1\u5b9a: {review.get('review_id', '-')} / {source_name}")
         messagebox.showinfo(
             "\u89c6\u9891\u590d\u76d8",
@@ -5591,16 +5944,23 @@ class SmartMatchDashboard:
             limit=20,
         )
         now = datetime.now()
+        batch_id = build_video_review_evidence_gap_batch_id(now)
         REPORT_DIR.mkdir(parents=True, exist_ok=True)
         path = REPORT_DIR / build_video_review_evidence_gap_batch_plan_filename(now)
         path.write_text(
-            "\n".join(build_video_review_evidence_gap_batch_plan_lines(rows, generated_at=now)),
+            "\n".join(build_video_review_evidence_gap_batch_plan_lines(rows, generated_at=now, batch_id=batch_id)),
             encoding="utf-8",
         )
+        batch_record = build_video_review_evidence_gap_batch_record(rows, path, generated_at=now, batch_id=batch_id)
+        batch_state = build_video_review_evidence_gap_batch_state_with_record(
+            _load_video_review_evidence_gap_batch_state(),
+            batch_record,
+        )
+        _save_video_review_evidence_gap_batch_state(batch_state)
         self.status_var.set(f"复盘证据缺口批次计划已导出: {path.name} | {len(rows)} 场")
         messagebox.showinfo(
             "复盘证据缺口批次计划",
-            build_video_review_evidence_gap_batch_plan_export_message(path, rows),
+            build_video_review_evidence_gap_batch_plan_export_message(path, rows, batch_record),
         )
         return path
 
@@ -5647,8 +6007,10 @@ class SmartMatchDashboard:
             return result
         try:
             invalidate_statsbomb_state_cache(STATSBOMB_REVIEW_TRAINING_FILE)
-            quality = build_statsbomb_review_training_quality_summary(get_statsbomb_review_training_samples())
+            review_samples = get_statsbomb_review_training_samples()
+            quality = build_statsbomb_review_training_quality_summary(review_samples)
         except Exception as exc:
+            review_samples = {}
             quality = {
                 "status": "attention",
                 "issue_count": 1,
@@ -5663,8 +6025,25 @@ class SmartMatchDashboard:
             }
         feedback = build_statsbomb_review_training_action_feedback(action_key, before_quality, quality, result)
         self._record_statsbomb_review_training_action_feedback(feedback)
+        batch_update = {"updated_count": 0}
+        sample_match_ids = collect_video_review_evidence_gap_sample_match_ids(review_samples)
+        if sample_match_ids:
+            try:
+                batch_update = _record_video_review_evidence_gap_batch_resolution(
+                    sample_match_ids,
+                    evidence_kind="statsbomb_event_proxy",
+                    source_name="StatsBomb/Event Proxy",
+                    review_id=str(result.get("output_path") or "statsbomb_review_training_samples"),
+                )
+            except Exception as exc:
+                self._log_event("ERROR", f"复盘证据缺口批次事件代理回写失败: {exc}")
+            else:
+                if int(batch_update.get("updated_count", 0) or 0) > 0:
+                    self._log_event("OK", f"复盘证据缺口批次事件代理已回写: {batch_update.get('updated_count', 0)} 场")
+        result["evidence_gap_batch_update"] = batch_update
         quality_status = str(quality.get("status") or "-")
-        self.status_var.set(f"\u4e8b\u4ef6\u4ee3\u7406\u590d\u76d8\u6837\u672c\u5df2\u751f\u6210: {sample_count} \u6761 | \u8d28\u91cf {quality_status}")
+        batch_update_text = f" | 批次回写 {int(batch_update.get('updated_count', 0) or 0)} 场" if int(batch_update.get("updated_count", 0) or 0) else ""
+        self.status_var.set(f"\u4e8b\u4ef6\u4ee3\u7406\u590d\u76d8\u6837\u672c\u5df2\u751f\u6210: {sample_count} \u6761 | \u8d28\u91cf {quality_status}{batch_update_text}")
         self.open_review_center()
         messagebox.showinfo(
             "\u4e8b\u4ef6\u4ee3\u7406\u590d\u76d8",
