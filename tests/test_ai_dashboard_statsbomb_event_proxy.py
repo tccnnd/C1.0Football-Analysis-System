@@ -15,11 +15,78 @@ if str(SRC_ROOT) not in sys.path:
 from v24_app.ai_dashboard import (
     build_statsbomb_event_proxy_review_samples_message,
     build_statsbomb_event_proxy_review_text,
+    build_statsbomb_review_training_action_feedback,
     build_statsbomb_review_training_action_rows,
+    build_statsbomb_review_training_feedback_rows,
 )
 
 
 class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
+    def test_review_training_action_feedback_summarizes_quality_delta(self) -> None:
+        feedback = build_statsbomb_review_training_action_feedback(
+            "build_statsbomb_review_samples",
+            {
+                "status": "blocked",
+                "sample_count": 0,
+                "issue_count": 2,
+                "issues": [{"code": "statsbomb_review_samples_missing"}],
+            },
+            {
+                "status": "attention",
+                "sample_count": 18,
+                "issue_count": 1,
+                "issues": [{"code": "statsbomb_review_sample_count_low", "recommendation": "继续补样本"}],
+            },
+            {"ok": True, "message": "done"},
+        )
+
+        self.assertEqual(feedback["outcome"], "improved")
+        self.assertEqual(feedback["tone"], "good")
+        self.assertEqual(feedback["sample_delta"], 18)
+        self.assertEqual(feedback["issue_delta"], -1)
+        self.assertIn("blocked->attention", feedback["summary_text"])
+        self.assertEqual(feedback["next_recommendation"], "继续补样本")
+
+    def test_review_training_action_feedback_marks_failed_and_queued(self) -> None:
+        quality = {"status": "attention", "sample_count": 10, "issue_count": 1, "issues": []}
+        failed = build_statsbomb_review_training_action_feedback(
+            "build_statsbomb_review_samples",
+            quality,
+            quality,
+            {"ok": False, "message": "boom"},
+        )
+        queued = build_statsbomb_review_training_action_feedback(
+            "recover_results",
+            quality,
+            quality,
+            {"ok": True, "queued": True},
+        )
+
+        self.assertEqual(failed["outcome"], "failed")
+        self.assertEqual(failed["tone"], "bad")
+        self.assertEqual(queued["outcome"], "queued")
+        self.assertEqual(queued["tone"], "neutral")
+
+    def test_review_training_feedback_rows_format_recent_records(self) -> None:
+        rows = build_statsbomb_review_training_feedback_rows(
+            [
+                {
+                    "occurred_at": "2026-05-14 12:00:00",
+                    "action_key": "build_statsbomb_review_samples",
+                    "outcome": "improved",
+                    "summary_text": "samples 0->18",
+                    "after_issue_codes": ["statsbomb_review_sample_count_low"],
+                    "next_recommendation": "继续补样本",
+                    "tone": "good",
+                }
+            ]
+        )
+
+        self.assertEqual(rows[0]["tone"], "good")
+        self.assertIn("build_statsbomb_review_samples", rows[0]["title"])
+        self.assertIn("samples 0->18", rows[0]["body"])
+        self.assertIn("继续补样本", rows[0]["body"])
+
     def test_review_training_action_rows_map_issues_to_executable_actions(self) -> None:
         rows = build_statsbomb_review_training_action_rows(
             {

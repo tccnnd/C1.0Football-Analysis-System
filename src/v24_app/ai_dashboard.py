@@ -214,6 +214,7 @@ RED = "#ef5b57"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 REPORT_DIR = PROJECT_ROOT / "reports"
 SETTINGS_PATH = PROJECT_ROOT / "data" / "state" / "ai_dashboard_settings.json"
+STATSBOMB_REVIEW_REPAIR_ACTION_LOG = PROJECT_ROOT / "data" / "state" / "statsbomb_review_repair_action_log.json"
 
 
 def build_video_review_workflow_action_rows(
@@ -1315,6 +1316,136 @@ def build_statsbomb_review_training_action_rows(quality: dict) -> list[dict[str,
             tone="neutral",
         )
     return rows[:4]
+
+
+def build_statsbomb_review_training_action_feedback(
+    action_key: str,
+    before_quality: dict,
+    after_quality: dict,
+    result: dict | None = None,
+    *,
+    occurred_at: datetime | None = None,
+) -> dict[str, object]:
+    result_payload = result if isinstance(result, dict) else {}
+    before_status = str(before_quality.get("status") or "-")
+    after_status = str(after_quality.get("status") or "-")
+    before_sample_count = int(before_quality.get("sample_count", 0) or 0)
+    after_sample_count = int(after_quality.get("sample_count", 0) or 0)
+    before_issue_count = int(before_quality.get("issue_count", len(before_quality.get("issues", []) if isinstance(before_quality.get("issues"), list) else [])) or 0)
+    after_issue_count = int(after_quality.get("issue_count", len(after_quality.get("issues", []) if isinstance(after_quality.get("issues"), list) else [])) or 0)
+    status_rank = {"healthy": 0, "attention": 1, "blocked": 2}
+    before_rank = status_rank.get(before_status, 1)
+    after_rank = status_rank.get(after_status, 1)
+    ok = bool(result_payload.get("ok", True))
+    queued = bool(result_payload.get("queued", False))
+    if not ok:
+        outcome = "failed"
+        tone = "bad"
+    elif queued:
+        outcome = "queued"
+        tone = "neutral"
+    elif after_rank < before_rank or after_issue_count < before_issue_count or after_sample_count > before_sample_count:
+        outcome = "improved"
+        tone = "good"
+    elif after_rank > before_rank or after_issue_count > before_issue_count:
+        outcome = "worsened"
+        tone = "bad"
+    else:
+        outcome = "unchanged"
+        tone = "warning"
+
+    def _issue_codes(quality: dict) -> list[str]:
+        issues = quality.get("issues") if isinstance(quality.get("issues"), list) else []
+        return [str(item.get("code") or "-") for item in issues[:4] if isinstance(item, dict)]
+
+    sample_delta = after_sample_count - before_sample_count
+    issue_delta = after_issue_count - before_issue_count
+    summary_text = (
+        f"{action_key}: {outcome} | status {before_status}->{after_status} | "
+        f"samples {before_sample_count}->{after_sample_count} ({sample_delta:+d}) | "
+        f"issues {before_issue_count}->{after_issue_count} ({issue_delta:+d})"
+    )
+    after_issues = after_quality.get("issues") if isinstance(after_quality.get("issues"), list) else []
+    next_recommendation = "-"
+    for issue in after_issues:
+        if isinstance(issue, dict):
+            next_recommendation = str(issue.get("recommendation") or issue.get("message") or "-")
+            break
+    if outcome == "improved" and after_status == "healthy":
+        next_recommendation = "质量已恢复健康，可进入回测/训练稳定性验证。"
+
+    return {
+        "action_key": action_key,
+        "occurred_at": (occurred_at or datetime.now()).strftime("%Y-%m-%d %H:%M:%S"),
+        "outcome": outcome,
+        "tone": tone,
+        "ok": ok,
+        "queued": queued,
+        "before_status": before_status,
+        "after_status": after_status,
+        "before_sample_count": before_sample_count,
+        "after_sample_count": after_sample_count,
+        "sample_delta": sample_delta,
+        "before_issue_count": before_issue_count,
+        "after_issue_count": after_issue_count,
+        "issue_delta": issue_delta,
+        "before_issue_codes": _issue_codes(before_quality),
+        "after_issue_codes": _issue_codes(after_quality),
+        "message": str(result_payload.get("message") or result_payload.get("reason") or ""),
+        "summary_text": summary_text,
+        "next_recommendation": next_recommendation,
+    }
+
+
+def build_statsbomb_review_training_feedback_rows(records: list[dict] | object, limit: int = 5) -> list[dict[str, object]]:
+    if not isinstance(records, list):
+        return []
+    rows: list[dict[str, object]] = []
+    for record in records[: max(0, int(limit))]:
+        if not isinstance(record, dict):
+            continue
+        issue_codes = record.get("after_issue_codes") if isinstance(record.get("after_issue_codes"), list) else []
+        issue_text = ", ".join(str(item) for item in issue_codes[:3]) or "-"
+        rows.append(
+            {
+                "title": f"{record.get('occurred_at', '-')} | {record.get('action_key', '-')} | {record.get('outcome', '-')}",
+                "body": (
+                    f"{record.get('summary_text', '-')}\n"
+                    f"剩余问题: {issue_text}\n"
+                    f"下一步: {record.get('next_recommendation', '-')}"
+                ),
+                "tone": str(record.get("tone") or "neutral"),
+            }
+        )
+    return rows
+
+
+def _load_statsbomb_review_training_action_feedback_log(
+    path: Path = STATSBOMB_REVIEW_REPAIR_ACTION_LOG,
+) -> list[dict]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if isinstance(payload, dict):
+        payload = payload.get("records")
+    if not isinstance(payload, list):
+        return []
+    return [item for item in payload if isinstance(item, dict)]
+
+
+def _append_statsbomb_review_training_action_feedback_log(
+    record: dict,
+    path: Path = STATSBOMB_REVIEW_REPAIR_ACTION_LOG,
+    *,
+    limit: int = 50,
+) -> None:
+    records = [dict(record), *_load_statsbomb_review_training_action_feedback_log(path)]
+    records = records[: max(1, int(limit))]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps({"records": records}, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(path)
 
 
 class SmartMatchDashboard:
@@ -4266,6 +4397,9 @@ class SmartMatchDashboard:
         snapshot_audit = self._result_recovery_snapshot_audit(lookback_days=lookback_days)
         video_memory_health = self._video_review_fewshot_memory_health_context()
         statsbomb_review_quality = build_statsbomb_review_training_quality_summary(get_statsbomb_review_training_samples())
+        statsbomb_repair_feedback_rows = build_statsbomb_review_training_feedback_rows(
+            _load_statsbomb_review_training_action_feedback_log()
+        )
 
         shell = self._page_shell(
             "\u590d\u76d8\u4e2d\u5fc3",
@@ -4591,6 +4725,16 @@ class SmartMatchDashboard:
                     str(row.get("body") or "-"),
                     command=self._statsbomb_review_training_action_command(str(row.get("action_key") or "")),
                 )
+        self._strategy_section_title(right, "事件代理修复闭环")
+        if statsbomb_repair_feedback_rows:
+            for row in statsbomb_repair_feedback_rows:
+                self._strategy_row(
+                    right,
+                    str(row.get("title") or "-"),
+                    str(row.get("body") or "-"),
+                )
+        else:
+            self._strategy_row(right, "暂无修复记录", "点击上方修复动作后，会记录本次动作前后的质量变化。")
 
         tk.Label(right, text="\u95ed\u73af\u590d\u76d8", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
         detail = tk.Text(
@@ -4822,22 +4966,79 @@ class SmartMatchDashboard:
         return output_path, review_path, plan_path, bundle_path, bundle_review_path
 
     def _statsbomb_review_training_action_command(self, action_key: str):
-        commands = {
-            "build_statsbomb_review_samples": self.export_statsbomb_event_proxy_review_samples,
-            "recover_results": self.run_result_recovery,
-            "run_high_accuracy_strategy_backtest": self.run_high_accuracy_strategy_backtest_task,
-            "refresh_review_center": self.open_review_center,
-        }
-        return commands.get(action_key)
+        if action_key in {
+            "build_statsbomb_review_samples",
+            "recover_results",
+            "run_high_accuracy_strategy_backtest",
+            "refresh_review_center",
+        }:
+            return lambda key=action_key: self.run_statsbomb_review_training_action(key)
+        return None
 
-    def export_statsbomb_event_proxy_review_samples(self) -> dict | None:
+    def _current_statsbomb_review_training_quality(self) -> dict:
+        return build_statsbomb_review_training_quality_summary(get_statsbomb_review_training_samples())
+
+    def _record_statsbomb_review_training_action_feedback(self, feedback: dict) -> None:
+        try:
+            _append_statsbomb_review_training_action_feedback_log(feedback)
+        except Exception as exc:
+            self._log_event("ERROR", f"事件代理修复闭环记录写入失败: {exc}")
+            return
+        self._log_event("OK", str(feedback.get("summary_text") or "事件代理修复闭环已记录"))
+
+    def run_statsbomb_review_training_action(self, action_key: str) -> None:
+        before_quality = self._current_statsbomb_review_training_quality()
+        if action_key == "build_statsbomb_review_samples":
+            self.export_statsbomb_event_proxy_review_samples(before_quality=before_quality, action_key=action_key)
+            return
+        if action_key == "recover_results":
+            feedback = build_statsbomb_review_training_action_feedback(
+                action_key,
+                before_quality,
+                before_quality,
+                {"ok": True, "queued": True, "message": "result recovery queued"},
+            )
+            self._record_statsbomb_review_training_action_feedback(feedback)
+            self.run_result_recovery(trigger="statsbomb_review_repair", show_popup=True)
+            return
+        if action_key == "run_high_accuracy_strategy_backtest":
+            feedback = build_statsbomb_review_training_action_feedback(
+                action_key,
+                before_quality,
+                before_quality,
+                {"ok": True, "queued": True, "message": "high accuracy backtest queued"},
+            )
+            self._record_statsbomb_review_training_action_feedback(feedback)
+            self.run_high_accuracy_strategy_backtest_task()
+            return
+        if action_key == "refresh_review_center":
+            after_quality = self._current_statsbomb_review_training_quality()
+            feedback = build_statsbomb_review_training_action_feedback(action_key, before_quality, after_quality, {"ok": True})
+            self._record_statsbomb_review_training_action_feedback(feedback)
+            self.open_review_center()
+
+    def export_statsbomb_event_proxy_review_samples(
+        self,
+        before_quality: dict | None = None,
+        action_key: str = "build_statsbomb_review_samples",
+    ) -> dict | None:
+        before_quality = before_quality if isinstance(before_quality, dict) else self._current_statsbomb_review_training_quality()
         try:
             result = repair_training_data_health("build_statsbomb_review_samples")
         except Exception as exc:
+            feedback = build_statsbomb_review_training_action_feedback(
+                action_key,
+                before_quality,
+                before_quality,
+                {"ok": False, "message": str(exc)},
+            )
+            self._record_statsbomb_review_training_action_feedback(feedback)
             messagebox.showerror("\u4e8b\u4ef6\u4ee3\u7406\u590d\u76d8", f"\u751f\u6210\u5931\u8d25:\n{exc}")
             return None
         sample_count = int(result.get("generated_sample_count", 0) or 0)
         if not bool(result.get("ok", True)):
+            feedback = build_statsbomb_review_training_action_feedback(action_key, before_quality, before_quality, result)
+            self._record_statsbomb_review_training_action_feedback(feedback)
             self.status_var.set("\u4e8b\u4ef6\u4ee3\u7406\u590d\u76d8\u6837\u672c\u751f\u6210\u5931\u8d25")
             messagebox.showerror("\u4e8b\u4ef6\u4ee3\u7406\u590d\u76d8", str(result.get("message") or result.get("reason") or "-"))
             return result
@@ -4857,6 +5058,8 @@ class SmartMatchDashboard:
                     }
                 ],
             }
+        feedback = build_statsbomb_review_training_action_feedback(action_key, before_quality, quality, result)
+        self._record_statsbomb_review_training_action_feedback(feedback)
         quality_status = str(quality.get("status") or "-")
         self.status_var.set(f"\u4e8b\u4ef6\u4ee3\u7406\u590d\u76d8\u6837\u672c\u5df2\u751f\u6210: {sample_count} \u6761 | \u8d28\u91cf {quality_status}")
         self.open_review_center()
