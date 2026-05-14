@@ -8190,6 +8190,48 @@ class SmartMatchDashboard:
             f"{evaluation_agent.get('status', '-')} / score {evaluation_agent.get('score', '-')}",
             str(evaluation_agent.get("summary_text") or "-"),
         )
+        statsbomb_review_quality = dashboard.get("statsbomb_review_training_quality", {}) if isinstance(dashboard.get("statsbomb_review_training_quality"), dict) else {}
+        self._strategy_section_title(right, "StatsBomb 事件代理样本质量")
+        for row in statsbomb_review_quality.get("card_rows", []) if isinstance(statsbomb_review_quality.get("card_rows"), list) else []:
+            if isinstance(row, dict):
+                self._strategy_row(
+                    right,
+                    f"{row.get('label', '-')}: {row.get('value', '-')}",
+                    str(row.get("detail") or "-"),
+                )
+        label_rows = statsbomb_review_quality.get("label_rows", []) if isinstance(statsbomb_review_quality.get("label_rows"), list) else []
+        if label_rows:
+            self._strategy_row(
+                right,
+                "标签分布",
+                "\n".join(
+                    f"{row.get('label', '-')}: {row.get('detail', '-')}"
+                    for row in label_rows[:3]
+                    if isinstance(row, dict)
+                ),
+            )
+        weight_rows = statsbomb_review_quality.get("weight_rows", []) if isinstance(statsbomb_review_quality.get("weight_rows"), list) else []
+        if weight_rows:
+            self._strategy_row(
+                right,
+                "事件错因权重",
+                "\n".join(
+                    f"{row.get('label', '-')}: {row.get('value', '-')}"
+                    for row in weight_rows[:3]
+                    if isinstance(row, dict)
+                ),
+            )
+        quality_issues = statsbomb_review_quality.get("issues", []) if isinstance(statsbomb_review_quality.get("issues"), list) else []
+        if quality_issues:
+            self._strategy_row(
+                right,
+                "质量修复建议",
+                "\n".join(
+                    str(item.get("recommendation") or item.get("message") or "-")
+                    for item in quality_issues[:4]
+                    if isinstance(item, dict)
+                ),
+            )
         for item in evaluation_agent.get("recommendations", []) if isinstance(evaluation_agent.get("recommendations"), list) else []:
             if isinstance(item, dict):
                 self._strategy_row(right, str(item.get("title") or "-"), str(item.get("body") or "-"))

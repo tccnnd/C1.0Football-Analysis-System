@@ -102,6 +102,7 @@ from v24_app.ui_modules import (
     build_statsbomb_fewshot_memory_summary,
     build_statsbomb_fewshot_memory_monitor,
     build_statsbomb_fewshot_memory_quality_alerts,
+    build_statsbomb_review_training_quality_summary,
     build_statsbomb_review_training_weight_signal,
     validate_statsbomb_fewshot_draft_payload,
     build_statsbomb_event_replay_case,
@@ -2969,7 +2970,11 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
             "summary": {
                 "sample_count": 60,
                 "feature_order": ["xg_diff", "shot_diff", "event_count"],
-                "label_counts": {"prediction_miss": {"0": 20, "1": 40}},
+                "label_counts": {
+                    "prediction_miss": {"0": 20, "1": 40},
+                    "handicap_miss": {"0": 30, "1": 30},
+                    "ou_miss": {"0": 28, "1": 32},
+                },
             },
             "items": [{} for _ in range(60)],
         }
@@ -2987,6 +2992,26 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertEqual(evaluation["statsbomb_review_training_signal"]["sample_count"], 60)
         self.assertIn("statsbomb_review_training_weighted", evaluation["memory_tags"])
         self.assertTrue(any(item["title"] == "应用StatsBomb事件代理权重" for item in evaluation["recommendations"]))
+
+    def test_statsbomb_review_training_quality_flags_missing_and_skewed_labels(self) -> None:
+        missing = build_statsbomb_review_training_quality_summary({})
+        skewed = build_statsbomb_review_training_quality_summary(
+            {
+                "summary": {
+                    "sample_count": 30,
+                    "feature_order": ["xg_diff", "shot_diff", "event_count"],
+                    "label_counts": {"prediction_miss": {"0": 1, "1": 29}},
+                },
+                "items": [{} for _ in range(30)],
+            }
+        )
+
+        self.assertEqual(missing["status"], "blocked")
+        self.assertTrue(any(issue["code"] == "statsbomb_review_samples_missing" for issue in missing["issues"]))
+        self.assertEqual(skewed["status"], "attention")
+        self.assertTrue(any(issue["code"] == "prediction_miss_skewed" for issue in skewed["issues"]))
+        self.assertEqual(skewed["label_rows"][0]["value"], "29/30")
+        self.assertEqual(skewed["weight_rows"][0]["code"], "statsbomb_xg_against_pick")
 
     def test_dashboard_exposes_statsbomb_review_training_weight_signal(self) -> None:
         settlements = [
@@ -3019,7 +3044,11 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
             "summary": {
                 "sample_count": 60,
                 "feature_order": ["xg_diff", "shot_diff", "event_count"],
-                "label_counts": {"prediction_miss": {"0": 20, "1": 40}},
+                "label_counts": {
+                    "prediction_miss": {"0": 20, "1": 40},
+                    "handicap_miss": {"0": 30, "1": 30},
+                    "ou_miss": {"0": 28, "1": 32},
+                },
             },
             "items": [{} for _ in range(60)],
         }
@@ -3031,6 +3060,8 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         )
 
         self.assertEqual(dashboard["evaluation_agent"]["statsbomb_review_training_signal"]["status"], "ready")
+        self.assertEqual(dashboard["statsbomb_review_training_quality"]["status"], "healthy")
+        self.assertEqual(dashboard["evaluation_agent"]["statsbomb_review_training_quality"]["status"], "healthy")
         self.assertEqual(list(dashboard["error_attribution"]["reason_counts"])[0], "statsbomb_finishing_variance")
         self.assertTrue(any(card["label"] == "StatsBomb权重" for card in dashboard["metrics"]))
 

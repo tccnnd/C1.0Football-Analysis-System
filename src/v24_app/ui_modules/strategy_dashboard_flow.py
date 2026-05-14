@@ -700,6 +700,146 @@ def build_statsbomb_review_training_weight_signal(
     }
 
 
+def build_statsbomb_review_training_quality_summary(
+    payload: Mapping[str, object] | object | None,
+) -> dict[str, object]:
+    resolved = _as_mapping(payload)
+    summary = _as_mapping(resolved.get("summary"))
+    signal = build_statsbomb_review_training_weight_signal(resolved)
+    label_counts = _as_mapping(summary.get("label_counts"))
+    sample_count = _safe_int(signal.get("sample_count"))
+    feature_count = _safe_int(signal.get("feature_count"))
+    issues: list[dict[str, object]] = []
+    label_rows: list[dict[str, object]] = []
+    label_specs = [
+        ("prediction_miss", "1X2错因标签"),
+        ("handicap_miss", "让球错因标签"),
+        ("ou_miss", "大小球错因标签"),
+    ]
+    for key, label in label_specs:
+        hit_count, miss_count = _label_count_pair(label_counts, key)
+        known_count = hit_count + miss_count
+        miss_rate = miss_count / known_count if known_count else None
+        tone = "neutral"
+        if known_count:
+            tone = "warning" if miss_rate is not None and (miss_rate >= 0.80 or miss_rate <= 0.20) else "good"
+        label_rows.append(
+            {
+                "code": key,
+                "label": label,
+                "known_count": known_count,
+                "hit_count": hit_count,
+                "miss_count": miss_count,
+                "miss_rate": miss_rate,
+                "value": f"{miss_count}/{known_count}" if known_count else "-",
+                "tone": tone,
+                "detail": f"hit={hit_count} | miss={miss_count} | miss_rate={_pct(miss_rate) if miss_rate is not None else '-'}",
+            }
+        )
+        if sample_count > 0 and known_count <= 0:
+            issues.append(
+                {
+                    "code": f"{key}_missing",
+                    "severity": "warning",
+                    "message": f"{label}缺少可用标签",
+                    "recommendation": "补齐赛果回收标签，否则事件代理训练样本无法稳定参与该玩法归因。",
+                }
+            )
+        elif known_count > 0 and miss_rate is not None and (miss_rate >= 0.85 or miss_rate <= 0.15):
+            issues.append(
+                {
+                    "code": f"{key}_skewed",
+                    "severity": "warning",
+                    "message": f"{label}类别分布偏斜",
+                    "recommendation": "补充命中和未命中两类样本，避免 Evaluation Agent 过度偏向单一解释。",
+                }
+            )
+
+    if sample_count <= 0:
+        issues.insert(
+            0,
+            {
+                "code": "statsbomb_review_samples_missing",
+                "severity": "blocking",
+                "message": "StatsBomb事件代理复盘样本为空",
+                "recommendation": "先在复盘中心生成事件代理复盘样本，再观察归因权重变化。",
+            },
+        )
+    elif sample_count < 20:
+        issues.append(
+            {
+                "code": "statsbomb_review_sample_count_low",
+                "severity": "warning",
+                "message": f"StatsBomb事件代理样本偏少: {sample_count}/20",
+                "recommendation": "继续回收带StatsBomb事件摘要的已结算比赛，优先补近期主流赛事。",
+            }
+        )
+    if sample_count > 0 and feature_count <= 0:
+        issues.append(
+            {
+                "code": "statsbomb_review_features_missing",
+                "severity": "warning",
+                "message": "事件代理样本缺少特征顺序",
+                "recommendation": "重新生成复盘训练样本，确保xG、射门、事件数等特征完整。",
+            }
+        )
+
+    has_blocking = any(str(issue.get("severity") or "") == "blocking" for issue in issues)
+    status = "blocked" if has_blocking else "attention" if issues else "healthy"
+    tone = "bad" if status == "blocked" else "warning" if status == "attention" else "good"
+    active_weights = _as_mapping(signal.get("attribution_weights"))
+    weight_rows = [
+        {
+            "code": code,
+            "label": ERROR_ATTRIBUTION_LABELS.get(code, code),
+            "value": f"{_safe_float(active_weights.get(code), 1.0):.2f}",
+            "tone": "good" if _safe_float(active_weights.get(code), 1.0) > 1.0 else "neutral",
+            "detail": "赛后事件代理权重，仅用于Evaluation Agent错因排序。",
+        }
+        for code in STATSBOMB_EVENT_ATTRIBUTION_CODES
+    ]
+    card_rows = [
+        {
+            "label": "整体状态",
+            "value": status,
+            "tone": tone,
+            "detail": f"issues={len(issues)} | signal={signal.get('status') or '-'}",
+        },
+        {
+            "label": "样本数",
+            "value": str(sample_count),
+            "tone": "good" if sample_count >= 20 else "warning" if sample_count > 0 else "bad",
+            "detail": f"features={feature_count}",
+        },
+        {
+            "label": "1X2标签",
+            "value": label_rows[0]["value"] if label_rows else "-",
+            "tone": str(label_rows[0]["tone"]) if label_rows else "neutral",
+            "detail": str(label_rows[0]["detail"]) if label_rows else "-",
+        },
+        {
+            "label": "当前权重",
+            "value": f"{_safe_float(active_weights.get('statsbomb_finishing_variance'), 1.0):.2f}",
+            "tone": "good" if sample_count else "neutral",
+            "detail": str(signal.get("summary_text") or "-"),
+        },
+    ]
+    return {
+        "status": status,
+        "tone": tone,
+        "issue_count": len(issues),
+        "issues": issues,
+        "sample_count": sample_count,
+        "feature_count": feature_count,
+        "label_rows": label_rows,
+        "weight_rows": weight_rows,
+        "card_rows": card_rows,
+        "signal": signal,
+        "summary_text": f"事件代理样本 {sample_count} | 标签 {label_rows[0]['value'] if label_rows else '-'} | 状态 {status}",
+        "leakage_note": signal.get("leakage_note"),
+    }
+
+
 def _pick_side(value: object) -> str:
     text = _text(value, "").upper()
     if text in {"HOME", "HOME_WIN", "H", "1"} or "HOME" in text:
@@ -5774,7 +5914,8 @@ def build_strategy_evaluation_agent_summary(
         if settlement_summary is not None
         else build_high_accuracy_strategy_settlement_summary(settlement_items)
     )
-    review_training_signal = build_statsbomb_review_training_weight_signal(statsbomb_review_training_samples or {})
+    review_training_quality = build_statsbomb_review_training_quality_summary(statsbomb_review_training_samples or {})
+    review_training_signal = _as_mapping(review_training_quality.get("signal"))
     review_training_weights = _as_mapping(review_training_signal.get("attribution_weights"))
     error_attribution = (
         _as_mapping(error_attribution)
@@ -6050,6 +6191,7 @@ def build_strategy_evaluation_agent_summary(
         "error_attribution": error_attribution,
         "jc_bucket_feedback": jc_feedback,
         "statsbomb_event_review": event_review,
+        "statsbomb_review_training_quality": review_training_quality,
         "statsbomb_review_training_signal": review_training_signal,
         "video_review_memory": video_review_memory,
         "video_review_fewshot_memory": video_fewshot_memory,
@@ -8876,7 +9018,8 @@ def build_high_accuracy_strategy_dashboard(
     validation = _as_mapping(resolved.get("validation"))
     breaker = _as_mapping(resolved.get("breaker"))
     settlement_summary = build_high_accuracy_strategy_settlement_summary(settlement_items)
-    statsbomb_review_training_signal = build_statsbomb_review_training_weight_signal(statsbomb_review_training_samples or {})
+    statsbomb_review_training_quality = build_statsbomb_review_training_quality_summary(statsbomb_review_training_samples or {})
+    statsbomb_review_training_signal = _as_mapping(statsbomb_review_training_quality.get("signal"))
     error_attribution = build_strategy_error_attribution_summary(
         settlement_items,
         error_weight_overrides=_as_mapping(statsbomb_review_training_signal.get("attribution_weights")),
@@ -9311,6 +9454,7 @@ def build_high_accuracy_strategy_dashboard(
         "agent_replay_downgrade": agent_replay_downgrade,
         "agent_replay_guard_tuning": agent_replay_guard_tuning,
         "evaluation_agent": evaluation_agent,
+        "statsbomb_review_training_quality": statsbomb_review_training_quality,
         "statsbomb_event_review": statsbomb_event_review,
         "video_review_memory": video_review_memory,
         "video_review_fewshot_memory": video_fewshot_memory,
