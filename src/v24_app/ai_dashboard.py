@@ -1314,6 +1314,22 @@ class SmartMatchDashboard:
         ]:
             self._kv_row(left, label, value)
 
+        governance_counts = self.main_flow_governance_counts if isinstance(self.main_flow_governance_counts, dict) else {}
+        tk.Label(left, text="\u4e3b\u6d41\u7a0b\u6cbb\u7406", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
+        for label, value in [
+            ("\u6b63\u5f0f\u5efa\u8bae", str(governance_counts.get("formal_ready", 0))),
+            ("C1 \u5f85\u5ba1", str(governance_counts.get("needs_c1_review", 0))),
+            ("\u963b\u65ad", str(governance_counts.get("blocked", 0))),
+            ("\u5f85\u56de\u6536", str(governance_counts.get("needs_recovery", 0))),
+        ]:
+            self._kv_row(left, label, value)
+        self._strategy_row(
+            left,
+            "\u67e5\u770b\u6b63\u5f0f\u5efa\u8bae",
+            "\u76f4\u63a5\u6253\u5f00\u4e3b\u6d41\u7a0b\u6cbb\u7406\u7b5b\u9009\uff0c\u5148\u770b\u53ef\u4ee5\u8fdb\u5165\u6b63\u5f0f\u5efa\u8bae\u7684\u573a\u6b21\u3002",
+            command=lambda: self.open_governance_filtered_matches("formal_ready"),
+        )
+
         alert_count = int(release_alerts.get("count", 0) or 0)
         if alert_count:
             tk.Label(left, text="\u653e\u884c\u56de\u6536\u63d0\u9192", bg=PANEL, fg=RED, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 8))
@@ -1324,6 +1340,7 @@ class SmartMatchDashboard:
         tk.Label(right, text="\u5feb\u6377\u5165\u53e3", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
         shortcuts = [
             ("\u8d5b\u4e8b\u5206\u6790", "\u67e5\u770b\u91cd\u70b9\u8d5b\u4e8b\u3001\u98ce\u9669\u548c\u7f6e\u4fe1\u5ea6\u5206\u5e03", lambda: self._select_nav(1, self._build_main)),
+            ("\u4e3b\u6d41\u7a0b\u6cbb\u7406", "\u5148\u770b\u6b63\u5f0f\u5efa\u8bae\uff0c\u518d\u67e5 C1 \u5f85\u5ba1\u548c\u963b\u65ad", lambda: self.open_governance_filtered_matches("formal_ready")),
             ("\u590d\u76d8\u4e2d\u5fc3", "\u56de\u6536\u8d5b\u679c\u5e76\u67e5\u770b\u547d\u4e2d\u7387\u4e0e\u9ad8\u7f6e\u4fe1\u5931\u8bef", self.open_review_center),
             ("\u8d5b\u524d\u5feb\u7167", "\u67e5\u770b\u5df2\u4fdd\u5b58\u7684\u8d5b\u524d\u9884\u6d4b\uff0c\u7b49\u5b8c\u573a\u540e\u8fdb\u884c\u590d\u76d8", self.open_snapshot_center),
             ("\u76d1\u63a7\u4e2d\u5fc3", "\u67e5\u770b Agent \u72b6\u6001\u3001\u8fd0\u884c\u65e5\u5fd7\u548c\u8017\u65f6", self.open_monitor_center),
