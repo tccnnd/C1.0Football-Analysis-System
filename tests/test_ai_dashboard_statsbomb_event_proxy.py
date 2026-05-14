@@ -26,6 +26,7 @@ from v24_app.ai_dashboard import (
     build_video_review_evidence_gap_batch_filter_options,
     build_video_review_evidence_gap_batch_filter_result,
     build_video_review_evidence_gap_batch_filter_rows,
+    build_video_review_evidence_gap_batch_action_rows,
     build_video_review_evidence_gap_batch_plan_export_message,
     build_video_review_evidence_gap_batch_plan_filename,
     build_video_review_evidence_gap_batch_plan_lines,
@@ -36,6 +37,7 @@ from v24_app.ai_dashboard import (
     build_video_review_evidence_gap_feedback,
     build_video_review_evidence_gap_feedback_rows,
     collect_video_review_evidence_gap_sample_match_ids,
+    find_video_review_evidence_gap_settlement,
 )
 
 
@@ -415,6 +417,54 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertEqual(rows[0]["evidence"], "external_reference")
         self.assertIn("FIFA+ Archive", rows[0]["body"])
         self.assertEqual(rows[0]["tone"], "good")
+
+    def test_video_review_evidence_gap_batch_action_rows_offer_pending_actions(self) -> None:
+        rows = build_video_review_evidence_gap_batch_action_rows(
+            {
+                "match_id": "gap-1",
+                "status": "pending",
+                "evidence_kind": "missing",
+            }
+        )
+
+        keys = [row["action_key"] for row in rows]
+        self.assertIn("show_settlement_detail", keys)
+        self.assertIn("bind_external_reference", keys)
+        self.assertIn("import_local_video", keys)
+        self.assertIn("build_statsbomb_review_samples", keys)
+        self.assertTrue(all(row["enabled"] for row in rows))
+
+    def test_video_review_evidence_gap_batch_action_rows_limit_resolved_actions(self) -> None:
+        rows = build_video_review_evidence_gap_batch_action_rows(
+            {
+                "match_id": "gap-1",
+                "status": "resolved",
+                "evidence_kind": "external_reference",
+            }
+        )
+
+        keys = [row["action_key"] for row in rows]
+        self.assertEqual(keys, ["show_settlement_detail", "refresh_batch_status"])
+        self.assertTrue(all(row["enabled"] for row in rows))
+
+    def test_video_review_evidence_gap_batch_action_rows_require_selection(self) -> None:
+        rows = build_video_review_evidence_gap_batch_action_rows({})
+
+        self.assertEqual(rows[0]["action_key"], "select_gap_item")
+        self.assertFalse(rows[0]["enabled"])
+        self.assertIn("请先", rows[0]["body"])
+
+    def test_find_video_review_evidence_gap_settlement_matches_id(self) -> None:
+        settlement = find_video_review_evidence_gap_settlement(
+            [
+                {"match_id": "gap-1", "home_team": "India"},
+                {"match_id": "gap-2", "home_team": "Kilo"},
+            ],
+            "gap-2",
+        )
+
+        self.assertEqual(settlement["home_team"], "Kilo")
+        self.assertIsNone(find_video_review_evidence_gap_settlement([{"match_id": "gap-1"}], "missing"))
 
     def test_video_review_evidence_gap_batch_resolution_uses_statsbomb_sample_ids(self) -> None:
         batch = build_video_review_evidence_gap_batch_record(

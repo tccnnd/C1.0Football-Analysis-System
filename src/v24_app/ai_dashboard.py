@@ -2173,6 +2173,78 @@ def build_video_review_evidence_gap_batch_filter_rows(
     return rows
 
 
+def find_video_review_evidence_gap_settlement(settlements: list[dict] | object, match_id: str | object) -> dict | None:
+    resolved_id = str(match_id or "").strip()
+    if not resolved_id or not isinstance(settlements, list):
+        return None
+    for settlement in settlements:
+        if isinstance(settlement, dict) and str(settlement.get("match_id") or "").strip() == resolved_id:
+            return settlement
+    return None
+
+
+def build_video_review_evidence_gap_batch_action_rows(selected_item: dict | object) -> list[dict[str, object]]:
+    if not isinstance(selected_item, dict) or not selected_item:
+        return [
+            {
+                "action_key": "select_gap_item",
+                "label": "选择记录",
+                "enabled": False,
+                "tone": "neutral",
+                "body": "请先在批次表格中选择一条缺口记录。",
+            }
+        ]
+    status = str(selected_item.get("status") or "pending")
+    match_id = str(selected_item.get("match_id") or "").strip()
+    has_match_id = bool(match_id and match_id != "-")
+    rows: list[dict[str, object]] = [
+        {
+            "action_key": "show_settlement_detail",
+            "label": "场次详情",
+            "enabled": has_match_id,
+            "tone": "info",
+            "body": "在当前窗口查看该场复盘详情和错因上下文。",
+        }
+    ]
+    if status == "resolved":
+        rows.append(
+            {
+                "action_key": "refresh_batch_status",
+                "label": "刷新状态",
+                "enabled": True,
+                "tone": "good",
+                "body": "该记录已处理，可刷新批次状态查看最新完成率。",
+            }
+        )
+        return rows
+    rows.extend(
+        [
+            {
+                "action_key": "bind_external_reference",
+                "label": "绑定外部回放",
+                "enabled": has_match_id,
+                "tone": "warning",
+                "body": "为该场绑定合法回放链接，完成后自动回写批次状态。",
+            },
+            {
+                "action_key": "import_local_video",
+                "label": "导入本地视频",
+                "enabled": has_match_id,
+                "tone": "warning",
+                "body": "导入本地授权视频文件，完成后自动回写批次状态。",
+            },
+            {
+                "action_key": "build_statsbomb_review_samples",
+                "label": "生成事件代理样本",
+                "enabled": True,
+                "tone": "info",
+                "body": "重建 StatsBomb/Event Proxy 复盘样本，并按 match_id 自动回写命中的批次项。",
+            },
+        ]
+    )
+    return rows
+
+
 def build_video_review_evidence_gap_feedback(
     settlement: dict,
     result: dict | None = None,
@@ -5820,6 +5892,9 @@ class SmartMatchDashboard:
         except (TypeError, ValueError, IndexError):
             messagebox.showinfo("\u89c6\u9891\u590d\u76d8", "\u9009\u4e2d\u8d5b\u4e8b\u65e0\u6548\uff0c\u8bf7\u91cd\u65b0\u9009\u62e9\u3002")
             return
+        self.import_video_review_for_settlement(settlement)
+
+    def import_video_review_for_settlement(self, settlement: dict) -> None:
         path = filedialog.askopenfilename(
             title="\u9009\u62e9\u672c\u5730\u6bd4\u8d5b\u56de\u653e\u6216\u96c6\u9526",
             filetypes=[
@@ -6245,12 +6320,54 @@ class SmartMatchDashboard:
         )
         detail.pack(fill=tk.X, pady=(12, 0))
         rows_cache: list[dict[str, object]] = []
+        action_var = tk.StringVar(value="选择一条记录后可直接处理缺口。")
+
+        def _selected_row(show_prompt: bool = True) -> dict | None:
+            selection = tree.selection()
+            if not selection or not rows_cache:
+                if show_prompt:
+                    messagebox.showinfo("复盘证据缺口批次", "请先选择一条缺口批次记录。")
+                return None
+            try:
+                index = int(selection[0])
+            except (TypeError, ValueError):
+                if show_prompt:
+                    messagebox.showinfo("复盘证据缺口批次", "当前选择无效，请重新选择。")
+                return None
+            if index < 0 or index >= len(rows_cache):
+                if show_prompt:
+                    messagebox.showinfo("复盘证据缺口批次", "当前选择无效，请重新选择。")
+                return None
+            return rows_cache[index]
+
+        def _settlement_for_row(row: dict | None) -> dict | None:
+            if not isinstance(row, dict):
+                return None
+            settlements = list(reversed(get_recent_settlements(limit=300)))
+            settlement = find_video_review_evidence_gap_settlement(settlements, str(row.get("match_id") or ""))
+            if not settlement:
+                messagebox.showinfo(
+                    "复盘证据缺口批次",
+                    f"未在最近结算记录中找到该场比赛:\n{row.get('match_id', '-')}",
+                )
+                return None
+            return settlement
+
+        def _set_action_text(row: dict | None) -> None:
+            actions = build_video_review_evidence_gap_batch_action_rows(row or {})
+            enabled = [str(action.get("label") or "-") for action in actions if bool(action.get("enabled"))]
+            disabled = [str(action.get("label") or "-") for action in actions if not bool(action.get("enabled"))]
+            action_var.set(
+                f"可执行: {', '.join(enabled) if enabled else '-'}"
+                + (f" | 不可执行: {', '.join(disabled)}" if disabled else "")
+            )
 
         def _show_detail(index: int | None = None) -> None:
             detail.configure(state=tk.NORMAL)
             detail.delete("1.0", tk.END)
             if index is None or index < 0 or index >= len(rows_cache):
                 detail.insert(tk.END, "选择一条批次记录查看处理来源、证据类型和报告路径。")
+                _set_action_text(None)
             else:
                 row = rows_cache[index]
                 detail.insert(
@@ -6264,6 +6381,7 @@ class SmartMatchDashboard:
                         f"处理时间: {row.get('handled_at', '-')}"
                     ),
                 )
+                _set_action_text(row)
             detail.configure(state=tk.DISABLED)
 
         def _refresh(_event=None) -> None:
@@ -6328,6 +6446,62 @@ class SmartMatchDashboard:
                     _show_detail(int(selection[0]))
                 except (TypeError, ValueError):
                     _show_detail(None)
+
+        def _show_selected_settlement_detail() -> None:
+            row = _selected_row()
+            settlement = _settlement_for_row(row)
+            if not settlement:
+                return
+            detail.configure(state=tk.NORMAL)
+            detail.delete("1.0", tk.END)
+            detail.insert(tk.END, self._settlement_review_text(settlement))
+            detail.configure(state=tk.DISABLED)
+
+        def _bind_selected_external_reference() -> None:
+            row = _selected_row()
+            settlement = _settlement_for_row(row)
+            if not settlement:
+                return
+            self.import_video_review_reference_for_settlement(settlement)
+            _refresh()
+
+        def _import_selected_local_video() -> None:
+            row = _selected_row()
+            settlement = _settlement_for_row(row)
+            if not settlement:
+                return
+            self.import_video_review_for_settlement(settlement)
+            _refresh()
+
+        def _build_event_proxy_samples_for_batch() -> None:
+            row = _selected_row()
+            if row is None:
+                return
+            self.export_statsbomb_event_proxy_review_samples()
+            _refresh()
+
+        action_wrap = tk.Frame(shell, bg=BG)
+        action_wrap.pack(fill=tk.X, pady=(10, 0))
+        tk.Label(action_wrap, textvariable=action_var, bg=BG, fg=MUTED, font=("Microsoft YaHei UI", 9)).pack(anchor=tk.W, pady=(0, 8))
+        for label, command, color in [
+            ("场次详情", _show_selected_settlement_detail, PANEL_2),
+            ("绑定外部回放", _bind_selected_external_reference, BLUE),
+            ("导入本地视频", _import_selected_local_video, PANEL_2),
+            ("生成事件代理样本", _build_event_proxy_samples_for_batch, PANEL_2),
+        ]:
+            tk.Button(
+                action_wrap,
+                text=label,
+                command=command,
+                bg=color,
+                fg="white" if color == BLUE else TEXT,
+                activebackground="#3d5ee7" if color == BLUE else "#172638",
+                activeforeground="white",
+                relief=tk.FLAT,
+                font=("Microsoft YaHei UI", 10, "bold"),
+                padx=14,
+                pady=6,
+            ).pack(side=tk.LEFT, padx=(0, 10))
 
         tree.bind("<<TreeviewSelect>>", _on_select)
         _refresh()
