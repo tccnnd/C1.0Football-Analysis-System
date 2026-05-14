@@ -53,6 +53,7 @@ class UIUserCenterModuleTests(unittest.TestCase):
             "run_ensemble_backtest",
             "run_play_model_backtest",
             "run_high_accuracy_strategy_backtest",
+            "export_play_model_takeover_gate_audit_report",
             "export_c1_availability_template",
             "import_c1_availability_snapshots",
             "sync_c1_availability_sources",

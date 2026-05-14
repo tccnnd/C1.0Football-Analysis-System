@@ -175,6 +175,7 @@ from .ui_modules import (
     build_strategy_release_recovery_loop,
     build_strategy_release_pool_rows,
     build_c1_rows_from_marks,
+    filter_main_flow_governance_rows,
     build_main_flow_governance_status,
     build_main_flow_governance_status_text,
     find_release_row,
@@ -190,6 +191,7 @@ from .ui_modules import (
     list_dashboard_report_files,
     summarize_dashboard_report_types,
     select_strategy_allowlist_rows,
+    summarize_main_flow_governance_statuses,
 )
 
 
@@ -1089,6 +1091,10 @@ class SmartMatchDashboard:
         self.c1_release_rows: list[dict] = []
         self.play_model_policy_cache: dict[str, object] = {}
         self.strategy_release_recovery_cache: dict[str, object] = {}
+        self.governance_filter = "all"
+        self.governance_filter_buttons: dict[str, tk.Button] = {}
+        self.main_flow_governance_counts: dict[str, int] = {}
+        self.main_flow_governance_status_by_match_id: dict[str, dict] = {}
         self.event_log: list[tuple[str, str, str]] = []
         self.current_nav_index = 0
         self.current_view = "home"
@@ -2064,6 +2070,11 @@ class SmartMatchDashboard:
         self.show_all_matches = False
         self._refresh_matches()
 
+    def _set_governance_filter(self, selected: str) -> None:
+        self.governance_filter = selected if selected in {"all", "formal_ready", "observe", "blocked", "needs_c1_review", "needs_recovery"} else "all"
+        self.show_all_matches = False
+        self._refresh_matches()
+
     def _widget_alive_for(self, widget: tk.Widget) -> bool:
         try:
             return bool(widget is not None and widget.winfo_exists())
@@ -2082,6 +2093,34 @@ class SmartMatchDashboard:
             if not self._widget_alive_for(button):
                 continue
             active = key == self.admission_filter
+            button.configure(
+                text=f"{labels.get(key, key)} {int(counts.get(key, 0) or 0)}",
+                bg=colors.get(key, BLUE) if active else PANEL_2,
+                fg="white" if active else TEXT,
+                activebackground=colors.get(key, BLUE) if active else "#172638",
+            )
+
+    def _refresh_governance_filter_buttons(self, counts: dict[str, int]) -> None:
+        labels = {
+            "all": "\u5168\u90e8",
+            "formal_ready": "\u6b63\u5f0f\u5efa\u8bae",
+            "observe": "\u89c2\u5bdf",
+            "blocked": "\u963b\u65ad",
+            "needs_c1_review": "C1 \u5f85\u5ba1",
+            "needs_recovery": "\u5f85\u56de\u6536",
+        }
+        colors = {
+            "all": BLUE,
+            "formal_ready": GREEN,
+            "observe": YELLOW,
+            "blocked": RED,
+            "needs_c1_review": YELLOW,
+            "needs_recovery": "#7aa2ff",
+        }
+        for key, button in getattr(self, "governance_filter_buttons", {}).items():
+            if not self._widget_alive_for(button):
+                continue
+            active = key == self.governance_filter
             button.configure(
                 text=f"{labels.get(key, key)} {int(counts.get(key, 0) or 0)}",
                 bg=colors.get(key, BLUE) if active else PANEL_2,

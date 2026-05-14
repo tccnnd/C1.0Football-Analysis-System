@@ -264,6 +264,75 @@ class PlayModelBacktestTests(unittest.TestCase):
         self.assertEqual(status["takeover_gate_audit"]["latest_validation_sample_count"], 120)
         self.assertTrue(str(status["takeover_gate_history_source"]).endswith("play_model_takeover_gate_history_v1.json"))
 
+    def test_export_play_model_takeover_gate_audit_report_outputs_markdown_and_csv(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            policy_file = Path(tmp_dir) / "play_model_policy_v1.json"
+            gate_history_file = Path(tmp_dir) / "play_model_takeover_gate_history_v1.json"
+            report_dir = Path(tmp_dir) / "reports"
+            with patch.object(core, "PLAY_MODEL_POLICY_FILE", policy_file):
+                with patch.object(core, "PLAY_MODEL_TAKEOVER_GATE_HISTORY_FILE", gate_history_file):
+                    with patch.object(core, "REPORT_DIR", report_dir):
+                        core._PLAY_MODEL_POLICY_CACHE.clear()
+                        core._PLAY_MODEL_POLICY_CACHE.update({"mtime": None, "policy": None, "report": {}})
+                        base_gate = {
+                            "status": "block",
+                            "updated_at": "2026-05-13 10:00:00",
+                            "reason": "validation_sample_count_low",
+                            "recommendation": "Keep shadow.",
+                            "policy_impact": "formal_takeover_disabled",
+                            "blocking_count": 1,
+                            "warning_count": 0,
+                            "issues": [{"code": "validation_sample_count_low"}],
+                            "metrics": {
+                                "validation_sample_count": 120,
+                                "total_goals_model_delta": -0.01,
+                                "score_model_delta": -0.02,
+                            },
+                        }
+                        backtest = {
+                            "ok": True,
+                            "reason": "ok",
+                            "validation": {"sample_count": 120},
+                            "improvement": {"total_goals_model_delta": -0.01, "score_model_delta": -0.02},
+                            "report_path": "reports/play_model_backtest_1.md",
+                        }
+                        core._save_play_model_takeover_gate_snapshot(base_gate, backtest)
+                        allow_gate = dict(base_gate)
+                        allow_gate.update(
+                            {
+                                "status": "allow",
+                                "updated_at": "2026-05-13 12:00:00",
+                                "reason": "stable_backtest",
+                                "blocking_count": 0,
+                                "warning_count": 0,
+                                "issues": [],
+                                "metrics": {
+                                    "validation_sample_count": 420,
+                                    "total_goals_model_delta": 0.02,
+                                    "score_model_delta": 0.01,
+                                },
+                            }
+                        )
+                        core._save_play_model_takeover_gate_snapshot(allow_gate, backtest)
+                        exported = core.export_play_model_takeover_gate_audit_report(limit=100)
+                        status = core.get_play_model_policy_status()
+                        self.assertTrue(exported["ok"])
+                        self.assertEqual(exported["history_count"], 2)
+                        md_path = Path(str(exported["markdown_path"]))
+                        csv_path = Path(str(exported["csv_path"]))
+                        self.assertTrue(md_path.exists())
+                        self.assertTrue(csv_path.exists())
+                        md_text = md_path.read_text(encoding="utf-8")
+                        csv_text = csv_path.read_text(encoding="utf-8")
+                        self.assertIn("Play Model Takeover Gate Audit Report", md_text)
+                        self.assertIn("block->allow", md_text)
+                        self.assertIn("validation_sample_count", csv_text)
+                        self.assertIn("block->allow", csv_text)
+                        audit_report = status.get("takeover_gate_audit_report", {})
+                        self.assertEqual(audit_report.get("latest_transition"), "block->allow")
+                        self.assertTrue(str(audit_report.get("markdown_path", "")).endswith(".md"))
+                        self.assertTrue(str(audit_report.get("csv_path", "")).endswith(".csv"))
+
     def test_run_draw_specialist_backtest_tracks_precision_recall_and_buckets(self) -> None:
         validation_items = [
             {

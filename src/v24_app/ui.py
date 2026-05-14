@@ -181,6 +181,7 @@ from .core import (
     predict_match,
     run_ensemble_backtest,
     run_play_model_backtest,
+    export_play_model_takeover_gate_audit_report,
     repair_training_data_health,
     save_c1_comparison_marks_cache,
     settle_match_result,
@@ -826,6 +827,9 @@ class FootballPredictionApp:
             return
         if action_key == "import_historical_samples":
             self._import_training_health_samples()
+            return
+        if action_key == "export_play_model_takeover_gate_audit_report":
+            self.export_play_model_takeover_gate_audit_report()
             return
         self._run_background(
             task_key=f"training_health_repair:{action_key}",
@@ -1569,6 +1573,28 @@ def _app_run_play_model_backtest(self) -> None:
         worker=run_play_model_backtest,
         on_success=self._apply_play_model_backtest_result,
         error_title="玩法回测失败",
+    )
+
+
+def _app_apply_export_play_model_takeover_gate_audit_report_result(self, result: dict) -> None:
+    ok = bool(result.get("ok"))
+    self.status_var.set("已导出接管守门审计报告" if ok else "导出接管守门审计报告失败")
+    if not ok:
+        messagebox.showinfo("接管守门审计报告", f"导出未完成\n原因: {result.get('reason', '-')}")
+        return
+    messagebox.showinfo(
+        "接管守门审计报告",
+        f"Markdown:\n{result.get('markdown_path') or '-'}\n\nCSV:\n{result.get('csv_path') or '-'}\n\nTransitions: {int(result.get('history_count', 0) or 0)}",
+    )
+
+
+def _app_export_play_model_takeover_gate_audit_report(self) -> None:
+    self._run_background(
+        task_key="export_play_model_takeover_gate_audit_report",
+        start_status="正在导出接管守门审计报告...",
+        worker=export_play_model_takeover_gate_audit_report,
+        on_success=self._apply_export_play_model_takeover_gate_audit_report_result,
+        error_title="导出接管守门审计报告失败",
     )
 
 
@@ -2381,6 +2407,7 @@ def _app_open_user_center_final(self) -> None:
         "run_ensemble_backtest": self.run_ensemble_backtest,
         "run_play_model_backtest": self.run_play_model_backtest,
         "run_high_accuracy_strategy_backtest": self.run_high_accuracy_strategy_backtest,
+        "export_play_model_takeover_gate_audit_report": self.export_play_model_takeover_gate_audit_report,
         "export_c1_availability_template": self.export_c1_availability_template,
         "import_c1_availability_snapshots": self.import_c1_availability_snapshots,
         "sync_c1_availability_sources": self.sync_c1_availability_sources,

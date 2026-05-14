@@ -271,6 +271,37 @@ def summarize_main_flow_governance_statuses(statuses: list[Mapping[str, object]]
     return counts
 
 
+def filter_main_flow_governance_rows(
+    rows: list[object] | object,
+    selected: str,
+    *,
+    status_fn,
+) -> list[object]:
+    if not isinstance(rows, list):
+        return []
+    selected_key = str(selected or "all").strip()
+    if selected_key == "all":
+        return list(rows)
+    allowed = {
+        "formal_ready": {"formal_ready"},
+        "observe": {"observe"},
+        "blocked": {"blocked"},
+        "needs_c1_review": {"needs_c1_review"},
+        "needs_recovery": {"needs_recovery"},
+    }.get(selected_key)
+    if not allowed:
+        return list(rows)
+    filtered: list[object] = []
+    for item in rows:
+        try:
+            status = _text(_as_mapping(status_fn(item)).get("status"), "")
+        except Exception:
+            continue
+        if status in allowed:
+            filtered.append(item)
+    return filtered
+
+
 def build_main_flow_governance_status_text(status: Mapping[str, object] | object) -> str:
     resolved = _as_mapping(status)
     if not resolved:

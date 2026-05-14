@@ -165,6 +165,7 @@ from .c1_main_list_flow import (
     should_show_match_for_filter,
 )
 from .main_flow_governance import (
+    filter_main_flow_governance_rows,
     build_main_flow_governance_status,
     build_main_flow_governance_status_text,
     summarize_main_flow_governance_statuses,
@@ -466,6 +467,7 @@ __all__ = [
     "compute_c1_action_counts",
     "restore_c1_marks_for_matches",
     "should_show_match_for_filter",
+    "filter_main_flow_governance_rows",
     "build_main_flow_governance_status",
     "build_main_flow_governance_status_text",
     "summarize_main_flow_governance_statuses",
