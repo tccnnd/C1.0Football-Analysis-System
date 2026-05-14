@@ -13,6 +13,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from v24_app.core import AppMatch
+from v24_app.ai_dashboard import build_video_review_workflow_action_rows
 from v24_app.ui_modules import build_analysis_status_text, build_export_report_lines, resolve_final_bindings
 
 
@@ -82,6 +83,8 @@ class UIModulesTests(unittest.TestCase):
             "_app_run_ensemble_backtest": object(),
             "_app_apply_play_model_backtest_result_v3": object(),
             "_app_run_play_model_backtest": object(),
+            "_app_apply_export_play_model_takeover_gate_audit_report_result": object(),
+            "_app_export_play_model_takeover_gate_audit_report": object(),
             "_app_apply_high_accuracy_strategy_backtest_result": object(),
             "_app_run_high_accuracy_strategy_backtest": object(),
             "_app_play_model_status_text_v3": object(),
@@ -146,6 +149,59 @@ class UIModulesTests(unittest.TestCase):
         self.assertGreaterEqual(len(resolved), 60)
         self.assertIn("open_user_center", resolved)
         self.assertIn("analyze_selected", resolved)
+
+    def test_build_video_review_workflow_action_rows_bind_real_actions(self) -> None:
+        calls: list[str] = []
+
+        class FakeTree:
+            def selection(self) -> list[str]:
+                return ["0"]
+
+        class FakeApp:
+            def import_video_review_for_selection(self, review_tree, settlements) -> None:
+                calls.append(f"import:{review_tree.selection()[0]}:{len(settlements)}")
+
+            def annotate_video_review_for_selection(self, review_tree, settlements) -> None:
+                calls.append(f"annotate:{review_tree.selection()[0]}:{len(settlements)}")
+
+            def export_video_review_fewshot_samples(self) -> None:
+                calls.append("export")
+
+            def preview_video_review_fewshot_merge_bundle(self) -> None:
+                calls.append("preview")
+
+            def apply_video_review_fewshot_merge_bundle(self) -> None:
+                calls.append("apply")
+
+        app = FakeApp()
+        tree = FakeTree()
+        settlements = [{"match_id": "match-1"}]
+        rows = build_video_review_workflow_action_rows(
+            lambda: app.import_video_review_for_selection(tree, settlements),
+            lambda: app.annotate_video_review_for_selection(tree, settlements),
+            app.export_video_review_fewshot_samples,
+            app.preview_video_review_fewshot_merge_bundle,
+            app.apply_video_review_fewshot_merge_bundle,
+        )
+
+        self.assertEqual(
+            [str(row.get("title") or "") for row in rows],
+            [
+                "导入所选视频复盘",
+                "标注视频事件",
+                "导出 few-shot 样本",
+                "预览合并包",
+                "应用视频记忆",
+            ],
+        )
+        for row in rows:
+            command = row.get("command")
+            self.assertTrue(callable(command))
+            command()
+        self.assertEqual(
+            calls,
+            ["import:0:1", "annotate:0:1", "export", "preview", "apply"],
+        )
 
 
 if __name__ == "__main__":

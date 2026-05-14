@@ -24,6 +24,7 @@ from .core import (
     add_video_review_annotation,
     create_video_review,
     extract_video_review_frames_now,
+    export_play_model_takeover_gate_audit_report as export_play_model_takeover_gate_audit_report_now,
     export_video_review_fewshot_samples_now,
     fetch_matches_v24,
     get_draw_specialist_backtest_status,
@@ -70,6 +71,8 @@ from .ui_modules import (
     build_draw_specialist_backtest_success_message,
     build_play_model_backtest_apply_status_text,
     build_play_model_backtest_success_message,
+    build_play_model_takeover_gate_audit_export_message,
+    build_play_model_takeover_gate_audit_export_status_text,
     build_play_model_policy_decision_rows,
     build_play_model_policy_status_text,
     build_play_model_training_status_text,
@@ -199,6 +202,47 @@ RED = "#ef5b57"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 REPORT_DIR = PROJECT_ROOT / "reports"
 SETTINGS_PATH = PROJECT_ROOT / "data" / "state" / "ai_dashboard_settings.json"
+
+
+def build_video_review_workflow_action_rows(
+    import_review,
+    annotate_video_event,
+    export_samples,
+    preview_merge_bundle,
+    apply_memory,
+) -> list[dict[str, object]]:
+    return [
+        {
+            "code": "import_selected_video_review",
+            "title": "导入所选视频复盘",
+            "body": "把当前选中的赛事实例导入复盘中心，建立后续标注上下文。",
+            "command": import_review,
+        },
+        {
+            "code": "annotate_video_event",
+            "title": "标注视频事件",
+            "body": "为已导入的视频复盘补录事件标签与时间点。",
+            "command": annotate_video_event,
+        },
+        {
+            "code": "export_video_fewshot_samples",
+            "title": "导出 few-shot 样本",
+            "body": "生成审查稿、合并计划和可应用包。",
+            "command": export_samples,
+        },
+        {
+            "code": "preview_video_merge_bundle",
+            "title": "预览合并包",
+            "body": "对 bundle 做 dry-run 预览，查看追加和跳过明细。",
+            "command": preview_merge_bundle,
+        },
+        {
+            "code": "apply_video_memory",
+            "title": "应用视频记忆",
+            "body": "把审核通过的 few-shot 样本写入正式视频记忆池并保留备份。",
+            "command": apply_memory,
+        },
+    ]
 
 
 @dataclass
@@ -2602,6 +2646,18 @@ class SmartMatchDashboard:
             error_title="\u73a9\u6cd5\u6a21\u578b\u56de\u6d4b\u5931\u8d25",
         )
 
+    def export_play_model_takeover_gate_audit_report(self) -> None:
+        self._submit_process_task(
+            key="play_model_takeover_gate_audit_export",
+            label="\u63a5\u7ba1\u5b88\u95e8\u5ba1\u8ba1\u5bfc\u51fa",
+            start_status="\u6b63\u5728\u540e\u53f0\u8fdb\u7a0b\u4e2d\u5bfc\u51fa\u63a5\u7ba1\u5b88\u95e8\u5ba1\u8ba1\u62a5\u544a...",
+            func=export_play_model_takeover_gate_audit_report_now,
+            group="report",
+            priority=115,
+            on_success=self._finish_play_model_takeover_gate_audit_export_task,
+            error_title="\u63a5\u7ba1\u5b88\u95e8\u5ba1\u8ba1\u5bfc\u51fa\u5931\u8d25",
+        )
+
     def run_draw_specialist_backtest_task(self) -> None:
         self._submit_process_task(
             key="draw_specialist_backtest",
@@ -2694,6 +2750,18 @@ class SmartMatchDashboard:
         else:
             messagebox.showinfo("\u73a9\u6cd5\u6a21\u578b\u56de\u6d4b", f"\u56de\u6d4b\u672a\u5b8c\u6210\n\u539f\u56e0: {payload.get('reason', '-')}")
 
+    def _finish_play_model_takeover_gate_audit_export_task(self, result: object, record: BackgroundTaskRecord) -> None:
+        payload = result if isinstance(result, dict) else {}
+        self.status_var.set(build_play_model_takeover_gate_audit_export_status_text(payload))
+        self._log_event("OK", f"\u63a5\u7ba1\u5b88\u95e8\u5ba1\u8ba1\u5bfc\u51fa\u5b8c\u6210 | {record.task_id} | {record.elapsed_seconds or 0:.2f}s")
+        if getattr(self, "current_view", "") == "monitor":
+            self.open_monitor_center()
+        title = "\u63a5\u7ba1\u5b88\u95e8\u5ba1\u8ba1\u62a5\u544a"
+        if bool(payload.get("ok")):
+            messagebox.showinfo(title, build_play_model_takeover_gate_audit_export_message(payload))
+        else:
+            messagebox.showwarning(title, build_play_model_takeover_gate_audit_export_message(payload))
+
     def _finish_draw_specialist_backtest_task(self, result: object, record: BackgroundTaskRecord) -> None:
         payload = result if isinstance(result, dict) else {}
         self.status_var.set(build_draw_specialist_backtest_apply_status_text(payload))
@@ -2782,6 +2850,19 @@ class SmartMatchDashboard:
             fg=MUTED,
             font=("Microsoft YaHei UI", 10),
         ).pack(anchor=tk.W, pady=(4, 0))
+        tk.Button(
+            header,
+            text="\u5bfc\u51fa\u5b88\u95e8\u5ba1\u8ba1",
+            command=self.export_play_model_takeover_gate_audit_report,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=14,
+            pady=6,
+        ).pack(anchor=tk.E, pady=(8, 0))
         frame = tk.Frame(window, bg=PANEL, highlightbackground="#172638", highlightthickness=1)
         frame.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 16))
         text = tk.Text(
@@ -3083,6 +3164,19 @@ class SmartMatchDashboard:
         ).pack(side=tk.RIGHT, padx=(0, 10))
         tk.Button(
             header,
+            text="\u5bfc\u51fa\u63a5\u7ba1\u5ba1\u8ba1",
+            command=self.export_play_model_takeover_gate_audit_report,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=14,
+            pady=7,
+        ).pack(side=tk.RIGHT, padx=(0, 10))
+        tk.Button(
+            header,
             text="\u9ad8\u51c6\u56de\u6d4b(\u8fdb\u7a0b)",
             command=self.run_high_accuracy_strategy_backtest_task,
             bg=PANEL_2,
@@ -3332,6 +3426,12 @@ class SmartMatchDashboard:
             "\u63a5\u7ba1\u7b56\u7565\u660e\u7ec6",
             "\u67e5\u770b\u5b8c\u6574\u95e8\u69db\u3001\u6821\u51c6\u6837\u672c\u548c\u63a5\u7ba1\u539f\u56e0",
             command=self.open_play_model_policy_detail_window,
+        )
+        self._strategy_row(
+            right,
+            "\u5bfc\u51fa\u63a5\u7ba1\u5b88\u95e8\u5ba1\u8ba1",
+            "\u751f\u6210 Markdown/CSV \u62a5\u544a\uff0c\u7528\u4e8e\u590d\u6838\u63a5\u7ba1 gate \u8f6c\u79fb\u3001\u6837\u672c\u6570\u548c\u6a21\u578b\u589e\u76ca\u3002",
+            command=self.export_play_model_takeover_gate_audit_report,
         )
 
         tk.Label(right, text="\u5e73\u5c40\u4e13\u9879\u8bca\u65ad", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
@@ -7404,9 +7504,27 @@ class SmartMatchDashboard:
                     str(row.get("detail") or "-"),
                 )
         self._strategy_section_title(right, "AI Video 补标注/补样建议")
-        for row in video_memory_health.get("action_rows", []) if isinstance(video_memory_health.get("action_rows"), list) else []:
+        self._strategy_row(
+            right,
+            str(video_memory_health.get("health", {}).get("summary_text") or "-"),
+            self._video_review_fewshot_action_text(video_memory_health.get("action_rows")),
+        )
+        workflow_rows = build_video_review_workflow_action_rows(
+            lambda: self.import_video_review_for_selection(review_tree, settlements),
+            lambda: self.annotate_video_review_for_selection(review_tree, settlements),
+            self.export_video_review_fewshot_samples,
+            self.preview_video_review_fewshot_merge_bundle,
+            self.apply_video_review_fewshot_merge_bundle,
+        )
+        self._strategy_section_title(right, "AI Video 建议动作入口")
+        for row in workflow_rows:
             if isinstance(row, dict):
-                self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
+                self._strategy_row(
+                    right,
+                    str(row.get("title") or "-"),
+                    str(row.get("body") or "-"),
+                    command=row.get("command"),
+                )
         fewshot_memory = evaluation_agent.get("statsbomb_fewshot_memory", {}) if isinstance(evaluation_agent.get("statsbomb_fewshot_memory"), dict) else {}
         memory_rows = fewshot_memory.get("rows", []) if isinstance(fewshot_memory.get("rows"), list) else []
         if memory_rows:
