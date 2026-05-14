@@ -3112,10 +3112,16 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertGreaterEqual(queue["candidate_count"], 1)
         self.assertEqual(queue["health_status"], "attention")
         self.assertTrue(any(issue["code"] == "sample_count_low" for issue in queue["health_issues"]))
+        self.assertIn("sample_count_low", queue["health_issue_codes"])
+        self.assertIn("xg_direction_failed", queue["missing_labels"])
+        self.assertTrue(queue["current_match_unmatched"])
+        self.assertEqual(queue["workflow_status"]["summary"], "backfill_queue_only")
         self.assertTrue(any("xg_direction_failed" in row["matched_tags"] for row in queue["candidate_rows"]))
         self.assertTrue(any("required_tag_gap" in row["matched_health_issues"] for row in queue["candidate_rows"]))
         self.assertGreater(queue["candidate_rows"][0]["repair_score"], 0)
         self.assertTrue(queue["candidate_rows"][0]["repair_reasons"])
+        self.assertTrue(queue["candidate_rows"][0]["priority_why"])
+        self.assertEqual(queue["candidate_rows"][0]["flow_status"]["draft"], "pending")
         self.assertIn("post-match", queue["leakage_note"])
 
     def test_statsbomb_fewshot_backfill_queue_ranks_by_repair_value(self) -> None:
@@ -3285,6 +3291,10 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
             "summary_text": "补样任务 1 | 候选 1 | 目标标签 1",
             "health_summary": "attention | issues 1 | samples 6",
             "health_issues": [{"code": "required_tag_gap", "severity": "medium", "recommendation": "cover missing tags"}],
+            "missing_labels": ["xg_direction_failed"],
+            "current_query_labels": ["xg_direction_failed", "strategy_miss"],
+            "current_match_unmatched": True,
+            "workflow_status": {"draft": "pending", "merge": "pending", "apply": "pending", "summary": "backfill_queue_only"},
             "leakage_note": "post-match only",
             "tasks": [
                 {
@@ -3298,6 +3308,7 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
                 {
                     "priority_score": 41,
                     "repair_score": 88,
+                    "priority_why": ["覆盖缺口标签: xg_direction_failed", "当前必需标签缺口，需优先补齐"],
                     "repair_reasons": ["required_tag_gap +25", "missing_tags +35"],
                     "source": "statsbomb_baseline",
                     "match_date": "2024-06-15",
@@ -3305,6 +3316,7 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
                     "title": "2024-06-15 | UEFA Euro | Spain vs Croatia",
                     "matched_tags": ["xg_direction_failed"],
                     "matched_health_issues": ["required_tag_gap"],
+                    "flow_status": {"draft": "pending", "merge": "pending", "apply": "pending", "summary": "backfill_queued_only"},
                     "tags": ["statsbomb_post_match_review", "xg_direction_failed"],
                 }
             ],
@@ -3320,9 +3332,11 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("StatsBomb Few-shot 补样队列", payload)
         self.assertIn("补充当前错因相似样本", payload)
         self.assertIn("Spain vs Croatia", payload)
-        self.assertIn("Health Drivers", payload)
+        self.assertIn("缺口与健康驱动", payload)
+        self.assertIn("当前比赛是否命中历史样本: 否", payload)
+        self.assertIn("流程状态: draft=pending | merge=pending | apply=pending", payload)
         self.assertIn("required_tag_gap", payload)
-        self.assertIn("required_tag_gap +25", payload)
+        self.assertIn("覆盖缺口标签: xg_direction_failed", payload)
         self.assertIn("post-match only", payload)
 
     def test_statsbomb_fewshot_draft_payload_builds_reviewable_samples(self) -> None:

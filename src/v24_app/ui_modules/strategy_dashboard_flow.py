@@ -1598,36 +1598,45 @@ def build_statsbomb_fewshot_backfill_queue(
                         matched_health_issues.append(issue_code)
             repair_score = _safe_int(row.get("priority_score"))
             repair_reasons: list[str] = []
+            priority_why: list[str] = []
             missing_hits = sorted(set(overlap) & missing_tag_set)
             current_hits = sorted(set(overlap) & current_query_tag_set)
             if missing_hits:
                 value = 35 * len(missing_hits)
                 repair_score += value
                 repair_reasons.append(f"missing_tags +{value}: {', '.join(missing_hits[:4])}")
+                priority_why.append(f"覆盖缺口标签: {', '.join(missing_hits[:4])}")
             if current_hits:
                 value = 25 * len(current_hits)
                 repair_score += value
                 repair_reasons.append(f"current_query +{value}: {', '.join(current_hits[:4])}")
+                priority_why.append(f"命中当前比赛错因上下文: {', '.join(current_hits[:4])}")
             for issue in matched_health_issues:
                 if issue == "memory_missing":
                     repair_score += 40
                     repair_reasons.append("memory_missing +40")
+                    priority_why.append("few-shot 记忆为空，优先补种子样本")
                 elif issue == "required_tag_gap":
                     repair_score += 25
                     repair_reasons.append("required_tag_gap +25")
+                    priority_why.append("当前必需标签缺口，需优先补齐")
                 elif issue == "sample_count_low":
                     repair_score += 12
                     repair_reasons.append("sample_count_low +12")
+                    priority_why.append("样本总量不足，需扩大样本池")
                 elif issue == "quality_alerts_present":
                     repair_score += 10
                     repair_reasons.append("quality_alerts_present +10")
+                    priority_why.append("存在质量告警，优先补高价值样本")
             if str(row.get("source") or "") == "recent_settlement":
                 repair_score += 15
                 repair_reasons.append("recent_settlement +15")
+                priority_why.append("近期实盘样本，复盘价值更高")
             if not repair_reasons and overlap:
                 value = 8 * len(overlap)
                 repair_score += value
                 repair_reasons.append(f"target_overlap +{value}")
+                priority_why.append("覆盖目标标签")
             scored_count += 1
             if row_limit <= 0:
                 return
@@ -1636,6 +1645,15 @@ def build_statsbomb_fewshot_backfill_queue(
             scored["matched_health_issues"] = matched_health_issues
             scored["repair_score"] = repair_score
             scored["repair_reasons"] = repair_reasons
+            scored["priority_why"] = priority_why[:6]
+            scored["missing_labels_hit"] = missing_hits
+            scored["current_context_hit"] = current_hits
+            scored["flow_status"] = {
+                "draft": "pending",
+                "merge": "pending",
+                "apply": "pending",
+                "summary": "backfill_queued_only",
+            }
             scored["priority_score"] = repair_score
             scored["body"] = (
                 f"{row.get('body', '-')}\n"
@@ -1682,7 +1700,17 @@ def build_statsbomb_fewshot_backfill_queue(
         "health_status": health.get("status") or "-",
         "health_summary": health.get("summary_text") or "-",
         "health_issues": [dict(issue) for issue in health_issues],
+        "health_issue_codes": [str(issue.get("code") or "-") for issue in health_issues],
         "target_tags": sorted(str(tag) for tag in target_tag_set),
+        "missing_labels": missing_tags,
+        "current_query_labels": current_query_tags,
+        "current_match_unmatched": _safe_int(monitor_data.get("current_matched_count")) <= 0,
+        "workflow_status": {
+            "draft": "pending",
+            "merge": "pending",
+            "apply": "pending",
+            "summary": "backfill_queue_only",
+        },
         "candidate_generation": "full" if include_candidates else "deferred",
         "tasks": tasks[: max(0, int(limit))],
         "candidate_rows": scored_rows[: max(0, int(limit))],
@@ -1706,12 +1734,17 @@ def build_statsbomb_fewshot_backfill_report_lines(
     tasks = [row for row in _as_list(resolved.get("tasks")) if isinstance(row, Mapping)]
     candidates = [row for row in _as_list(resolved.get("candidate_rows")) if isinstance(row, Mapping)]
     health_issues = [row for row in _as_list(resolved.get("health_issues")) if isinstance(row, Mapping)]
+    workflow = _as_mapping(resolved.get("workflow_status"))
     lines = [
         "# StatsBomb Few-shot 补样队列",
         "",
         f"- 生成时间: {current.strftime('%Y-%m-%d %H:%M:%S')}",
         f"- 摘要: {resolved.get('summary_text') or '-'}",
         f"- 状态: {resolved.get('status') or '-'}",
+        f"- 缺口标签: {', '.join(str(tag) for tag in _as_list(resolved.get('missing_labels'))[:12]) or '-'}",
+        f"- 当前比赛标签: {', '.join(str(tag) for tag in _as_list(resolved.get('current_query_labels'))[:12]) or '-'}",
+        f"- 当前比赛是否命中历史样本: {'否' if bool(resolved.get('current_match_unmatched')) else '是'}",
+        f"- 流程状态: draft={workflow.get('draft') or '-'} | merge={workflow.get('merge') or '-'} | apply={workflow.get('apply') or '-'}",
         f"- 防泄漏边界: {resolved.get('leakage_note') or '-'}",
         "",
         "## 补样任务",
@@ -1719,7 +1752,7 @@ def build_statsbomb_fewshot_backfill_report_lines(
         "| 优先级 | 任务 | 目标标签 | 说明 |",
         "| ---: | --- | --- | --- |",
     ]
-    lines.extend(["", "## Health Drivers", "", "| Issue | Severity | Recommendation |", "| --- | --- | --- |"])
+    lines.extend(["", "## 缺口与健康驱动", "", "| Issue | Severity | Recommendation |", "| --- | --- | --- |"])
     if not health_issues:
         lines.append("| - | - | - |")
     for issue in health_issues:
@@ -1728,7 +1761,7 @@ def build_statsbomb_fewshot_backfill_report_lines(
             + " | ".join([_md_cell(issue.get("code")), _md_cell(issue.get("severity")), _md_cell(issue.get("recommendation"))])
             + " |"
         )
-    lines.extend(["", "## Backfill Tasks", "", "| Priority | Task | Target tags | Description |", "| ---: | --- | --- | --- |"])
+    lines.extend(["", "## 补样任务", "", "| Priority | Task | Target tags | Description |", "| ---: | --- | --- | --- |"])
     if not tasks:
         lines.append("| 0 | 暂无补样任务 | - | 当前 StatsBomb few-shot 记忆覆盖健康。 |")
     for task in tasks:
@@ -1750,8 +1783,8 @@ def build_statsbomb_fewshot_backfill_report_lines(
             "",
             "## 候选比赛",
             "",
-            "| 修复评分 | 来源 | 日期 | 赛事 | 比赛 | 命中目标 | 健康驱动 | 排序原因 | 标签 |",
-            "| ---: | --- | --- | --- | --- | --- | --- | --- | --- |",
+            "| 修复评分 | 来源 | 日期 | 赛事 | 比赛 | 命中目标 | 健康驱动 | 优先原因 | 流程状态 | 标签 |",
+            "| ---: | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
     )
     if not candidates:
@@ -1759,7 +1792,9 @@ def build_statsbomb_fewshot_backfill_report_lines(
     for row in candidates:
         matched_tags = ", ".join(str(tag) for tag in _as_list(row.get("matched_tags"))) or "-"
         health_issues = ", ".join(str(issue) for issue in _as_list(row.get("matched_health_issues"))) or "-"
-        repair_reasons = ", ".join(str(reason) for reason in _as_list(row.get("repair_reasons"))) or "-"
+        repair_reasons = ", ".join(str(reason) for reason in _as_list(row.get("priority_why"))) or ", ".join(str(reason) for reason in _as_list(row.get("repair_reasons"))) or "-"
+        flow_status = _as_mapping(row.get("flow_status"))
+        flow_text = f"draft={flow_status.get('draft') or '-'} | merge={flow_status.get('merge') or '-'} | apply={flow_status.get('apply') or '-'}"
         tags = ", ".join(str(tag) for tag in _as_list(row.get("tags"))) or "-"
         lines.append(
             "| "
@@ -1773,6 +1808,7 @@ def build_statsbomb_fewshot_backfill_report_lines(
                     _md_cell(matched_tags),
                     _md_cell(health_issues),
                     _md_cell(repair_reasons),
+                    _md_cell(flow_text),
                     _md_cell(tags),
                 ]
             )
