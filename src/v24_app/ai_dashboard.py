@@ -37,6 +37,7 @@ from .core import (
     get_recent_settlements,
     get_video_review_for_match,
     get_video_review_fewshot_memory,
+    repair_training_data_health,
     get_result_recovery_runs,
     get_statsbomb_event_baseline,
     get_statsbomb_sandbox_fewshot_memory,
@@ -1101,6 +1102,60 @@ def _snapshot_status(match: dict, now: datetime | None = None) -> str:
     if hours_from_kickoff <= 3:
         return "\u8fdb\u884c\u4e2d"
     return "\u5f85\u56de\u6536"
+
+
+def build_statsbomb_event_proxy_review_text(item: dict) -> str:
+    summary = item.get("statsbomb_event_summary") if isinstance(item.get("statsbomb_event_summary"), dict) else {}
+    if not summary:
+        return "\n".join(
+            [
+                "StatsBomb 事件代理复盘",
+                "- 状态: 暂无事件代理数据",
+                "- 建议: 若没有视频回放，可优先接入 StatsBomb/事件摘要作为赛后复盘证据。",
+                "- 使用边界: 仅用于赛后归因和训练样本复盘，不进入赛前预测特征。",
+            ]
+        )
+    home = str(item.get("home_team") or "home")
+    away = str(item.get("away_team") or "away")
+    team_stats = summary.get("team_stats") if isinstance(summary.get("team_stats"), dict) else {}
+    home_stats = team_stats.get(home) if isinstance(team_stats.get(home), dict) else {}
+    away_stats = team_stats.get(away) if isinstance(team_stats.get(away), dict) else {}
+    def _as_float(value: object) -> float:
+        try:
+            return float(value or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    event_count = int(max(0, _as_float(summary.get("event_count"))))
+    evidence_level = "medium" if event_count >= 1000 else "low"
+    home_xg = _as_float(home_stats.get("xg"))
+    away_xg = _as_float(away_stats.get("xg"))
+    xg_diff = home_xg - away_xg
+    if abs(xg_diff) < 0.3:
+        conclusion = "双方机会质量接近，重点复核临门一脚、门将表现或偶发事件。"
+    elif xg_diff >= 0.75:
+        conclusion = f"{home} 的机会质量明显占优，若预测失误需复核赛前强弱面低估。"
+    elif xg_diff <= -0.75:
+        conclusion = f"{away} 的机会质量明显占优，若预测失误需复核客队进攻面或主队防守风险。"
+    elif xg_diff > 0:
+        conclusion = f"{home} 机会质量小幅占优，适合作为赛后归因辅助证据。"
+    else:
+        conclusion = f"{away} 机会质量小幅占优，适合作为赛后归因辅助证据。"
+    source_id = summary.get("source_match_id") or item.get("statsbomb_source_match_id") or "-"
+    return "\n".join(
+        [
+            "StatsBomb 事件代理复盘",
+            "- source_type=event_proxy",
+            f"- source_match_id: {source_id}",
+            f"- 证据强度: {evidence_level} / events={event_count}",
+            f"- xG: {home} {_num(home_xg)} vs {away} {_num(away_xg)} / diff {_num(xg_diff)}",
+            f"- 射门: {home} {int(_as_float(home_stats.get('shots')))} vs {away} {int(_as_float(away_stats.get('shots')))}",
+            f"- 射正: {home} {int(_as_float(home_stats.get('shots_on_target')))} vs {away} {int(_as_float(away_stats.get('shots_on_target')))}",
+            f"- 进球时间: first={summary.get('first_goal_minute', '-')} / last={summary.get('last_goal_minute', '-')}",
+            f"- 代理结论: {conclusion}",
+            "- 使用边界: 仅用于赛后归因和训练样本复盘，不进入赛前预测特征，避免赛果信息泄漏。",
+        ]
+    )
 
 
 class SmartMatchDashboard:
@@ -4272,6 +4327,19 @@ class SmartMatchDashboard:
         ).pack(side=tk.LEFT, padx=(10, 0))
         tk.Button(
             review_actions,
+            text="\u751f\u6210\u4e8b\u4ef6\u4ee3\u7406\u590d\u76d8\u6837\u672c",
+            command=self.export_statsbomb_event_proxy_review_samples,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=14,
+            pady=6,
+        ).pack(side=tk.LEFT, padx=(10, 0))
+        tk.Button(
+            review_actions,
             text="\u9884\u89c8\u6837\u672c\u5408\u5e76",
             command=self.preview_video_review_fewshot_merge_bundle,
             bg=PANEL_2,
@@ -4575,6 +4643,35 @@ class SmartMatchDashboard:
             ),
         )
         return output_path, review_path, plan_path, bundle_path, bundle_review_path
+
+    def export_statsbomb_event_proxy_review_samples(self) -> dict | None:
+        try:
+            result = repair_training_data_health("build_statsbomb_review_samples")
+        except Exception as exc:
+            messagebox.showerror("\u4e8b\u4ef6\u4ee3\u7406\u590d\u76d8", f"\u751f\u6210\u5931\u8d25:\n{exc}")
+            return None
+        sample_count = int(result.get("generated_sample_count", 0) or 0)
+        skipped = result.get("skipped_reasons") if isinstance(result.get("skipped_reasons"), dict) else {}
+        missing_statsbomb = int(skipped.get("missing_statsbomb", 0) or 0)
+        unknown_label = int(skipped.get("unknown_label", 0) or 0)
+        output_path = str(result.get("output_path") or "-")
+        if not bool(result.get("ok", True)):
+            self.status_var.set("\u4e8b\u4ef6\u4ee3\u7406\u590d\u76d8\u6837\u672c\u751f\u6210\u5931\u8d25")
+            messagebox.showerror("\u4e8b\u4ef6\u4ee3\u7406\u590d\u76d8", str(result.get("message") or result.get("reason") or "-"))
+            return result
+        self.status_var.set(f"\u4e8b\u4ef6\u4ee3\u7406\u590d\u76d8\u6837\u672c\u5df2\u751f\u6210: {sample_count} \u6761")
+        messagebox.showinfo(
+            "\u4e8b\u4ef6\u4ee3\u7406\u590d\u76d8",
+            (
+                "StatsBomb/Event Proxy \u590d\u76d8\u6837\u672c\u5df2\u751f\u6210\n\n"
+                f"\u6837\u672c: {sample_count}\n"
+                f"\u7f3a StatsBomb \u4e8b\u4ef6: {missing_statsbomb}\n"
+                f"\u672a\u77e5\u6807\u7b7e: {unknown_label}\n"
+                f"\u8f93\u51fa: {output_path}\n\n"
+                "\u8be5\u6570\u636e\u4ec5\u7528\u4e8e\u8d5b\u540e\u590d\u76d8\u548c\u8bef\u5dee\u5f52\u56e0\uff0c\u4e0d\u8fdb\u5165\u8d5b\u524d\u9884\u6d4b\u7279\u5f81\u3002"
+            ),
+        )
+        return result
 
     def preview_video_review_fewshot_merge_bundle(self) -> Path | None:
         REPORT_DIR.mkdir(parents=True, exist_ok=True)
@@ -5589,6 +5686,7 @@ class SmartMatchDashboard:
                 "AI 视频复盘",
                 "- 暂无本场视频复盘。可导入本地录像/集锦后，由 VideoReview Agent 生成抽帧计划和复盘归因。",
             ]
+        statsbomb_proxy_lines = ["", *build_statsbomb_event_proxy_review_text(item).splitlines()]
         allowlist_lines: list[str] = []
         if str(item.get("strategy_allowlist_decision") or "") == "allow":
             allowlist_lines = [
@@ -5626,6 +5724,7 @@ class SmartMatchDashboard:
             "\u6539\u8fdb\u5efa\u8bae",
             *[f"- {suggestion}" for suggestion in suggestions],
             *video_lines,
+            *statsbomb_proxy_lines,
         ]
         return "\n".join(lines)
 
