@@ -20,6 +20,7 @@ from .final_bindings_manifest import FINAL_BINDING_MANIFEST, resolve_final_bindi
 from .reporting import build_export_report_lines
 from .c1_windows import show_c1_comparison_window, show_c1_release_window
 from .user_center import build_user_center_sections, open_user_center_window
+from .special_workbench_flow import SPECIAL_WORKBENCH_LAYOUT, build_special_workbench_sections
 from .main_list_sync import (
     C1_TREE_TAG_STYLES,
     build_c1_apply_dialog_text,
@@ -358,6 +359,8 @@ __all__ = [
     "show_c1_release_window",
     "build_user_center_sections",
     "open_user_center_window",
+    "SPECIAL_WORKBENCH_LAYOUT",
+    "build_special_workbench_sections",
     "C1_TREE_TAG_STYLES",
     "build_c1_apply_dialog_text",
     "build_c1_apply_status_text",

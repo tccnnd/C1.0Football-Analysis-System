@@ -69,6 +69,7 @@ from .ui_modules import (
     build_background_task_summary,
     build_background_task_stability_cards,
     build_background_task_stability_summary,
+    build_special_workbench_sections,
     build_high_accuracy_strategy_backtest_message,
     build_high_accuracy_strategy_backtest_status_text,
     build_draw_specialist_backtest_apply_status_text,
@@ -3108,6 +3109,7 @@ class SmartMatchDashboard:
             ("♧", "策略库", False),
             ("▤", "数据中心", False),
             ("⚙", "系统设置", False),
+            ("◇", "专项中心", False),
         ]
         for index, (icon, text, active) in enumerate(nav):
             command = None
@@ -3125,6 +3127,8 @@ class SmartMatchDashboard:
                 command = self.open_data_center
             elif index == 6:
                 command = self.open_system_settings
+            elif index == 7:
+                command = self.open_special_workbench
             self._nav_item(index, icon, text, active, command=command)
 
     def _nav_item(self, index: int, icon: str, text: str, active: bool, command=None) -> None:
@@ -3247,6 +3251,7 @@ class SmartMatchDashboard:
         tk.Label(right, text="\u5feb\u6377\u5165\u53e3", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
         shortcuts = [
             ("\u8d5b\u4e8b\u5206\u6790", "\u67e5\u770b\u91cd\u70b9\u8d5b\u4e8b\u3001\u98ce\u9669\u548c\u7f6e\u4fe1\u5ea6\u5206\u5e03", lambda: self._select_nav(1, self._build_main)),
+            ("专项中心", "集中进入复盘、策略接管、数据运行相关专项窗口", self.open_special_workbench),
             ("\u4e3b\u6d41\u7a0b\u6cbb\u7406", "\u5148\u770b\u6b63\u5f0f\u5efa\u8bae\uff0c\u518d\u67e5 C1 \u5f85\u5ba1\u548c\u963b\u65ad", lambda: self.open_governance_filtered_matches("formal_ready")),
             ("\u6cbb\u7406\u8be6\u60c5", "\u6e05\u7406 C1 \u5f85\u5ba1\u4e0e\u963b\u65ad\u573a\u6b21\uff0c\u67e5\u770b\u51b3\u7b56\u94fe", self.open_governance_issue_center),
             ("\u63a5\u7ba1\u5ba1\u8ba1", "\u67e5\u770b\u63a5\u7ba1\u95e8\u69db\u5386\u53f2\u3001\u5bfc\u51fa\u8def\u5f84\u548c\u5ba1\u8ba1\u6587\u4ef6", self.open_play_model_takeover_gate_audit_history),
@@ -3257,6 +3262,56 @@ class SmartMatchDashboard:
         ]
         for title, body_text, command in shortcuts:
             self._shortcut_row(right, title, body_text, command)
+
+    def open_special_workbench(self) -> None:
+        self.current_nav_index = 7
+        self.current_view = "special_workbench"
+        self._refresh_nav_highlight()
+        shell = self._page_shell(
+            "专项中心",
+            "集中进入复盘、策略接管、数据运行相关专项窗口，减少主页面内容堆叠。",
+        )
+        actions = {
+            "open_review_center": self.open_review_center,
+            "open_ai_video_review_center_window": self.open_ai_video_review_center_window,
+            "open_video_review_evidence_gap_center_window": self.open_video_review_evidence_gap_center_window,
+            "open_statsbomb_review_training_center_window": self.open_statsbomb_review_training_center_window,
+            "open_statsbomb_review_training_closure_window": self.open_statsbomb_review_training_closure_window,
+            "open_strategy_library": self.open_strategy_library,
+            "open_strategy_release_recovery_loop_window": self.open_strategy_release_recovery_loop_window,
+            "open_play_model_takeover_gate_audit_history": self.open_play_model_takeover_gate_audit_history,
+            "open_play_model_policy_detail_window": self.open_play_model_policy_detail_window,
+            "open_draw_specialist_backtest_window": self.open_draw_specialist_backtest_window,
+            "open_accuracy_diagnostics": self.open_accuracy_diagnostics,
+            "open_snapshot_center": self.open_snapshot_center,
+            "open_data_center": self.open_data_center,
+            "open_monitor_center": self.open_monitor_center,
+            "open_recovery_run_center": self.open_recovery_run_center,
+        }
+        sections = build_special_workbench_sections(actions)
+
+        grid = tk.Frame(shell, bg=BG)
+        grid.pack(fill=tk.BOTH, expand=True)
+        for column in range(3):
+            grid.grid_columnconfigure(column, weight=1, uniform="special_workbench")
+
+        for column, (section_title, rows) in enumerate(sections):
+            card = self._card(grid, PANEL)
+            card.grid(row=0, column=column, sticky="nsew", padx=(0, 14 if column < len(sections) - 1 else 0))
+            tk.Label(
+                card,
+                text=section_title,
+                bg=PANEL,
+                fg=TEXT,
+                font=("Microsoft YaHei UI", 13, "bold"),
+            ).pack(anchor=tk.W, padx=18, pady=(16, 10))
+            for row in rows:
+                self._strategy_row(
+                    card,
+                    str(row.get("title") or "-"),
+                    str(row.get("body") or "-"),
+                    command=row.get("command"),
+                )
 
     def _build_main(self) -> None:
         self.current_nav_index = 1
@@ -10940,6 +10995,7 @@ class SmartMatchDashboard:
         primary_tools = tk.Frame(shell, bg=BG)
         primary_tools.pack(fill=tk.X, pady=(0, 6))
         self._strategy_toolbar_button(primary_tools, "\u5237\u65b0\u770b\u677f", self.open_strategy_library)
+        self._strategy_toolbar_button(primary_tools, "专项中心", self.open_special_workbench)
         self._strategy_toolbar_button(primary_tools, "\u8fdb\u7a0b\u9ad8\u51c6\u56de\u6d4b", self.run_high_accuracy_strategy_backtest_task)
         self._strategy_toolbar_button(primary_tools, "\u5bfc\u51fa\u653e\u884c\u6e05\u5355", self.export_strategy_allowlist, primary=True)
         self._strategy_toolbar_button(primary_tools, "\u653e\u884c\u56de\u6536\u95ed\u73af", self.open_strategy_release_recovery_loop_window)
