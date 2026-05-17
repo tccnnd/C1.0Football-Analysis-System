@@ -894,8 +894,12 @@ def _supervisor_markdown(pred: dict) -> str:
         "|---|---|",
         f"| Trace ID | {_md_cell(trace.get('trace_id', '-'))} |",
         f"| Trace Version | {_md_cell(trace.get('trace_version', '-'))} |",
+        f"| Workflow | {_md_cell(trace.get('workflow_name', '-'))} / {_md_cell(trace.get('workflow_version', '-'))} |",
+        f"| Model | {_md_cell(trace.get('model_name', '-'))} |",
         f"| Prompt Version | {_md_cell(trace.get('prompt_version', '-'))} |",
         f"| Trace Latency | {_md_cell(trace.get('latency_ms', '-'))} ms |",
+        f"| Replayable | {_md_cell('yes' if trace.get('replayable') else 'no')} |",
+        f"| Grounded | {_md_cell('yes' if trace.get('report_grounded_flag') else 'no')} |",
         f"| Evidence Refs | {_md_cell(len(evidence_refs))} |",
         f"| Tool Calls | {_md_cell(len(tool_calls))} |",
         f"| Supervisor 状态 | {_md_cell(supervisor.get('status', '-'))} |",
@@ -4460,6 +4464,7 @@ class SmartMatchDashboard:
 
     def _draw_agent_trace_panel(self, parent: tk.Widget, row: DashboardRow) -> None:
         supervisor = row.prediction.get("supervisor") if isinstance(row.prediction, dict) else {}
+        trace = row.prediction.get("trace") if isinstance(row.prediction, dict) and isinstance(row.prediction.get("trace"), dict) else {}
         nodes = build_agent_trace_nodes(supervisor)
         if not nodes:
             return
@@ -4485,6 +4490,25 @@ class SmartMatchDashboard:
             fg=MUTED,
             font=("Microsoft YaHei UI", 9),
         ).pack(side=tk.RIGHT)
+        if trace:
+            evidence_refs = trace.get("evidence_refs") if isinstance(trace.get("evidence_refs"), list) else []
+            tool_calls = trace.get("tool_calls") if isinstance(trace.get("tool_calls"), list) else []
+            trace_id = str(trace.get("trace_id") or "-")
+            trace_short = trace_id if len(trace_id) <= 22 else f"{trace_id[:22]}..."
+            latency = trace.get("latency_ms")
+            latency_text = f"{latency}ms" if latency not in (None, "") else "-ms"
+            trace_row = tk.Frame(frame, bg=PANEL)
+            trace_row.pack(fill=tk.X, padx=18, pady=(0, 8))
+            tk.Label(
+                trace_row,
+                text=(
+                    f"Trace: {trace_short} | evidence {len(evidence_refs)} | "
+                    f"tool {len(tool_calls)} | latency {latency_text}"
+                ),
+                bg=PANEL,
+                fg=MUTED,
+                font=("Microsoft YaHei UI", 9),
+            ).pack(anchor=tk.W)
 
         node_row = tk.Frame(frame, bg=PANEL)
         node_row.pack(fill=tk.X, padx=18, pady=(0, 8))
