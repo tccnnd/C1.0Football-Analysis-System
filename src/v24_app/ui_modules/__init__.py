@@ -22,7 +22,10 @@ from .c1_windows import show_c1_comparison_window, show_c1_release_window
 from .user_center import build_user_center_sections, open_user_center_window
 from .special_workbench_flow import (
     SPECIAL_WORKBENCH_LAYOUT,
+    build_data_training_special_section_rows,
     build_review_center_special_summary_rows,
+    build_special_workbench_overview_rows,
+    build_strategy_special_summary_rows,
     build_special_workbench_sections,
 )
 from .main_list_sync import (
@@ -364,7 +367,10 @@ __all__ = [
     "build_user_center_sections",
     "open_user_center_window",
     "SPECIAL_WORKBENCH_LAYOUT",
+    "build_data_training_special_section_rows",
     "build_review_center_special_summary_rows",
+    "build_special_workbench_overview_rows",
+    "build_strategy_special_summary_rows",
     "build_special_workbench_sections",
     "C1_TREE_TAG_STYLES",
     "build_c1_apply_dialog_text",

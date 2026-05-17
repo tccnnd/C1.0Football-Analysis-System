@@ -14,7 +14,10 @@ if str(SRC_ROOT) not in sys.path:
 
 from v24_app.ui_modules import (
     SPECIAL_WORKBENCH_LAYOUT,
+    build_data_training_special_section_rows,
     build_review_center_special_summary_rows,
+    build_strategy_special_summary_rows,
+    build_special_workbench_overview_rows,
     build_special_workbench_sections,
 )
 
@@ -62,6 +65,105 @@ class UISpecialWorkbenchFlowTests(unittest.TestCase):
         self.assertIn("当前缺证据 7 场", rows[2]["body"])
         self.assertEqual(rows[3]["action_key"], "open_statsbomb_review_training_center_window")
         self.assertEqual(rows[4]["action_key"], "open_statsbomb_review_training_closure_window")
+
+    def test_build_special_workbench_overview_rows_summarizes_groups(self) -> None:
+        rows = build_special_workbench_overview_rows()
+
+        self.assertEqual(rows[0]["label"], "专项总数")
+        self.assertEqual(rows[0]["value"], str(sum(len(entries) for _section_title, entries in SPECIAL_WORKBENCH_LAYOUT)))
+        self.assertIn("复盘", rows[1]["label"])
+        self.assertIn("策略", rows[2]["label"])
+        self.assertIn("数据", rows[3]["label"])
+        self.assertIn("/", rows[0]["detail"])
+
+
+    def test_build_data_training_special_section_rows_exposes_overview_and_jump_entry(self) -> None:
+        calls: list[str] = []
+        actions = {
+            "show_model_training_overview": lambda: calls.append("training"),
+            "open_data_center": lambda: calls.append("data"),
+        }
+        rows = build_data_training_special_section_rows(
+            actions,
+            coverage_status={
+                "training_health": {
+                    "status": "attention",
+                    "blocking_count": 0,
+                    "warning_count": 1,
+                    "issues": [
+                        {
+                            "code": "statsbomb_review_samples_missing",
+                            "severity": "warning",
+                            "message": "StatsBomb 复盘样本缺失。",
+                            "recommendation": "生成复盘样本。",
+                        }
+                    ],
+                    "xgb_trainability": {
+                        "sample_count": 128,
+                        "min_sample_count": 300,
+                        "valid_feature_count": 120,
+                        "min_valid_feature_count": 300,
+                    },
+                    "history_readiness": {
+                        "club_match_count": 96,
+                        "min_club_match_count": 100,
+                        "statsbomb_match_count": 3,
+                        "statsbomb_review_sample_count": 0,
+                        "statsbomb_review_feature_count": 0,
+                    },
+                }
+            },
+            training_gate_status={
+                "status": "ready_to_train_play_models",
+                "recommended_action": "train_play_models",
+                "recommendation": "玩法模型可训练。",
+                "xgb": {
+                    "trainable": True,
+                    "sample_count": 320,
+                    "min_sample_count": 300,
+                    "valid_feature_count": 300,
+                    "min_valid_feature_count": 300,
+                    "model_ready": True,
+                },
+                "play_models": {
+                    "trainable_count": 2,
+                    "total_count": 2,
+                    "ready_count": 1,
+                    "all_trainable": True,
+                    "all_ready": False,
+                },
+            },
+            data_health_status={
+                "data_source": "local",
+                "source_health": "来源正常",
+                "cache_status": "缓存命中",
+                "inventory_rows": [
+                    ("cache", "12 files / 1.2 MB / updated 2026-05-17"),
+                    ("state", "8 files / 512 KB / updated 2026-05-17"),
+                    ("models", "3 files / 3.4 MB / updated 2026-05-17"),
+                ],
+            },
+        )
+
+        self.assertEqual(
+            [row["title"] for row in rows],
+            [
+                "训练健康卡片",
+                "优先补数建议",
+                "XGB 训练 gate",
+                "玩法模型训练 gate",
+                "数据文件 / 模型文件 / 缓存健康摘要",
+            ],
+        )
+        self.assertIn("attention", rows[0]["body"])
+        self.assertIn("StatsBomb 复盘样本缺失", rows[1]["body"])
+        self.assertIn("ready_to_train_play_models", rows[3]["body"])
+        self.assertIn("数据源 local", rows[4]["body"])
+        for row in rows:
+            command = row.get("command")
+            self.assertTrue(callable(command))
+            command()
+        self.assertEqual(calls, ["training", "training", "training", "training", "data"])
 
 
 if __name__ == "__main__":

@@ -3,6 +3,27 @@ from __future__ import annotations
 from typing import Callable, Mapping
 
 
+def _as_mapping(value: object) -> Mapping[str, object]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _safe_int(value: object, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _text(value: object, default: str = "-") -> str:
+    text = str(value if value is not None else "").strip()
+    return text or default
+
+from .model_status_flow import (
+    build_training_health_action_rows,
+    build_training_health_card_rows,
+    build_training_model_gate_rows,
+)
+
 SPECIAL_WORKBENCH_LAYOUT: tuple[tuple[str, tuple[dict[str, str], ...]], ...] = (
     (
         "复盘闭环",
@@ -65,6 +86,12 @@ SPECIAL_WORKBENCH_LAYOUT: tuple[tuple[str, tuple[dict[str, str], ...]], ...] = (
                 "body": "查看总进球/比分模型接管门槛、有效策略和阻断原因。",
                 "action_key": "open_play_model_policy_detail_window",
                 "tone": "neutral",
+            },
+            {
+                "title": "调参审计历史",
+                "body": "查看调参审计转场、导出文件和最新外部报告。",
+                "action_key": "open_strategy_policy_audit_history",
+                "tone": "info",
             },
             {
                 "title": "平局专项诊断",
@@ -182,3 +209,192 @@ def build_review_center_special_summary_rows(
             "tone": str(closure_summary.get("tone") or "neutral"),
         },
     ]
+
+
+def build_strategy_special_summary_rows(
+    *,
+    play_model_policy_status: Mapping[str, object] | object,
+    release_recovery_loop: Mapping[str, object] | object,
+    draw_release_guard_tuning: Mapping[str, object] | object,
+    accuracy_diagnostics: Mapping[str, object] | object,
+    limit: int = 6,
+) -> list[dict[str, object]]:
+    play_status = _as_mapping(play_model_policy_status)
+    release = _as_mapping(release_recovery_loop)
+    draw_tuning = _as_mapping(draw_release_guard_tuning)
+    accuracy = _as_mapping(accuracy_diagnostics)
+    policy = _as_mapping(play_status.get("policy"))
+    effective_policy = _as_mapping(play_status.get("effective_policy"))
+    takeover_gate = _as_mapping(play_status.get("takeover_gate"))
+    takeover_audit = _as_mapping(play_status.get("takeover_gate_audit"))
+    takeover_report = _as_mapping(play_status.get("takeover_gate_audit_report"))
+    rows = [
+        {
+            "title": "放行回收闭环",
+            "body": (
+                f"{_text(release.get('summary_text'), _text(release.get('health_text'), '暂无闭环摘要'))}\n"
+                f"待回收 {_safe_int(release.get('ready_for_recovery_count'))} | 告警 {_safe_int(release.get('alert_count'))}"
+            ),
+            "action_key": "open_strategy_release_recovery_loop_window",
+            "tone": "warning" if _safe_int(release.get("ready_for_recovery_count")) else "neutral",
+        },
+        {
+            "title": "接管审计历史",
+            "body": (
+                f"历史 {_safe_int(takeover_audit.get('history_count'), _safe_int(takeover_report.get('history_count')))} | "
+                f"最近转变 {_text(takeover_audit.get('latest_transition'), _text(takeover_report.get('latest_transition')))}\n"
+                f"最近原因 {_text(takeover_audit.get('latest_reason'), _text(takeover_report.get('latest_reason')))}"
+            ),
+            "action_key": "open_play_model_takeover_gate_audit_history",
+            "tone": "warning" if _text(takeover_gate.get("status"), "") in {"block", "watch"} else "neutral",
+        },
+        {
+            "title": "玩法接管策略",
+            "body": (
+                f"gate {_text(takeover_gate.get('status'), '-')} | blocked={bool(play_status.get('policy_blocked_by_gate'))}\n"
+                f"scoreline {_text(_as_mapping(policy.get('scoreline')).get('takeover_enabled'), '-')} -> {_text(_as_mapping(effective_policy.get('scoreline')).get('takeover_enabled'), '-')}\n"
+                f"total_goals {_text(_as_mapping(policy.get('total_goals')).get('takeover_enabled'), '-')} -> {_text(_as_mapping(effective_policy.get('total_goals')).get('takeover_enabled'), '-')}"
+            ),
+            "action_key": "open_play_model_policy_detail_window",
+            "tone": "warning" if bool(play_status.get("policy_blocked_by_gate")) else "neutral",
+        },
+        {
+            "title": "平局专项诊断",
+            "body": (
+                f"{_text(draw_tuning.get('summary_text'), _text(draw_tuning.get('label'), '暂无平局诊断'))}\n"
+                f"{_text(draw_tuning.get('reason_text'), _text(draw_tuning.get('description'), '-'))}"
+            ),
+            "action_key": "open_draw_specialist_backtest_window",
+            "tone": _text(draw_tuning.get("tone"), "neutral"),
+        },
+        {
+            "title": "准确率诊断",
+            "body": (
+                f"样本 {_safe_int(accuracy.get('sample_count'))} | 总体 {_text(accuracy.get('overall'), '-')}\n"
+                f"优先 {_text(accuracy.get('priority'), '-')}"
+            ),
+            "action_key": "open_accuracy_diagnostics",
+            "tone": "warning" if _safe_int(accuracy.get("sample_count")) and _text(accuracy.get("priority"), "") != "-" else "neutral",
+        },
+        {
+            "title": "调参审计历史",
+            "body": "查看策略调参审计历史、导出文件和最近回放记录。",
+            "action_key": "open_strategy_policy_audit_history",
+            "tone": "info",
+        },
+    ]
+    return rows[: max(0, int(limit))]
+
+
+def build_data_training_special_section_rows(
+    actions: Mapping[str, Callable[[], None]],
+    *,
+    coverage_status: Mapping[str, object] | object,
+    training_gate_status: Mapping[str, object] | object,
+    data_health_status: Mapping[str, object] | object,
+) -> list[dict[str, object]]:
+    coverage = coverage_status if isinstance(coverage_status, Mapping) else {}
+    data_health = data_health_status if isinstance(data_health_status, Mapping) else {}
+    training_cards = build_training_health_card_rows(coverage, limit=4)
+    training_actions = build_training_health_action_rows(coverage, limit=3)
+    gate_rows = build_training_model_gate_rows(training_gate_status, limit=3)
+
+    inventory_rows = data_health.get("inventory_rows", []) if isinstance(data_health.get("inventory_rows"), list) else []
+    inventory_text = " | ".join(
+        f"{str(item[0])}: {str(item[1])}"
+        for item in inventory_rows[:3]
+        if isinstance(item, (list, tuple)) and len(item) >= 2
+    ) or "-"
+    data_source = str(data_health.get("data_source") or "-")
+    source_health = str(data_health.get("source_health") or "-")
+    cache_status = str(data_health.get("cache_status") or "-")
+
+    missing: list[str] = []
+    rows: list[dict[str, object]] = []
+
+    def _attach(action_key: str, title: str, body: str) -> None:
+        command = actions.get(action_key)
+        if command is None:
+            missing.append(action_key)
+            return
+        rows.append(
+            {
+                "title": title,
+                "body": body,
+                "action_key": action_key,
+                "command": command,
+            }
+        )
+
+    health_body = " | ".join(
+        f"{str(row.get('label') or '-')}: {str(row.get('value') or '-')}"
+        for row in training_cards[:3]
+    ) or "-"
+    health_detail = str(training_cards[0].get("detail") or "-") if training_cards else "-"
+    _attach(
+        "show_model_training_overview",
+        "训练健康卡片",
+        f"{health_body}\n{health_detail}",
+    )
+
+    if training_actions:
+        first_action = training_actions[0]
+        suggestion_body = f"{str(first_action.get('value') or '-')} | {str(first_action.get('detail') or '-')}"
+    else:
+        suggestion_body = "进入训练总览查看补数建议"
+    _attach(
+        "show_model_training_overview",
+        "优先补数建议",
+        suggestion_body,
+    )
+
+    gate_head_row = gate_rows[0] if gate_rows else {}
+    gate_head_body = f"{str(gate_head_row.get('value') or '-')} | {str(gate_head_row.get('detail') or '-')}"
+    xgb_gate_row = gate_rows[1] if len(gate_rows) > 1 else (gate_rows[0] if gate_rows else {})
+    _attach(
+        "show_model_training_overview",
+        "XGB 训练 gate",
+        f"{gate_head_body} | {str(xgb_gate_row.get('value') or '-')} | {str(xgb_gate_row.get('detail') or '-')}",
+    )
+
+    play_gate_row = gate_rows[2] if len(gate_rows) > 2 else {}
+    _attach(
+        "show_model_training_overview",
+        "玩法模型训练 gate",
+        f"{gate_head_body} | {str(play_gate_row.get('value') or '-')} | {str(play_gate_row.get('detail') or '-')}",
+    )
+
+    _attach(
+        "open_data_center",
+        "数据文件 / 模型文件 / 缓存健康摘要",
+        f"数据源 {data_source} | 源健康 {source_health} | 缓存 {cache_status}\n{inventory_text}",
+    )
+
+    if missing:
+        raise RuntimeError(f"Missing data training section action(s): {', '.join(missing[:8])}")
+    return rows
+
+
+def build_special_workbench_overview_rows() -> list[dict[str, str]]:
+    section_names = " / ".join(str(section_title) for section_title, _entries in SPECIAL_WORKBENCH_LAYOUT)
+    overview_rows = [
+        {
+            "label": "专项总数",
+            "value": str(sum(len(entries) for _section_title, entries in SPECIAL_WORKBENCH_LAYOUT)),
+            "tone": "good",
+            "detail": section_names,
+        }
+    ]
+    tones = ("info", "warning", "neutral")
+    for index, (section_title, entries) in enumerate(SPECIAL_WORKBENCH_LAYOUT):
+        sample_titles = [str(entry.get("title") or "-") for entry in entries[:2] if isinstance(entry, dict)]
+        detail = " / ".join(sample_titles) if sample_titles else "-"
+        overview_rows.append(
+            {
+                "label": str(section_title),
+                "value": str(len(entries)),
+                "tone": tones[index % len(tones)],
+                "detail": detail,
+            }
+        )
+    return overview_rows

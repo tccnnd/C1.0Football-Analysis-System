@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 import math
@@ -32,6 +32,8 @@ from .core import (
     get_draw_specialist_backtest_status,
     get_draw_release_guard_policy_history,
     get_draw_release_guard_policy_status,
+    get_training_data_coverage_status,
+    get_training_model_gate_status,
     get_play_model_policy_status,
     get_play_model_training_status,
     get_high_accuracy_strategy_status,
@@ -70,7 +72,10 @@ from .ui_modules import (
     build_background_task_stability_cards,
     build_background_task_stability_summary,
     build_review_center_special_summary_rows,
+    build_data_training_special_section_rows,
+    build_special_workbench_overview_rows,
     build_special_workbench_sections,
+    build_strategy_special_summary_rows,
     build_high_accuracy_strategy_backtest_message,
     build_high_accuracy_strategy_backtest_status_text,
     build_draw_specialist_backtest_apply_status_text,
@@ -3272,6 +3277,41 @@ class SmartMatchDashboard:
             "专项中心",
             "集中进入复盘、策略接管、数据运行相关专项窗口，减少主页面内容堆叠。",
         )
+        tk.Label(
+            shell,
+            text="优先从复盘闭环进入，接管、策略和数据入口按需展开。",
+            bg=BG,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 10),
+        ).pack(anchor=tk.W, pady=(0, 10))
+
+        quick_actions = tk.Frame(shell, bg=BG)
+        quick_actions.pack(fill=tk.X, pady=(0, 12))
+        for label, command in [
+            ("复盘中心", self.open_review_center),
+            ("策略看板", self.open_strategy_library),
+            ("数据中心", self.open_data_center),
+            ("监控中心", self.open_monitor_center),
+        ]:
+            tk.Button(
+                quick_actions,
+                text=label,
+                command=command,
+                bg=PANEL_2,
+                fg=TEXT,
+                activebackground="#172638",
+                activeforeground="white",
+                relief=tk.FLAT,
+                font=("Microsoft YaHei UI", 10, "bold"),
+                padx=16,
+                pady=6,
+            ).pack(side=tk.LEFT, padx=(0, 8))
+
+        overview = tk.Frame(shell, bg=BG)
+        overview.pack(fill=tk.X, pady=(0, 14))
+        for row in build_special_workbench_overview_rows():
+            self._detail_metric(overview, str(row.get("label") or "-"), str(row.get("value") or "-"), self._tone_color(str(row.get("tone") or "neutral")))
+
         actions = {
             "open_review_center": self.open_review_center,
             "open_ai_video_review_center_window": self.open_ai_video_review_center_window,
@@ -3286,14 +3326,35 @@ class SmartMatchDashboard:
             "open_accuracy_diagnostics": self.open_accuracy_diagnostics,
             "open_snapshot_center": self.open_snapshot_center,
             "open_data_center": self.open_data_center,
+            "show_model_training_overview": self.show_model_training_overview,
             "open_monitor_center": self.open_monitor_center,
             "open_recovery_run_center": self.open_recovery_run_center,
         }
+        coverage_status = get_training_data_coverage_status()
+        training_gate_status = get_training_model_gate_status(coverage_status)
+        load_report = self.last_load_diagnostics if isinstance(self.last_load_diagnostics, dict) else {}
+        data_health_status = {
+            "data_source": self.data_source,
+            "source_health": _source_health_summary(load_report),
+            "cache_status": _cache_status_summary(load_report),
+            "inventory_rows": self._data_inventory_rows(),
+        }
         sections = build_special_workbench_sections(actions)
+        sections.append(
+            (
+                "数据与训练",
+                build_data_training_special_section_rows(
+                    actions,
+                    coverage_status=coverage_status,
+                    training_gate_status=training_gate_status,
+                    data_health_status=data_health_status,
+                ),
+            )
+        )
 
         grid = tk.Frame(shell, bg=BG)
         grid.pack(fill=tk.BOTH, expand=True)
-        for column in range(3):
+        for column in range(len(sections)):
             grid.grid_columnconfigure(column, weight=1, uniform="special_workbench")
 
         for column, (section_title, rows) in enumerate(sections):
@@ -4930,8 +4991,51 @@ class SmartMatchDashboard:
         self._refresh_nav_highlight()
         shell = self._page_shell(
             "\u6570\u636e\u4e2d\u5fc3",
-            "\u5f53\u524d\u6570\u636e\u6e90\u3001\u7f13\u5b58\u3001\u6a21\u578b\u72b6\u6001\u548c\u62a5\u544a\u4ea7\u7269",
+            "\u53ea\u4fdd\u7559\u603b\u89c8\u548c\u8df3\u8f6c\u5165\u53e3\uff0c\u5176\u4f59\u5185\u5bb9\u79fb\u5230\u4e13\u9879\u4e2d\u5fc3",
         )
+        load_report = self.last_load_diagnostics if isinstance(self.last_load_diagnostics, dict) else {}
+        source_health = _source_health_summary(load_report)
+        cache_status = _cache_status_summary(load_report)
+        cache_tone = _cache_status_tone(load_report)
+
+        top = tk.Frame(shell, bg=BG)
+        top.pack(fill=tk.X, pady=(0, 16))
+        for label, value, color in [
+            ("\u6570\u636e\u6e90", self.data_source, "#7aa2ff"),
+            ("\u6e90\u5065\u5eb7", source_health, GREEN if "\u6b63\u5e38" in source_health or "\u5408\u5e76" in source_health else YELLOW),
+            ("\u7f13\u5b58\u56de\u9000", cache_status, self._tone_color(cache_tone)),
+            ("\u5f53\u524d\u6a21\u578b", self._dominant_model_name(), TEXT),
+            ("\u603b\u89c8\u72b6\u6001", "\u53ef\u4ee5\u8f6c\u8fdb\u4e13\u9879\u4e2d\u5fc3", TEXT),
+        ]:
+            self._detail_metric(top, label, value, color)
+
+        body = tk.Frame(shell, bg=BG)
+        body.pack(fill=tk.BOTH, expand=True)
+        left = self._card(body, PANEL)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 14))
+        right = self._card(body, PANEL)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        tk.Label(left, text="\u603b\u89c8", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
+        for label, value in [
+            ("\u6570\u636e\u6e90", self.data_source),
+            ("\u6e90\u5065\u5eb7", source_health),
+            ("\u7f13\u5b58\u56de\u9000", cache_status),
+            ("\u6700\u8fd1\u52a0\u8f7d", self.last_loaded_at),
+            ("\u4eca\u65e5\u8d5b\u4e8b", str(len(self.rows))),
+        ]:
+            self._kv_row(left, label, value)
+
+        tk.Label(right, text="\u8df3\u8f6c\u5165\u53e3", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
+        for title, body_text, command in [
+            ("\u4e13\u9879\u4e2d\u5fc3", "\u8fdb\u5165\u590d\u76d8\u3001\u7b56\u7565\u548c\u6570\u636e\u4e0e\u8bad\u7ec3\u4e13\u9879\u68c0\u89c8", self.open_special_workbench),
+            ("\u8bad\u7ec3\u603b\u89c8", "\u67e5\u770b\u8bad\u7ec3\u5065\u5eb7\u5361\u7247\u3001\u8865\u6570\u5efa\u8bae\u548c gate", self.show_model_training_overview),
+            ("\u5237\u65b0\u6570\u636e", "\u91cd\u65b0\u52a0\u8f7d\u5f53\u524d\u6570\u636e\u6e90\u548c\u7f13\u5b58\u72b6\u6001", self.refresh),
+            ("\u91cd\u8bd5\u5728\u7ebf\u6e90", "\u4f18\u5148\u7eed\u8bd5\u8fde\u63a5\u5916\u90e8\u6570\u636e\u6e90", lambda: self.refresh(force_live=True)),
+            ("\u8bfb\u53d6\u7f13\u5b58\u6c60", "\u53ea\u91cd\u8bfb\u672c\u5730\u7f13\u5b58\u4fdd\u6301\u5feb\u901f\u9884\u89c8", lambda: self.refresh(cache_only=True)),
+        ]:
+            self._shortcut_row(right, title, body_text, command)
+        return
 
         top = tk.Frame(shell, bg=BG)
         top.pack(fill=tk.X, pady=(0, 16))
@@ -10794,6 +10898,14 @@ class SmartMatchDashboard:
             statsbomb_review_training_samples=get_statsbomb_review_training_samples(),
         )
         release_pool_rows = self._strategy_release_pool_rows(settlements, release_loop=release_loop)
+        play_model_status = get_play_model_policy_status()
+        accuracy_diagnostics = self._accuracy_diagnostics(settlements)
+        special_summary_rows = build_strategy_special_summary_rows(
+            play_model_policy_status=play_model_status,
+            release_recovery_loop=release_loop,
+            draw_release_guard_tuning=dashboard.get("draw_release_guard_tuning", {}),
+            accuracy_diagnostics=accuracy_diagnostics,
+        )
         shell = self._page_shell(
             "\u7b56\u7565\u770b\u677f",
             "\u5c55\u793a\u9ad8\u51c6\u7b56\u7565\u6c60\u3001\u56de\u6d4b\u5206\u5c42\u3001\u7a33\u5b9a\u6027\u548c\u771f\u5b9e\u7ed3\u7b97\u53cd\u9988",
@@ -10818,68 +10930,10 @@ class SmartMatchDashboard:
             font=("Microsoft YaHei UI", 10),
         ).pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        primary_tools = tk.Frame(shell, bg=BG)
-        primary_tools.pack(fill=tk.X, pady=(0, 6))
-        self._strategy_toolbar_button(primary_tools, "\u5237\u65b0\u770b\u677f", self.open_strategy_library)
-        self._strategy_toolbar_button(primary_tools, "专项中心", self.open_special_workbench)
-        self._strategy_toolbar_button(primary_tools, "\u8fdb\u7a0b\u9ad8\u51c6\u56de\u6d4b", self.run_high_accuracy_strategy_backtest_task)
-        self._strategy_toolbar_button(primary_tools, "\u5bfc\u51fa\u653e\u884c\u6e05\u5355", self.export_strategy_allowlist, primary=True)
-        self._strategy_toolbar_button(primary_tools, "\u653e\u884c\u56de\u6536\u95ed\u73af", self.open_strategy_release_recovery_loop_window)
-        self._strategy_toolbar_button(
-            primary_tools,
-            "\u5e94\u7528Replay\u5efa\u8bae",
-            lambda tuning=dashboard.get("agent_replay_guard_tuning", {}): self.apply_agent_replay_guard_tuning(tuning),
-        )
-        self._strategy_toolbar_button(
-            primary_tools,
-            "\u5e94\u7528\u95e8\u69db\u5efa\u8bae",
-            lambda tuning=dashboard.get("allowlist_tuning", {}): self.apply_strategy_allowlist_tuning(tuning),
-        )
-        self._strategy_toolbar_button(
-            primary_tools,
-            "\u5e94\u7528\u5e73\u5c40\u8c03\u53c2",
-            lambda tuning=dashboard.get("draw_release_guard_tuning", {}): self.apply_draw_release_guard_tuning(tuning),
-        )
-
-        audit_tools = tk.Frame(shell, bg=BG)
-        audit_tools.pack(fill=tk.X, pady=(0, 12))
-        self._strategy_toolbar_button(audit_tools, "\u5ba1\u8ba1\u5386\u53f2", self.open_strategy_policy_audit_history)
-        self._strategy_toolbar_button(audit_tools, "\u5bfc\u51fa\u8c03\u53c2\u5ba1\u8ba1", self.export_strategy_policy_audit_report)
-        self._strategy_toolbar_button(
-            audit_tools,
-            "\u6cbb\u7406\u4e8b\u4ef6",
-            lambda review=dashboard.get("policy_effect_review", {}), dg_history=draw_guard_history, dg_tuning=dashboard.get("draw_release_guard_tuning_effect", {}), dg_rollback=dashboard.get("draw_release_guard_rollback_effect", {}), dg_freeze=dashboard.get("draw_release_guard_freeze_override", {}), dg_guard=dashboard.get("draw_release_guard_tuning_guard", {}): self.open_policy_governance_event_window(
-                review,
-                draw_release_guard_policy_history=dg_history,
-                draw_release_guard_tuning_effect_review=dg_tuning,
-                draw_release_guard_rollback_effect_review=dg_rollback,
-                draw_release_guard_freeze_override_status=dg_freeze,
-                draw_release_guard_tuning_guard=dg_guard,
-            ),
-        )
-        self._strategy_toolbar_button(audit_tools, "\u89e3\u9664\u8c03\u53c2\u51bb\u7ed3", self.apply_strategy_policy_freeze_override)
-        self._strategy_toolbar_button(audit_tools, "\u89e3\u9664DrawGuard\u51bb\u7ed3", self.apply_draw_release_guard_freeze_override)
-        self._strategy_toolbar_button(audit_tools, "StatsBomb\u8865\u6837", self.export_statsbomb_fewshot_backfill_report)
-        self._strategy_toolbar_button(audit_tools, "StatsBomb\u8349\u7a3f", self.export_statsbomb_fewshot_draft)
-        self._strategy_toolbar_button(audit_tools, "StatsBomb\u9884\u89c8", self.preview_statsbomb_fewshot_merge_bundle)
-        self._strategy_toolbar_button(audit_tools, "StatsBomb\u5e94\u7528", self.apply_statsbomb_fewshot_merge_bundle, danger=True)
-        self._strategy_toolbar_button(audit_tools, "StatsBomb\u56de\u6eda", self.rollback_statsbomb_fewshot_memory, danger=True)
-        self._strategy_toolbar_button(audit_tools, "StatsBomb\u5ba1\u8ba1", self.export_statsbomb_fewshot_memory_audit)
-        self._strategy_toolbar_button(
-            audit_tools,
-            "\u751f\u6548\u8be6\u60c5",
-            lambda review=dashboard.get("policy_effect_review", {}): self.open_policy_effect_detail_window(review),
-        )
-        self._strategy_toolbar_button(audit_tools, "StatsBomb\u6837\u672c", self.open_statsbomb_event_sandbox_window)
-        self._strategy_toolbar_button(audit_tools, "\u56de\u6edaDrawGuard", self.rollback_latest_draw_guard_policy, danger=True)
-        self._strategy_toolbar_button(audit_tools, "\u56de\u6eda\u4e0a\u4e00\u7248", self.rollback_latest_strategy_policy, danger=True)
-        tk.Label(
-            audit_tools,
-            text="\u53c2\u6570\u5ba1\u8ba1\u4e0e\u56de\u6eda",
-            bg=BG,
-            fg=MUTED,
-            font=("Microsoft YaHei UI", 10),
-        ).pack(side=tk.LEFT)
+        toolbar = tk.Frame(shell, bg=BG)
+        toolbar.pack(fill=tk.X, pady=(0, 8))
+        self._strategy_toolbar_button(toolbar, "刷新看板", self.open_strategy_library)
+        self._strategy_toolbar_button(toolbar, "专项中心", self.open_special_workbench, primary=True)
 
         scroll_wrap = tk.Frame(shell, bg=BG)
         scroll_wrap.pack(fill=tk.BOTH, expand=True)
@@ -10924,6 +10978,23 @@ class SmartMatchDashboard:
         left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 14))
         right = tk.Frame(body, bg=BG)
         right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        summary_commands = {
+            "open_strategy_release_recovery_loop_window": self.open_strategy_release_recovery_loop_window,
+            "open_play_model_takeover_gate_audit_history": self.open_play_model_takeover_gate_audit_history,
+            "open_play_model_policy_detail_window": self.open_play_model_policy_detail_window,
+            "open_draw_specialist_backtest_window": self.open_draw_specialist_backtest_window,
+            "open_accuracy_diagnostics": self.open_accuracy_diagnostics,
+            "open_strategy_policy_audit_history": self.open_strategy_policy_audit_history,
+        }
+        self._strategy_section_title(right, "\u7b56\u7565\u4e13\u9879\u6458\u8981", first=True)
+        for row in special_summary_rows:
+            self._strategy_row(
+                right,
+                str(row.get("title") or "-"),
+                str(row.get("body") or "-"),
+                command=summary_commands.get(str(row.get("action_key") or "")),
+            )
 
         self._strategy_section_title(left, "\u5f53\u524d\u7b56\u7565\u6c60", first=True)
         pool_rows = dashboard.get("pool_rows", [])
