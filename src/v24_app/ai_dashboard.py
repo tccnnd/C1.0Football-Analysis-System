@@ -1626,6 +1626,22 @@ def build_video_review_center_action_rows(
     return rows[: max(0, int(limit))]
 
 
+def build_video_review_evidence_gap_quick_open_filters(evidence_filter: str | None = None) -> dict[str, str]:
+    kind = str(evidence_filter or "").strip()
+    base = {
+        "batch_filter": "latest",
+        "status_filter": "all",
+        "priority_filter": "all",
+        "evidence_filter": "all",
+    }
+    if kind in {"local_video", "external_reference"}:
+        base["status_filter"] = "pending"
+        base["priority_filter"] = "P0"
+        base["evidence_filter"] = kind
+        return base
+    return base
+
+
 def build_statsbomb_review_training_quality_export_message(path: Path, quality: dict, record_count: int) -> str:
     return "\n".join(
         [
@@ -6456,7 +6472,13 @@ class SmartMatchDashboard:
         )
         return path
 
-    def open_video_review_evidence_gap_center_window(self, initial_evidence_filter: str | None = None) -> None:
+    def open_video_review_evidence_gap_center_window(
+        self,
+        initial_batch_filter: str | None = None,
+        initial_status_filter: str | None = None,
+        initial_priority_filter: str | None = None,
+        initial_evidence_filter: str | None = None,
+    ) -> None:
         state = _load_video_review_evidence_gap_batch_state()
         options = build_video_review_evidence_gap_batch_filter_options(state)
 
@@ -6501,7 +6523,16 @@ class SmartMatchDashboard:
         status_var = tk.StringVar(value=(_labels("status_options") or ["全部状态"])[0])
         priority_var = tk.StringVar(value=(_labels("priority_options") or ["全部优先级"])[0])
         evidence_var = tk.StringVar(value=(_labels("evidence_options") or ["全部证据"])[0])
+        initial_batch_label = _label_for_value("batch_options", initial_batch_filter)
+        initial_status_label = _label_for_value("status_options", initial_status_filter)
+        initial_priority_label = _label_for_value("priority_options", initial_priority_filter)
         initial_evidence_label = _label_for_value("evidence_options", initial_evidence_filter)
+        if initial_batch_label:
+            batch_var.set(initial_batch_label)
+        if initial_status_label:
+            status_var.set(initial_status_label)
+        if initial_priority_label:
+            priority_var.set(initial_priority_label)
         if initial_evidence_label:
             evidence_var.set(initial_evidence_label)
 
@@ -6873,8 +6904,12 @@ class SmartMatchDashboard:
             video_source_coverage,
         )
         action_command_map = {
-            "open_video_review_evidence_gap_center_window_local_video": lambda: self.open_video_review_evidence_gap_center_window("local_video"),
-            "open_video_review_evidence_gap_center_window_external_reference": lambda: self.open_video_review_evidence_gap_center_window("external_reference"),
+            "open_video_review_evidence_gap_center_window_local_video": lambda: self.open_video_review_evidence_gap_center_window(
+                **build_video_review_evidence_gap_quick_open_filters("local_video")
+            ),
+            "open_video_review_evidence_gap_center_window_external_reference": lambda: self.open_video_review_evidence_gap_center_window(
+                **build_video_review_evidence_gap_quick_open_filters("external_reference")
+            ),
             "export_video_review_fewshot_samples": self.export_video_review_fewshot_samples,
             "preview_video_review_fewshot_merge_bundle": self.preview_video_review_fewshot_merge_bundle,
             "export_video_review_fewshot_memory_audit": self.export_video_review_fewshot_memory_audit,

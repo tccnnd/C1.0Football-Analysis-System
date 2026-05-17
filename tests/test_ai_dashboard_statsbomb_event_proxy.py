@@ -42,6 +42,7 @@ from v24_app.ai_dashboard import (
     build_video_review_evidence_gap_feedback_rows,
     build_video_review_center_summary,
     build_video_review_center_action_rows,
+    build_video_review_evidence_gap_quick_open_filters,
     collect_video_review_evidence_gap_sample_match_ids,
     find_video_review_evidence_gap_settlement,
 )
@@ -1008,6 +1009,22 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertEqual(rows[0]["code"], "video_memory_ready")
         self.assertEqual(rows[0]["action_key"], "open_review_center")
         self.assertEqual(rows[0]["tone"], "good")
+
+    def test_video_review_evidence_gap_quick_open_filters_focus_local_video(self) -> None:
+        filters = build_video_review_evidence_gap_quick_open_filters("local_video")
+
+        self.assertEqual(filters["batch_filter"], "latest")
+        self.assertEqual(filters["status_filter"], "pending")
+        self.assertEqual(filters["priority_filter"], "P0")
+        self.assertEqual(filters["evidence_filter"], "local_video")
+
+    def test_video_review_evidence_gap_quick_open_filters_focus_external_reference(self) -> None:
+        filters = build_video_review_evidence_gap_quick_open_filters("external_reference")
+
+        self.assertEqual(filters["batch_filter"], "latest")
+        self.assertEqual(filters["status_filter"], "pending")
+        self.assertEqual(filters["priority_filter"], "P0")
+        self.assertEqual(filters["evidence_filter"], "external_reference")
 
 
 if __name__ == "__main__":
