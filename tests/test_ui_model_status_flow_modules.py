@@ -32,6 +32,7 @@ from v24_app.ui_modules import (
     build_play_model_takeover_gate_audit_rows,
     build_play_model_takeover_gate_audit_export_message,
     build_play_model_takeover_gate_audit_export_status_text,
+    build_play_model_takeover_gate_audit_overview_text,
     build_play_model_takeover_gate_rows,
     build_play_model_training_status_text,
     build_play_threshold_apply_status_text,
@@ -594,6 +595,37 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
         self.assertIn("History count: 3", policy_text)
         self.assertIn("watch->allow", policy_text)
         self.assertIn("play_model_takeover_gate_audit_20260514_120000.md", policy_text)
+
+    def test_takeover_gate_audit_overview_text_summarizes_latest_report(self) -> None:
+        overview_text = build_play_model_takeover_gate_audit_overview_text(
+            {
+                "takeover_gate_history_count": 3,
+                "takeover_gate_audit": {
+                    "latest_transition": "block->watch",
+                    "latest_status": "watch",
+                    "latest_reason": "total_goals_model_no_uplift",
+                    "latest_updated_at": "2026-05-13 11:00:00",
+                    "latest_report_path": "reports/play_model_takeover_gate_audit_20260513_110000.md",
+                },
+                "takeover_gate_audit_report": {
+                    "updated_at": "2026-05-14 12:00:00",
+                    "history_count": 3,
+                    "latest_transition": "watch->allow",
+                    "latest_reason": "stable_backtest",
+                    "markdown_path": "reports/play_model_takeover_gate_audit_20260514_120000.md",
+                    "csv_path": "reports/play_model_takeover_gate_audit_20260514_120000.csv",
+                },
+                "takeover_gate_history_source": "data/policy/takeover_gate_history.json",
+            }
+        )
+
+        self.assertIn("接管审计概览", overview_text)
+        self.assertIn("历史转场: 3", overview_text)
+        self.assertIn("最新转场: watch->allow", overview_text)
+        self.assertIn("最新状态: watch", overview_text)
+        self.assertIn("最新原因: stable_backtest", overview_text)
+        self.assertIn("Markdown: reports/play_model_takeover_gate_audit_20260514_120000.md", overview_text)
+        self.assertIn("CSV: reports/play_model_takeover_gate_audit_20260514_120000.csv", overview_text)
 
     def test_takeover_gate_audit_export_message_summarizes_outputs(self) -> None:
         result = {

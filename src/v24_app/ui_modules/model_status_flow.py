@@ -913,6 +913,37 @@ def build_play_model_takeover_gate_audit_rows(status: Mapping[str, object] | obj
     return rows
 
 
+def build_play_model_takeover_gate_audit_overview_text(status: Mapping[str, object] | object) -> str:
+    resolved = status if isinstance(status, Mapping) else {}
+    history = resolved.get("takeover_gate_history", []) if isinstance(resolved, Mapping) else []
+    audit = resolved.get("takeover_gate_audit", {}) if isinstance(resolved.get("takeover_gate_audit"), Mapping) else {}
+    report = resolved.get("takeover_gate_audit_report", {}) if isinstance(resolved.get("takeover_gate_audit_report"), Mapping) else {}
+    history_items = [item for item in history if isinstance(item, Mapping)] if isinstance(history, list) else []
+    latest_history = history_items[0] if history_items else {}
+    history_count = _safe_int(
+        resolved.get("takeover_gate_history_count"),
+        _safe_int(audit.get("history_count"), _safe_int(report.get("history_count"), len(history_items))),
+    )
+    latest_transition = str(report.get("latest_transition") or audit.get("latest_transition") or latest_history.get("transition") or "-")
+    latest_status = str(audit.get("latest_status") or report.get("latest_status") or latest_history.get("status") or "-")
+    latest_reason = str(report.get("latest_reason") or audit.get("latest_reason") or latest_history.get("reason") or "-")
+    latest_updated_at = str(report.get("updated_at") or audit.get("latest_updated_at") or latest_history.get("updated_at") or "-")
+    markdown_path = str(report.get("markdown_path") or audit.get("latest_report_path") or latest_history.get("report_path") or "-")
+    csv_path = str(report.get("csv_path") or audit.get("latest_csv_path") or "-")
+    history_source = str(resolved.get("takeover_gate_history_source") or resolved.get("history_source") or "-")
+    return (
+        "接管审计概览\n"
+        + f"- 历史转场: {history_count}\n"
+        + f"- 最新转场: {latest_transition}\n"
+        + f"- 最新状态: {latest_status}\n"
+        + f"- 最新原因: {latest_reason}\n"
+        + f"- 更新时间: {latest_updated_at}\n"
+        + f"- Markdown: {markdown_path}\n"
+        + f"- CSV: {csv_path}\n"
+        + f"- 历史源: {history_source}"
+    )
+
+
 def build_play_model_takeover_gate_audit_export_status_text(result: Mapping[str, object] | object) -> str:
     resolved = result if isinstance(result, Mapping) else {}
     if not bool(resolved.get("ok")):

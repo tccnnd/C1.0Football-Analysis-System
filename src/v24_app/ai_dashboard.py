@@ -78,6 +78,7 @@ from .ui_modules import (
     build_play_model_backtest_success_message,
     build_play_model_takeover_gate_audit_export_message,
     build_play_model_takeover_gate_audit_export_status_text,
+    build_play_model_takeover_gate_audit_overview_text,
     build_play_model_policy_decision_rows,
     build_play_model_policy_status_text,
     build_play_model_training_status_text,
@@ -3247,6 +3248,7 @@ class SmartMatchDashboard:
             ("\u8d5b\u4e8b\u5206\u6790", "\u67e5\u770b\u91cd\u70b9\u8d5b\u4e8b\u3001\u98ce\u9669\u548c\u7f6e\u4fe1\u5ea6\u5206\u5e03", lambda: self._select_nav(1, self._build_main)),
             ("\u4e3b\u6d41\u7a0b\u6cbb\u7406", "\u5148\u770b\u6b63\u5f0f\u5efa\u8bae\uff0c\u518d\u67e5 C1 \u5f85\u5ba1\u548c\u963b\u65ad", lambda: self.open_governance_filtered_matches("formal_ready")),
             ("\u6cbb\u7406\u8be6\u60c5", "\u6e05\u7406 C1 \u5f85\u5ba1\u4e0e\u963b\u65ad\u573a\u6b21\uff0c\u67e5\u770b\u51b3\u7b56\u94fe", self.open_governance_issue_center),
+            ("\u63a5\u7ba1\u5ba1\u8ba1", "\u67e5\u770b\u63a5\u7ba1\u95e8\u69db\u5386\u53f2\u3001\u5bfc\u51fa\u8def\u5f84\u548c\u5ba1\u8ba1\u6587\u4ef6", self.open_play_model_takeover_gate_audit_history),
             ("\u590d\u76d8\u4e2d\u5fc3", "\u56de\u6536\u8d5b\u679c\u5e76\u67e5\u770b\u547d\u4e2d\u7387\u4e0e\u9ad8\u7f6e\u4fe1\u5931\u8bef", self.open_review_center),
             ("\u8d5b\u524d\u5feb\u7167", "\u67e5\u770b\u5df2\u4fdd\u5b58\u7684\u8d5b\u524d\u9884\u6d4b\uff0c\u7b49\u5b8c\u573a\u540e\u8fdb\u884c\u590d\u76d8", self.open_snapshot_center),
             ("\u76d1\u63a7\u4e2d\u5fc3", "\u67e5\u770b Agent \u72b6\u6001\u3001\u8fd0\u884c\u65e5\u5fd7\u548c\u8017\u65f6", self.open_monitor_center),
@@ -5166,6 +5168,8 @@ class SmartMatchDashboard:
         payload = result if isinstance(result, dict) else {}
         self.status_var.set(build_play_model_takeover_gate_audit_export_status_text(payload))
         self._log_event("OK", f"\u63a5\u7ba1\u5b88\u95e8\u5ba1\u8ba1\u5bfc\u51fa\u5b8c\u6210 | {record.task_id} | {record.elapsed_seconds or 0:.2f}s")
+        if getattr(self, "current_view", "") == "play_model_takeover_gate_audit_history":
+            self.open_play_model_takeover_gate_audit_history()
         if getattr(self, "current_view", "") == "monitor":
             self.open_monitor_center()
         title = "\u63a5\u7ba1\u5b88\u95e8\u5ba1\u8ba1\u62a5\u544a"
@@ -5262,8 +5266,10 @@ class SmartMatchDashboard:
             fg=MUTED,
             font=("Microsoft YaHei UI", 10),
         ).pack(anchor=tk.W, pady=(4, 0))
+        action_row = tk.Frame(header, bg=BG)
+        action_row.pack(anchor=tk.E, pady=(8, 0))
         tk.Button(
-            header,
+            action_row,
             text="\u5bfc\u51fa\u5b88\u95e8\u5ba1\u8ba1",
             command=self.export_play_model_takeover_gate_audit_report,
             bg=PANEL_2,
@@ -5274,7 +5280,20 @@ class SmartMatchDashboard:
             font=("Microsoft YaHei UI", 10, "bold"),
             padx=14,
             pady=6,
-        ).pack(anchor=tk.E, pady=(8, 0))
+        ).pack(side=tk.RIGHT)
+        tk.Button(
+            action_row,
+            text="\u5ba1\u8ba1\u5386\u53f2",
+            command=self.open_play_model_takeover_gate_audit_history,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=14,
+            pady=6,
+        ).pack(side=tk.RIGHT, padx=(0, 8))
         frame = tk.Frame(window, bg=PANEL, highlightbackground="#172638", highlightthickness=1)
         frame.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 16))
         text = tk.Text(
@@ -5293,6 +5312,184 @@ class SmartMatchDashboard:
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 12), pady=12)
         text.insert(tk.END, build_play_model_policy_status_text(status))
         text.configure(state=tk.DISABLED)
+
+    def open_play_model_takeover_gate_audit_history(self) -> None:
+        self.current_nav_index = 4
+        self.current_view = "play_model_takeover_gate_audit_history"
+        self._refresh_nav_highlight()
+        status = self._play_model_policy_status()
+        REPORT_DIR.mkdir(parents=True, exist_ok=True)
+        report_files = sorted(
+            list(REPORT_DIR.glob("play_model_takeover_gate_audit_*.md"))
+            + list(REPORT_DIR.glob("play_model_takeover_gate_audit_*.csv")),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+
+        shell = self._page_shell(
+            "\u63a5\u7ba1\u5ba1\u8ba1\u5386\u53f2",
+            "\u67e5\u770b\u63a5\u7ba1\u95e8\u69db\u5386\u53f2\u3001\u5bfc\u51fa\u8def\u5f84\u548c\u5ba1\u8ba1\u6587\u4ef6\u3002",
+        )
+
+        header = tk.Frame(shell, bg=BG)
+        header.pack(fill=tk.X, pady=(0, 12))
+        tk.Button(
+            header,
+            text="\u8fd4\u56de\u7b56\u7565\u770b\u677f",
+            command=self.open_strategy_library,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=18,
+            pady=7,
+        ).pack(side=tk.RIGHT)
+        tk.Button(
+            header,
+            text="\u56de\u5230\u590d\u76d8\u4e2d\u5fc3",
+            command=self.open_review_center,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=18,
+            pady=7,
+        ).pack(side=tk.RIGHT, padx=(0, 10))
+        tk.Button(
+            header,
+            text="\u6253\u5f00\u7b56\u7565\u660e\u7ec6",
+            command=self.open_play_model_policy_detail_window,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=18,
+            pady=7,
+        ).pack(side=tk.RIGHT, padx=(0, 10))
+        tk.Button(
+            header,
+            text="\u5bfc\u51fa\u5ba1\u8ba1\u62a5\u544a",
+            command=self.export_play_model_takeover_gate_audit_report,
+            bg=BLUE,
+            fg="white",
+            activebackground="#3d5ee7",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=18,
+            pady=7,
+        ).pack(side=tk.RIGHT, padx=(0, 10))
+
+        overview = tk.Frame(shell, bg=PANEL, highlightbackground="#172638", highlightthickness=1)
+        overview.pack(fill=tk.X, pady=(0, 14))
+        tk.Label(overview, text="\u5ba1\u8ba1\u6982\u89c8", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=16, pady=(14, 6))
+        overview_text = tk.Text(
+            overview,
+            bg=PANEL,
+            fg=TEXT,
+            insertbackground=TEXT,
+            selectbackground=BLUE,
+            relief=tk.FLAT,
+            wrap=tk.WORD,
+            font=("Consolas", 10),
+            height=8,
+        )
+        overview_text.pack(fill=tk.X, padx=12, pady=(0, 12))
+        overview_text.insert(tk.END, build_play_model_takeover_gate_audit_overview_text(status))
+        overview_text.configure(state=tk.DISABLED)
+
+        body = tk.Frame(shell, bg=BG)
+        body.pack(fill=tk.BOTH, expand=True)
+        left = self._card(body, PANEL)
+        left.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 14))
+        right = self._card(body, PANEL)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        tk.Label(left, text="\u5ba1\u8ba1\u6587\u4ef6", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
+        list_wrap = tk.Frame(left, bg=PANEL)
+        list_wrap.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
+        listbox = tk.Listbox(
+            list_wrap,
+            bg=PANEL,
+            fg=TEXT,
+            selectbackground=BLUE,
+            selectforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10),
+            width=44,
+            activestyle="none",
+        )
+        scrollbar = tk.Scrollbar(list_wrap, orient=tk.VERTICAL, command=listbox.yview)
+        listbox.configure(yscrollcommand=scrollbar.set)
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        tk.Label(right, text="\u6587\u4ef6\u9884\u89c8", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
+        preview_wrap = tk.Frame(right, bg=PANEL)
+        preview_wrap.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
+        preview = tk.Text(
+            preview_wrap,
+            bg=PANEL,
+            fg=TEXT,
+            insertbackground=TEXT,
+            selectbackground=BLUE,
+            relief=tk.FLAT,
+            wrap=tk.WORD,
+            font=("Consolas", 10),
+        )
+        preview_scrollbar = tk.Scrollbar(preview_wrap, orient=tk.VERTICAL, command=preview.yview)
+        preview.configure(yscrollcommand=preview_scrollbar.set)
+        preview.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        preview_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        report_entries = [
+            {
+                "path": path,
+                "kind": "MD" if path.suffix.lower() == ".md" else "CSV",
+            }
+            for path in report_files
+        ]
+
+        def show_report(index: int) -> None:
+            if index < 0 or index >= len(report_entries):
+                return
+            path = report_entries[index]["path"]
+            try:
+                encoding = "utf-8-sig" if path.suffix.lower() == ".csv" else "utf-8"
+                content = path.read_text(encoding=encoding)
+            except Exception as exc:
+                content = f"\u8bfb\u53d6\u5931\u8d25: {exc}"
+            preview.configure(state=tk.NORMAL)
+            preview.delete("1.0", tk.END)
+            preview.insert("1.0", content)
+            preview.configure(state=tk.DISABLED)
+            self.status_var.set(f"\u6b63\u5728\u67e5\u770b\u63a5\u7ba1\u5ba1\u8ba1: {path.name}")
+
+        for entry in report_entries:
+            path = entry["path"]
+            stamp = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+            listbox.insert(tk.END, f"{stamp}  [{entry['kind']}] {path.name}")
+
+        if report_entries:
+            listbox.selection_set(0)
+            listbox.activate(0)
+            show_report(0)
+        else:
+            preview.insert("1.0", "\u6682\u65e0\u63a5\u7ba1\u5ba1\u8ba1\u5bfc\u51fa\u6587\u4ef6\u3002\u8bf7\u5148\u6267\u884c\u4e00\u6b21\u5bfc\u51fa\u3002")
+            preview.configure(state=tk.DISABLED)
+
+        def on_select(_event: object) -> None:
+            selection = listbox.curselection()
+            if selection:
+                show_report(int(selection[0]))
+
+        listbox.bind("<<ListboxSelect>>", on_select)
 
     def open_draw_specialist_backtest_window(self) -> None:
         status = get_draw_specialist_backtest_status()
