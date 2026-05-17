@@ -1026,6 +1026,41 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertEqual(filters["priority_filter"], "P0")
         self.assertEqual(filters["evidence_filter"], "external_reference")
 
+    def test_video_review_evidence_gap_quick_open_filters_select_matching_batch(self) -> None:
+        state = {
+            "batches": [
+                {
+                    "batch_id": "batch-new",
+                    "items": [
+                        {
+                            "match_id": "new-1",
+                            "status": "pending",
+                            "priority_label": "P2",
+                            "evidence_kind": "missing",
+                        }
+                    ],
+                },
+                {
+                    "batch_id": "batch-old",
+                    "items": [
+                        {
+                            "match_id": "old-1",
+                            "status": "pending",
+                            "priority_label": "P0",
+                            "evidence_kind": "local_video",
+                        }
+                    ],
+                },
+            ]
+        }
+
+        filters = build_video_review_evidence_gap_quick_open_filters("local_video", state)
+
+        self.assertEqual(filters["batch_filter"], "batch-old")
+        self.assertEqual(filters["status_filter"], "pending")
+        self.assertEqual(filters["priority_filter"], "P0")
+        self.assertEqual(filters["evidence_filter"], "local_video")
+
 
 if __name__ == "__main__":
     unittest.main()

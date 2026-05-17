@@ -1626,7 +1626,10 @@ def build_video_review_center_action_rows(
     return rows[: max(0, int(limit))]
 
 
-def build_video_review_evidence_gap_quick_open_filters(evidence_filter: str | None = None) -> dict[str, str]:
+def build_video_review_evidence_gap_quick_open_filters(
+    evidence_filter: str | None = None,
+    state: dict | object | None = None,
+) -> dict[str, str]:
     kind = str(evidence_filter or "").strip()
     base = {
         "batch_filter": "latest",
@@ -1638,6 +1641,22 @@ def build_video_review_evidence_gap_quick_open_filters(evidence_filter: str | No
         base["status_filter"] = "pending"
         base["priority_filter"] = "P0"
         base["evidence_filter"] = kind
+        batches = [item for item in ((state.get("batches") if isinstance(state, dict) else []) or []) if isinstance(item, dict)]
+        for batch in batches:
+            batch_id = str(batch.get("batch_id") or "").strip()
+            if not batch_id:
+                continue
+            result = build_video_review_evidence_gap_batch_filter_result(
+                state,
+                batch_filter=batch_id,
+                status_filter=base["status_filter"],
+                priority_filter=base["priority_filter"],
+                evidence_filter=base["evidence_filter"],
+            )
+            items = result.get("items") if isinstance(result, dict) else []
+            if isinstance(items, list) and items:
+                base["batch_filter"] = batch_id
+                return base
         return base
     return base
 
@@ -6693,9 +6712,10 @@ class SmartMatchDashboard:
                         row.get("match_id", "-"),
                         row.get("title", "-"),
                     ),
-                )
+            )
             tree.selection_set("0")
             tree.focus("0")
+            tree.see("0")
             _show_detail(0)
 
         for combo in (batch_combo, status_combo, priority_combo, evidence_combo):
@@ -6903,13 +6923,13 @@ class SmartMatchDashboard:
             video_memory_health,
             video_source_coverage,
         )
+        def _open_evidence_gap(kind: str) -> None:
+            filters = build_video_review_evidence_gap_quick_open_filters(kind, _load_video_review_evidence_gap_batch_state())
+            self.open_video_review_evidence_gap_center_window(**filters)
+
         action_command_map = {
-            "open_video_review_evidence_gap_center_window_local_video": lambda: self.open_video_review_evidence_gap_center_window(
-                **build_video_review_evidence_gap_quick_open_filters("local_video")
-            ),
-            "open_video_review_evidence_gap_center_window_external_reference": lambda: self.open_video_review_evidence_gap_center_window(
-                **build_video_review_evidence_gap_quick_open_filters("external_reference")
-            ),
+            "open_video_review_evidence_gap_center_window_local_video": lambda: _open_evidence_gap("local_video"),
+            "open_video_review_evidence_gap_center_window_external_reference": lambda: _open_evidence_gap("external_reference"),
             "export_video_review_fewshot_samples": self.export_video_review_fewshot_samples,
             "preview_video_review_fewshot_merge_bundle": self.preview_video_review_fewshot_merge_bundle,
             "export_video_review_fewshot_memory_audit": self.export_video_review_fewshot_memory_audit,
