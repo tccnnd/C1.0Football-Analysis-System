@@ -1572,15 +1572,26 @@ def build_video_review_center_action_rows(
     if missing_evidence_count > 0:
         rows.append(
             {
-                "code": "video_review_missing_evidence",
-                "action_key": "open_video_review_evidence_gap_center_window",
-                "title": "先补视频证据缺口",
-                "body": f"当前缺证据 {missing_evidence_count} 场，先去证据缺口中心绑定合法回放或事件代理，再回到专项中心复核。",
+                "code": "video_review_missing_local_video",
+                "action_key": "open_video_review_evidence_gap_center_window_local_video",
+                "title": "导入本地视频",
+                "body": f"当前缺证据 {missing_evidence_count} 场，优先筛到本地视频并导入授权录像，再回到专项中心复核。",
                 "priority": 0,
                 "tone": "bad",
             }
         )
-        seen.add("video_review_missing_evidence")
+        rows.append(
+            {
+                "code": "video_review_missing_external_reference",
+                "action_key": "open_video_review_evidence_gap_center_window_external_reference",
+                "title": "绑定 FIFA+ 回放",
+                "body": f"当前缺证据 {missing_evidence_count} 场，优先绑定 FIFA+ 或其他合法回放链接完成闭环，再回到专项中心复核。",
+                "priority": 1,
+                "tone": "warning",
+            }
+        )
+        seen.add("video_review_missing_local_video")
+        seen.add("video_review_missing_external_reference")
 
     for row in memory_rows:
         if not isinstance(row, dict):
@@ -1605,7 +1616,13 @@ def build_video_review_center_action_rows(
             }
         )
 
-    rows.sort(key=lambda row: (int(row.get("priority", 99) or 99), str(row.get("title") or "")))
+    def _priority_value(row: dict[str, object]) -> int:
+        try:
+            return int(row.get("priority", 99))
+        except (TypeError, ValueError):
+            return 99
+
+    rows.sort(key=lambda row: (_priority_value(row), str(row.get("title") or "")))
     return rows[: max(0, int(limit))]
 
 
@@ -6439,7 +6456,7 @@ class SmartMatchDashboard:
         )
         return path
 
-    def open_video_review_evidence_gap_center_window(self) -> None:
+    def open_video_review_evidence_gap_center_window(self, initial_evidence_filter: str | None = None) -> None:
         state = _load_video_review_evidence_gap_batch_state()
         options = build_video_review_evidence_gap_batch_filter_options(state)
 
@@ -6449,6 +6466,15 @@ class SmartMatchDashboard:
 
         def _labels(key: str) -> list[str]:
             return [str(item.get("label") or item.get("value") or "-") for item in _options(key)]
+
+        def _label_for_value(key: str, value: str | None) -> str | None:
+            resolved = str(value or "").strip()
+            if not resolved:
+                return None
+            for item in _options(key):
+                if str(item.get("value") or "").strip() == resolved:
+                    return str(item.get("label") or item.get("value") or "-")
+            return None
 
         def _value_for_label(key: str, label: str) -> str:
             for item in _options(key):
@@ -6475,6 +6501,9 @@ class SmartMatchDashboard:
         status_var = tk.StringVar(value=(_labels("status_options") or ["全部状态"])[0])
         priority_var = tk.StringVar(value=(_labels("priority_options") or ["全部优先级"])[0])
         evidence_var = tk.StringVar(value=(_labels("evidence_options") or ["全部证据"])[0])
+        initial_evidence_label = _label_for_value("evidence_options", initial_evidence_filter)
+        if initial_evidence_label:
+            evidence_var.set(initial_evidence_label)
 
         def _combo(label: str, variable: tk.StringVar, values: list[str]) -> ttk.Combobox:
             wrap = tk.Frame(controls, bg=BG)
@@ -6844,7 +6873,8 @@ class SmartMatchDashboard:
             video_source_coverage,
         )
         action_command_map = {
-            "open_video_review_evidence_gap_center_window": self.open_video_review_evidence_gap_center_window,
+            "open_video_review_evidence_gap_center_window_local_video": lambda: self.open_video_review_evidence_gap_center_window("local_video"),
+            "open_video_review_evidence_gap_center_window_external_reference": lambda: self.open_video_review_evidence_gap_center_window("external_reference"),
             "export_video_review_fewshot_samples": self.export_video_review_fewshot_samples,
             "preview_video_review_fewshot_merge_bundle": self.preview_video_review_fewshot_merge_bundle,
             "export_video_review_fewshot_memory_audit": self.export_video_review_fewshot_memory_audit,

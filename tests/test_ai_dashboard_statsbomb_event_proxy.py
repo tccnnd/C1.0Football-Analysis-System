@@ -966,10 +966,13 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
             },
         )
 
-        self.assertGreaterEqual(len(rows), 1)
-        self.assertEqual(rows[0]["code"], "video_review_missing_evidence")
-        self.assertEqual(rows[0]["action_key"], "open_video_review_evidence_gap_center_window")
+        self.assertGreaterEqual(len(rows), 2)
+        self.assertEqual(rows[0]["code"], "video_review_missing_local_video")
+        self.assertEqual(rows[0]["action_key"], "open_video_review_evidence_gap_center_window_local_video")
         self.assertIn("缺证据 2", rows[0]["body"])
+        self.assertEqual(rows[1]["code"], "video_review_missing_external_reference")
+        self.assertEqual(rows[1]["action_key"], "open_video_review_evidence_gap_center_window_external_reference")
+        self.assertIn("FIFA+", rows[1]["body"])
 
     def test_video_review_center_action_rows_map_duplicate_keys_to_audit(self) -> None:
         rows = build_video_review_center_action_rows(
