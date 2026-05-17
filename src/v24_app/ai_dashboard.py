@@ -1681,6 +1681,53 @@ def build_video_review_evidence_gap_quick_target_item(
     return None
 
 
+def build_video_review_evidence_gap_row_key(row: dict | object) -> tuple[str, str] | None:
+    if not isinstance(row, dict):
+        return None
+    batch_id = str(row.get("batch_id") or "").strip()
+    match_id = str(row.get("match_id") or "").strip()
+    if not batch_id or not match_id:
+        return None
+    return batch_id, match_id
+
+
+def find_video_review_evidence_gap_row_index(
+    rows: list[dict] | object,
+    row_key: tuple[str, str] | None,
+) -> int | None:
+    if not row_key or not isinstance(rows, list):
+        return None
+    target_batch_id, target_match_id = row_key
+    for index, item in enumerate(rows):
+        if not isinstance(item, dict):
+            continue
+        if (
+            str(item.get("batch_id") or "").strip() == target_batch_id
+            and str(item.get("match_id") or "").strip() == target_match_id
+        ):
+            return index
+    return None
+
+
+def build_video_review_evidence_gap_next_selection_index(
+    rows: list[dict] | object,
+    current_index: int | None = None,
+) -> int | None:
+    items = [item for item in rows if isinstance(item, dict)] if isinstance(rows, list) else []
+    if not items:
+        return None
+    start = int(current_index) if isinstance(current_index, int) else -1
+
+    def _is_pending(row: dict) -> bool:
+        return str(row.get("status") or "") != "resolved"
+
+    for offset in range(1, len(items) + 1):
+        index = (start + offset) % len(items)
+        if _is_pending(items[index]):
+            return index
+    return 0
+
+
 def build_statsbomb_review_training_quality_export_message(path: Path, quality: dict, record_count: int) -> str:
     return "\n".join(
         [
@@ -6634,9 +6681,10 @@ class SmartMatchDashboard:
         detail.pack(fill=tk.X, pady=(12, 0))
         rows_cache: list[dict[str, object]] = []
         filter_result_cache: dict[str, object] = {}
+        selection_override_key: tuple[str, str] | None = None
         action_var = tk.StringVar(value="选择一条记录后可直接绑定当前选中回放或导入当前选中视频。")
 
-        def _selected_row(show_prompt: bool = True) -> dict | None:
+        def _selected_row_index(show_prompt: bool = True) -> int | None:
             selection = tree.selection()
             if not selection or not rows_cache:
                 if show_prompt:
@@ -6651,6 +6699,12 @@ class SmartMatchDashboard:
             if index < 0 or index >= len(rows_cache):
                 if show_prompt:
                     messagebox.showinfo("复盘证据缺口批次", "当前选择无效，请重新选择。")
+                return None
+            return index
+
+        def _selected_row(show_prompt: bool = True) -> dict | None:
+            index = _selected_row_index(show_prompt=show_prompt)
+            if index is None:
                 return None
             return rows_cache[index]
 
@@ -6676,6 +6730,37 @@ class SmartMatchDashboard:
                 + (f" | 不可执行: {', '.join(disabled)}" if disabled else "")
             )
 
+        def _current_row_key() -> tuple[str, str] | None:
+            index = _selected_row_index(show_prompt=False)
+            if index is None or index < 0 or index >= len(rows_cache):
+                return None
+            return build_video_review_evidence_gap_row_key(rows_cache[index])
+
+        def _queue_next_selection_after_current_row() -> None:
+            nonlocal selection_override_key
+            index = _selected_row_index(show_prompt=False)
+            if index is None:
+                selection_override_key = None
+                return
+            next_index = build_video_review_evidence_gap_next_selection_index(rows_cache, index)
+            if next_index is None or next_index < 0 or next_index >= len(rows_cache):
+                selection_override_key = None
+                return
+            selection_override_key = build_video_review_evidence_gap_row_key(rows_cache[next_index])
+
+        def _apply_selection(index: int | None) -> None:
+            if index is None or index < 0 or index >= len(rows_cache):
+                _show_detail(None)
+                return
+            iid = str(index)
+            if not tree.exists(iid):
+                _show_detail(None)
+                return
+            tree.selection_set(iid)
+            tree.focus(iid)
+            tree.see(iid)
+            _show_detail(index)
+
         def _show_detail(index: int | None = None) -> None:
             detail.configure(state=tk.NORMAL)
             detail.delete("1.0", tk.END)
@@ -6698,8 +6783,11 @@ class SmartMatchDashboard:
                 _set_action_text(row)
             detail.configure(state=tk.DISABLED)
 
-        def _refresh(_event=None) -> None:
-            nonlocal rows_cache, filter_result_cache
+        def _refresh(_event=None, *, advance_selection: bool = False) -> None:
+            nonlocal rows_cache, filter_result_cache, selection_override_key
+            prior_key = _current_row_key()
+            if advance_selection:
+                _queue_next_selection_after_current_row()
             result = build_video_review_evidence_gap_batch_filter_result(
                 _load_video_review_evidence_gap_batch_state(),
                 batch_filter=_value_for_label("batch_options", batch_var.get()),
@@ -6714,6 +6802,7 @@ class SmartMatchDashboard:
             for item_id in tree.get_children():
                 tree.delete(item_id)
             if not rows_cache:
+                selection_override_key = None
                 tree.insert("", tk.END, iid="empty", values=("-", "-", "-", "-", "-", "-", "-", "暂无匹配的缺口批次记录"))
                 _show_detail(None)
                 return
@@ -6733,10 +6822,17 @@ class SmartMatchDashboard:
                         row.get("title", "-"),
                     ),
             )
-            tree.selection_set("0")
-            tree.focus("0")
-            tree.see("0")
-            _show_detail(0)
+            selected_index = None
+            if selection_override_key is not None:
+                selected_index = find_video_review_evidence_gap_row_index(rows_cache, selection_override_key)
+                selection_override_key = None
+            if selected_index is None and not advance_selection and prior_key is not None:
+                selected_index = find_video_review_evidence_gap_row_index(rows_cache, prior_key)
+            if selected_index is None:
+                selected_index = build_video_review_evidence_gap_next_selection_index(rows_cache, None)
+            if selected_index is None:
+                selected_index = 0
+            _apply_selection(selected_index)
 
         for combo in (batch_combo, status_combo, priority_combo, evidence_combo):
             combo.bind("<<ComboboxSelected>>", _refresh)
@@ -6779,7 +6875,7 @@ class SmartMatchDashboard:
             if not settlement:
                 return
             self.import_video_review_reference_for_settlement(settlement)
-            self._refresh_video_review_evidence_gap_center_window()
+            self._refresh_video_review_evidence_gap_center_window(advance_selection=True)
 
         def _import_selected_local_video() -> None:
             row = _selected_row()
@@ -6787,14 +6883,14 @@ class SmartMatchDashboard:
             if not settlement:
                 return
             self.import_video_review_for_settlement(settlement)
-            self._refresh_video_review_evidence_gap_center_window()
+            self._refresh_video_review_evidence_gap_center_window(advance_selection=True)
 
         def _build_event_proxy_samples_for_batch() -> None:
             row = _selected_row()
             if row is None:
                 return
             self.export_statsbomb_event_proxy_review_samples()
-            self._refresh_video_review_evidence_gap_center_window()
+            self._refresh_video_review_evidence_gap_center_window(advance_selection=True)
 
         def _export_current_filter_report() -> None:
             result = filter_result_cache or build_video_review_evidence_gap_batch_filter_result(
@@ -6862,11 +6958,12 @@ class SmartMatchDashboard:
         *,
         evidence_filter: str | None = None,
         open_if_missing: bool = False,
+        advance_selection: bool = False,
     ) -> None:
         if self._widget_alive("video_review_evidence_gap_window"):
             refresh = getattr(self, "_video_review_evidence_gap_refresh", None)
             if callable(refresh):
-                refresh()
+                refresh(advance_selection=advance_selection)
             return
         if open_if_missing:
             filters = build_video_review_evidence_gap_quick_open_filters(
@@ -6901,7 +6998,11 @@ class SmartMatchDashboard:
                 **build_video_review_evidence_gap_quick_open_filters(evidence_filter, state)
             )
             return
-        self._refresh_video_review_evidence_gap_center_window(evidence_filter=evidence_filter, open_if_missing=True)
+        self._refresh_video_review_evidence_gap_center_window(
+            evidence_filter=evidence_filter,
+            open_if_missing=True,
+            advance_selection=True,
+        )
 
     def open_ai_video_review_center_window(self) -> None:
         settlements = list(reversed(get_recent_settlements(limit=200)))

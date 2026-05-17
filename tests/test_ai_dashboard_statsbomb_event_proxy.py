@@ -42,8 +42,11 @@ from v24_app.ai_dashboard import (
     build_video_review_evidence_gap_feedback_rows,
     build_video_review_center_summary,
     build_video_review_center_action_rows,
+    build_video_review_evidence_gap_row_key,
+    build_video_review_evidence_gap_next_selection_index,
     build_video_review_evidence_gap_quick_open_filters,
     build_video_review_evidence_gap_quick_target_item,
+    find_video_review_evidence_gap_row_index,
     collect_video_review_evidence_gap_sample_match_ids,
     find_video_review_evidence_gap_settlement,
 )
@@ -1101,6 +1104,32 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertIsNotNone(item)
         self.assertEqual(item["match_id"], "old-1")
         self.assertEqual(item["batch_id"], "batch-old")
+
+    def test_video_review_evidence_gap_next_selection_index_advances_to_next_pending_row(self) -> None:
+        rows = [
+            {"batch_id": "batch-1", "match_id": "m-1", "status": "resolved"},
+            {"batch_id": "batch-1", "match_id": "m-2", "status": "pending"},
+            {"batch_id": "batch-1", "match_id": "m-3", "status": "pending"},
+        ]
+
+        self.assertEqual(build_video_review_evidence_gap_next_selection_index(rows, current_index=0), 1)
+
+    def test_video_review_evidence_gap_auto_advance_targets_refreshed_rows_by_key(self) -> None:
+        rows_before = [
+            {"batch_id": "batch-1", "match_id": "m-1", "status": "pending"},
+            {"batch_id": "batch-1", "match_id": "m-2", "status": "pending"},
+            {"batch_id": "batch-1", "match_id": "m-3", "status": "pending"},
+        ]
+        next_index = build_video_review_evidence_gap_next_selection_index(rows_before, current_index=1)
+        self.assertEqual(next_index, 2)
+        next_key = build_video_review_evidence_gap_row_key(rows_before[next_index])
+
+        rows_after = [
+            {"batch_id": "batch-1", "match_id": "m-1", "status": "pending"},
+            {"batch_id": "batch-1", "match_id": "m-3", "status": "pending"},
+        ]
+
+        self.assertEqual(find_video_review_evidence_gap_row_index(rows_after, next_key), 1)
 
 
 if __name__ == "__main__":
