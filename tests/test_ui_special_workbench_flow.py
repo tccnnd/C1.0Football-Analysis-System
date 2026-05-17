@@ -38,6 +38,7 @@ class UISpecialWorkbenchFlowTests(unittest.TestCase):
         self.assertGreaterEqual(len(sections[0][1]), 5)
         self.assertIn("open_ai_video_review_center_window", action_keys)
         self.assertIn("open_play_model_takeover_gate_audit_history", action_keys)
+        self.assertIn("open_strategy_policy_audit_history", action_keys)
         self.assertIn("open_data_center", action_keys)
 
         first_command = sections[0][1][0]["command"]
@@ -65,6 +66,37 @@ class UISpecialWorkbenchFlowTests(unittest.TestCase):
         self.assertIn("当前缺证据 7 场", rows[2]["body"])
         self.assertEqual(rows[3]["action_key"], "open_statsbomb_review_training_center_window")
         self.assertEqual(rows[4]["action_key"], "open_statsbomb_review_training_closure_window")
+
+    def test_build_strategy_special_summary_rows_includes_core_strategy_entries(self) -> None:
+        rows = build_strategy_special_summary_rows(
+            play_model_policy_status={
+                "policy_blocked_by_gate": True,
+                "policy": {"scoreline": {"takeover_enabled": True}, "total_goals": {"takeover_enabled": True}},
+                "effective_policy": {"scoreline": {"takeover_enabled": False}, "total_goals": {"takeover_enabled": False}},
+                "takeover_gate": {"status": "watch"},
+                "takeover_gate_audit": {"history_count": 2, "latest_transition": "block->watch", "latest_reason": "total_goals_model_no_uplift"},
+            },
+            release_recovery_loop={"summary_text": "闭环 2 场 | 待回收 1 场", "ready_for_recovery_count": 1, "alert_count": 2},
+            draw_release_guard_tuning={"summary_text": "平局专项诊断 | warning", "reason_text": "sample_count_low", "tone": "warning"},
+            accuracy_diagnostics={"sample_count": 12, "overall": "62.5%", "priority": "调高1X2命中率"},
+        )
+
+        self.assertEqual(
+            [row["action_key"] for row in rows],
+            [
+                "open_strategy_release_recovery_loop_window",
+                "open_play_model_takeover_gate_audit_history",
+                "open_play_model_policy_detail_window",
+                "open_draw_specialist_backtest_window",
+                "open_accuracy_diagnostics",
+                "open_strategy_policy_audit_history",
+            ],
+        )
+        self.assertIn("放行回收闭环", rows[0]["title"])
+        self.assertIn("历史 2", rows[1]["body"])
+        self.assertIn("blocked=True", rows[2]["body"])
+        self.assertIn("sample_count_low", rows[3]["body"])
+        self.assertIn("样本 12", rows[4]["body"])
 
     def test_build_special_workbench_overview_rows_summarizes_groups(self) -> None:
         rows = build_special_workbench_overview_rows()
