@@ -102,6 +102,81 @@ def event_type(event: dict) -> str:
     return ""
 
 
+def _statsbomb_canonical_event_types() -> set[str]:
+    return {"Shot", "Foul Committed", "Bad Behaviour", "Substitution", "Own Goal For"}
+
+
+def canonical_event_rows(events: list[dict]) -> list[dict]:
+    rows: list[dict] = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        kind = event_type(event)
+        if kind not in _statsbomb_canonical_event_types():
+            continue
+        minute = event_minute(event)
+        second = None
+        try:
+            second = int(event.get("second"))
+        except Exception:
+            second = None
+        detail = ""
+        xg = None
+        if kind == "Shot":
+            shot = event.get("shot") if isinstance(event.get("shot"), dict) else {}
+            detail = nested_name(shot, "outcome")
+            try:
+                xg = round(float(shot.get("statsbomb_xg") or 0.0), 4)
+            except Exception:
+                xg = 0.0
+        elif kind == "Foul Committed":
+            foul = event.get("foul_committed") if isinstance(event.get("foul_committed"), dict) else {}
+            detail = nested_name(foul, "card")
+        elif kind == "Bad Behaviour":
+            behaviour = event.get("bad_behaviour") if isinstance(event.get("bad_behaviour"), dict) else {}
+            detail = nested_name(behaviour, "card")
+        elif kind == "Substitution":
+            detail = "Substitution"
+        elif kind == "Own Goal For":
+            detail = "Own Goal"
+        rows.append(
+            {
+                "type": kind,
+                "minute": minute,
+                "second": second,
+                "period": event.get("period"),
+                "team": team_name(event),
+                "player": player_name(event),
+                "detail": detail,
+                "xg": xg,
+            }
+        )
+    return rows
+
+
+def build_event_bundle(match: dict, events: list[dict], summary: dict, canonical_events: list[dict]) -> dict:
+    competition = match.get("competition") if isinstance(match.get("competition"), dict) else {}
+    season = match.get("season") if isinstance(match.get("season"), dict) else {}
+    home_team = match.get("home_team") if isinstance(match.get("home_team"), dict) else {}
+    away_team = match.get("away_team") if isinstance(match.get("away_team"), dict) else {}
+    return {
+        "source": SOURCE_NAME,
+        "source_url": SOURCE_URL,
+        "source_match_id": int(match.get("match_id")),
+        "match_date": str(match.get("match_date") or ""),
+        "match_time": str(match.get("kick_off") or "")[:5],
+        "league": str(competition.get("competition_name") or ""),
+        "season": str(season.get("season_name") or ""),
+        "home_team": str(home_team.get("home_team_name") or ""),
+        "away_team": str(away_team.get("away_team_name") or ""),
+        "event_count": int(summary.get("event_count", len(events)) or len(events)),
+        "canonical_event_count": len(canonical_events),
+        "canonical_event_types": sorted({str(row.get("type") or "") for row in canonical_events if isinstance(row, dict) and row.get("type")}),
+        "first_goal_minute": summary.get("first_goal_minute"),
+        "last_goal_minute": summary.get("last_goal_minute"),
+    }
+
+
 def stats_template() -> dict:
     return {
         "shots": 0,
@@ -230,6 +305,8 @@ def convert_match(match: dict, events: list[dict]) -> dict:
     home_team = match.get("home_team") if isinstance(match.get("home_team"), dict) else {}
     away_team = match.get("away_team") if isinstance(match.get("away_team"), dict) else {}
     kick_off = str(match.get("kick_off") or "")
+    event_summary = summarize_events(match, events)
+    canonical_events = canonical_event_rows(events)
 
     return {
         "match_id": f"statsbomb:{match_id}",
@@ -247,7 +324,9 @@ def convert_match(match: dict, events: list[dict]) -> dict:
         "stage": str(stage.get("name") or ""),
         "source": SOURCE_NAME,
         "source_url": SOURCE_URL,
-        "event_summary": summarize_events(match, events),
+        "event_summary": event_summary,
+        "event_bundle": build_event_bundle(match, events, event_summary, canonical_events),
+        "canonical_events": canonical_events,
     }
 
 

@@ -517,6 +517,31 @@ def _statsbomb_summary_from_settlement(item: dict[str, Any]) -> dict[str, Any]:
     return summary if isinstance(summary, dict) else {}
 
 
+def _statsbomb_canonical_events_from_settlement(item: dict[str, Any]) -> list[dict[str, Any]]:
+    canonical_events = item.get("canonical_events")
+    if isinstance(canonical_events, list):
+        return [row for row in canonical_events if isinstance(row, dict)]
+    return []
+
+
+def _statsbomb_event_bundle_from_settlement(item: dict[str, Any]) -> dict[str, Any]:
+    bundle = item.get("event_bundle")
+    if isinstance(bundle, dict):
+        return bundle
+    summary = _statsbomb_summary_from_settlement(item)
+    canonical_events = _statsbomb_canonical_events_from_settlement(item)
+    if not summary and not canonical_events:
+        return {}
+    return {
+        "source": _normalize_text(item.get("source")) or "StatsBomb Open Data",
+        "source_url": _normalize_text(item.get("source_url")) or "",
+        "source_match_id": item.get("statsbomb_source_match_id"),
+        "event_count": _safe_int(summary.get("event_count"), default=0) or 0,
+        "canonical_event_count": len(canonical_events),
+        "canonical_event_types": sorted({str(row.get("type") or "") for row in canonical_events if row.get("type")}),
+    }
+
+
 def _statsbomb_team_stats(item: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     summary = _statsbomb_summary_from_settlement(item)
     team_stats = summary.get("team_stats")
@@ -652,6 +677,8 @@ def build_statsbomb_review_training_samples(
                     "home_goals": _safe_int(item.get("home_goals")),
                     "away_goals": _safe_int(item.get("away_goals")),
                     "statsbomb_source_match_id": item.get("statsbomb_source_match_id"),
+                    "event_bundle": _statsbomb_event_bundle_from_settlement(item),
+                    "canonical_events": _statsbomb_canonical_events_from_settlement(item),
                 },
             }
         )
