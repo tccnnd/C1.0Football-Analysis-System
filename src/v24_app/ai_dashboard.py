@@ -881,14 +881,23 @@ def _supervisor_markdown(pred: dict) -> str:
     supervisor = pred.get("supervisor") if isinstance(pred.get("supervisor"), dict) else {}
     if not supervisor:
         return "## 8. Supervisor / Agent Trace\n\n暂无 Supervisor 编排数据。\n\n"
+    trace = pred.get("trace") if isinstance(pred.get("trace"), dict) else {}
     decision = supervisor.get("decision") if isinstance(supervisor.get("decision"), dict) else {}
     actions = supervisor.get("next_actions") if isinstance(supervisor.get("next_actions"), list) else []
     nodes = build_agent_trace_nodes(supervisor)
+    evidence_refs = trace.get("evidence_refs") if isinstance(trace.get("evidence_refs"), list) else []
+    tool_calls = trace.get("tool_calls") if isinstance(trace.get("tool_calls"), list) else []
     lines = [
         "## 8. Supervisor / Agent Trace",
         "",
         "| 项目 | 结果 |",
         "|---|---|",
+        f"| Trace ID | {_md_cell(trace.get('trace_id', '-'))} |",
+        f"| Trace Version | {_md_cell(trace.get('trace_version', '-'))} |",
+        f"| Prompt Version | {_md_cell(trace.get('prompt_version', '-'))} |",
+        f"| Trace Latency | {_md_cell(trace.get('latency_ms', '-'))} ms |",
+        f"| Evidence Refs | {_md_cell(len(evidence_refs))} |",
+        f"| Tool Calls | {_md_cell(len(tool_calls))} |",
         f"| Supervisor 状态 | {_md_cell(supervisor.get('status', '-'))} |",
         f"| 是否允许放行 | {_md_cell('yes' if decision.get('release_allowed') else 'no')} |",
         f"| 是否需要人工复核 | {_md_cell('yes' if decision.get('requires_human_review') else 'no')} |",

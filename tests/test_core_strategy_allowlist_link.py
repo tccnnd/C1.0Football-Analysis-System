@@ -129,6 +129,37 @@ class CoreStrategyAllowlistLinkTests(unittest.TestCase):
         self.assertEqual(stored["prediction"]["strategy_allowlist"]["decision"], "allow")
         self.assertEqual(prediction["strategy_allowlist"]["exported_at"], marker["exported_at"])
 
+    def test_persist_prediction_snapshot_adds_trace_envelope(self) -> None:
+        match = self._match()
+        prediction = {
+            "recommendation": "home",
+            "confidence": 0.66,
+            "risk_level": "LOW",
+            "supervisor": {
+                "status": "completed",
+                "decision": {"release_allowed": True, "requires_human_review": False},
+                "agents": [
+                    {
+                        "name": "StrategyComposer",
+                        "status": "ready",
+                        "trigger": "report_ready_check",
+                        "evidence": {"release_allowed": True},
+                        "actions": ["ready_for_report"],
+                    }
+                ],
+            },
+        }
+        fake_store = _FakeStateStore()
+
+        with patch("v24_app.core.STATE_STORE", fake_store):
+            core.persist_prediction_snapshot(match, prediction)
+
+        stored = fake_store.snapshots[match.match_id]
+        self.assertIn("trace", prediction)
+        self.assertEqual(stored["trace"]["trace_id"], prediction["trace"]["trace_id"])
+        self.assertEqual(stored["prediction"]["trace"]["trace_version"], "trace_v1")
+        self.assertEqual(stored["prediction"]["trace"]["tool_calls"][0]["name"], "ready_for_report")
+
     def test_persist_prediction_snapshots_batches_state_writes(self) -> None:
         first = self._match()
         second = core.AppMatch(

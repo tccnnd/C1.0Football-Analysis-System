@@ -32,6 +32,7 @@ from .models.xgboost_v0 import XGBoostProbabilityModel
 from .models.bayesian_calibration import calibrate_three_way_probabilities
 from .orchestrator import build_supervisor_orchestration
 from .storage.state_store import StateStore
+from .trace_envelope import build_prediction_trace_envelope
 from .training_samples import (
     build_recent_form_feature_map,
     build_team_histories_from_state,
@@ -11333,6 +11334,8 @@ def _predict_match_with_inputs(
 
 
 def predict_match(match: AppMatch) -> dict:
+    started_at = datetime.now()
+    started_perf = time.perf_counter()
     ratings_map = _load_match_ratings(match)
     had_home = match.home_team in ratings_map
     had_away = match.away_team in ratings_map
@@ -11350,7 +11353,31 @@ def predict_match(match: AppMatch) -> dict:
         recent_form_features=recent_form_features,
     )
     prediction["rating_pool"] = _rating_pool_name(match)
-    return _apply_world_cup_overlay(match, prediction)
+    prediction = _apply_world_cup_overlay(match, prediction)
+    _ensure_prediction_trace(match, prediction, started_at=started_at, latency_ms=(time.perf_counter() - started_perf) * 1000.0)
+    return prediction
+
+
+def _ensure_prediction_trace(
+    match: AppMatch,
+    prediction: dict,
+    *,
+    started_at: datetime | None = None,
+    latency_ms: float | int | None = None,
+) -> dict:
+    if not isinstance(prediction, dict):
+        return {}
+    trace = prediction.get("trace")
+    if isinstance(trace, dict) and trace.get("trace_id"):
+        return trace
+    trace = build_prediction_trace_envelope(
+        match=match,
+        prediction=prediction,
+        started_at=started_at,
+        latency_ms=latency_ms,
+    )
+    prediction["trace"] = trace
+    return trace
 
 
 def _strategy_allowlist_marker(
@@ -11428,6 +11455,7 @@ def mark_strategy_allowlist_snapshots(
             summary["skipped"] += 1
             continue
         prediction["strategy_allowlist"] = dict(marker)
+        trace = _ensure_prediction_trace(match, prediction)
         existing = snapshots.get(match.match_id) if isinstance(snapshots, dict) else None
         record = dict(existing) if isinstance(existing, dict) else {}
         record.update(
@@ -11438,6 +11466,8 @@ def mark_strategy_allowlist_snapshots(
                 "market_snapshot": record.get("market_snapshot") if isinstance(record.get("market_snapshot"), dict) else _market_snapshot_fields_from_match(match),
             }
         )
+        if trace:
+            record["trace"] = dict(trace)
         record = _attach_strategy_allowlist_marker(record, marker)
         STATE_STORE.upsert_prediction_snapshot(match.match_id, record)
         STATE_STORE.upsert_analysis_history(match.match_id, record)
@@ -11593,6 +11623,9 @@ def _agent_trace_settlement_fields(prediction: dict | None) -> dict:
     supervisor = prediction.get("supervisor") if isinstance(prediction, dict) else {}
     if not isinstance(supervisor, dict):
         supervisor = {}
+    trace = prediction.get("trace") if isinstance(prediction, dict) else {}
+    if not isinstance(trace, dict):
+        trace = {}
     agents = supervisor.get("agents") if isinstance(supervisor.get("agents"), list) else []
     agent_statuses: dict[str, str] = {}
     agent_actions: list[str] = []
@@ -11623,6 +11656,9 @@ def _agent_trace_settlement_fields(prediction: dict | None) -> dict:
             if action_text and action_text not in agent_actions:
                 agent_actions.append(action_text)
     return {
+        "trace_id": str(trace.get("trace_id") or ""),
+        "trace_version": str(trace.get("trace_version") or ""),
+        "prompt_version": str(trace.get("prompt_version") or ""),
         "supervisor_agent_statuses": agent_statuses,
         "supervisor_alert_agents": alert_agents,
         "supervisor_watch_agents": watch_agents,
@@ -11639,6 +11675,9 @@ def persist_prediction_snapshot(match: AppMatch, prediction: dict) -> None:
     existing = snapshots.get(match.match_id) if isinstance(snapshots, dict) else None
     marker = _existing_strategy_allowlist_marker(existing)
     stored_prediction = dict(prediction)
+    trace = _ensure_prediction_trace(match, stored_prediction)
+    if trace:
+        prediction["trace"] = dict(trace)
     if marker:
         stored_prediction["strategy_allowlist"] = dict(marker)
         prediction["strategy_allowlist"] = dict(marker)
@@ -11649,6 +11688,8 @@ def persist_prediction_snapshot(match: AppMatch, prediction: dict) -> None:
         "prediction": stored_prediction,
         "market_snapshot": market_snapshot,
     }
+    if trace:
+        record["trace"] = dict(trace)
     record = _attach_strategy_allowlist_marker(record, marker)
     STATE_STORE.upsert_prediction_snapshot(match.match_id, record)
     STATE_STORE.upsert_analysis_history(match.match_id, record)
@@ -11683,6 +11724,9 @@ def persist_prediction_snapshots(items: Iterable[tuple[AppMatch, dict]]) -> dict
         existing = snapshots.get(match.match_id) if isinstance(snapshots, dict) else None
         marker = _existing_strategy_allowlist_marker(existing)
         stored_prediction = dict(prediction)
+        trace = _ensure_prediction_trace(match, stored_prediction)
+        if trace:
+            prediction["trace"] = dict(trace)
         if marker:
             stored_prediction["strategy_allowlist"] = dict(marker)
             prediction["strategy_allowlist"] = dict(marker)
@@ -11692,6 +11736,8 @@ def persist_prediction_snapshots(items: Iterable[tuple[AppMatch, dict]]) -> dict
             "prediction": stored_prediction,
             "market_snapshot": _market_snapshot_fields_from_match(match),
         }
+        if trace:
+            record["trace"] = dict(trace)
         record = _attach_strategy_allowlist_marker(record, marker)
         _ordered_upsert(snapshots, match.match_id, record, limit=3000)
         _ordered_upsert(history, match.match_id, record, limit=5000)

@@ -247,6 +247,14 @@ class AIDashboardLoadReportTests(unittest.TestCase):
                     {"name": "RiskGuardian", "status": "alert", "trigger": "risk_overlay", "outputs": {"admission_decision": "observe"}},
                 ],
             },
+            "trace": {
+                "trace_id": "trc_test123",
+                "trace_version": "trace_v1",
+                "prompt_version": "strategy_report_v1",
+                "latency_ms": 12.5,
+                "tool_calls": [{"name": "manual_market_review"}],
+                "evidence_refs": [{"ref_id": "market_entropy"}],
+            },
         }
 
         report = _markdown_report(DashboardRow(match=match, prediction=prediction))
@@ -259,6 +267,10 @@ class AIDashboardLoadReportTests(unittest.TestCase):
         self.assertIn("Handicap Margin Consistency", report)
         self.assertIn("handicap_direction_mismatch", report)
         self.assertIn("Supervisor / Agent Trace", report)
+        self.assertIn("trc_test123", report)
+        self.assertIn("strategy_report_v1", report)
+        self.assertIn("Evidence Refs", report)
+        self.assertIn("Tool Calls", report)
         self.assertIn("manual_market_review", report)
         self.assertIn("MarketEntropy / ALERT", report)
         self.assertIn("Market pressure is abnormal", report)
