@@ -116,6 +116,7 @@ from .ui_modules import (
     build_statsbomb_review_training_quality_report_lines,
     build_statsbomb_review_training_quality_summary,
     build_video_review_source_coverage_summary,
+    build_video_review_resource_closure_summary,
     build_statsbomb_fewshot_backfill_report_filename,
     build_statsbomb_fewshot_backfill_report_lines,
     build_statsbomb_fewshot_draft_filename,
@@ -1661,6 +1662,7 @@ def build_video_review_center_summary(
     proxy_count = _as_int(source_payload.get("statsbomb_event_proxy_count"))
     missing_count = _as_int(source_payload.get("no_review_evidence_count"))
     settled_count = _as_int(source_payload.get("total_settled_count"))
+    resource_closure = build_video_review_resource_closure_summary(source_payload, memory_payload)
     memory_sample_count = _as_int(monitor.get("sample_count"))
     blocking_count = _as_int(health.get("blocking_count"))
     warning_count = _as_int(health.get("warning_count"))
@@ -1676,6 +1678,7 @@ def build_video_review_center_summary(
         f"记忆 {memory_status} | 来源 {coverage_status} | 已结算 {settled_count}\n"
         f"本地视频 {local_count} | 外部回放 {external_count} | "
         f"事件代理 {proxy_count} | 缺证据 {missing_count}\n"
+        f"资源闭环 {resource_closure.get('status_label') or '-'} | {resource_closure.get('summary_text') or '-'}\n"
         f"记忆样本 {memory_sample_count} | 健康问题 {issue_count} | 待处理动作 {action_count}"
     )
 
@@ -1699,6 +1702,9 @@ def build_video_review_center_summary(
         "issue_count": issue_count,
         "action_count": action_count,
         "card_count": card_count,
+        "resource_closure_summary": resource_closure,
+        "resource_closure_status": str(resource_closure.get("status") or "blocked"),
+        "resource_closure_tone": str(resource_closure.get("tone") or "neutral"),
     }
 
 
@@ -7427,6 +7433,9 @@ class SmartMatchDashboard:
             video_memory=get_video_review_fewshot_memory(),
         )
         summary = build_video_review_center_summary(video_memory_health, video_source_coverage)
+        resource_closure_summary = (
+            summary.get("resource_closure_summary") if isinstance(summary.get("resource_closure_summary"), dict) else {}
+        )
 
         window = tk.Toplevel(self.root)
         window.title("AI视频复盘专项中心")
@@ -7539,7 +7548,27 @@ class SmartMatchDashboard:
         else:
             self._strategy_row(left, "暂无补样建议", "视频记忆当前没有需要立即处理的补标注/补样动作。")
 
-        self._strategy_section_title(right, "视频来源覆盖", first=True)
+        self._strategy_section_title(right, "视频资源闭环", first=True)
+        resource_action_key = str(resource_closure_summary.get("action_key") or "")
+        resource_command_map = {
+            "open_video_review_evidence_gap_center_window": self.open_video_review_evidence_gap_center_window,
+            "open_statsbomb_review_training_closure_window": self.open_statsbomb_review_training_closure_window,
+            "open_ai_video_review_center_window": lambda: (window.destroy(), self.open_ai_video_review_center_window()),
+        }
+        self._strategy_row(
+            right,
+            str(resource_closure_summary.get("title") or "-"),
+            str(resource_closure_summary.get("body") or "-"),
+            command=resource_command_map.get(resource_action_key),
+        )
+        for row in [item for item in resource_closure_summary.get("card_rows", []) if isinstance(item, dict)][:4]:
+            self._strategy_row(
+                right,
+                f"{row.get('label', '-')}: {row.get('value', '-')}",
+                str(row.get("detail") or "-"),
+            )
+
+        self._strategy_section_title(right, "视频来源覆盖", first=False)
         self._strategy_row(
             right,
             f"{video_source_coverage.get('coverage_status', '-')} | settled {video_source_coverage.get('total_settled_count', 0)}",

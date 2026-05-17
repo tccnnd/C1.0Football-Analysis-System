@@ -1362,6 +1362,105 @@ def build_video_review_source_coverage_summary(
     }
 
 
+def build_video_review_resource_closure_summary(
+    video_source_coverage: Mapping[str, object] | object,
+    video_memory_health: Mapping[str, object] | object | None = None,
+) -> dict[str, object]:
+    coverage = _as_mapping(video_source_coverage)
+    memory = _as_mapping(video_memory_health)
+    memory_health = _as_mapping(memory.get("health"))
+    memory_status = _text(memory_health.get("status") or memory.get("status"), "blocked")
+    coverage_status = _text(coverage.get("coverage_status"), "blocked")
+
+    local_count = _safe_int(coverage.get("local_video_count"))
+    external_count = _safe_int(coverage.get("external_reference_count"))
+    proxy_count = _safe_int(coverage.get("statsbomb_event_proxy_count"))
+    missing_count = _safe_int(coverage.get("no_review_evidence_count"))
+    settled_count = _safe_int(coverage.get("total_settled_count"))
+    closure_count = local_count + external_count + proxy_count
+    closure_rate = closure_count / settled_count if settled_count else 0.0
+
+    statuses = {coverage_status, memory_status}
+    if "blocked" in statuses:
+        status = "blocked"
+    elif "attention" in statuses or missing_count > 0:
+        status = "attention"
+    else:
+        status = "healthy"
+
+    tone = {"healthy": "good", "attention": "warning", "blocked": "bad"}.get(status, "neutral")
+    status_label = {"healthy": "资源闭环可用", "attention": "需要补证据", "blocked": "资源闭环受阻"}.get(status, status)
+    if missing_count > 0:
+        next_step = "补本地视频 / 合法回放后回到缺口中心复核"
+        action_key = "open_video_review_evidence_gap_center_window"
+    elif proxy_count > 0:
+        next_step = "进入 StatsBomb 闭环复核，确认事件代理样本是否已回写"
+        action_key = "open_statsbomb_review_training_closure_window"
+    else:
+        next_step = "维持当前资源闭环"
+        action_key = "open_ai_video_review_center_window"
+
+    boundary_text = _text(
+        coverage.get("fallback_policy_text"),
+        "StatsBomb/Event Proxy 仅用于赛后复盘，不进入赛前预测特征。",
+    )
+    rows = [
+        {
+            "label": "闭环状态",
+            "value": status,
+            "tone": tone,
+            "detail": f"coverage={coverage_status} | memory={memory_status}",
+        },
+        {
+            "label": "闭环率",
+            "value": f"{closure_rate:.0%}",
+            "tone": "good" if status == "healthy" else "warning" if closure_rate > 0 else "bad",
+            "detail": f"已闭环 {closure_count} / 已结算 {settled_count}",
+        },
+        {
+            "label": "来源分布",
+            "value": f"本地 {local_count} / 外部 {external_count} / 事件代理 {proxy_count}",
+            "tone": "good" if closure_count else "neutral",
+            "detail": f"缺证据 {missing_count}",
+        },
+        {
+            "label": "使用边界",
+            "value": "赛后复盘",
+            "tone": "neutral",
+            "detail": boundary_text,
+        },
+    ]
+    body = (
+        f"来源 {coverage_status} | 记忆 {memory_status} | 已结算 {settled_count}\n"
+        f"闭环 {closure_count}/{settled_count} | 本地 {local_count} | 外部 {external_count} | "
+        f"事件代理 {proxy_count} | 缺证据 {missing_count}\n"
+        f"下一步 {next_step}\n"
+        f"{boundary_text}"
+    )
+    return {
+        "status": status,
+        "tone": tone,
+        "status_label": status_label,
+        "summary_text": f"closed {closure_count}/{settled_count} | missing {missing_count} | memory {memory_status}",
+        "title": f"视频资源闭环 | {status_label}",
+        "body": body,
+        "coverage_status": coverage_status,
+        "memory_status": memory_status,
+        "settled_count": settled_count,
+        "local_video_count": local_count,
+        "external_reference_count": external_count,
+        "statsbomb_event_proxy_count": proxy_count,
+        "no_review_evidence_count": missing_count,
+        "closure_count": closure_count,
+        "closure_rate": round(closure_rate, 4),
+        "next_step": next_step,
+        "action_key": action_key,
+        "boundary_text": boundary_text,
+        "card_rows": rows,
+        "rows": rows,
+    }
+
+
 def _side_from_margin(value: float, *, threshold: float = 0.0) -> str:
     if value > threshold:
         return "home"

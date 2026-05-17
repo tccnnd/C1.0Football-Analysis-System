@@ -974,6 +974,8 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertEqual(summary["status"], "healthy")
         self.assertEqual(summary["tone"], "good")
         self.assertEqual(summary["memory_sample_count"], 24)
+        self.assertEqual(summary["resource_closure_status"], "healthy")
+        self.assertIn("资源闭环", summary["body"])
         self.assertIn("本地视频 2", summary["body"])
         self.assertIn("外部回放 3", summary["body"])
         self.assertIn("事件代理 3", summary["body"])
@@ -1024,6 +1026,7 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertEqual(summary["tone"], "bad")
         self.assertEqual(summary["issue_count"], 3)
         self.assertEqual(summary["action_count"], 1)
+        self.assertEqual(summary["resource_closure_status"], "blocked")
         self.assertIn("复盘受阻", summary["title"])
 
     def test_video_review_center_action_rows_prioritize_missing_evidence(self) -> None:

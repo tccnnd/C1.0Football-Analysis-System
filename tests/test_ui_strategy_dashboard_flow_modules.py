@@ -71,6 +71,7 @@ from v24_app.ui_modules import (
     build_video_review_fewshot_merge_plan_filename,
     build_video_review_fewshot_merge_plan_lines,
     build_video_review_source_coverage_summary,
+    build_video_review_resource_closure_summary,
     validate_video_review_fewshot_payload,
     build_statsbomb_fewshot_backfill_queue,
     build_statsbomb_fewshot_backfill_report_filename,
@@ -2610,6 +2611,56 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertEqual(summary["statsbomb_event_proxy_count"], 0)
         self.assertTrue(any(row["coverage_kind"] == "missing_evidence" for row in summary["rows"]))
         self.assertTrue(any("缺少复盘证据" in row["title"] for row in summary["rows"]))
+
+    def test_video_review_resource_closure_summary_reports_healthy_attention_and_blocked_states(self) -> None:
+        healthy = build_video_review_resource_closure_summary(
+            {
+                "coverage_status": "healthy",
+                "total_settled_count": 4,
+                "local_video_count": 1,
+                "external_reference_count": 1,
+                "statsbomb_event_proxy_count": 2,
+                "no_review_evidence_count": 0,
+            },
+            {"health": {"status": "healthy"}},
+        )
+        attention = build_video_review_resource_closure_summary(
+            {
+                "coverage_status": "attention",
+                "total_settled_count": 4,
+                "local_video_count": 1,
+                "external_reference_count": 1,
+                "statsbomb_event_proxy_count": 1,
+                "no_review_evidence_count": 1,
+            },
+            {"health": {"status": "healthy"}},
+        )
+        blocked = build_video_review_resource_closure_summary(
+            {
+                "coverage_status": "healthy",
+                "total_settled_count": 4,
+                "local_video_count": 2,
+                "external_reference_count": 1,
+                "statsbomb_event_proxy_count": 1,
+                "no_review_evidence_count": 0,
+            },
+            {"health": {"status": "blocked"}},
+        )
+
+        self.assertEqual(healthy["status"], "healthy")
+        self.assertEqual(healthy["tone"], "good")
+        self.assertEqual(healthy["action_key"], "open_statsbomb_review_training_closure_window")
+        self.assertIn("视频资源闭环", healthy["title"])
+        self.assertIn("StatsBomb/Event Proxy", healthy["body"])
+
+        self.assertEqual(attention["status"], "attention")
+        self.assertEqual(attention["tone"], "warning")
+        self.assertIn("缺证据 1", attention["body"])
+        self.assertEqual(attention["action_key"], "open_video_review_evidence_gap_center_window")
+
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(blocked["tone"], "bad")
+        self.assertEqual(blocked["status_label"], "资源闭环受阻")
 
     def _video_fewshot_item(
         self,
