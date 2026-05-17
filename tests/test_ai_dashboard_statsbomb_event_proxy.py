@@ -18,6 +18,7 @@ from v24_app.ai_dashboard import (
     build_statsbomb_event_proxy_review_text,
     build_statsbomb_review_training_action_feedback,
     build_statsbomb_review_training_action_rows,
+    build_statsbomb_review_training_center_summary,
     build_statsbomb_review_training_feedback_rows,
     build_statsbomb_review_training_quality_export_message,
     build_video_review_evidence_gap_batch_id,
@@ -702,6 +703,32 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertIn("build_statsbomb_review_samples", rows[0]["title"])
         self.assertIn("samples 0->18", rows[0]["body"])
         self.assertIn("继续补样本", rows[0]["body"])
+
+    def test_review_training_center_summary_compacts_quality_and_repair_state(self) -> None:
+        summary = build_statsbomb_review_training_center_summary(
+            {
+                "status": "attention",
+                "sample_count": 18,
+                "issue_count": 2,
+                "issues": [{"code": "statsbomb_review_sample_count_low", "severity": "warning"}],
+            },
+            [
+                {
+                    "occurred_at": "2026-05-17 09:00:00",
+                    "action_key": "build_statsbomb_review_samples",
+                    "outcome": "improved",
+                }
+            ],
+        )
+
+        self.assertEqual(summary["status"], "attention")
+        self.assertEqual(summary["tone"], "warning")
+        self.assertEqual(summary["sample_count"], 18)
+        self.assertEqual(summary["issue_count"], 2)
+        self.assertEqual(summary["repair_count"], 1)
+        self.assertIn("事件代理质量", summary["title"])
+        self.assertIn("样本 18", summary["body"])
+        self.assertIn("2026-05-17 09:00:00", summary["body"])
 
     def test_review_training_action_rows_map_issues_to_executable_actions(self) -> None:
         rows = build_statsbomb_review_training_action_rows(

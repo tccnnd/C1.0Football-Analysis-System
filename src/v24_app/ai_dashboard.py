@@ -1425,6 +1425,36 @@ def build_statsbomb_review_training_feedback_rows(records: list[dict] | object, 
     return rows
 
 
+def build_statsbomb_review_training_center_summary(quality: dict | object, records: list[dict] | object) -> dict[str, object]:
+    payload = quality if isinstance(quality, dict) else {}
+    repair_records = [item for item in records if isinstance(item, dict)] if isinstance(records, list) else []
+    status = str(payload.get("status") or "blocked")
+    sample_count = int(payload.get("sample_count", 0) or 0)
+    issue_count = int(payload.get("issue_count", 0) or 0)
+    action_count = len(build_statsbomb_review_training_action_rows(payload))
+    tone = "good" if status == "healthy" else "warning" if status == "attention" else "bad"
+    latest = repair_records[0] if repair_records else {}
+    latest_text = (
+        f"{latest.get('occurred_at', '-')} | {latest.get('action_key', '-')} | {latest.get('outcome', '-')}"
+        if latest
+        else "-"
+    )
+    return {
+        "status": status,
+        "tone": tone,
+        "sample_count": sample_count,
+        "issue_count": issue_count,
+        "action_count": action_count,
+        "repair_count": len(repair_records),
+        "latest_repair": latest_text,
+        "title": f"事件代理质量 | {status}",
+        "body": (
+            f"样本 {sample_count} | 问题 {issue_count} | 可执行动作 {action_count} | 修复记录 {len(repair_records)}\n"
+            f"最近修复: {latest_text}"
+        ),
+    }
+
+
 def build_statsbomb_review_training_quality_export_message(path: Path, quality: dict, record_count: int) -> str:
     return "\n".join(
         [
@@ -5477,8 +5507,10 @@ class SmartMatchDashboard:
         )
         evidence_gap_batch_state = _load_video_review_evidence_gap_batch_state()
         evidence_gap_batch_status = build_video_review_evidence_gap_batch_status(evidence_gap_batch_state)
-        statsbomb_repair_feedback_rows = build_statsbomb_review_training_feedback_rows(
-            _load_statsbomb_review_training_action_feedback_log()
+        statsbomb_repair_records = _load_statsbomb_review_training_action_feedback_log()
+        statsbomb_review_center_summary = build_statsbomb_review_training_center_summary(
+            statsbomb_review_quality,
+            statsbomb_repair_records,
         )
 
         shell = self._page_shell(
@@ -5755,8 +5787,8 @@ class SmartMatchDashboard:
         ).pack(side=tk.LEFT)
         tk.Button(
             review_memory_actions,
-            text="导出事件代理质量报告",
-            command=self.export_statsbomb_review_training_quality_report,
+            text="事件代理中心",
+            command=self.open_statsbomb_review_training_center_window,
             bg=PANEL_2,
             fg=TEXT,
             activebackground="#172638",
@@ -5881,33 +5913,19 @@ class SmartMatchDashboard:
                 "暂无处理记录",
                 "绑定外部回放链接后，会记录 missing_evidence -> external_reference 的变化。",
             )
-        self._strategy_section_title(right, "StatsBomb事件代理样本质量")
-        for row in statsbomb_review_quality.get("card_rows", []) if isinstance(statsbomb_review_quality.get("card_rows"), list) else []:
-            if isinstance(row, dict):
-                self._strategy_row(
-                    right,
-                    f"{row.get('label', '-')}: {row.get('value', '-')}",
-                    str(row.get("detail") or "-"),
-                )
-        self._strategy_section_title(right, "事件代理可执行修复")
-        for row in build_statsbomb_review_training_action_rows(statsbomb_review_quality):
-            if isinstance(row, dict):
-                self._strategy_row(
-                    right,
-                    str(row.get("title") or "-"),
-                    str(row.get("body") or "-"),
-                    command=self._statsbomb_review_training_action_command(str(row.get("action_key") or "")),
-                )
-        self._strategy_section_title(right, "事件代理修复闭环")
-        if statsbomb_repair_feedback_rows:
-            for row in statsbomb_repair_feedback_rows:
-                self._strategy_row(
-                    right,
-                    str(row.get("title") or "-"),
-                    str(row.get("body") or "-"),
-                )
-        else:
-            self._strategy_row(right, "暂无修复记录", "点击上方修复动作后，会记录本次动作前后的质量变化。")
+        self._strategy_section_title(right, "事件代理复盘")
+        self._strategy_row(
+            right,
+            str(statsbomb_review_center_summary.get("title") or "-"),
+            str(statsbomb_review_center_summary.get("body") or "-"),
+            command=self.open_statsbomb_review_training_center_window,
+        )
+        self._strategy_row(
+            right,
+            "打开事件代理专项中心",
+            "StatsBomb/Event Proxy 样本质量、可执行修复、修复闭环和质量报告导出都集中在专项窗口。",
+            command=self.open_statsbomb_review_training_center_window,
+        )
 
         tk.Label(right, text="\u95ed\u73af\u590d\u76d8", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
         detail = tk.Text(
@@ -6601,6 +6619,139 @@ class SmartMatchDashboard:
 
     def open_video_review_evidence_gap_batch_filter_window(self) -> None:
         self.open_video_review_evidence_gap_center_window()
+
+    def open_statsbomb_review_training_center_window(self) -> None:
+        quality = self._current_statsbomb_review_training_quality()
+        repair_records = _load_statsbomb_review_training_action_feedback_log()
+        summary = build_statsbomb_review_training_center_summary(quality, repair_records)
+
+        window = tk.Toplevel(self.root)
+        window.title("事件代理专项中心")
+        window.geometry("1040x700")
+        window.configure(bg=BG)
+
+        shell = tk.Frame(window, bg=BG)
+        shell.pack(fill=tk.BOTH, expand=True, padx=16, pady=16)
+
+        header = tk.Frame(shell, bg=BG)
+        header.pack(fill=tk.X, pady=(0, 12))
+        tk.Label(header, text="事件代理专项中心", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 15, "bold")).pack(side=tk.LEFT)
+        tk.Button(
+            header,
+            text="导出质量报告",
+            command=self.export_statsbomb_review_training_quality_report,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=14,
+            pady=6,
+        ).pack(side=tk.RIGHT, padx=(8, 0))
+        tk.Button(
+            header,
+            text="生成事件代理样本",
+            command=self.export_statsbomb_event_proxy_review_samples,
+            bg=BLUE,
+            fg="white",
+            activebackground="#3d5ee7",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=14,
+            pady=6,
+        ).pack(side=tk.RIGHT, padx=(8, 0))
+        tk.Button(
+            header,
+            text="刷新",
+            command=lambda: (window.destroy(), self.open_statsbomb_review_training_center_window()),
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=14,
+            pady=6,
+        ).pack(side=tk.RIGHT, padx=(8, 0))
+
+        top = tk.Frame(shell, bg=BG)
+        top.pack(fill=tk.X, pady=(0, 12))
+        for label, value, color in [
+            ("质量状态", str(summary.get("status") or "-"), self._tone_color(str(summary.get("tone") or "neutral"))),
+            ("复盘样本", str(summary.get("sample_count", 0)), TEXT),
+            ("问题数", str(summary.get("issue_count", 0)), RED if int(summary.get("issue_count", 0) or 0) else GREEN),
+            ("修复记录", str(summary.get("repair_count", 0)), "#7aa2ff"),
+        ]:
+            self._detail_metric(top, label, value, color)
+
+        body = tk.Frame(shell, bg=BG)
+        body.pack(fill=tk.BOTH, expand=True)
+        left = self._card(body, PANEL)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 12))
+        right = self._card(body, PANEL)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self._strategy_section_title(left, "样本质量", first=True)
+        card_rows = quality.get("card_rows") if isinstance(quality.get("card_rows"), list) else []
+        if card_rows:
+            for row in card_rows:
+                if isinstance(row, dict):
+                    self._strategy_row(
+                        left,
+                        f"{row.get('label', '-')}: {row.get('value', '-')}",
+                        str(row.get("detail") or "-"),
+                    )
+        else:
+            self._strategy_row(left, "暂无质量卡片", "当前没有可展示的 StatsBomb/Event Proxy 质量明细。")
+
+        self._strategy_section_title(left, "质量问题", first=False)
+        issues = quality.get("issues") if isinstance(quality.get("issues"), list) else []
+        if issues:
+            for issue in [item for item in issues if isinstance(item, dict)][:6]:
+                self._strategy_row(
+                    left,
+                    f"{issue.get('severity', '-')}: {issue.get('code', '-')}",
+                    f"{issue.get('message', '-')}\n建议: {issue.get('recommendation', '-')}",
+                )
+        else:
+            self._strategy_row(left, "暂无质量问题", "事件代理复盘样本当前没有阻塞项。")
+
+        self._strategy_section_title(right, "可执行修复", first=True)
+
+        def _action_command(action_key: str):
+            if action_key == "refresh_review_center":
+                return lambda: (window.destroy(), self.open_statsbomb_review_training_center_window())
+            return lambda key=action_key: self.run_statsbomb_review_training_action(key)
+
+        for row in build_statsbomb_review_training_action_rows(quality):
+            if isinstance(row, dict):
+                self._strategy_row(
+                    right,
+                    str(row.get("title") or "-"),
+                    str(row.get("body") or "-"),
+                    command=_action_command(str(row.get("action_key") or "")),
+                )
+
+        self._strategy_section_title(right, "修复闭环", first=False)
+        repair_rows = build_statsbomb_review_training_feedback_rows(repair_records, limit=8)
+        if repair_rows:
+            for row in repair_rows:
+                self._strategy_row(
+                    right,
+                    str(row.get("title") or "-"),
+                    str(row.get("body") or "-"),
+                )
+        else:
+            self._strategy_row(right, "暂无修复记录", "点击修复动作后，会记录动作前后的质量变化。")
+
+        self._strategy_section_title(right, "边界", first=False)
+        self._strategy_row(
+            right,
+            "仅用于赛后复盘",
+            "StatsBomb/Event Proxy 样本只进入 Evaluation Agent 复盘与错因归因，不写入赛前预测特征。",
+        )
 
     def export_statsbomb_review_training_quality_report(self) -> Path:
         quality = self._current_statsbomb_review_training_quality()
