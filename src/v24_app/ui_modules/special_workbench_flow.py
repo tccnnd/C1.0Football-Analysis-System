@@ -342,6 +342,7 @@ def build_data_training_special_section_rows(
         suggestion_body = f"{str(first_action.get('value') or '-')} | {str(first_action.get('detail') or '-')}"
     else:
         suggestion_body = "进入训练总览查看补数建议"
+    suggestion_body = f"{suggestion_body}\n补数与特征重建闭环: 生成复盘样本 -> 重建XGB样本 -> 刷新训练健康"
     _attach(
         "show_model_training_overview",
         "优先补数建议",
