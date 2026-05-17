@@ -4513,6 +4513,8 @@ TRAINING_HEALTH_MIN_LABEL_CLASSES = 3
 TRAINING_HEALTH_MIN_CLASS_COUNT = 30
 TRAINING_HEALTH_MIN_LEAGUES = 5
 TRAINING_HEALTH_MIN_CLUB_HISTORY = 100
+TRAINING_HEALTH_MIN_MATCH_FACT_COVERAGE_RATIO = 0.80
+TRAINING_HEALTH_MIN_SOURCE_PROVENANCE_RATIO = 0.80
 
 
 def _int_count_mapping(payload: object) -> dict[str, int]:
@@ -4537,6 +4539,143 @@ def _training_health_issue(code: str, severity: str, message: str, recommendatio
     }
 
 
+def _ratio(numerator: int | float, denominator: int | float) -> float:
+    try:
+        denominator_value = float(denominator)
+        if denominator_value <= 0:
+            return 0.0
+        return round(max(0.0, min(float(numerator) / denominator_value, 1.0)), 4)
+    except Exception:
+        return 0.0
+
+
+def _statsbomb_action_fact_summary(items: list[dict]) -> dict:
+    event_match_count = 0
+    event_count = 0
+    source_complete_count = 0
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        event_summary = item.get("event_summary", {}) if isinstance(item.get("event_summary"), dict) else {}
+        item_event_count = int(_safe_int(event_summary.get("event_count"), 0) or 0)
+        if item_event_count > 0:
+            event_match_count += 1
+            event_count += item_event_count
+        if normalize_text(item.get("source", "")) or normalize_text(item.get("source_url", "")) or normalize_text(item.get("source_match_id", "")):
+            source_complete_count += 1
+    return {
+        "event_match_count": event_match_count,
+        "event_count": event_count,
+        "source_complete_count": source_complete_count,
+    }
+
+
+def _prediction_trace_fact_ref_summary() -> dict:
+    try:
+        snapshots = STATE_STORE.load_prediction_snapshots()
+    except Exception:
+        snapshots = {}
+    if not isinstance(snapshots, dict):
+        return {
+            "snapshot_count": 0,
+            "trace_count": 0,
+            "match_fact_trace_count": 0,
+            "action_fact_trace_count": 0,
+            "source_provenance_trace_count": 0,
+            "trace_fact_ref_coverage_ratio": 0.0,
+        }
+    items_payload = snapshots.get("items")
+    if isinstance(items_payload, dict):
+        records = [item for item in items_payload.values() if isinstance(item, dict)]
+    elif isinstance(items_payload, list):
+        records = [item for item in items_payload if isinstance(item, dict)]
+    else:
+        records = [item for item in snapshots.values() if isinstance(item, dict)]
+    trace_count = 0
+    match_fact_trace_count = 0
+    action_fact_trace_count = 0
+    source_provenance_trace_count = 0
+    for record in records:
+        prediction = record.get("prediction", {}) if isinstance(record.get("prediction"), dict) else {}
+        trace = prediction.get("trace") if isinstance(prediction.get("trace"), dict) else record.get("trace")
+        if not isinstance(trace, dict):
+            continue
+        trace_count += 1
+        fact_refs = trace.get("fact_refs") if isinstance(trace.get("fact_refs"), list) else []
+        kinds = {
+            str(item.get("kind") or "")
+            for item in fact_refs
+            if isinstance(item, dict)
+        }
+        if "match_fact" in kinds:
+            match_fact_trace_count += 1
+        if "action_fact" in kinds:
+            action_fact_trace_count += 1
+        if "source_provenance" in kinds:
+            source_provenance_trace_count += 1
+    snapshot_count = len(records)
+    return {
+        "snapshot_count": snapshot_count,
+        "trace_count": trace_count,
+        "match_fact_trace_count": match_fact_trace_count,
+        "action_fact_trace_count": action_fact_trace_count,
+        "source_provenance_trace_count": source_provenance_trace_count,
+        "trace_fact_ref_coverage_ratio": _ratio(match_fact_trace_count, snapshot_count),
+    }
+
+
+def _build_fact_layer_coverage(
+    *,
+    xgb_samples: dict,
+    club_history: dict,
+    world_cup_history: dict,
+    statsbomb_events: dict,
+    statsbomb_items: list[dict],
+) -> dict:
+    sample_count = int(xgb_samples.get("sample_count", 0) or 0)
+    club_match_count = int(club_history.get("match_count", 0) or 0)
+    world_cup_match_count = int(world_cup_history.get("match_count", 0) or 0)
+    statsbomb_match_count = int(statsbomb_events.get("match_count", 0) or 0)
+    action_summary = _statsbomb_action_fact_summary(statsbomb_items)
+
+    match_fact_available_count = club_match_count + world_cup_match_count + statsbomb_match_count
+    match_fact_target_count = max(sample_count, match_fact_available_count)
+    action_fact_match_count = int(action_summary.get("event_match_count", 0) or 0)
+    action_fact_event_count = int(action_summary.get("event_count", 0) or 0)
+    source_target_count = match_fact_available_count + action_fact_match_count
+    club_source_count = club_match_count if club_history.get("source") else 0
+    world_cup_source_count = world_cup_match_count if world_cup_history.get("source") else 0
+    statsbomb_source_count = int(action_summary.get("source_complete_count", 0) or 0)
+    source_complete_count = club_source_count + world_cup_source_count + statsbomb_source_count + action_fact_match_count
+    trace_fact_refs = _prediction_trace_fact_ref_summary()
+
+    return {
+        "match_fact": {
+            "available_count": match_fact_available_count,
+            "target_count": match_fact_target_count,
+            "coverage_ratio": _ratio(match_fact_available_count, match_fact_target_count),
+            "club_history_count": club_match_count,
+            "world_cup_history_count": world_cup_match_count,
+            "statsbomb_match_count": statsbomb_match_count,
+            "min_coverage_ratio": TRAINING_HEALTH_MIN_MATCH_FACT_COVERAGE_RATIO,
+        },
+        "action_fact": {
+            "available_match_count": action_fact_match_count,
+            "target_match_count": statsbomb_match_count,
+            "coverage_ratio": _ratio(action_fact_match_count, statsbomb_match_count),
+            "event_count": action_fact_event_count,
+            "source": "statsbomb_event_summaries",
+        },
+        "source_provenance": {
+            "complete_count": source_complete_count,
+            "target_count": source_target_count,
+            "coverage_ratio": _ratio(source_complete_count, source_target_count),
+            "min_coverage_ratio": TRAINING_HEALTH_MIN_SOURCE_PROVENANCE_RATIO,
+        },
+        "trace_fact_refs": trace_fact_refs,
+    }
+
+
 def _build_training_health_diagnostics(
     *,
     xgb_samples: dict,
@@ -4544,6 +4683,7 @@ def _build_training_health_diagnostics(
     world_cup_history: dict,
     statsbomb_events: dict,
     rating_pools: dict,
+    fact_coverage: dict | None = None,
 ) -> dict:
     issues: list[dict[str, str]] = []
 
@@ -4658,6 +4798,45 @@ def _build_training_health_diagnostics(
             )
         )
 
+    fact_coverage = fact_coverage if isinstance(fact_coverage, dict) else {}
+    match_fact = fact_coverage.get("match_fact", {}) if isinstance(fact_coverage.get("match_fact"), dict) else {}
+    action_fact = fact_coverage.get("action_fact", {}) if isinstance(fact_coverage.get("action_fact"), dict) else {}
+    source_provenance = fact_coverage.get("source_provenance", {}) if isinstance(fact_coverage.get("source_provenance"), dict) else {}
+    trace_fact_refs = fact_coverage.get("trace_fact_refs", {}) if isinstance(fact_coverage.get("trace_fact_refs"), dict) else {}
+    match_fact_ratio = _safe_float(match_fact.get("coverage_ratio"), 0.0)
+    match_fact_target_count = int(match_fact.get("target_count", 0) or 0)
+    action_fact_ratio = _safe_float(action_fact.get("coverage_ratio"), 0.0)
+    action_fact_target_count = int(action_fact.get("target_match_count", 0) or 0)
+    source_provenance_ratio = _safe_float(source_provenance.get("coverage_ratio"), 0.0)
+    source_provenance_target_count = int(source_provenance.get("target_count", 0) or 0)
+    if sample_count >= TRAINING_HEALTH_MIN_XGB_SAMPLES and match_fact_target_count > 0 and match_fact_ratio < TRAINING_HEALTH_MIN_MATCH_FACT_COVERAGE_RATIO:
+        issues.append(
+            _training_health_issue(
+                "fact_match_coverage_low",
+                "warning",
+                f"MatchFact coverage is low: {match_fact_ratio:.1%}",
+                "Materialize MatchFact rows for XGB/history samples before formal model training.",
+            )
+        )
+    if action_fact_target_count > 0 and action_fact_ratio < 1.0:
+        issues.append(
+            _training_health_issue(
+                "fact_action_coverage_low",
+                "warning",
+                f"ActionFact coverage is incomplete: {action_fact_ratio:.1%}",
+                "Convert StatsBomb event summaries into canonical ActionFact sidecars.",
+            )
+        )
+    if source_provenance_target_count > 0 and source_provenance_ratio < TRAINING_HEALTH_MIN_SOURCE_PROVENANCE_RATIO:
+        issues.append(
+            _training_health_issue(
+                "fact_source_provenance_low",
+                "warning",
+                f"SourceProvenance completeness is low: {source_provenance_ratio:.1%}",
+                "Backfill provider/source_id/source_version for fact-layer rows.",
+            )
+        )
+
     has_blocking = any(issue.get("severity") == "blocking" for issue in issues)
     status = "blocked" if has_blocking else "attention" if issues else "healthy"
     return {
@@ -4703,6 +4882,21 @@ def _build_training_health_diagnostics(
             "national_team_count": int(rating_pools.get("national_team_count", 0) or 0),
             "club_ready": int(rating_pools.get("club_team_count", 0) or 0) > 0,
             "national_ready": int(rating_pools.get("national_team_count", 0) or 0) > 0,
+        },
+        "fact_readiness": {
+            "match_fact_available_count": int(match_fact.get("available_count", 0) or 0),
+            "match_fact_target_count": match_fact_target_count,
+            "match_fact_coverage_ratio": round(match_fact_ratio, 4),
+            "min_match_fact_coverage_ratio": TRAINING_HEALTH_MIN_MATCH_FACT_COVERAGE_RATIO,
+            "action_fact_match_count": int(action_fact.get("available_match_count", 0) or 0),
+            "action_fact_target_match_count": action_fact_target_count,
+            "action_fact_coverage_ratio": round(action_fact_ratio, 4),
+            "action_fact_event_count": int(action_fact.get("event_count", 0) or 0),
+            "source_provenance_complete_count": int(source_provenance.get("complete_count", 0) or 0),
+            "source_provenance_target_count": source_provenance_target_count,
+            "source_provenance_ratio": round(source_provenance_ratio, 4),
+            "trace_snapshot_count": int(trace_fact_refs.get("snapshot_count", 0) or 0),
+            "trace_fact_ref_coverage_ratio": _safe_float(trace_fact_refs.get("trace_fact_ref_coverage_ratio"), 0.0),
         },
     }
 
@@ -4755,6 +4949,23 @@ def get_training_data_coverage_status() -> dict:
 
     club_ratings = STATE_STORE.load_ratings()
     national_team_ratings = STATE_STORE.load_national_team_ratings()
+    fact_coverage = _build_fact_layer_coverage(
+        xgb_samples={
+            "sample_count": int(xgb_summary.get("sample_count", 0) or 0),
+        },
+        club_history={
+            "match_count": int(club_summary.get("item_count", 0) or 0),
+            "source": club_summary.get("source"),
+        },
+        world_cup_history={
+            "match_count": int(world_cup_summary.get("item_count", 0) or 0),
+            "source": world_cup_summary.get("source"),
+        },
+        statsbomb_events={
+            "match_count": int(statsbomb_summary.get("item_count", 0) or 0),
+        },
+        statsbomb_items=statsbomb_summary_items,
+    )
     coverage = {
         "xgb_samples": {
             "sample_count": int(xgb_summary.get("sample_count", 0) or 0),
@@ -4804,6 +5015,7 @@ def get_training_data_coverage_status() -> dict:
             "club_team_count": len(club_ratings),
             "national_team_count": len(national_team_ratings),
         },
+        "fact_coverage": fact_coverage,
     }
     coverage["training_health"] = _build_training_health_diagnostics(
         xgb_samples=coverage["xgb_samples"],
@@ -4811,6 +5023,7 @@ def get_training_data_coverage_status() -> dict:
         world_cup_history=coverage["world_cup_history"],
         statsbomb_events=coverage["statsbomb_events"],
         rating_pools=coverage["rating_pools"],
+        fact_coverage=coverage["fact_coverage"],
     )
     return coverage
 

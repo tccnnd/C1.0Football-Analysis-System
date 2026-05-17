@@ -86,6 +86,22 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
                     "club_team_count": 20,
                     "national_team_count": 8,
                 },
+                "fact_readiness": {
+                    "match_fact_available_count": 90,
+                    "match_fact_target_count": 120,
+                    "match_fact_coverage_ratio": 0.75,
+                    "min_match_fact_coverage_ratio": 0.80,
+                    "action_fact_match_count": 3,
+                    "action_fact_target_match_count": 5,
+                    "action_fact_event_count": 1200,
+                    "source_provenance_ratio": 0.70,
+                },
+            },
+            "fact_coverage": {
+                "match_fact": {"available_count": 90, "target_count": 120, "coverage_ratio": 0.75},
+                "action_fact": {"available_match_count": 3, "target_match_count": 5, "event_count": 1200},
+                "source_provenance": {"coverage_ratio": 0.70},
+                "trace_fact_refs": {"trace_fact_ref_coverage_ratio": 0.25},
             },
         }
 
@@ -113,6 +129,7 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
         self.assertIn("复盘样本=2", text)
         self.assertIn("覆盖缺口=4", text)
         self.assertIn("候选=1", text)
+        self.assertIn("Fact Layer", text)
 
     def test_model_training_overview_shows_training_health_issues(self) -> None:
         text = build_model_training_overview_text(
@@ -179,6 +196,7 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
         self.assertEqual(actions[0]["value"], "扩大历史赛果样本，优先最近4年主流联赛")
         self.assertEqual(actions[0]["action_key"], "import_historical_samples")
         self.assertEqual(training_health_action_button_text(actions[0]["action_key"]), "导入历史样本")
+        self.assertTrue(any(row["label"] == "Fact Layer" for row in cards))
 
     def test_training_health_action_rows_show_attention_suggestions(self) -> None:
         coverage = self._coverage_with_health(
@@ -207,6 +225,34 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
         self.assertTrue(any(row["value"] == "补不同联赛样本" for row in actions))
         self.assertTrue(any(row["value"] == "补平局/客胜等弱类别样本" for row in actions))
         self.assertTrue(any(row["action_key"] == "import_historical_samples" for row in actions))
+
+    def test_training_health_action_rows_show_fact_layer_suggestions(self) -> None:
+        coverage = self._coverage_with_health(
+            "attention",
+            [
+                {
+                    "code": "fact_match_coverage_low",
+                    "severity": "warning",
+                    "message": "MatchFact coverage is low: 75.0%",
+                    "recommendation": "Materialize MatchFact rows.",
+                },
+                {
+                    "code": "fact_action_coverage_low",
+                    "severity": "warning",
+                    "message": "ActionFact coverage is incomplete: 60.0%",
+                    "recommendation": "Build ActionFact sidecars.",
+                },
+            ],
+        )
+
+        cards = build_training_health_card_rows(coverage)
+        actions = build_training_health_action_rows(coverage)
+
+        fact_card = next(row for row in cards if row["label"] == "Fact Layer")
+        self.assertEqual(fact_card["tone"], "warning")
+        self.assertIn("MatchFact 75.0%", fact_card["detail"])
+        self.assertTrue(any(row["value"] == "Materialize MatchFact rows for history/XGB samples" for row in actions))
+        self.assertTrue(any(row["action_key"] == "build_statsbomb_review_samples" for row in actions))
 
     def test_training_health_action_rows_show_healthy_next_step(self) -> None:
         coverage = self._coverage_with_health("healthy", [])

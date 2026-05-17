@@ -36,7 +36,12 @@ def _xgb_sample(index: int, *, with_features: bool = True) -> dict:
 
 def _write_history_payload(path: Path, count: int) -> None:
     path.write_text(
-        json.dumps({"items": [{"match_date": f"2023-01-{(index % 28) + 1:02d}"} for index in range(count)]}),
+        json.dumps(
+            {
+                "source": "unit_history",
+                "items": [{"match_date": f"2023-01-{(index % 28) + 1:02d}"} for index in range(count)],
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -106,6 +111,9 @@ class CoreTrainingDataCoverageSummaryTests(unittest.TestCase):
         self.assertEqual(status["club_history"]["league_profile_count"], 2)
         self.assertEqual(status["world_cup_history"]["year_count"], 2)
         self.assertEqual(status["statsbomb_events"]["review_feature_count"], 2)
+        self.assertEqual(status["fact_coverage"]["match_fact"]["available_count"], 5)
+        self.assertEqual(status["fact_coverage"]["match_fact"]["target_count"], 5)
+        self.assertEqual(status["training_health"]["fact_readiness"]["match_fact_available_count"], 5)
 
     def test_training_data_coverage_includes_statsbomb_audit(self) -> None:
         settlements = [
@@ -183,7 +191,7 @@ class CoreTrainingDataCoverageSummaryTests(unittest.TestCase):
             state = root / "data" / "state"
             state.mkdir(parents=True)
             (state / "league_profiles.json").write_text(json.dumps({"leagues": {"A": {}, "B": {}, "C": {}, "D": {}, "E": {}}}), encoding="utf-8")
-            _write_history_payload(state / "club_match_history.json", 100)
+            _write_history_payload(state / "club_match_history.json", 300)
             store = core.StateStore(root)
             store.save_xgb_samples([_xgb_sample(index) for index in range(300)])
 
@@ -195,6 +203,26 @@ class CoreTrainingDataCoverageSummaryTests(unittest.TestCase):
         self.assertEqual(health["issue_count"], 0)
         self.assertEqual(health["xgb_trainability"]["valid_feature_ratio"], 1.0)
         self.assertEqual(health["xgb_trainability"]["label_class_count"], 3)
+        self.assertEqual(health["fact_readiness"]["match_fact_coverage_ratio"], 1.0)
+
+    def test_training_health_warns_for_fact_layer_gaps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "data" / "state"
+            state.mkdir(parents=True)
+            (state / "league_profiles.json").write_text(json.dumps({"leagues": {"A": {}, "B": {}, "C": {}, "D": {}, "E": {}}}), encoding="utf-8")
+            store = core.StateStore(root)
+            store.save_xgb_samples([_xgb_sample(index) for index in range(300)])
+
+            with patch("v24_app.core.PROJECT_DIR", root), patch("v24_app.core.STATE_STORE", store):
+                status = core.get_training_data_coverage_status()
+
+        health = status["training_health"]
+        codes = {issue["code"] for issue in health["issues"]}
+        self.assertEqual(health["status"], "attention")
+        self.assertIn("fact_match_coverage_low", codes)
+        self.assertEqual(health["fact_readiness"]["match_fact_available_count"], 0)
+        self.assertEqual(health["fact_readiness"]["match_fact_target_count"], 300)
 
     def test_training_health_blocks_when_xgb_samples_are_not_trainable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
