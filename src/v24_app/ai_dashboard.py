@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import math
 import json
 import re
@@ -5412,6 +5413,34 @@ class SmartMatchDashboard:
         right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         tk.Label(left, text="\u5ba1\u8ba1\u6587\u4ef6", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
+        file_actions = tk.Frame(left, bg=PANEL)
+        file_actions.pack(fill=tk.X, padx=18, pady=(0, 10))
+        tk.Button(
+            file_actions,
+            text="\u6253\u5f00\u9009\u4e2d\u6587\u4ef6",
+            command=lambda: open_selected_report(),
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=14,
+            pady=6,
+        ).pack(side=tk.LEFT)
+        tk.Button(
+            file_actions,
+            text="\u5237\u65b0\u5217\u8868",
+            command=lambda: self.open_play_model_takeover_gate_audit_history(),
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=14,
+            pady=6,
+        ).pack(side=tk.LEFT, padx=(10, 0))
         list_wrap = tk.Frame(left, bg=PANEL)
         list_wrap.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
         listbox = tk.Listbox(
@@ -5470,6 +5499,17 @@ class SmartMatchDashboard:
             preview.insert("1.0", content)
             preview.configure(state=tk.DISABLED)
             self.status_var.set(f"\u6b63\u5728\u67e5\u770b\u63a5\u7ba1\u5ba1\u8ba1: {path.name}")
+
+        def open_selected_report() -> None:
+            selection = listbox.curselection()
+            if not selection:
+                messagebox.showinfo("\u63a5\u7ba1\u5ba1\u8ba1", "\u8bf7\u5148\u9009\u62e9\u4e00\u4e2a\u5ba1\u8ba1\u6587\u4ef6\u3002")
+                return
+            path = report_entries[int(selection[0])]["path"]
+            try:
+                os.startfile(str(path))
+            except Exception as exc:
+                messagebox.showwarning("\u63a5\u7ba1\u5ba1\u8ba1", f"\u6253\u5f00\u5931\u8d25: {exc}")
 
         for entry in report_entries:
             path = entry["path"]
