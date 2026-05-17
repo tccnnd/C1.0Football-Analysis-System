@@ -6779,7 +6779,7 @@ class SmartMatchDashboard:
             if not settlement:
                 return
             self.import_video_review_reference_for_settlement(settlement)
-            _refresh()
+            self._refresh_video_review_evidence_gap_center_window()
 
         def _import_selected_local_video() -> None:
             row = _selected_row()
@@ -6787,14 +6787,14 @@ class SmartMatchDashboard:
             if not settlement:
                 return
             self.import_video_review_for_settlement(settlement)
-            _refresh()
+            self._refresh_video_review_evidence_gap_center_window()
 
         def _build_event_proxy_samples_for_batch() -> None:
             row = _selected_row()
             if row is None:
                 return
             self.export_statsbomb_event_proxy_review_samples()
-            _refresh()
+            self._refresh_video_review_evidence_gap_center_window()
 
         def _export_current_filter_report() -> None:
             result = filter_result_cache or build_video_review_evidence_gap_batch_filter_result(
@@ -6843,29 +6843,65 @@ class SmartMatchDashboard:
 
         tree.bind("<<TreeviewSelect>>", _on_select)
         _refresh()
+        self._video_review_evidence_gap_window = window
+        self._video_review_evidence_gap_refresh = _refresh
+
+        def _close_window() -> None:
+            if getattr(self, "_video_review_evidence_gap_window", None) is window:
+                self._video_review_evidence_gap_window = None
+                self._video_review_evidence_gap_refresh = None
+            window.destroy()
+
+        window.protocol("WM_DELETE_WINDOW", _close_window)
 
     def open_video_review_evidence_gap_batch_filter_window(self) -> None:
         self.open_video_review_evidence_gap_center_window()
+
+    def _refresh_video_review_evidence_gap_center_window(
+        self,
+        *,
+        evidence_filter: str | None = None,
+        open_if_missing: bool = False,
+    ) -> None:
+        if self._widget_alive("video_review_evidence_gap_window"):
+            refresh = getattr(self, "_video_review_evidence_gap_refresh", None)
+            if callable(refresh):
+                refresh()
+            return
+        if open_if_missing:
+            filters = build_video_review_evidence_gap_quick_open_filters(
+                evidence_filter,
+                _load_video_review_evidence_gap_batch_state(),
+            )
+            self.open_video_review_evidence_gap_center_window(**filters)
 
     def _run_video_review_evidence_gap_quick_action(self, evidence_filter: str, action_kind: str) -> None:
         state = _load_video_review_evidence_gap_batch_state()
         target = build_video_review_evidence_gap_quick_target_item(state, evidence_filter)
         if not target:
-            self.open_video_review_evidence_gap_center_window(**build_video_review_evidence_gap_quick_open_filters(evidence_filter, state))
+            self.open_video_review_evidence_gap_center_window(
+                **build_video_review_evidence_gap_quick_open_filters(evidence_filter, state)
+            )
             return
         settlement = find_video_review_evidence_gap_settlement(
             list(reversed(get_recent_settlements(limit=300))),
             str(target.get("match_id") or ""),
         )
         if not settlement:
-            self.open_video_review_evidence_gap_center_window(**build_video_review_evidence_gap_quick_open_filters(evidence_filter, state))
+            self.open_video_review_evidence_gap_center_window(
+                **build_video_review_evidence_gap_quick_open_filters(evidence_filter, state)
+            )
             return
         if action_kind == "bind_external_reference":
             self.import_video_review_reference_for_settlement(settlement)
         elif action_kind == "import_local_video":
             self.import_video_review_for_settlement(settlement)
         else:
-            self.open_video_review_evidence_gap_center_window(**build_video_review_evidence_gap_quick_open_filters(evidence_filter, state))
+            self.open_video_review_evidence_gap_center_window(
+                **build_video_review_evidence_gap_quick_open_filters(evidence_filter, state)
+            )
+            return
+        self._refresh_video_review_evidence_gap_center_window(evidence_filter=evidence_filter, open_if_missing=True)
 
     def open_ai_video_review_center_window(self) -> None:
         settlements = list(reversed(get_recent_settlements(limit=200)))
