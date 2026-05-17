@@ -130,3 +130,55 @@ def build_special_workbench_sections(
     if missing:
         raise RuntimeError(f"Missing special workbench action(s): {', '.join(missing[:8])}")
     return sections
+
+
+def build_review_center_special_summary_rows(
+    *,
+    video_review_center_summary: Mapping[str, object] | object,
+    evidence_gap_batch_status: Mapping[str, object] | object,
+    video_source_coverage: Mapping[str, object] | object,
+    statsbomb_review_center_summary: Mapping[str, object] | object,
+    statsbomb_review_closure_summary: Mapping[str, object] | object,
+) -> list[dict[str, str]]:
+    video_summary = video_review_center_summary if isinstance(video_review_center_summary, Mapping) else {}
+    gap_status = evidence_gap_batch_status if isinstance(evidence_gap_batch_status, Mapping) else {}
+    source_coverage = video_source_coverage if isinstance(video_source_coverage, Mapping) else {}
+    proxy_summary = statsbomb_review_center_summary if isinstance(statsbomb_review_center_summary, Mapping) else {}
+    closure_summary = statsbomb_review_closure_summary if isinstance(statsbomb_review_closure_summary, Mapping) else {}
+    missing_evidence_count = int(source_coverage.get("no_review_evidence_count", 0) or 0)
+    gap_completion = float(gap_status.get("completion_rate", 0) or 0)
+    return [
+        {
+            "title": "专项中心",
+            "body": "视频复盘、证据缺口、事件代理和闭环样本质量已集中到专项窗口处理。",
+            "action_key": "open_special_workbench",
+            "tone": "neutral",
+        },
+        {
+            "title": str(video_summary.get("title") or "AI视频复盘"),
+            "body": str(video_summary.get("body") or "-"),
+            "action_key": "open_ai_video_review_center_window",
+            "tone": str(video_summary.get("tone") or "neutral"),
+        },
+        {
+            "title": f"证据缺口 | {gap_status.get('status', '-')}",
+            "body": (
+                f"{gap_status.get('summary_text', '-')}\n"
+                f"完成率 {gap_completion:.0%} | 当前缺证据 {missing_evidence_count} 场"
+            ),
+            "action_key": "open_video_review_evidence_gap_center_window",
+            "tone": "warning" if missing_evidence_count > 0 else "good",
+        },
+        {
+            "title": str(proxy_summary.get("title") or "事件代理专项"),
+            "body": str(proxy_summary.get("body") or "-"),
+            "action_key": "open_statsbomb_review_training_center_window",
+            "tone": str(proxy_summary.get("tone") or "neutral"),
+        },
+        {
+            "title": str(closure_summary.get("title") or "事件代理复盘闭环"),
+            "body": str(closure_summary.get("body") or "-"),
+            "action_key": "open_statsbomb_review_training_closure_window",
+            "tone": str(closure_summary.get("tone") or "neutral"),
+        },
+    ]

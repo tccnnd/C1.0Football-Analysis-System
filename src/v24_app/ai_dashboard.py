@@ -69,6 +69,7 @@ from .ui_modules import (
     build_background_task_summary,
     build_background_task_stability_cards,
     build_background_task_stability_summary,
+    build_review_center_special_summary_rows,
     build_special_workbench_sections,
     build_high_accuracy_strategy_backtest_message,
     build_high_accuracy_strategy_backtest_status_text,
@@ -6226,10 +6227,6 @@ class SmartMatchDashboard:
             statsbomb_samples=get_statsbomb_review_training_samples(),
             video_memory=get_video_review_fewshot_memory(),
         )
-        evidence_gap_feedback_rows = build_video_review_evidence_gap_feedback_rows(
-            _load_video_review_evidence_gap_feedback_log(),
-            limit=2,
-        )
         evidence_gap_batch_state = _load_video_review_evidence_gap_batch_state()
         evidence_gap_batch_status = build_video_review_evidence_gap_batch_status(evidence_gap_batch_state)
         statsbomb_repair_records = _load_statsbomb_review_training_action_feedback_log()
@@ -6427,7 +6424,7 @@ class SmartMatchDashboard:
         review_actions.pack(fill=tk.X, padx=18, pady=(0, 12))
         tk.Button(
             review_actions,
-            text="\u5bfc\u5165\u6240\u9009\u89c6\u9891\u590d\u76d8",
+            text="\u5bfc\u5165\u672c\u5730\u89c6\u9891",
             command=lambda: self.import_video_review_for_selection(review_tree, settlements),
             bg=PANEL_2,
             fg=TEXT,
@@ -6453,8 +6450,8 @@ class SmartMatchDashboard:
         ).pack(side=tk.LEFT, padx=(10, 0))
         tk.Button(
             review_actions,
-            text="\u6807\u6ce8\u89c6\u9891\u4e8b\u4ef6",
-            command=lambda: self.annotate_video_review_for_selection(review_tree, settlements),
+            text="\u6253\u5f00\u590d\u76d8\u4e13\u9879",
+            command=self.open_special_workbench,
             bg=PANEL_2,
             fg=TEXT,
             activebackground="#172638",
@@ -6464,197 +6461,26 @@ class SmartMatchDashboard:
             padx=14,
             pady=6,
         ).pack(side=tk.LEFT, padx=(10, 0))
-        tk.Button(
-            review_actions,
-            text="\u5bfc\u51fa\u89c6\u9891\u590d\u76d8\u6837\u672c",
-            command=self.export_video_review_fewshot_samples,
-            bg=PANEL_2,
-            fg=TEXT,
-            activebackground="#172638",
-            activeforeground="white",
-            relief=tk.FLAT,
-            font=("Microsoft YaHei UI", 10, "bold"),
-            padx=14,
-            pady=6,
-        ).pack(side=tk.LEFT, padx=(10, 0))
-        tk.Button(
-            review_actions,
-            text="\u751f\u6210\u4e8b\u4ef6\u4ee3\u7406\u590d\u76d8\u6837\u672c",
-            command=self.export_statsbomb_event_proxy_review_samples,
-            bg=PANEL_2,
-            fg=TEXT,
-            activebackground="#172638",
-            activeforeground="white",
-            relief=tk.FLAT,
-            font=("Microsoft YaHei UI", 10, "bold"),
-            padx=14,
-            pady=6,
-        ).pack(side=tk.LEFT, padx=(10, 0))
-        tk.Button(
-            review_actions,
-            text="\u9884\u89c8\u6837\u672c\u5408\u5e76",
-            command=self.preview_video_review_fewshot_merge_bundle,
-            bg=PANEL_2,
-            fg=TEXT,
-            activebackground="#172638",
-            activeforeground="white",
-            relief=tk.FLAT,
-            font=("Microsoft YaHei UI", 10, "bold"),
-            padx=14,
-            pady=6,
-        ).pack(side=tk.LEFT, padx=(10, 0))
-        tk.Button(
-            review_actions,
-            text="\u5e94\u7528\u89c6\u9891\u8bb0\u5fc6",
-            command=self.apply_video_review_fewshot_merge_bundle,
-            bg=PANEL_2,
-            fg="#fecaca",
-            activebackground="#451a1a",
-            activeforeground="white",
-            relief=tk.FLAT,
-            font=("Microsoft YaHei UI", 10, "bold"),
-            padx=14,
-            pady=6,
-        ).pack(side=tk.LEFT, padx=(10, 0))
-        review_memory_actions = tk.Frame(left, bg=PANEL)
-        review_memory_actions.pack(fill=tk.X, padx=18, pady=(0, 12))
-        tk.Button(
-            review_memory_actions,
-            text="\u5ba1\u8ba1\u89c6\u9891\u8bb0\u5fc6",
-            command=self.export_video_review_fewshot_memory_audit,
-            bg=PANEL_2,
-            fg=TEXT,
-            activebackground="#172638",
-            activeforeground="white",
-            relief=tk.FLAT,
-            font=("Microsoft YaHei UI", 10, "bold"),
-            padx=14,
-            pady=6,
-        ).pack(side=tk.LEFT)
-        tk.Button(
-            review_memory_actions,
-            text="事件代理中心",
-            command=self.open_statsbomb_review_training_center_window,
-            bg=PANEL_2,
-            fg=TEXT,
-            activebackground="#172638",
-            activeforeground="white",
-            relief=tk.FLAT,
-            font=("Microsoft YaHei UI", 10, "bold"),
-            padx=14,
-            pady=6,
-        ).pack(side=tk.LEFT, padx=(10, 0))
-        tk.Button(
-            review_memory_actions,
-            text="导出缺口批次计划",
-            command=self.export_video_review_evidence_gap_batch_plan,
-            bg=PANEL_2,
-            fg=TEXT,
-            activebackground="#172638",
-            activeforeground="white",
-            relief=tk.FLAT,
-            font=("Microsoft YaHei UI", 10, "bold"),
-            padx=14,
-            pady=6,
-        ).pack(side=tk.LEFT, padx=(10, 0))
-        tk.Button(
-            review_memory_actions,
-            text="证据缺口中心",
-            command=self.open_video_review_evidence_gap_center_window,
-            bg=PANEL_2,
-            fg=TEXT,
-            activebackground="#172638",
-            activeforeground="white",
-            relief=tk.FLAT,
-            font=("Microsoft YaHei UI", 10, "bold"),
-            padx=14,
-            pady=6,
-        ).pack(side=tk.LEFT, padx=(10, 0))
-        tk.Button(
-            review_memory_actions,
-            text="\u56de\u6eda\u89c6\u9891\u8bb0\u5fc6",
-            command=self.rollback_video_review_fewshot_memory,
-            bg=PANEL_2,
-            fg="#fecaca",
-            activebackground="#451a1a",
-            activeforeground="white",
-            relief=tk.FLAT,
-            font=("Microsoft YaHei UI", 10, "bold"),
-            padx=14,
-            pady=6,
-        ).pack(side=tk.LEFT, padx=(10, 0))
-
-        self._strategy_section_title(right, "AI视频复盘")
-        self._strategy_row(
-            right,
-            str(video_review_center_summary.get("title") or "-"),
-            str(video_review_center_summary.get("body") or "-"),
-            command=self.open_ai_video_review_center_window,
-        )
-        self._strategy_row(
-            right,
-            "打开AI视频复盘专项中心",
-            "视频记忆健康、视频来源覆盖、补标注/补样建议和视频降级边界集中到专项窗口查看，避免复盘中心继续堆叠过多内容。",
-            command=self.open_ai_video_review_center_window,
-        )
-        self._strategy_section_title(right, "复盘证据缺口行动")
-        self._strategy_row(
-            right,
-            f"缺口批次执行 | {evidence_gap_batch_status.get('status', '-')}",
-            (
-                f"{evidence_gap_batch_status.get('summary_text', '-')}\n"
-                f"完成率: {float(evidence_gap_batch_status.get('completion_rate', 0) or 0):.0%} | "
-                f"当前缺证据 {video_source_coverage.get('no_review_evidence_count', 0)} 场"
-            ),
-            command=self.open_video_review_evidence_gap_center_window,
-        )
-        self._strategy_row(
-            right,
-            "打开证据缺口专项中心",
-            "批次筛选、P0/P1 优先处理、绑定回放、导入视频、生成事件代理样本和处理报告导出都集中在专项窗口。",
-            command=self.open_video_review_evidence_gap_center_window,
-        )
-        self._strategy_section_title(right, "复盘证据处理记录")
-        if evidence_gap_feedback_rows:
-            for row in evidence_gap_feedback_rows:
-                self._strategy_row(
-                    right,
-                    str(row.get("title") or "-"),
-                    str(row.get("body") or "-"),
-                )
-        else:
+        self._strategy_section_title(right, "复盘专项摘要")
+        review_summary_commands = {
+            "open_special_workbench": self.open_special_workbench,
+            "open_ai_video_review_center_window": self.open_ai_video_review_center_window,
+            "open_video_review_evidence_gap_center_window": self.open_video_review_evidence_gap_center_window,
+            "open_statsbomb_review_training_center_window": self.open_statsbomb_review_training_center_window,
+            "open_statsbomb_review_training_closure_window": self.open_statsbomb_review_training_closure_window,
+        }
+        for row in build_review_center_special_summary_rows(
+            video_review_center_summary=video_review_center_summary,
+            evidence_gap_batch_status=evidence_gap_batch_status,
+            video_source_coverage=video_source_coverage,
+            statsbomb_review_center_summary=statsbomb_review_center_summary,
+            statsbomb_review_closure_summary=statsbomb_review_closure_summary,
+        ):
             self._strategy_row(
                 right,
-                "暂无处理记录",
-                "绑定外部回放链接后，会记录 missing_evidence -> external_reference 的变化。",
-            )
-        self._strategy_section_title(right, "事件代理复盘")
-        self._strategy_row(
-            right,
-            str(statsbomb_review_center_summary.get("title") or "-"),
-            str(statsbomb_review_center_summary.get("body") or "-"),
-            command=self.open_statsbomb_review_training_center_window,
-        )
-        self._strategy_row(
-            right,
-            "打开事件代理专项中心",
-            "StatsBomb/Event Proxy 样本质量、可执行修复、修复闭环和质量报告导出都集中在专项窗口。",
-            command=self.open_statsbomb_review_training_center_window,
-        )
-
-        self._strategy_section_title(right, "复盘闭环")
-        self._strategy_row(
-            right,
-            str(statsbomb_review_closure_summary.get("title") or "-"),
-            str(statsbomb_review_closure_summary.get("body") or "-"),
-            command=self.open_statsbomb_review_training_closure_window,
-        )
-        closure_card_rows = statsbomb_review_closure_summary.get("card_rows") if isinstance(statsbomb_review_closure_summary.get("card_rows"), list) else []
-        for row in [item for item in closure_card_rows if isinstance(item, dict)][:2]:
-            self._strategy_row(
-                right,
-                f"{row.get('label', '-')}: {row.get('value', '-')}",
-                str(row.get("detail") or "-"),
+                str(row.get("title") or "-"),
+                str(row.get("body") or "-"),
+                command=review_summary_commands.get(str(row.get("action_key") or "")),
             )
         tk.Label(right, text="\u95ed\u73af\u590d\u76d8", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
         detail = tk.Text(

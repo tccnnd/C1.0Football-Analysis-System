@@ -12,7 +12,11 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from v24_app.ui_modules import SPECIAL_WORKBENCH_LAYOUT, build_special_workbench_sections
+from v24_app.ui_modules import (
+    SPECIAL_WORKBENCH_LAYOUT,
+    build_review_center_special_summary_rows,
+    build_special_workbench_sections,
+)
 
 
 class UISpecialWorkbenchFlowTests(unittest.TestCase):
@@ -41,6 +45,23 @@ class UISpecialWorkbenchFlowTests(unittest.TestCase):
     def test_build_special_workbench_sections_reports_missing_actions(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "Missing special workbench action"):
             build_special_workbench_sections({})
+
+    def test_build_review_center_special_summary_rows_reduces_to_action_cards(self) -> None:
+        rows = build_review_center_special_summary_rows(
+            video_review_center_summary={"title": "AI视频复盘 | attention", "body": "video body", "tone": "warning"},
+            evidence_gap_batch_status={"status": "running", "summary_text": "gap body", "completion_rate": 0.25},
+            video_source_coverage={"no_review_evidence_count": 7},
+            statsbomb_review_center_summary={"title": "事件代理 | healthy", "body": "proxy body", "tone": "good"},
+            statsbomb_review_closure_summary={"title": "闭环 | attention", "body": "closure body", "tone": "warning"},
+        )
+
+        self.assertEqual(len(rows), 5)
+        self.assertEqual(rows[0]["action_key"], "open_special_workbench")
+        self.assertIn("AI视频复盘", rows[1]["title"])
+        self.assertEqual(rows[2]["action_key"], "open_video_review_evidence_gap_center_window")
+        self.assertIn("当前缺证据 7 场", rows[2]["body"])
+        self.assertEqual(rows[3]["action_key"], "open_statsbomb_review_training_center_window")
+        self.assertEqual(rows[4]["action_key"], "open_statsbomb_review_training_closure_window")
 
 
 if __name__ == "__main__":
