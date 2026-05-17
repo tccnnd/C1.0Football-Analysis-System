@@ -4,6 +4,12 @@ import hashlib
 from datetime import datetime
 from typing import Any, Mapping
 
+from c1.data.fact_contracts import (
+    ACTION_FACT_SCHEMA_VERSION,
+    MATCH_FACT_SCHEMA_VERSION,
+    SOURCE_PROVENANCE_SCHEMA_VERSION,
+)
+
 
 TRACE_VERSION = "trace_v1"
 DEFAULT_PROMPT_VERSION = "strategy_report_v1"
@@ -13,6 +19,7 @@ DEFAULT_WORKFLOW_VERSION = "match_analysis_v1"
 DEFAULT_EVAL_SUITE_VERSION = "strategy_eval_v1"
 DEFAULT_THREAD_ID = "app:local"
 DEFAULT_USER_ID = "local-user"
+FACT_REF_VERSION = "fact_ref_v1"
 
 
 def _as_mapping(value: object) -> Mapping[str, object]:
@@ -73,6 +80,117 @@ def _dedupe_texts(values: list[object]) -> list[str]:
     return result
 
 
+def _get_value(source: object, key: str, default: object = "") -> object:
+    if isinstance(source, Mapping):
+        return source.get(key, default)
+    return getattr(source, key, default)
+
+
+def _fact_schema_for_kind(kind: str, source: object | None = None) -> str:
+    explicit = _text(_get_value(source or {}, "schema_version", ""), "")
+    if explicit:
+        return explicit
+    if kind == "match_fact":
+        return MATCH_FACT_SCHEMA_VERSION
+    if kind == "action_fact":
+        return ACTION_FACT_SCHEMA_VERSION
+    if kind == "source_provenance":
+        return SOURCE_PROVENANCE_SCHEMA_VERSION
+    return ""
+
+
+def build_fact_ref(kind: str, source: object, *, fallback_match_id: str = "") -> dict[str, object]:
+    resolved_kind = _text(kind, "fact")
+    match_id = _first_text(_get_value(source, "match_id", ""), fallback_match_id, default="")
+    provider = _first_text(_get_value(source, "provider", ""), _get_value(source, "source", ""), _get_value(source, "source_vendor", ""), default="")
+    source_id = _first_text(_get_value(source, "source_id", ""), _get_value(source, "provider_match_id", ""), _get_value(source, "source_event_id", ""), default="")
+    action_id = _first_text(_get_value(source, "action_id", ""), _get_value(source, "event_id", ""), default="")
+    if resolved_kind == "match_fact":
+        identity = match_id or source_id
+    elif resolved_kind == "action_fact":
+        identity = action_id or source_id
+    elif resolved_kind == "source_provenance":
+        identity = f"{provider}:{source_id}" if provider or source_id else match_id
+    else:
+        identity = action_id or match_id or source_id
+    ref = {
+        "ref_id": _hash_id("fact", resolved_kind, identity, length=16),
+        "kind": resolved_kind,
+        "fact_ref_version": FACT_REF_VERSION,
+        "schema_version": _fact_schema_for_kind(resolved_kind, source),
+        "match_id": match_id,
+        "provider": provider,
+        "source_id": source_id,
+    }
+    if action_id:
+        ref["action_id"] = action_id
+    source_version = _text(_get_value(source, "source_version", ""), "")
+    if source_version:
+        ref["source_version"] = source_version
+    raw_payload_ref = _text(_get_value(source, "raw_payload_ref", ""), "")
+    if raw_payload_ref:
+        ref["raw_payload_ref"] = raw_payload_ref
+    return ref
+
+
+def _dedupe_fact_refs(refs: list[dict[str, object]]) -> list[dict[str, object]]:
+    seen: set[str] = set()
+    result: list[dict[str, object]] = []
+    for item in refs:
+        ref_id = _text(item.get("ref_id"), "")
+        if not ref_id or ref_id in seen:
+            continue
+        seen.add(ref_id)
+        result.append(item)
+    return result
+
+
+def _source_ref_from_match(match: Any, match_id: str) -> dict[str, object]:
+    return {
+        "match_id": match_id,
+        "provider": _text(_match_attr(match, "source", ""), ""),
+        "source_id": _text(_match_attr(match, "source_id", ""), ""),
+        "source_vendor": _text(_match_attr(match, "source", ""), ""),
+    }
+
+
+def _match_fact_ref(match: Any, match_id: str) -> dict[str, object]:
+    provider = _text(_match_attr(match, "source", ""), "")
+    source_id = _text(_match_attr(match, "source_id", ""), "")
+    return build_fact_ref(
+        "match_fact",
+        {
+            "match_id": match_id,
+            "provider": provider,
+            "source_id": source_id,
+            "schema_version": MATCH_FACT_SCHEMA_VERSION,
+        },
+    )
+
+
+def _fact_refs_from_prediction(match: Any, prediction: Mapping[str, object], match_id: str, existing: Mapping[str, object]) -> list[dict[str, object]]:
+    refs: list[dict[str, object]] = [_match_fact_ref(match, match_id)]
+    source_ref = build_fact_ref("source_provenance", _source_ref_from_match(match, match_id), fallback_match_id=match_id)
+    if _text(source_ref.get("provider"), "") or _text(source_ref.get("source_id"), ""):
+        refs.append(source_ref)
+
+    for key, kind in (
+        ("fact_refs", ""),
+        ("match_fact_refs", "match_fact"),
+        ("action_fact_refs", "action_fact"),
+        ("source_provenance_refs", "source_provenance"),
+    ):
+        for item in _as_list(existing.get(key)) + _as_list(prediction.get(key)):
+            if not isinstance(item, Mapping):
+                continue
+            item_kind = _text(item.get("kind"), kind or "fact")
+            if item.get("ref_id") and item.get("schema_version"):
+                refs.append(dict(item))
+                continue
+            refs.append(build_fact_ref(item_kind, item, fallback_match_id=match_id))
+    return _dedupe_fact_refs(refs)
+
+
 def _trace_nodes(supervisor: Mapping[str, object]) -> list[dict[str, object]]:
     nodes: list[dict[str, object]] = []
     for index, item in enumerate(_as_list(supervisor.get("agents"))):
@@ -118,7 +236,19 @@ def _tool_calls_from_nodes(trace_id: str, nodes: list[dict[str, object]]) -> lis
     return tool_calls
 
 
-def _input_ref(match: Any, match_id: str) -> dict[str, object]:
+def _compact_fact_refs(fact_refs: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [
+        {
+            "ref_id": item.get("ref_id"),
+            "kind": item.get("kind"),
+            "schema_version": item.get("schema_version"),
+            "match_id": item.get("match_id"),
+        }
+        for item in fact_refs
+    ]
+
+
+def _input_ref(match: Any, match_id: str, fact_refs: list[dict[str, object]] | None = None) -> dict[str, object]:
     return {
         "ref_id": _hash_id("input", match_id, _match_attr(match, "source_id", "")),
         "kind": "match_prediction_input",
@@ -130,6 +260,7 @@ def _input_ref(match: Any, match_id: str) -> dict[str, object]:
             "draw": _match_attr(match, "odds_draw", None),
             "away": _match_attr(match, "odds_away", None),
         },
+        "fact_refs": _compact_fact_refs(fact_refs or []),
     }
 
 
@@ -194,6 +325,25 @@ def _retrieval_refs_from_evidence(evidence_refs: list[dict[str, object]]) -> lis
                 "kind": "evidence_ref",
                 "source_ref_id": ref_id,
                 "source_kind": _text(item.get("kind"), "-"),
+            }
+        )
+    return refs
+
+
+def _fact_evidence_refs(fact_refs: list[dict[str, object]]) -> list[dict[str, object]]:
+    refs: list[dict[str, object]] = []
+    for item in fact_refs:
+        ref_id = _text(item.get("ref_id"), "")
+        if not ref_id:
+            continue
+        refs.append(
+            {
+                "ref_id": f"fact:{ref_id}",
+                "kind": "fact_ref",
+                "fact_ref_id": ref_id,
+                "fact_kind": _text(item.get("kind"), "-"),
+                "schema_version": _text(item.get("schema_version"), "-"),
+                "match_id": _text(item.get("match_id"), "-"),
             }
         )
     return refs
@@ -298,6 +448,7 @@ def build_prediction_trace_envelope(
         ),
     )
     nodes = _trace_nodes(supervisor)
+    normalized_fact_refs = _fact_refs_from_prediction(match, resolved, match_id, existing)
     tool_calls = _as_list(existing.get("tool_calls"))
     if not all(isinstance(item, Mapping) for item in tool_calls):
         tool_calls = []
@@ -306,6 +457,7 @@ def build_prediction_trace_envelope(
     if not all(isinstance(item, Mapping) for item in evidence_refs):
         evidence_refs = []
     normalized_evidence_refs = [dict(item) for item in evidence_refs if isinstance(item, Mapping)] or _evidence_refs(match, resolved, nodes)
+    normalized_evidence_refs = _dedupe_fact_refs([*normalized_evidence_refs, *_fact_evidence_refs(normalized_fact_refs)])
     retrieval_refs = _as_list(existing.get("retrieval_refs"))
     if not all(isinstance(item, Mapping) for item in retrieval_refs):
         retrieval_refs = []
@@ -332,7 +484,9 @@ def build_prediction_trace_envelope(
     analysis_id = _first_text(existing.get("analysis_id"), resolved.get("analysis_id"), _hash_id("ana", trace_id, match_id, length=12))
     thread_id = _first_text(existing.get("thread_id"), resolved.get("thread_id"), DEFAULT_THREAD_ID)
     user_id = _first_text(existing.get("user_id"), resolved.get("user_id"), DEFAULT_USER_ID)
-    input_ref = dict(existing.get("input_ref")) if isinstance(existing.get("input_ref"), Mapping) else _input_ref(match, match_id)
+    input_ref = dict(existing.get("input_ref")) if isinstance(existing.get("input_ref"), Mapping) else _input_ref(match, match_id, normalized_fact_refs)
+    if "fact_refs" not in input_ref:
+        input_ref["fact_refs"] = _compact_fact_refs(normalized_fact_refs)
     state_snapshot_ref = _first_text(
         existing.get("state_snapshot_ref"),
         resolved.get("state_snapshot_ref"),
@@ -346,8 +500,11 @@ def build_prediction_trace_envelope(
             "ref_id": input_ref.get("ref_id"),
             "kind": "prediction_replay_input",
             "state_snapshot_ref": state_snapshot_ref,
+            "fact_refs": _compact_fact_refs(normalized_fact_refs),
         }
     )
+    if "fact_refs" not in replay_input_ref:
+        replay_input_ref["fact_refs"] = _compact_fact_refs(normalized_fact_refs)
     model_params = dict(existing.get("model_params")) if isinstance(existing.get("model_params"), Mapping) else {}
     if not model_params and isinstance(resolved.get("ensemble_weights"), Mapping):
         model_params["ensemble_weights"] = dict(_as_mapping(resolved.get("ensemble_weights")))
@@ -372,6 +529,7 @@ def build_prediction_trace_envelope(
                 "source": _match_attr(match, "source", ""),
                 "source_id": _match_attr(match, "source_id", ""),
                 "framework_independent": True,
+                "fact_ref_count": len(normalized_fact_refs),
             }.items()
             if key not in metadata
         }
@@ -413,6 +571,7 @@ def build_prediction_trace_envelope(
         "workflow_version": workflow_version_value,
         "match_id": match_id,
         "analysis_id": analysis_id,
+        "fact_refs": normalized_fact_refs,
         "input_ref": input_ref,
         "retrieval_refs": normalized_retrieval_refs,
         "prompt_name": prompt_name_value,

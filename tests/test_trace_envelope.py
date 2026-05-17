@@ -38,6 +38,15 @@ class TraceEnvelopeTests(unittest.TestCase):
             "risk_level": "HIGH",
             "model": "test-model",
             "ensemble_weights": {"market": 0.35, "elo": 0.30, "poisson": 0.20, "xgboost": 0.15},
+            "action_fact_refs": [
+                {
+                    "action_id": "shot-1",
+                    "match_id": match.match_id,
+                    "source_event_id": "event-1",
+                    "provider": "statsbomb",
+                    "schema_version": "action_fact_v1",
+                }
+            ],
             "market_entropy": {"level": "HIGH", "score": 0.84},
             "supervisor": {
                 "status": "alert",
@@ -77,6 +86,11 @@ class TraceEnvelopeTests(unittest.TestCase):
         self.assertEqual(trace["workflow_version"], "match_analysis_v1")
         self.assertEqual(trace["match_id"], match.match_id)
         self.assertEqual(trace["input_ref"]["match_id"], match.match_id)
+        self.assertTrue(any(item["kind"] == "match_fact" for item in trace["fact_refs"]))
+        self.assertTrue(any(item["kind"] == "source_provenance" for item in trace["fact_refs"]))
+        self.assertTrue(any(item["kind"] == "action_fact" for item in trace["fact_refs"]))
+        self.assertTrue(any(item["kind"] == "action_fact" for item in trace["input_ref"]["fact_refs"]))
+        self.assertTrue(any(item["kind"] == "source_provenance" for item in trace["replay_input_ref"]["fact_refs"]))
         self.assertTrue(str(trace["state_snapshot_ref"]).startswith("prediction_snapshot:"))
         self.assertTrue(str(trace["output_ref"]).startswith("prediction_output:trc_"))
         self.assertEqual(trace["prompt_name"], "strategy_report")
@@ -90,6 +104,7 @@ class TraceEnvelopeTests(unittest.TestCase):
         self.assertEqual(trace["cost"]["amount"], 0.0)
         self.assertIn("prediction_trace", trace["tags"])
         self.assertEqual(trace["metadata"]["league"], "L1")
+        self.assertEqual(trace["metadata"]["fact_ref_count"], 3)
         self.assertTrue(trace["replayable"])
         self.assertEqual(trace["replay_input_ref"]["state_snapshot_ref"], trace["state_snapshot_ref"])
         self.assertTrue(str(trace["replay_seed"]).startswith("seed_"))
@@ -109,6 +124,7 @@ class TraceEnvelopeTests(unittest.TestCase):
         self.assertEqual(trace["tool_calls"][0]["name"], "manual_market_review")
         self.assertTrue(any(item["ref_id"] == "match_source" for item in trace["evidence_refs"]))
         self.assertTrue(any(item["ref_id"] == "market_entropy" for item in trace["evidence_refs"]))
+        self.assertTrue(any(item["kind"] == "fact_ref" for item in trace["evidence_refs"]))
 
     def test_build_prediction_trace_envelope_preserves_existing_metadata(self) -> None:
         match = AppMatch(
@@ -134,6 +150,14 @@ class TraceEnvelopeTests(unittest.TestCase):
                     "scores": {"manual_score": {"value": 1.0}},
                     "tags": ["replay"],
                     "replayable": False,
+                    "fact_refs": [
+                        {
+                            "ref_id": "fact_existing",
+                            "kind": "match_fact",
+                            "schema_version": "match_fact_v1",
+                            "match_id": match.match_id,
+                        }
+                    ],
                 },
             },
             generated_at=datetime(2026, 5, 18, 10, 0, 1),
@@ -147,6 +171,7 @@ class TraceEnvelopeTests(unittest.TestCase):
         self.assertEqual(trace["scores"]["manual_score"]["value"], 1.0)
         self.assertIn("replay", trace["tags"])
         self.assertFalse(trace["replayable"])
+        self.assertTrue(any(item["ref_id"] == "fact_existing" for item in trace["fact_refs"]))
 
 
 if __name__ == "__main__":

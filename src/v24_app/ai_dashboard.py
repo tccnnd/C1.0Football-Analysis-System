@@ -887,6 +887,7 @@ def _supervisor_markdown(pred: dict) -> str:
     nodes = build_agent_trace_nodes(supervisor)
     evidence_refs = trace.get("evidence_refs") if isinstance(trace.get("evidence_refs"), list) else []
     tool_calls = trace.get("tool_calls") if isinstance(trace.get("tool_calls"), list) else []
+    fact_refs = trace.get("fact_refs") if isinstance(trace.get("fact_refs"), list) else []
     lines = [
         "## 8. Supervisor / Agent Trace",
         "",
@@ -900,6 +901,7 @@ def _supervisor_markdown(pred: dict) -> str:
         f"| Trace Latency | {_md_cell(trace.get('latency_ms', '-'))} ms |",
         f"| Replayable | {_md_cell('yes' if trace.get('replayable') else 'no')} |",
         f"| Grounded | {_md_cell('yes' if trace.get('report_grounded_flag') else 'no')} |",
+        f"| Fact Refs | {_md_cell(len(fact_refs))} |",
         f"| Evidence Refs | {_md_cell(len(evidence_refs))} |",
         f"| Tool Calls | {_md_cell(len(tool_calls))} |",
         f"| Supervisor 状态 | {_md_cell(supervisor.get('status', '-'))} |",
@@ -4493,6 +4495,7 @@ class SmartMatchDashboard:
         if trace:
             evidence_refs = trace.get("evidence_refs") if isinstance(trace.get("evidence_refs"), list) else []
             tool_calls = trace.get("tool_calls") if isinstance(trace.get("tool_calls"), list) else []
+            fact_refs = trace.get("fact_refs") if isinstance(trace.get("fact_refs"), list) else []
             trace_id = str(trace.get("trace_id") or "-")
             trace_short = trace_id if len(trace_id) <= 22 else f"{trace_id[:22]}..."
             latency = trace.get("latency_ms")
@@ -4502,7 +4505,7 @@ class SmartMatchDashboard:
             tk.Label(
                 trace_row,
                 text=(
-                    f"Trace: {trace_short} | evidence {len(evidence_refs)} | "
+                    f"Trace: {trace_short} | facts {len(fact_refs)} | evidence {len(evidence_refs)} | "
                     f"tool {len(tool_calls)} | latency {latency_text}"
                 ),
                 bg=PANEL,
