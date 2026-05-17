@@ -43,6 +43,7 @@ from v24_app.ai_dashboard import (
     build_video_review_center_summary,
     build_video_review_center_action_rows,
     build_video_review_evidence_gap_quick_open_filters,
+    build_video_review_evidence_gap_quick_target_item,
     collect_video_review_evidence_gap_sample_match_ids,
     find_video_review_evidence_gap_settlement,
 )
@@ -1060,6 +1061,46 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertEqual(filters["status_filter"], "pending")
         self.assertEqual(filters["priority_filter"], "P0")
         self.assertEqual(filters["evidence_filter"], "local_video")
+
+    def test_video_review_evidence_gap_quick_target_item_prefers_matching_row(self) -> None:
+        state = {
+            "batches": [
+                {
+                    "batch_id": "batch-new",
+                    "items": [
+                        {
+                            "match_id": "new-1",
+                            "status": "pending",
+                            "priority_label": "P2",
+                            "evidence_kind": "missing",
+                        }
+                    ],
+                },
+                {
+                    "batch_id": "batch-old",
+                    "items": [
+                        {
+                            "match_id": "old-1",
+                            "status": "pending",
+                            "priority_label": "P0",
+                            "evidence_kind": "local_video",
+                        },
+                        {
+                            "match_id": "old-2",
+                            "status": "pending",
+                            "priority_label": "P0",
+                            "evidence_kind": "local_video",
+                        },
+                    ],
+                },
+            ]
+        }
+
+        item = build_video_review_evidence_gap_quick_target_item(state, "local_video")
+
+        self.assertIsNotNone(item)
+        self.assertEqual(item["match_id"], "old-1")
+        self.assertEqual(item["batch_id"], "batch-old")
 
 
 if __name__ == "__main__":

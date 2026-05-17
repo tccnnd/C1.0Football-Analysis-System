@@ -1661,6 +1661,26 @@ def build_video_review_evidence_gap_quick_open_filters(
     return base
 
 
+def build_video_review_evidence_gap_quick_target_item(
+    state: dict | object | None,
+    evidence_filter: str | None = None,
+) -> dict[str, object] | None:
+    filters = build_video_review_evidence_gap_quick_open_filters(evidence_filter, state)
+    result = build_video_review_evidence_gap_batch_filter_result(
+        state if isinstance(state, dict) else {},
+        batch_filter=filters["batch_filter"],
+        status_filter=filters["status_filter"],
+        priority_filter=filters["priority_filter"],
+        evidence_filter=filters["evidence_filter"],
+    )
+    items = result.get("items") if isinstance(result, dict) else []
+    if isinstance(items, list):
+        for item in items:
+            if isinstance(item, dict):
+                return item
+    return None
+
+
 def build_statsbomb_review_training_quality_export_message(path: Path, quality: dict, record_count: int) -> str:
     return "\n".join(
         [
@@ -6614,7 +6634,7 @@ class SmartMatchDashboard:
         detail.pack(fill=tk.X, pady=(12, 0))
         rows_cache: list[dict[str, object]] = []
         filter_result_cache: dict[str, object] = {}
-        action_var = tk.StringVar(value="选择一条记录后可直接处理缺口。")
+        action_var = tk.StringVar(value="选择一条记录后可直接绑定当前选中回放或导入当前选中视频。")
 
         def _selected_row(show_prompt: bool = True) -> dict | None:
             selection = tree.selection()
@@ -6652,7 +6672,7 @@ class SmartMatchDashboard:
             enabled = [str(action.get("label") or "-") for action in actions if bool(action.get("enabled"))]
             disabled = [str(action.get("label") or "-") for action in actions if not bool(action.get("enabled"))]
             action_var.set(
-                f"可执行: {', '.join(enabled) if enabled else '-'}"
+                f"当前选中记录可执行: {', '.join(enabled) if enabled else '-'}"
                 + (f" | 不可执行: {', '.join(disabled)}" if disabled else "")
             )
 
@@ -6802,8 +6822,8 @@ class SmartMatchDashboard:
         tk.Label(action_wrap, textvariable=action_var, bg=BG, fg=MUTED, font=("Microsoft YaHei UI", 9)).pack(anchor=tk.W, pady=(0, 8))
         for label, command, color in [
             ("场次详情", _show_selected_settlement_detail, PANEL_2),
-            ("绑定外部回放", _bind_selected_external_reference, BLUE),
-            ("导入本地视频", _import_selected_local_video, PANEL_2),
+            ("绑定当前选中回放", _bind_selected_external_reference, BLUE),
+            ("导入当前选中视频", _import_selected_local_video, PANEL_2),
             ("生成事件代理样本", _build_event_proxy_samples_for_batch, PANEL_2),
             ("导出筛选报告", _export_current_filter_report, PANEL_2),
         ]:
@@ -6826,6 +6846,26 @@ class SmartMatchDashboard:
 
     def open_video_review_evidence_gap_batch_filter_window(self) -> None:
         self.open_video_review_evidence_gap_center_window()
+
+    def _run_video_review_evidence_gap_quick_action(self, evidence_filter: str, action_kind: str) -> None:
+        state = _load_video_review_evidence_gap_batch_state()
+        target = build_video_review_evidence_gap_quick_target_item(state, evidence_filter)
+        if not target:
+            self.open_video_review_evidence_gap_center_window(**build_video_review_evidence_gap_quick_open_filters(evidence_filter, state))
+            return
+        settlement = find_video_review_evidence_gap_settlement(
+            list(reversed(get_recent_settlements(limit=300))),
+            str(target.get("match_id") or ""),
+        )
+        if not settlement:
+            self.open_video_review_evidence_gap_center_window(**build_video_review_evidence_gap_quick_open_filters(evidence_filter, state))
+            return
+        if action_kind == "bind_external_reference":
+            self.import_video_review_reference_for_settlement(settlement)
+        elif action_kind == "import_local_video":
+            self.import_video_review_for_settlement(settlement)
+        else:
+            self.open_video_review_evidence_gap_center_window(**build_video_review_evidence_gap_quick_open_filters(evidence_filter, state))
 
     def open_ai_video_review_center_window(self) -> None:
         settlements = list(reversed(get_recent_settlements(limit=200)))
@@ -6923,13 +6963,15 @@ class SmartMatchDashboard:
             video_memory_health,
             video_source_coverage,
         )
-        def _open_evidence_gap(kind: str) -> None:
-            filters = build_video_review_evidence_gap_quick_open_filters(kind, _load_video_review_evidence_gap_batch_state())
-            self.open_video_review_evidence_gap_center_window(**filters)
-
         action_command_map = {
-            "open_video_review_evidence_gap_center_window_local_video": lambda: _open_evidence_gap("local_video"),
-            "open_video_review_evidence_gap_center_window_external_reference": lambda: _open_evidence_gap("external_reference"),
+            "open_video_review_evidence_gap_center_window_local_video": lambda: self._run_video_review_evidence_gap_quick_action(
+                "local_video",
+                "import_local_video",
+            ),
+            "open_video_review_evidence_gap_center_window_external_reference": lambda: self._run_video_review_evidence_gap_quick_action(
+                "external_reference",
+                "bind_external_reference",
+            ),
             "export_video_review_fewshot_samples": self.export_video_review_fewshot_samples,
             "preview_video_review_fewshot_merge_bundle": self.preview_video_review_fewshot_merge_bundle,
             "export_video_review_fewshot_memory_audit": self.export_video_review_fewshot_memory_audit,
