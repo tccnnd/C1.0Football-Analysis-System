@@ -1455,6 +1455,166 @@ def build_statsbomb_review_training_center_summary(quality: dict | object, recor
     }
 
 
+def build_statsbomb_review_training_closure_summary(
+    review_samples: dict | list | object,
+    evidence_gap_state: dict | object,
+) -> dict[str, object]:
+    def _items(value: object) -> list[dict]:
+        if isinstance(value, dict):
+            for key in ("items", "rows", "batches"):
+                resolved = value.get(key)
+                if isinstance(resolved, list):
+                    return [item for item in resolved if isinstance(item, dict)]
+            return []
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+        return []
+
+    def _match_id(item: dict) -> str:
+        match = item.get("match") if isinstance(item.get("match"), dict) else {}
+        meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+        return str(
+            item.get("match_id")
+            or match.get("match_id")
+            or meta.get("match_id")
+            or item.get("source_match_id")
+            or meta.get("source_match_id")
+            or ""
+        ).strip()
+
+    quality = build_statsbomb_review_training_quality_summary(review_samples)
+    sample_count = int(quality.get("sample_count", 0) or 0)
+    quality_status = str(quality.get("status") or "blocked")
+    sample_match_ids = collect_video_review_evidence_gap_sample_match_ids(review_samples)
+
+    linked_items: list[dict[str, object]] = []
+    matched_sample_match_ids: set[str] = set()
+    for batch in _items(evidence_gap_state):
+        batch_id = str(batch.get("batch_id") or "-")
+        for item in _items(batch):
+            match_id = _match_id(item)
+            if not match_id or match_id not in sample_match_ids:
+                continue
+            matched_sample_match_ids.add(match_id)
+            status = str(item.get("status") or "pending")
+            linked_items.append(
+                {
+                    "batch_id": batch_id,
+                    "match_id": match_id,
+                    "title": str(item.get("title") or "-"),
+                    "status": status,
+                    "evidence_kind": str(item.get("evidence_kind") or "-"),
+                    "source_name": str(item.get("source_name") or "-"),
+                    "handled_at": str(item.get("handled_at") or "-"),
+                    "review_id": str(item.get("review_id") or "-"),
+                    "tone": "good" if status == "resolved" else "warning",
+                }
+            )
+
+    closed_match_ids = {
+        str(item.get("match_id") or "").strip()
+        for item in linked_items
+        if str(item.get("status") or "") == "resolved" and str(item.get("match_id") or "").strip()
+    }
+    pending_match_ids = {
+        str(item.get("match_id") or "").strip()
+        for item in linked_items
+        if str(item.get("status") or "") != "resolved" and str(item.get("match_id") or "").strip()
+    }
+    linked_match_ids = closed_match_ids | pending_match_ids
+    linked_match_count = len(linked_match_ids)
+    closed_count = len(closed_match_ids)
+    pending_count = len(pending_match_ids)
+    sample_match_count = len(sample_match_ids)
+    unmatched_sample_count = max(0, sample_match_count - len(matched_sample_match_ids))
+    closure_rate = 0.0 if sample_match_count <= 0 else closed_count / sample_match_count
+
+    if sample_count <= 0 or quality_status == "blocked":
+        status = "blocked"
+    elif pending_count > 0 or unmatched_sample_count > 0 or quality_status == "attention":
+        status = "attention"
+    else:
+        status = "healthy"
+
+    tone = {"healthy": "good", "attention": "warning", "blocked": "bad"}.get(status, "neutral")
+    status_label = {"healthy": "闭环可用", "attention": "需要回写", "blocked": "闭环阻塞"}.get(status, status)
+    latest_item = {}
+    if linked_items:
+        latest_item = sorted(linked_items, key=lambda item: str(item.get("handled_at") or ""))[-1]
+    latest_text = (
+        f"{latest_item.get('handled_at', '-')} | {latest_item.get('source_name', '-') or '-'} | {latest_item.get('review_id', '-')}"
+        if latest_item
+        else "-"
+    )
+
+    card_rows = [
+        {
+            "label": "整体状态",
+            "value": status,
+            "tone": tone,
+            "detail": f"quality={quality_status} | linked={linked_match_count}",
+        },
+        {
+            "label": "样本",
+            "value": f"{sample_count} / {sample_match_count}",
+            "tone": "danger" if sample_count <= 0 else "warning" if unmatched_sample_count > 0 else "good",
+            "detail": f"未匹配 {unmatched_sample_count}",
+        },
+        {
+            "label": "已回写",
+            "value": str(closed_count),
+            "tone": "good" if pending_count == 0 else "warning",
+            "detail": f"待回写 {pending_count}",
+        },
+        {
+            "label": "闭环率",
+            "value": f"{closure_rate:.0%}",
+            "tone": "good" if closure_rate >= 0.95 else "warning" if closure_rate > 0 else "danger",
+            "detail": f"关联 {linked_match_count} | 最新 {latest_text}",
+        },
+    ]
+
+    rows = sorted(
+        linked_items,
+        key=lambda item: (0 if str(item.get("status") or "") != "resolved" else 1, str(item.get("handled_at") or "")),
+    )
+    rows = [
+        {
+            "title": f"{item.get('match_id', '-')} | {item.get('status', '-')} | {item.get('batch_id', '-')}",
+            "body": (
+                f"evidence={item.get('evidence_kind', '-')} | source={item.get('source_name', '-') or '-'} | "
+                f"handled_at={item.get('handled_at', '-') or '-'} | review_id={item.get('review_id', '-') or '-'}"
+            ),
+            "tone": str(item.get("tone") or "neutral"),
+        }
+        for item in rows[:8]
+    ]
+
+    return {
+        "status": status,
+        "tone": tone,
+        "status_label": status_label,
+        "title": f"StatsBomb/Event Proxy 闭环 | {status_label}",
+        "body": (
+            f"样本 {sample_count} | 关联场次 {linked_match_count}/{sample_match_count} | "
+            f"已回写 {closed_count} | 待回写 {pending_count}\n"
+            f"最新处理 {latest_text}"
+        ),
+        "sample_count": sample_count,
+        "sample_match_count": sample_match_count,
+        "linked_match_count": linked_match_count,
+        "closed_count": closed_count,
+        "pending_count": pending_count,
+        "unmatched_sample_count": unmatched_sample_count,
+        "closure_rate": round(closure_rate, 4),
+        "quality_status": quality_status,
+        "quality_issue_count": int(quality.get("issue_count", 0) or 0),
+        "quality": quality,
+        "card_rows": card_rows,
+        "rows": rows,
+    }
+
+
 def build_video_review_center_summary(
     video_memory_health: dict | object,
     video_source_coverage: dict | object,
@@ -7177,6 +7337,19 @@ class SmartMatchDashboard:
         tk.Label(header, text="事件代理专项中心", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 15, "bold")).pack(side=tk.LEFT)
         tk.Button(
             header,
+            text="复盘闭环",
+            command=self.open_statsbomb_review_training_closure_window,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=14,
+            pady=6,
+        ).pack(side=tk.RIGHT, padx=(8, 0))
+        tk.Button(
+            header,
             text="导出质量报告",
             command=self.export_statsbomb_review_training_quality_report,
             bg=PANEL_2,
@@ -7290,6 +7463,110 @@ class SmartMatchDashboard:
             right,
             "仅用于赛后复盘",
             "StatsBomb/Event Proxy 样本只进入 Evaluation Agent 复盘与错因归因，不写入赛前预测特征。",
+        )
+
+    def open_statsbomb_review_training_closure_window(self) -> None:
+        review_samples = get_statsbomb_review_training_samples()
+        evidence_gap_state = _load_video_review_evidence_gap_batch_state()
+        summary = build_statsbomb_review_training_closure_summary(review_samples, evidence_gap_state)
+        quality = summary.get("quality") if isinstance(summary.get("quality"), dict) else {}
+
+        window = tk.Toplevel(self.root)
+        window.title("StatsBomb/Event Proxy 复盘闭环")
+        window.geometry("1080x700")
+        window.configure(bg=BG)
+
+        shell = tk.Frame(window, bg=BG)
+        shell.pack(fill=tk.BOTH, expand=True, padx=16, pady=16)
+
+        header = tk.Frame(shell, bg=BG)
+        header.pack(fill=tk.X, pady=(0, 12))
+        tk.Label(header, text="StatsBomb/Event Proxy 复盘闭环", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 15, "bold")).pack(side=tk.LEFT)
+
+        def _header_button(label: str, command, *, color: str = PANEL_2) -> None:
+            tk.Button(
+                header,
+                text=label,
+                command=command,
+                bg=color,
+                fg="white" if color == BLUE else TEXT,
+                activebackground="#3d5ee7" if color == BLUE else "#172638",
+                activeforeground="white",
+                relief=tk.FLAT,
+                font=("Microsoft YaHei UI", 10, "bold"),
+                padx=14,
+                pady=6,
+            ).pack(side=tk.RIGHT, padx=(8, 0))
+
+        _header_button("刷新", lambda: (window.destroy(), self.open_statsbomb_review_training_closure_window()))
+        _header_button("打开缺口中心", self.open_video_review_evidence_gap_center_window)
+        _header_button("生成样本", self.export_statsbomb_event_proxy_review_samples, color=BLUE)
+        _header_button("质量报告", self.export_statsbomb_review_training_quality_report)
+
+        top = tk.Frame(shell, bg=BG)
+        top.pack(fill=tk.X, pady=(0, 12))
+        for label, value, color in [
+            ("闭环状态", str(summary.get("status_label") or summary.get("status") or "-"), self._tone_color(str(summary.get("tone") or "neutral"))),
+            ("样本", str(summary.get("sample_count", 0)), TEXT),
+            ("关联场次", f"{summary.get('linked_match_count', 0)}/{summary.get('sample_match_count', 0)}", "#7aa2ff"),
+            ("已回写", str(summary.get("closed_count", 0)), GREEN if int(summary.get("closed_count", 0) or 0) else TEXT),
+            ("待回写", str(summary.get("pending_count", 0)), RED if int(summary.get("pending_count", 0) or 0) else GREEN),
+            ("闭环率", f"{float(summary.get('closure_rate', 0) or 0):.0%}", YELLOW if float(summary.get("closure_rate", 0) or 0) < 1 else GREEN),
+        ]:
+            self._detail_metric(top, label, value, color)
+
+        body = tk.Frame(shell, bg=BG)
+        body.pack(fill=tk.BOTH, expand=True)
+        left = self._card(body, PANEL)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 12))
+        right = self._card(body, PANEL)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self._strategy_section_title(left, "闭环摘要", first=True)
+        self._strategy_row(left, str(summary.get("title") or "-"), str(summary.get("body") or "-"))
+        card_rows = summary.get("card_rows") if isinstance(summary.get("card_rows"), list) else []
+        for row in [item for item in card_rows if isinstance(item, dict)]:
+            self._strategy_row(
+                left,
+                f"{row.get('label', '-')}: {row.get('value', '-')}",
+                str(row.get("detail") or "-"),
+            )
+
+        self._strategy_section_title(left, "质量状态", first=False)
+        quality_card_rows = quality.get("card_rows") if isinstance(quality.get("card_rows"), list) else []
+        if quality_card_rows:
+            for row in [item for item in quality_card_rows if isinstance(item, dict)][:4]:
+                self._strategy_row(
+                    left,
+                    f"{row.get('label', '-')}: {row.get('value', '-')}",
+                    str(row.get("detail") or "-"),
+                )
+        else:
+            self._strategy_row(left, "暂无质量卡片", "当前没有可展示的 StatsBomb/Event Proxy 质量明细。")
+
+        self._strategy_section_title(right, "闭环明细", first=True)
+        closure_rows = summary.get("rows") if isinstance(summary.get("rows"), list) else []
+        if closure_rows:
+            for row in [item for item in closure_rows if isinstance(item, dict)]:
+                self._strategy_row(
+                    right,
+                    str(row.get("title") or "-"),
+                    str(row.get("body") or "-"),
+                )
+        else:
+            self._strategy_row(right, "暂无闭环明细", "当前没有可展示的回写记录。")
+
+        self._strategy_section_title(right, "边界", first=False)
+        self._strategy_row(
+            right,
+            "仅用于赛后复盘",
+            "StatsBomb/Event Proxy 样本只进入 Evaluation Agent 复盘与错因归因，不写入赛前预测特征。",
+        )
+        self._strategy_row(
+            right,
+            "缺口入口",
+            "样本生成后自动回写复盘缺口，必要时可直接打开缺口中心继续处理。",
+            command=self.open_video_review_evidence_gap_center_window,
         )
 
     def export_statsbomb_review_training_quality_report(self) -> Path:

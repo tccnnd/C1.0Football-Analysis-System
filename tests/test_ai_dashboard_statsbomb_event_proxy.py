@@ -4,6 +4,7 @@ import sys
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -21,6 +22,7 @@ from v24_app.ai_dashboard import (
     build_statsbomb_review_training_center_summary,
     build_statsbomb_review_training_feedback_rows,
     build_statsbomb_review_training_quality_export_message,
+    build_statsbomb_review_training_closure_summary,
     build_video_review_evidence_gap_batch_id,
     build_video_review_evidence_gap_batch_record,
     build_video_review_evidence_gap_action_rows,
@@ -736,6 +738,73 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertIn("事件代理质量", summary["title"])
         self.assertIn("样本 18", summary["body"])
         self.assertIn("2026-05-17 09:00:00", summary["body"])
+
+    def test_review_training_closure_summary_tracks_pending_and_resolved_matches(self) -> None:
+        review_samples = {
+            "items": [
+                {"match_id": "m-1"},
+                {"match_id": "m-2"},
+            ]
+        }
+        evidence_gap_state = {
+            "batches": [
+                {
+                    "batch_id": "batch-1",
+                    "items": [
+                        {
+                            "match_id": "m-1",
+                            "status": "resolved",
+                            "handled_at": "2026-05-17 09:10:00",
+                            "source_name": "StatsBomb/Event Proxy",
+                            "review_id": "review-1",
+                            "evidence_kind": "statsbomb_event_proxy",
+                        },
+                        {
+                            "match_id": "m-2",
+                            "status": "pending",
+                            "handled_at": "",
+                            "source_name": "",
+                            "review_id": "",
+                            "evidence_kind": "",
+                        },
+                    ],
+                }
+            ]
+        }
+
+        with patch(
+            "v24_app.ai_dashboard.build_statsbomb_review_training_quality_summary",
+            return_value={"status": "healthy", "sample_count": 2, "issue_count": 0, "card_rows": []},
+        ):
+            summary = build_statsbomb_review_training_closure_summary(review_samples, evidence_gap_state)
+
+        self.assertEqual(summary["status"], "attention")
+        self.assertEqual(summary["tone"], "warning")
+        self.assertEqual(summary["sample_count"], 2)
+        self.assertEqual(summary["sample_match_count"], 2)
+        self.assertEqual(summary["linked_match_count"], 2)
+        self.assertEqual(summary["closed_count"], 1)
+        self.assertEqual(summary["pending_count"], 1)
+        self.assertEqual(summary["unmatched_sample_count"], 0)
+        self.assertIn("闭环", summary["title"])
+        self.assertIn("已回写 1", summary["body"])
+        self.assertGreaterEqual(len(summary["card_rows"]), 4)
+        self.assertEqual(summary["rows"][0]["tone"], "warning")
+
+    def test_review_training_closure_summary_is_blocked_without_samples(self) -> None:
+        with patch(
+            "v24_app.ai_dashboard.build_statsbomb_review_training_quality_summary",
+            return_value={"status": "blocked", "sample_count": 0, "issue_count": 1, "card_rows": []},
+        ):
+            summary = build_statsbomb_review_training_closure_summary({}, {"batches": []})
+
+        self.assertEqual(summary["status"], "blocked")
+        self.assertEqual(summary["tone"], "bad")
+        self.assertEqual(summary["sample_count"], 0)
+        self.assertEqual(summary["sample_match_count"], 0)
+        self.assertEqual(summary["closed_count"], 0)
+        self.assertEqual(summary["pending_count"], 0)
+        self.assertEqual(summary["rows"], [])
 
     def test_review_training_action_rows_map_issues_to_executable_actions(self) -> None:
         rows = build_statsbomb_review_training_action_rows(
