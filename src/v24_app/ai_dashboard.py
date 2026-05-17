@@ -1533,6 +1533,82 @@ def build_video_review_center_summary(
     }
 
 
+def build_video_review_center_action_rows(
+    video_memory_health: dict | object,
+    video_source_coverage: dict | object,
+    *,
+    limit: int = 6,
+) -> list[dict[str, object]]:
+    def _payload(value: dict | object) -> dict:
+        return value if isinstance(value, dict) else {}
+
+    def _action_key_for_code(code: str) -> str:
+        if code == "video_memory_duplicate_keys":
+            return "export_video_review_fewshot_memory_audit"
+        if code in {"video_memory_backup_missing"}:
+            return "export_video_review_fewshot_memory_audit"
+        if code in {"video_memory_missing"}:
+            return "preview_video_review_fewshot_merge_bundle"
+        if code in {"video_memory_low_samples"}:
+            return "export_video_review_fewshot_samples"
+        if code in {"video_memory_no_current_match", "video_memory_ready"}:
+            return "open_review_center"
+        if code in {"video_memory_root_concentration", "video_memory_source_concentration"}:
+            return "preview_video_review_fewshot_merge_bundle"
+        if code.startswith("gap:"):
+            return "open_review_center"
+        return "open_ai_video_review_center_window"
+
+    memory_payload = _payload(video_memory_health)
+    source_payload = _payload(video_source_coverage)
+    monitor = _payload(memory_payload.get("monitor"))
+    quality = _payload(memory_payload.get("quality"))
+    health = _payload(memory_payload.get("health"))
+    memory_rows = build_video_review_fewshot_action_rows(monitor, quality, health, limit=max(0, int(limit)))
+    rows: list[dict[str, object]] = []
+    seen: set[str] = set()
+
+    missing_evidence_count = int(source_payload.get("no_review_evidence_count", 0) or 0)
+    if missing_evidence_count > 0:
+        rows.append(
+            {
+                "code": "video_review_missing_evidence",
+                "action_key": "open_video_review_evidence_gap_center_window",
+                "title": "先补视频证据缺口",
+                "body": f"当前缺证据 {missing_evidence_count} 场，先去证据缺口中心绑定合法回放或事件代理，再回到专项中心复核。",
+                "priority": 0,
+                "tone": "bad",
+            }
+        )
+        seen.add("video_review_missing_evidence")
+
+    for row in memory_rows:
+        if not isinstance(row, dict):
+            continue
+        code = str(row.get("code") or "")
+        if code in seen:
+            continue
+        seen.add(code)
+        enriched = dict(row)
+        enriched["action_key"] = _action_key_for_code(code)
+        rows.append(enriched)
+
+    if not rows:
+        rows.append(
+            {
+                "code": "video_memory_ready",
+                "action_key": "open_review_center",
+                "title": "进入稳定性复盘",
+                "body": "视频记忆池当前没有阻塞问题，可回到复盘中心继续观察样本导入、证据回收与归因稳定性。",
+                "priority": 99,
+                "tone": "good",
+            }
+        )
+
+    rows.sort(key=lambda row: (int(row.get("priority", 99) or 99), str(row.get("title") or "")))
+    return rows[: max(0, int(limit))]
+
+
 def build_statsbomb_review_training_quality_export_message(path: Path, quality: dict, record_count: int) -> str:
     return "\n".join(
         [
@@ -6763,13 +6839,25 @@ class SmartMatchDashboard:
             self._strategy_row(left, "暂无健康卡片", "当前没有可展示的视频记忆健康明细。")
 
         self._strategy_section_title(left, "优先补标注/补样", first=False)
-        action_rows = video_memory_health.get("action_rows") if isinstance(video_memory_health.get("action_rows"), list) else []
+        action_rows = build_video_review_center_action_rows(
+            video_memory_health,
+            video_source_coverage,
+        )
+        action_command_map = {
+            "open_video_review_evidence_gap_center_window": self.open_video_review_evidence_gap_center_window,
+            "export_video_review_fewshot_samples": self.export_video_review_fewshot_samples,
+            "preview_video_review_fewshot_merge_bundle": self.preview_video_review_fewshot_merge_bundle,
+            "export_video_review_fewshot_memory_audit": self.export_video_review_fewshot_memory_audit,
+            "open_review_center": self.open_review_center,
+            "open_ai_video_review_center_window": lambda: (window.destroy(), self.open_ai_video_review_center_window()),
+        }
         if action_rows:
             for row in [item for item in action_rows if isinstance(item, dict)][:6]:
                 self._strategy_row(
                     left,
                     str(row.get("title") or row.get("code") or "-"),
                     str(row.get("body") or row.get("recommendation") or "-"),
+                    command=action_command_map.get(str(row.get("action_key") or "")),
                 )
         else:
             self._strategy_row(left, "暂无补样建议", "视频记忆当前没有需要立即处理的补标注/补样动作。")

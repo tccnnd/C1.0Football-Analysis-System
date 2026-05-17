@@ -41,6 +41,7 @@ from v24_app.ai_dashboard import (
     build_video_review_evidence_gap_feedback,
     build_video_review_evidence_gap_feedback_rows,
     build_video_review_center_summary,
+    build_video_review_center_action_rows,
     collect_video_review_evidence_gap_sample_match_ids,
     find_video_review_evidence_gap_settlement,
 )
@@ -950,6 +951,60 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertEqual(summary["issue_count"], 3)
         self.assertEqual(summary["action_count"], 1)
         self.assertIn("复盘受阻", summary["title"])
+
+    def test_video_review_center_action_rows_prioritize_missing_evidence(self) -> None:
+        rows = build_video_review_center_action_rows(
+            {
+                "monitor": {"sample_count": 4},
+                "quality": {"alerts": []},
+                "health": {"status": "healthy", "issues": []},
+            },
+            {
+                "coverage_status": "blocked",
+                "no_review_evidence_count": 2,
+                "total_settled_count": 4,
+            },
+        )
+
+        self.assertGreaterEqual(len(rows), 1)
+        self.assertEqual(rows[0]["code"], "video_review_missing_evidence")
+        self.assertEqual(rows[0]["action_key"], "open_video_review_evidence_gap_center_window")
+        self.assertIn("缺证据 2", rows[0]["body"])
+
+    def test_video_review_center_action_rows_map_duplicate_keys_to_audit(self) -> None:
+        rows = build_video_review_center_action_rows(
+            {
+                "monitor": {"sample_count": 3},
+                "quality": {"alerts": []},
+                "health": {
+                    "status": "blocked",
+                    "issues": [
+                        {
+                            "code": "video_memory_duplicate_keys",
+                            "recommendation": "Deduplicate official video memory.",
+                        }
+                    ],
+                },
+            },
+            {"coverage_status": "healthy", "no_review_evidence_count": 0},
+        )
+
+        self.assertEqual(rows[0]["code"], "video_memory_duplicate_keys")
+        self.assertEqual(rows[0]["action_key"], "export_video_review_fewshot_memory_audit")
+
+    def test_video_review_center_action_rows_show_review_center_when_healthy(self) -> None:
+        rows = build_video_review_center_action_rows(
+            {
+                "monitor": {"sample_count": 12},
+                "quality": {"alerts": []},
+                "health": {"status": "healthy", "issues": []},
+            },
+            {"coverage_status": "healthy", "no_review_evidence_count": 0},
+        )
+
+        self.assertEqual(rows[0]["code"], "video_memory_ready")
+        self.assertEqual(rows[0]["action_key"], "open_review_center")
+        self.assertEqual(rows[0]["tone"], "good")
 
 
 if __name__ == "__main__":
