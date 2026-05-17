@@ -2173,6 +2173,92 @@ def build_video_review_evidence_gap_batch_filter_rows(
     return rows
 
 
+def build_video_review_evidence_gap_batch_filter_report_filename(now: datetime | None = None) -> str:
+    current = now or datetime.now()
+    return f"video_review_evidence_gap_batch_filter_report_{current.strftime('%Y%m%d_%H%M%S')}.md"
+
+
+def build_video_review_evidence_gap_batch_filter_report_lines(
+    filter_result: dict | object,
+    *,
+    generated_at: datetime | None = None,
+) -> list[str]:
+    def _clean(value: object) -> str:
+        text = str(value if value not in (None, "") else "-").replace("\n", " ").strip()
+        return text.replace("|", "\\|") or "-"
+
+    result = filter_result if isinstance(filter_result, dict) else {}
+    filters = result.get("filters") if isinstance(result.get("filters"), dict) else {}
+    summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+    rows = build_video_review_evidence_gap_batch_filter_rows(result, limit=500)
+    generated = generated_at or datetime.now()
+    lines = [
+        "# 复盘证据缺口批次处理报告",
+        "",
+        f"- Generated At: {generated.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- Batch Filter: {filters.get('batch', '-')}",
+        f"- Status Filter: {filters.get('status', '-')}",
+        f"- Priority Filter: {filters.get('priority', '-')}",
+        f"- Evidence Filter: {filters.get('evidence', '-')}",
+        f"- Summary: {summary.get('summary_text', '-')}",
+        "- Boundary: use legal replay links only; no auto video download; StatsBomb/Event Proxy is post-match review evidence only.",
+        "",
+        "## 明细",
+        "",
+    ]
+    if not rows:
+        lines.append("- 当前筛选条件下没有匹配记录。")
+        return lines
+    lines.extend(
+        [
+            "| 优先级 | 分数 | 状态 | 证据 | 来源 | 处理时间 | match_id | 场次 |",
+            "| --- | ---: | --- | --- | --- | --- | --- | --- |",
+        ]
+    )
+    for row in rows:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    _clean(row.get("priority")),
+                    _clean(row.get("score")),
+                    _clean(row.get("status")),
+                    _clean(row.get("evidence")),
+                    _clean(row.get("source")),
+                    _clean(row.get("handled_at")),
+                    _clean(row.get("match_id")),
+                    _clean(row.get("title")),
+                ]
+            )
+            + " |"
+        )
+    lines.extend(
+        [
+            "",
+            "## 处理建议",
+            "",
+            "- P0/P1 且未处理的记录优先绑定合法外部回放或本地授权视频。",
+            "- 无合法视频来源时，优先生成 StatsBomb/Event Proxy 复盘样本并回写批次状态。",
+            "- 已处理记录进入视频复盘样本或事件代理样本审计，不进入赛前预测特征。",
+        ]
+    )
+    return lines
+
+
+def build_video_review_evidence_gap_batch_filter_report_message(path: Path, filter_result: dict | object) -> str:
+    summary = filter_result.get("summary") if isinstance(filter_result, dict) and isinstance(filter_result.get("summary"), dict) else {}
+    return "\n".join(
+        [
+            "复盘证据缺口批次处理报告已导出",
+            "",
+            f"文件: {path}",
+            str(summary.get("summary_text") or "-"),
+            "",
+            "边界: 只使用合法回放链接或授权本地视频；不自动下载视频；事件代理仅用于赛后复盘。",
+        ]
+    )
+
+
 def find_video_review_evidence_gap_settlement(settlements: list[dict] | object, match_id: str | object) -> dict | None:
     resolved_id = str(match_id or "").strip()
     if not resolved_id or not isinstance(settlements, list):
@@ -5385,16 +5471,12 @@ class SmartMatchDashboard:
             statsbomb_samples=get_statsbomb_review_training_samples(),
             video_memory=get_video_review_fewshot_memory(),
         )
-        evidence_gap_rows = build_video_review_evidence_gap_action_rows(
-            settlements,
-            get_statsbomb_review_training_samples(),
-        )
         evidence_gap_feedback_rows = build_video_review_evidence_gap_feedback_rows(
-            _load_video_review_evidence_gap_feedback_log()
+            _load_video_review_evidence_gap_feedback_log(),
+            limit=2,
         )
         evidence_gap_batch_state = _load_video_review_evidence_gap_batch_state()
         evidence_gap_batch_status = build_video_review_evidence_gap_batch_status(evidence_gap_batch_state)
-        evidence_gap_batch_rows = build_video_review_evidence_gap_batch_status_rows(evidence_gap_batch_state)
         statsbomb_repair_feedback_rows = build_statsbomb_review_training_feedback_rows(
             _load_statsbomb_review_training_action_feedback_log()
         )
@@ -5699,8 +5781,8 @@ class SmartMatchDashboard:
         ).pack(side=tk.LEFT, padx=(10, 0))
         tk.Button(
             review_memory_actions,
-            text="筛选缺口批次",
-            command=self.open_video_review_evidence_gap_batch_filter_window,
+            text="证据缺口中心",
+            command=self.open_video_review_evidence_gap_center_window,
             bg=PANEL_2,
             fg=TEXT,
             activebackground="#172638",
@@ -5774,30 +5856,17 @@ class SmartMatchDashboard:
             f"缺口批次执行 | {evidence_gap_batch_status.get('status', '-')}",
             (
                 f"{evidence_gap_batch_status.get('summary_text', '-')}\n"
-                f"完成率: {float(evidence_gap_batch_status.get('completion_rate', 0) or 0):.0%}"
+                f"完成率: {float(evidence_gap_batch_status.get('completion_rate', 0) or 0):.0%} | "
+                f"当前缺证据 {video_source_coverage.get('no_review_evidence_count', 0)} 场"
             ),
+            command=self.open_video_review_evidence_gap_center_window,
         )
-        for row in evidence_gap_batch_rows:
-            self._strategy_row(
-                right,
-                str(row.get("title") or "-"),
-                str(row.get("body") or "-"),
-            )
-        if evidence_gap_rows:
-            for row in evidence_gap_rows:
-                settlement = row.get("settlement") if isinstance(row.get("settlement"), dict) else {}
-                self._strategy_row(
-                    right,
-                    str(row.get("title") or "-"),
-                    str(row.get("body") or "-"),
-                    command=(lambda item=settlement: self.import_video_review_reference_for_settlement(item)),
-                )
-        else:
-            self._strategy_row(
-                right,
-                "暂无证据缺口",
-                "当前已结算场次均有视频、外部回放或 StatsBomb/Event Proxy 复盘证据。",
-            )
+        self._strategy_row(
+            right,
+            "打开证据缺口专项中心",
+            "批次筛选、P0/P1 优先处理、绑定回放、导入视频、生成事件代理样本和处理报告导出都集中在专项窗口。",
+            command=self.open_video_review_evidence_gap_center_window,
+        )
         self._strategy_section_title(right, "复盘证据处理记录")
         if evidence_gap_feedback_rows:
             for row in evidence_gap_feedback_rows:
@@ -6225,7 +6294,7 @@ class SmartMatchDashboard:
         )
         return path
 
-    def open_video_review_evidence_gap_batch_filter_window(self) -> None:
+    def open_video_review_evidence_gap_center_window(self) -> None:
         state = _load_video_review_evidence_gap_batch_state()
         options = build_video_review_evidence_gap_batch_filter_options(state)
 
@@ -6244,14 +6313,14 @@ class SmartMatchDashboard:
             return str(first.get("value") or "all")
 
         window = tk.Toplevel(self.root)
-        window.title("复盘证据缺口批次筛选")
-        window.geometry("1080x660")
+        window.title("复盘证据缺口专项中心")
+        window.geometry("1120x720")
         window.configure(bg=BG)
 
         shell = tk.Frame(window, bg=BG)
         shell.pack(fill=tk.BOTH, expand=True, padx=16, pady=16)
 
-        tk.Label(shell, text="复盘证据缺口批次筛选", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 15, "bold")).pack(anchor=tk.W)
+        tk.Label(shell, text="复盘证据缺口专项中心", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 15, "bold")).pack(anchor=tk.W)
         summary_var = tk.StringVar(value="-")
         tk.Label(shell, textvariable=summary_var, bg=BG, fg=MUTED, font=("Microsoft YaHei UI", 10)).pack(anchor=tk.W, pady=(4, 12))
 
@@ -6320,6 +6389,7 @@ class SmartMatchDashboard:
         )
         detail.pack(fill=tk.X, pady=(12, 0))
         rows_cache: list[dict[str, object]] = []
+        filter_result_cache: dict[str, object] = {}
         action_var = tk.StringVar(value="选择一条记录后可直接处理缺口。")
 
         def _selected_row(show_prompt: bool = True) -> dict | None:
@@ -6385,7 +6455,7 @@ class SmartMatchDashboard:
             detail.configure(state=tk.DISABLED)
 
         def _refresh(_event=None) -> None:
-            nonlocal rows_cache
+            nonlocal rows_cache, filter_result_cache
             result = build_video_review_evidence_gap_batch_filter_result(
                 _load_video_review_evidence_gap_batch_state(),
                 batch_filter=_value_for_label("batch_options", batch_var.get()),
@@ -6393,6 +6463,7 @@ class SmartMatchDashboard:
                 priority_filter=_value_for_label("priority_options", priority_var.get()),
                 evidence_filter=_value_for_label("evidence_options", evidence_var.get()),
             )
+            filter_result_cache = result
             summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
             summary_var.set(str(summary.get("summary_text") or "-"))
             rows_cache = build_video_review_evidence_gap_batch_filter_rows(result, limit=200)
@@ -6480,6 +6551,27 @@ class SmartMatchDashboard:
             self.export_statsbomb_event_proxy_review_samples()
             _refresh()
 
+        def _export_current_filter_report() -> None:
+            result = filter_result_cache or build_video_review_evidence_gap_batch_filter_result(
+                _load_video_review_evidence_gap_batch_state(),
+                batch_filter=_value_for_label("batch_options", batch_var.get()),
+                status_filter=_value_for_label("status_options", status_var.get()),
+                priority_filter=_value_for_label("priority_options", priority_var.get()),
+                evidence_filter=_value_for_label("evidence_options", evidence_var.get()),
+            )
+            now = datetime.now()
+            REPORT_DIR.mkdir(parents=True, exist_ok=True)
+            path = REPORT_DIR / build_video_review_evidence_gap_batch_filter_report_filename(now)
+            path.write_text(
+                "\n".join(build_video_review_evidence_gap_batch_filter_report_lines(result, generated_at=now)),
+                encoding="utf-8",
+            )
+            self.status_var.set(f"复盘证据缺口处理报告已导出: {path.name}")
+            messagebox.showinfo(
+                "复盘证据缺口处理报告",
+                build_video_review_evidence_gap_batch_filter_report_message(path, result),
+            )
+
         action_wrap = tk.Frame(shell, bg=BG)
         action_wrap.pack(fill=tk.X, pady=(10, 0))
         tk.Label(action_wrap, textvariable=action_var, bg=BG, fg=MUTED, font=("Microsoft YaHei UI", 9)).pack(anchor=tk.W, pady=(0, 8))
@@ -6488,6 +6580,7 @@ class SmartMatchDashboard:
             ("绑定外部回放", _bind_selected_external_reference, BLUE),
             ("导入本地视频", _import_selected_local_video, PANEL_2),
             ("生成事件代理样本", _build_event_proxy_samples_for_batch, PANEL_2),
+            ("导出筛选报告", _export_current_filter_report, PANEL_2),
         ]:
             tk.Button(
                 action_wrap,
@@ -6505,6 +6598,9 @@ class SmartMatchDashboard:
 
         tree.bind("<<TreeviewSelect>>", _on_select)
         _refresh()
+
+    def open_video_review_evidence_gap_batch_filter_window(self) -> None:
+        self.open_video_review_evidence_gap_center_window()
 
     def export_statsbomb_review_training_quality_report(self) -> Path:
         quality = self._current_statsbomb_review_training_quality()

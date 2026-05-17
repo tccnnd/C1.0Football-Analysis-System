@@ -26,6 +26,9 @@ from v24_app.ai_dashboard import (
     build_video_review_evidence_gap_batch_filter_options,
     build_video_review_evidence_gap_batch_filter_result,
     build_video_review_evidence_gap_batch_filter_rows,
+    build_video_review_evidence_gap_batch_filter_report_filename,
+    build_video_review_evidence_gap_batch_filter_report_lines,
+    build_video_review_evidence_gap_batch_filter_report_message,
     build_video_review_evidence_gap_batch_action_rows,
     build_video_review_evidence_gap_batch_plan_export_message,
     build_video_review_evidence_gap_batch_plan_filename,
@@ -417,6 +420,72 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertEqual(rows[0]["evidence"], "external_reference")
         self.assertIn("FIFA+ Archive", rows[0]["body"])
         self.assertEqual(rows[0]["tone"], "good")
+
+    def test_video_review_evidence_gap_batch_filter_report_filename_is_stable(self) -> None:
+        self.assertEqual(
+            build_video_review_evidence_gap_batch_filter_report_filename(datetime(2026, 5, 17, 9, 8, 7)),
+            "video_review_evidence_gap_batch_filter_report_20260517_090807.md",
+        )
+
+    def test_video_review_evidence_gap_batch_filter_report_lines_include_filters_and_rows(self) -> None:
+        result = build_video_review_evidence_gap_batch_filter_result(
+            {
+                "batches": [
+                    {
+                        "batch_id": "latest",
+                        "items": [
+                            {
+                                "match_id": "p1-pending",
+                                "title": "P1 Pending",
+                                "priority_label": "P1",
+                                "priority_score": 60,
+                                "status": "pending",
+                            },
+                            {
+                                "match_id": "p2-event",
+                                "title": "P2 Event",
+                                "priority_label": "P2",
+                                "priority_score": 35,
+                                "status": "resolved",
+                                "evidence_kind": "statsbomb_event_proxy",
+                                "source_name": "StatsBomb/Event Proxy",
+                                "handled_at": "2026-05-17 09:00:00",
+                            },
+                        ],
+                    }
+                ]
+            },
+            batch_filter="latest",
+            status_filter="all",
+            priority_filter="all",
+            evidence_filter="all",
+        )
+
+        text = "\n".join(
+            build_video_review_evidence_gap_batch_filter_report_lines(
+                result,
+                generated_at=datetime(2026, 5, 17, 9, 8, 7),
+            )
+        )
+
+        self.assertIn("Batch Filter: latest", text)
+        self.assertIn("Status Filter: all", text)
+        self.assertIn("匹配 2 项", text)
+        self.assertIn("| P1 | 60 | 未处理 | missing | - | - | p1-pending | P1 Pending |", text)
+        self.assertIn("StatsBomb/Event Proxy", text)
+        self.assertIn("no auto video download", text)
+
+    def test_video_review_evidence_gap_batch_filter_report_message_summarizes_export(self) -> None:
+        result = {"summary": {"summary_text": "匹配 2 项 | 未处理 1 | 已处理 1"}}
+        text = build_video_review_evidence_gap_batch_filter_report_message(
+            Path("reports/video_review_evidence_gap_batch_filter_report_20260517_090807.md"),
+            result,
+        )
+
+        self.assertIn("复盘证据缺口批次处理报告已导出", text)
+        self.assertIn("video_review_evidence_gap_batch_filter_report_20260517_090807.md", text)
+        self.assertIn("匹配 2 项", text)
+        self.assertIn("不自动下载视频", text)
 
     def test_video_review_evidence_gap_batch_action_rows_offer_pending_actions(self) -> None:
         rows = build_video_review_evidence_gap_batch_action_rows(
