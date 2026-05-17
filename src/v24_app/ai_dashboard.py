@@ -5945,6 +5945,10 @@ class SmartMatchDashboard:
             statsbomb_review_quality,
             statsbomb_repair_records,
         )
+        statsbomb_review_closure_summary = build_statsbomb_review_training_closure_summary(
+            get_statsbomb_review_training_samples(),
+            evidence_gap_batch_state,
+        )
         video_review_center_summary = build_video_review_center_summary(
             video_memory_health,
             video_source_coverage,
@@ -6014,6 +6018,19 @@ class SmartMatchDashboard:
             header,
             text="\u51c6\u786e\u7387\u8bca\u65ad",
             command=self.open_accuracy_diagnostics,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=18,
+            pady=7,
+        ).pack(side=tk.RIGHT, padx=(0, 10))
+        tk.Button(
+            header,
+            text="复盘闭环",
+            command=self.open_statsbomb_review_training_closure_window,
             bg=PANEL_2,
             fg=TEXT,
             activebackground="#172638",
@@ -6333,6 +6350,20 @@ class SmartMatchDashboard:
             command=self.open_statsbomb_review_training_center_window,
         )
 
+        self._strategy_section_title(right, "复盘闭环")
+        self._strategy_row(
+            right,
+            str(statsbomb_review_closure_summary.get("title") or "-"),
+            str(statsbomb_review_closure_summary.get("body") or "-"),
+            command=self.open_statsbomb_review_training_closure_window,
+        )
+        closure_card_rows = statsbomb_review_closure_summary.get("card_rows") if isinstance(statsbomb_review_closure_summary.get("card_rows"), list) else []
+        for row in [item for item in closure_card_rows if isinstance(item, dict)][:2]:
+            self._strategy_row(
+                right,
+                f"{row.get('label', '-')}: {row.get('value', '-')}",
+                str(row.get("detail") or "-"),
+            )
         tk.Label(right, text="\u95ed\u73af\u590d\u76d8", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
         detail = tk.Text(
             right,
