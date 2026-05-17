@@ -1455,6 +1455,84 @@ def build_statsbomb_review_training_center_summary(quality: dict | object, recor
     }
 
 
+def build_video_review_center_summary(
+    video_memory_health: dict | object,
+    video_source_coverage: dict | object,
+) -> dict[str, object]:
+    def _as_int(value: object, default: int = 0) -> int:
+        try:
+            return int(value if value is not None else default)
+        except (TypeError, ValueError):
+            return default
+
+    def _payload(value: dict | object) -> dict:
+        return value if isinstance(value, dict) else {}
+
+    memory_payload = _payload(video_memory_health)
+    source_payload = _payload(video_source_coverage)
+    health = _payload(memory_payload.get("health"))
+    monitor = _payload(memory_payload.get("monitor"))
+    card_rows = memory_payload.get("card_rows") if isinstance(memory_payload.get("card_rows"), list) else []
+    action_rows = memory_payload.get("action_rows") if isinstance(memory_payload.get("action_rows"), list) else []
+
+    memory_status = str(health.get("status") or "blocked")
+    coverage_status = str(source_payload.get("coverage_status") or "blocked")
+    statuses = {memory_status, coverage_status}
+    if "blocked" in statuses:
+        status = "blocked"
+    elif "attention" in statuses:
+        status = "attention"
+    else:
+        status = "healthy"
+
+    tone = {"healthy": "good", "attention": "warning", "blocked": "bad"}.get(status, "neutral")
+    status_label = {"healthy": "可用", "attention": "需要关注", "blocked": "复盘受阻"}.get(status, status)
+    local_count = _as_int(source_payload.get("local_video_count"))
+    external_count = _as_int(source_payload.get("external_reference_count"))
+    proxy_count = _as_int(source_payload.get("statsbomb_event_proxy_count"))
+    missing_count = _as_int(source_payload.get("no_review_evidence_count"))
+    settled_count = _as_int(source_payload.get("total_settled_count"))
+    memory_sample_count = _as_int(monitor.get("sample_count"))
+    blocking_count = _as_int(health.get("blocking_count"))
+    warning_count = _as_int(health.get("warning_count"))
+    action_count = len([row for row in action_rows if isinstance(row, dict)])
+    card_count = len([row for row in card_rows if isinstance(row, dict)])
+    issue_count = blocking_count + warning_count
+
+    summary_text = (
+        f"memory {memory_status} | source {coverage_status} | "
+        f"missing {missing_count}/{settled_count}"
+    )
+    body = (
+        f"记忆 {memory_status} | 来源 {coverage_status} | 已结算 {settled_count}\n"
+        f"本地视频 {local_count} | 外部回放 {external_count} | "
+        f"事件代理 {proxy_count} | 缺证据 {missing_count}\n"
+        f"记忆样本 {memory_sample_count} | 健康问题 {issue_count} | 待处理动作 {action_count}"
+    )
+
+    return {
+        "status": status,
+        "tone": tone,
+        "status_label": status_label,
+        "summary_text": summary_text,
+        "title": f"AI视频复盘 | {status_label}",
+        "body": body,
+        "memory_status": memory_status,
+        "coverage_status": coverage_status,
+        "settled_count": settled_count,
+        "local_video_count": local_count,
+        "external_reference_count": external_count,
+        "statsbomb_event_proxy_count": proxy_count,
+        "no_review_evidence_count": missing_count,
+        "memory_sample_count": memory_sample_count,
+        "blocking_count": blocking_count,
+        "warning_count": warning_count,
+        "issue_count": issue_count,
+        "action_count": action_count,
+        "card_count": card_count,
+    }
+
+
 def build_statsbomb_review_training_quality_export_message(path: Path, quality: dict, record_count: int) -> str:
     return "\n".join(
         [
@@ -5512,6 +5590,10 @@ class SmartMatchDashboard:
             statsbomb_review_quality,
             statsbomb_repair_records,
         )
+        video_review_center_summary = build_video_review_center_summary(
+            video_memory_health,
+            video_source_coverage,
+        )
 
         shell = self._page_shell(
             "\u590d\u76d8\u4e2d\u5fc3",
@@ -5838,49 +5920,18 @@ class SmartMatchDashboard:
             pady=6,
         ).pack(side=tk.LEFT, padx=(10, 0))
 
-        video_health = video_memory_health.get("health", {}) if isinstance(video_memory_health.get("health"), dict) else {}
-        tk.Label(right, text="AI视频记忆健康", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(
-            anchor=tk.W,
-            padx=18,
-            pady=(16, 10),
+        self._strategy_section_title(right, "AI视频复盘")
+        self._strategy_row(
+            right,
+            str(video_review_center_summary.get("title") or "-"),
+            str(video_review_center_summary.get("body") or "-"),
+            command=self.open_ai_video_review_center_window,
         )
         self._strategy_row(
             right,
-            "\u89c6\u9891\u6765\u6e90\u7b56\u7565",
-            "FIFA+ Archive \u6309\u4e16\u754c\u676f\u56de\u653e\u94fe\u63a5\u4f7f\u7528\uff1b\u8054\u8d5b/\u676f\u8d5b\u6ca1\u6709\u5408\u6cd5\u89c6\u9891\u65f6\uff0c\u964d\u7ea7\u4e3a StatsBomb/\u4e8b\u4ef6\u4ee3\u7406\u590d\u76d8\uff0c\u4e0d\u963b\u65ad\u590d\u76d8\u95ed\u73af\u3002",
-        )
-        self._strategy_row(
-            right,
-            f"{video_health.get('status', '-')} | {video_health.get('summary_text', '-')}",
-            self._video_review_fewshot_card_text(video_memory_health.get("card_rows")),
-        )
-        self._strategy_row(
-            right,
-            "优先补标注/补样",
-            self._video_review_fewshot_action_text(video_memory_health.get("action_rows")),
-        )
-        self._strategy_section_title(right, "视频来源覆盖")
-        self._strategy_row(
-            right,
-            f"{video_source_coverage.get('coverage_status', '-')} | settled {video_source_coverage.get('total_settled_count', 0)}",
-            (
-                f"本地视频 {video_source_coverage.get('local_video_count', 0)} | "
-                f"外部回放 {video_source_coverage.get('external_reference_count', 0)} | "
-                f"事件代理 {video_source_coverage.get('statsbomb_event_proxy_count', 0)} | "
-                f"缺证据 {video_source_coverage.get('no_review_evidence_count', 0)}"
-            ),
-        )
-        for row in video_source_coverage.get("rows", []) if isinstance(video_source_coverage.get("rows"), list) else []:
-            if isinstance(row, dict):
-                self._strategy_row(
-                    right,
-                    str(row.get("title") or row.get("label") or "-"),
-                    str(row.get("body") or row.get("suggestion") or "-"),
-                )
-        self._strategy_row(
-            right,
-            "视频降级策略",
-            str(video_source_coverage.get("fallback_policy_text") or "-"),
+            "打开AI视频复盘专项中心",
+            "视频记忆健康、视频来源覆盖、补标注/补样建议和视频降级边界集中到专项窗口查看，避免复盘中心继续堆叠过多内容。",
+            command=self.open_ai_video_review_center_window,
         )
         self._strategy_section_title(right, "复盘证据缺口行动")
         self._strategy_row(
@@ -6619,6 +6670,142 @@ class SmartMatchDashboard:
 
     def open_video_review_evidence_gap_batch_filter_window(self) -> None:
         self.open_video_review_evidence_gap_center_window()
+
+    def open_ai_video_review_center_window(self) -> None:
+        settlements = list(reversed(get_recent_settlements(limit=200)))
+        video_memory_health = self._video_review_fewshot_memory_health_context()
+        statsbomb_samples = get_statsbomb_review_training_samples()
+        video_source_coverage = build_video_review_source_coverage_summary(
+            settlements,
+            statsbomb_samples=statsbomb_samples,
+            video_memory=get_video_review_fewshot_memory(),
+        )
+        summary = build_video_review_center_summary(video_memory_health, video_source_coverage)
+
+        window = tk.Toplevel(self.root)
+        window.title("AI视频复盘专项中心")
+        window.geometry("1120x740")
+        window.configure(bg=BG)
+
+        shell = tk.Frame(window, bg=BG)
+        shell.pack(fill=tk.BOTH, expand=True, padx=16, pady=16)
+
+        header = tk.Frame(shell, bg=BG)
+        header.pack(fill=tk.X, pady=(0, 12))
+        tk.Label(header, text="AI视频复盘专项中心", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 15, "bold")).pack(side=tk.LEFT)
+
+        def _header_button(label: str, command, *, color: str = PANEL_2) -> None:
+            tk.Button(
+                header,
+                text=label,
+                command=command,
+                bg=color,
+                fg="white" if color == BLUE else TEXT,
+                activebackground="#3d5ee7" if color == BLUE else "#172638",
+                activeforeground="white",
+                relief=tk.FLAT,
+                font=("Microsoft YaHei UI", 10, "bold"),
+                padx=14,
+                pady=6,
+            ).pack(side=tk.RIGHT, padx=(8, 0))
+
+        _header_button("刷新", lambda: (window.destroy(), self.open_ai_video_review_center_window()))
+        _header_button("审计视频记忆", self.export_video_review_fewshot_memory_audit)
+        _header_button("预览样本合并", self.preview_video_review_fewshot_merge_bundle)
+        _header_button("导出视频复盘样本", self.export_video_review_fewshot_samples, color=BLUE)
+
+        scroll_wrap = tk.Frame(shell, bg=BG)
+        scroll_wrap.pack(fill=tk.BOTH, expand=True)
+        canvas = tk.Canvas(scroll_wrap, bg=BG, bd=0, highlightthickness=0)
+        scrollbar = tk.Scrollbar(scroll_wrap, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        content = tk.Frame(canvas, bg=BG)
+        window_id = canvas.create_window((0, 0), window=content, anchor=tk.NW)
+        content.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window_id, width=event.width))
+
+        top = tk.Frame(content, bg=BG)
+        top.pack(fill=tk.X, pady=(0, 12))
+        for label, value, color in [
+            ("复盘状态", str(summary.get("status_label") or summary.get("status") or "-"), self._tone_color(str(summary.get("tone") or "neutral"))),
+            ("已结算", str(summary.get("settled_count", 0)), TEXT),
+            ("本地视频", str(summary.get("local_video_count", 0)), GREEN if int(summary.get("local_video_count", 0) or 0) else TEXT),
+            ("外部回放", str(summary.get("external_reference_count", 0)), "#7aa2ff" if int(summary.get("external_reference_count", 0) or 0) else TEXT),
+            ("事件代理", str(summary.get("statsbomb_event_proxy_count", 0)), YELLOW if int(summary.get("statsbomb_event_proxy_count", 0) or 0) else TEXT),
+            ("缺证据", str(summary.get("no_review_evidence_count", 0)), RED if int(summary.get("no_review_evidence_count", 0) or 0) else GREEN),
+        ]:
+            self._detail_metric(top, label, value, color)
+
+        body = tk.Frame(content, bg=BG)
+        body.pack(fill=tk.BOTH, expand=True)
+        left = self._card(body, PANEL)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 12))
+        right = self._card(body, PANEL)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self._strategy_section_title(left, "视频记忆健康", first=True)
+        self._strategy_row(
+            left,
+            str(summary.get("title") or "-"),
+            str(summary.get("body") or "-"),
+        )
+        card_rows = video_memory_health.get("card_rows") if isinstance(video_memory_health.get("card_rows"), list) else []
+        if card_rows:
+            for row in [item for item in card_rows if isinstance(item, dict)][:8]:
+                self._strategy_row(
+                    left,
+                    f"{row.get('label', '-')}: {row.get('value', '-')}",
+                    str(row.get("detail") or "-"),
+                )
+        else:
+            self._strategy_row(left, "暂无健康卡片", "当前没有可展示的视频记忆健康明细。")
+
+        self._strategy_section_title(left, "优先补标注/补样", first=False)
+        action_rows = video_memory_health.get("action_rows") if isinstance(video_memory_health.get("action_rows"), list) else []
+        if action_rows:
+            for row in [item for item in action_rows if isinstance(item, dict)][:6]:
+                self._strategy_row(
+                    left,
+                    str(row.get("title") or row.get("code") or "-"),
+                    str(row.get("body") or row.get("recommendation") or "-"),
+                )
+        else:
+            self._strategy_row(left, "暂无补样建议", "视频记忆当前没有需要立即处理的补标注/补样动作。")
+
+        self._strategy_section_title(right, "视频来源覆盖", first=True)
+        self._strategy_row(
+            right,
+            f"{video_source_coverage.get('coverage_status', '-')} | settled {video_source_coverage.get('total_settled_count', 0)}",
+            (
+                f"本地视频 {video_source_coverage.get('local_video_count', 0)} | "
+                f"外部回放 {video_source_coverage.get('external_reference_count', 0)} | "
+                f"事件代理 {video_source_coverage.get('statsbomb_event_proxy_count', 0)} | "
+                f"缺证据 {video_source_coverage.get('no_review_evidence_count', 0)}"
+            ),
+        )
+        coverage_rows = video_source_coverage.get("rows") if isinstance(video_source_coverage.get("rows"), list) else []
+        for row in [item for item in coverage_rows if isinstance(item, dict)][:8]:
+            self._strategy_row(
+                right,
+                str(row.get("title") or row.get("label") or "-"),
+                str(row.get("body") or row.get("suggestion") or "-"),
+            )
+
+        self._strategy_section_title(right, "视频降级策略", first=False)
+        self._strategy_row(
+            right,
+            "合法来源优先",
+            str(video_source_coverage.get("fallback_policy_text") or "-"),
+        )
+        self._strategy_section_title(right, "使用边界", first=False)
+        self._strategy_row(
+            right,
+            "仅用于赛后复盘",
+            "本地视频、FIFA+ 回放链接和 StatsBomb/Event Proxy 只作为赛后归因证据，不自动下载受版权保护的视频，也不写入赛前预测特征。",
+        )
+        self._bind_canvas_mousewheel(content, canvas)
 
     def open_statsbomb_review_training_center_window(self) -> None:
         quality = self._current_statsbomb_review_training_quality()

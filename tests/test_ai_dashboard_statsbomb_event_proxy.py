@@ -40,6 +40,7 @@ from v24_app.ai_dashboard import (
     build_video_review_evidence_gap_batch_status_rows,
     build_video_review_evidence_gap_feedback,
     build_video_review_evidence_gap_feedback_rows,
+    build_video_review_center_summary,
     collect_video_review_evidence_gap_sample_match_ids,
     find_video_review_evidence_gap_settlement,
 )
@@ -876,6 +877,79 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertIn("射门: Bayer Leverkusen 19 vs Werder Bremen 8", text)
         self.assertIn("first=25 / last=89", text)
         self.assertIn("不进入赛前预测特征", text)
+
+    def test_video_review_center_summary_reports_healthy_coverage(self) -> None:
+        summary = build_video_review_center_summary(
+            {
+                "health": {"status": "healthy", "blocking_count": 0, "warning_count": 0},
+                "monitor": {"sample_count": 24},
+                "card_rows": [{"label": "整体状态", "value": "healthy", "detail": "ok"}],
+                "action_rows": [{"title": "进入稳定性复盘", "body": "ready"}],
+            },
+            {
+                "coverage_status": "healthy",
+                "total_settled_count": 8,
+                "local_video_count": 2,
+                "external_reference_count": 3,
+                "statsbomb_event_proxy_count": 3,
+                "no_review_evidence_count": 0,
+            },
+        )
+
+        self.assertEqual(summary["status"], "healthy")
+        self.assertEqual(summary["tone"], "good")
+        self.assertEqual(summary["memory_sample_count"], 24)
+        self.assertIn("本地视频 2", summary["body"])
+        self.assertIn("外部回放 3", summary["body"])
+        self.assertIn("事件代理 3", summary["body"])
+        self.assertIn("缺证据 0", summary["body"])
+
+    def test_video_review_center_summary_flags_missing_evidence_as_attention(self) -> None:
+        summary = build_video_review_center_summary(
+            {
+                "health": {"status": "healthy", "blocking_count": 0, "warning_count": 0},
+                "monitor": {"sample_count": 12},
+                "action_rows": [],
+            },
+            {
+                "coverage_status": "attention",
+                "total_settled_count": 10,
+                "local_video_count": 1,
+                "external_reference_count": 2,
+                "statsbomb_event_proxy_count": 5,
+                "no_review_evidence_count": 2,
+            },
+        )
+
+        self.assertEqual(summary["status"], "attention")
+        self.assertEqual(summary["tone"], "warning")
+        self.assertEqual(summary["no_review_evidence_count"], 2)
+        self.assertIn("missing 2/10", summary["summary_text"])
+        self.assertIn("缺证据 2", summary["body"])
+
+    def test_video_review_center_summary_blocks_when_memory_or_source_blocked(self) -> None:
+        summary = build_video_review_center_summary(
+            {
+                "health": {"status": "blocked", "blocking_count": 1, "warning_count": 2},
+                "monitor": {"sample_count": 1},
+                "card_rows": [],
+                "action_rows": [{"title": "补样", "body": "扩大样本"}],
+            },
+            {
+                "coverage_status": "healthy",
+                "total_settled_count": 4,
+                "local_video_count": 1,
+                "external_reference_count": 1,
+                "statsbomb_event_proxy_count": 2,
+                "no_review_evidence_count": 0,
+            },
+        )
+
+        self.assertEqual(summary["status"], "blocked")
+        self.assertEqual(summary["tone"], "bad")
+        self.assertEqual(summary["issue_count"], 3)
+        self.assertEqual(summary["action_count"], 1)
+        self.assertIn("复盘受阻", summary["title"])
 
 
 if __name__ == "__main__":
