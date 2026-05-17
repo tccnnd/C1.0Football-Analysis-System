@@ -20,7 +20,6 @@ from .core import (
     apply_draw_release_guard_policy_update,
     apply_strategy_admission_policy_update,
     auto_settle_finished_matches,
-    build_historical_strategy_replay_samples,
     build_result_recovery_snapshot_audit,
     add_video_review_annotation,
     create_video_review,
@@ -10913,18 +10912,17 @@ class SmartMatchDashboard:
         policy_history = get_strategy_admission_policy_history(limit=20)
         draw_guard_history = get_draw_release_guard_policy_history(limit=20)
         release_loop = self._strategy_release_recovery_loop(settlements)
-        historical_replay = build_historical_strategy_replay_samples(status, historical_limit=50000, max_samples=1000)
         dashboard = build_high_accuracy_strategy_dashboard(
             status,
             settlements,
             policy_history,
-            get_statsbomb_event_baseline(),
-            get_statsbomb_sandbox_fewshot_memory(),
-            historical_replay,
+            {},
+            {},
+            {},
             draw_guard_status,
             draw_guard_history,
-            video_review_fewshot_memory=get_video_review_fewshot_memory(),
-            statsbomb_review_training_samples=get_statsbomb_review_training_samples(),
+            video_review_fewshot_memory={},
+            statsbomb_review_training_samples={},
         )
         release_pool_rows = self._strategy_release_pool_rows(settlements, release_loop=release_loop)
         play_model_status = get_play_model_policy_status()
@@ -10937,7 +10935,7 @@ class SmartMatchDashboard:
         )
         shell = self._page_shell(
             "\u7b56\u7565\u770b\u677f",
-            "\u5c55\u793a\u9ad8\u51c6\u7b56\u7565\u6c60\u3001\u56de\u6d4b\u5206\u5c42\u3001\u7a33\u5b9a\u6027\u548c\u771f\u5b9e\u7ed3\u7b97\u53cd\u9988",
+            "\u4fdd\u7559\u7b56\u7565\u6c60\u3001\u53cd\u9988\u548c\u4e13\u9879\u7cbe\u7b80\u6458\u8981\uff0c\u6df1\u5c42\u5206\u6790\u5df2\u79fb\u5165\u4e13\u9879\u4e2d\u5fc3",
         )
 
         header = tk.Frame(shell, bg=BG)
@@ -10978,7 +10976,24 @@ class SmartMatchDashboard:
 
         top = tk.Frame(content, bg=BG)
         top.pack(fill=tk.X, pady=(0, 16))
-        self._strategy_metric_grid(top, dashboard.get("metrics", []), columns=4)
+        core_metric_labels = {
+            "\u7b56\u7565\u72b6\u6001",
+            "\u6062\u590d\u72b6\u6001",
+            "\u7b56\u7565\u6c60",
+            "\u7a33\u5b9a\u7b56\u7565",
+            "\u65ad\u8def\u6682\u505c",
+            "\u5b9e\u76d8\u53cd\u9988",
+            "\u56de\u6d4b\u8bb0\u5f55",
+            "\u771f\u5b9e\u547d\u4e2d",
+            "\u7b56\u7565\u9519\u56e0",
+            "Replay Guard",
+        }
+        strategy_metrics = [
+            row
+            for row in dashboard.get("metrics", [])
+            if isinstance(row, dict) and str(row.get("label") or "") in core_metric_labels
+        ]
+        self._strategy_metric_grid(top, strategy_metrics, columns=4)
 
         freeze_alerts = build_strategy_policy_freeze_alerts(
             dashboard.get("freeze_override_status", {}),
@@ -11028,7 +11043,7 @@ class SmartMatchDashboard:
         self._strategy_section_title(left, "\u5f53\u524d\u7b56\u7565\u6c60", first=True)
         pool_rows = dashboard.get("pool_rows", [])
         if pool_rows:
-            for row in pool_rows:
+            for row in pool_rows[:4]:
                 if isinstance(row, dict):
                     self._strategy_row(left, str(row.get("title") or "-"), str(row.get("body") or "-"))
         else:
@@ -11038,7 +11053,7 @@ class SmartMatchDashboard:
         self._strategy_section_title(left, "\u9ad8\u51c6\u7b56\u7565\u5b9e\u76d8\u53cd\u9988\u95ed\u73af")
         feedback_rows = live_feedback_loop.get("rows", []) if isinstance(live_feedback_loop.get("rows"), list) else []
         if feedback_rows:
-            for row in feedback_rows:
+            for row in feedback_rows[:3]:
                 if isinstance(row, dict):
                     self._strategy_row(left, str(row.get("title") or "-"), str(row.get("body") or "-"))
         else:
@@ -11052,14 +11067,14 @@ class SmartMatchDashboard:
         self._strategy_section_title(left, "JC\u7a33\u5b9a\u6876\u5b9e\u76d8\u6392\u540d")
         jc_rows = jc_feedback.get("rows", []) if isinstance(jc_feedback.get("rows"), list) else []
         if jc_rows:
-            for row in jc_rows:
+            for row in jc_rows[:3]:
                 if isinstance(row, dict):
                     self._strategy_row(left, str(row.get("title") or "-"), str(row.get("body") or "-"))
         else:
             self._strategy_row(left, "\u6682\u65e0JC\u6876\u5b9e\u76d8\u7edf\u8ba1", "\u5f53\u7ade\u5f69\u7a33\u5b9a\u6876\u7b56\u7565\u5b8c\u6210\u8d5b\u679c\u56de\u6536\u540e\uff0c\u8fd9\u91cc\u4f1a\u663e\u793a\u5404\u6876\u7684\u5b9e\u76d8\u547d\u4e2d\u3001\u504f\u5dee\u548c\u964d\u7ea7\u72b6\u6001\u3002")
 
         self._strategy_section_title(left, "\u56de\u6d4b\u4e0e\u6837\u672c")
-        for label, value in dashboard.get("validation_rows", []):
+        for label, value in dashboard.get("validation_rows", [])[:4]:
             self._strategy_row(left, str(label), str(value))
 
         self._strategy_section_title(right, "\u771f\u5b9e\u7ed3\u7b97\u53cd\u9988", first=True)
@@ -11078,522 +11093,9 @@ class SmartMatchDashboard:
             f"\u4e3b\u8981\u9519\u56e0: {error_attribution.get('top_reason', '-')}",
             f"\u9519\u56e0\u9879 {error_attribution.get('miss_count', 0)} | \u5f85\u5224\u5b9a {error_attribution.get('unknown_count', 0)}",
         )
-        for row in error_attribution.get("rows", []) if isinstance(error_attribution.get("rows"), list) else []:
+        for row in (error_attribution.get("rows", []) if isinstance(error_attribution.get("rows"), list) else [])[:3]:
             if isinstance(row, dict):
                 self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
-
-        historical_replay = dashboard.get("historical_strategy_replay", {}) if isinstance(dashboard.get("historical_strategy_replay"), dict) else {}
-        historical_error_attribution = dashboard.get("historical_error_attribution", {}) if isinstance(dashboard.get("historical_error_attribution"), dict) else {}
-        source_counts = historical_replay.get("source_counts", {}) if isinstance(historical_replay.get("source_counts"), dict) else {}
-        source_text = " / ".join(f"{key}:{value}" for key, value in list(source_counts.items())[:3]) if source_counts else "-"
-        self._strategy_section_title(right, "\u5386\u53f2\u7b56\u7565\u56de\u653e\u9519\u56e0")
-        if int(historical_replay.get("sample_count") or 0):
-            self._strategy_row(
-                right,
-                f"\u56de\u653e\u6837\u672c: {historical_replay.get('sample_count', 0)} | \u547d\u4e2d {historical_replay.get('hit_rate_text', '-')}",
-                (
-                    f"\u9519\u56e0\u9879 {historical_error_attribution.get('miss_count', 0)} | "
-                    f"\u4e3b\u56e0 {historical_error_attribution.get('top_reason', '-')} | "
-                    f"\u6765\u6e90 {source_text}"
-                ),
-            )
-            for row in historical_error_attribution.get("rows", []) if isinstance(historical_error_attribution.get("rows"), list) else []:
-                if isinstance(row, dict):
-                    self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
-        else:
-            self._strategy_row(
-                right,
-                "\u6682\u65e0\u5386\u53f2\u56de\u653e\u6837\u672c",
-                "\u9700\u5148\u751f\u6210\u7b56\u7565\u6c60\uff0c\u5e76\u786e\u4fdd\u5386\u53f2\u5e02\u573a\u6837\u672c\u80fd\u547d\u4e2d\u5f53\u524d\u7b56\u7565\u95e8\u69db\u3002",
-            )
-
-        agent_trace_replay = dashboard.get("agent_trace_replay", {}) if isinstance(dashboard.get("agent_trace_replay"), dict) else {}
-        self._strategy_section_title(right, "Agent Replay 复盘")
-        self._strategy_row(
-            right,
-            f"最高关联: {agent_trace_replay.get('top_agent', '-')} | {agent_trace_replay.get('summary_text', '-')}",
-            f"主要动作: {agent_trace_replay.get('top_action', '-')}",
-        )
-        for row in agent_trace_replay.get("rows", []) if isinstance(agent_trace_replay.get("rows"), list) else []:
-            if isinstance(row, dict):
-                self._strategy_row(
-                    right,
-                    f"{row.get('agent', '-')} | 触发 {row.get('trigger_count', 0)} | alert {row.get('alert_count', 0)} / watch {row.get('watch_count', 0)}",
-                    (
-                        f"胜平负失误 {row.get('prediction_miss_rate_text', '-')} | "
-                        f"让球失误 {row.get('handicap_miss_rate_text', '-')} | "
-                        f"主要动作 {row.get('top_action', '-')}"
-                    ),
-                )
-
-        replay_downgrade = dashboard.get("agent_replay_downgrade", {}) if isinstance(dashboard.get("agent_replay_downgrade"), dict) else {}
-        self._strategy_section_title(right, "Agent Replay 降级回测")
-        self._strategy_row(
-            right,
-            f"{replay_downgrade.get('recommendation', '-')}: {replay_downgrade.get('summary_text', '-')}",
-            str(replay_downgrade.get("recommendation_text") or "-"),
-        )
-        for row in replay_downgrade.get("rows", []) if isinstance(replay_downgrade.get("rows"), list) else []:
-            if isinstance(row, dict):
-                self._strategy_row(
-                    right,
-                    f"{row.get('agent', '-')} | 样本 {row.get('count', 0)} | 净值 {row.get('prediction_net', 0)}/{row.get('handicap_net', 0)}",
-                    (
-                        f"1X2避错 {row.get('prediction_avoided_misses', 0)} / 成本 {row.get('prediction_opportunity_cost', 0)} | "
-                        f"让球避错 {row.get('handicap_avoided_misses', 0)} / 成本 {row.get('handicap_opportunity_cost', 0)} | "
-                        f"主要动作 {row.get('top_action', '-')}"
-                    ),
-                )
-
-        replay_tuning = dashboard.get("agent_replay_guard_tuning", {}) if isinstance(dashboard.get("agent_replay_guard_tuning"), dict) else {}
-        self._strategy_section_title(right, "Replay Guard \u8c03\u53c2\u5efa\u8bae")
-        tuning_rows = replay_tuning.get("rows", []) if isinstance(replay_tuning.get("rows"), list) else []
-        tuning_body = "\n".join(f"{label}: {value}" for label, value in tuning_rows if isinstance(label, str)) if tuning_rows else "-"
-        tuning_net = replay_tuning.get("net", 0)
-        self._strategy_row(
-            right,
-            f"{replay_tuning.get('label', '-')} | \u51c0\u503c {int(tuning_net):+d}" if isinstance(tuning_net, int) else str(replay_tuning.get("label", "-")),
-            tuning_body,
-        )
-
-        policy_effect = dashboard.get("policy_effect_review", {}) if isinstance(dashboard.get("policy_effect_review"), dict) else {}
-        self._strategy_section_title(right, "\u53c2\u6570\u751f\u6548\u590d\u76d8")
-        self._strategy_row(
-            right,
-            str(policy_effect.get("latest_label") or "-"),
-            f"{policy_effect.get('summary_text', '-')}\n\u70b9\u51fb\u67e5\u770b\u7248\u672c\u4e0e\u8d5b\u4e8b\u660e\u7ec6",
-            command=lambda review=policy_effect: self.open_policy_effect_detail_window(review),
-        )
-        for row in policy_effect.get("rows", []) if isinstance(policy_effect.get("rows"), list) else []:
-            if isinstance(row, dict):
-                self._strategy_row(
-                    right,
-                    str(row.get("title") or "-"),
-                    f"{row.get('body', '-')}\n\u70b9\u51fb\u67e5\u770b\u8be5\u7248\u672c\u6837\u672c",
-                    command=lambda review=policy_effect: self.open_policy_effect_detail_window(review),
-                )
-
-        policy_governance = dashboard.get("policy_governance_event_summary", {}) if isinstance(dashboard.get("policy_governance_event_summary"), dict) else {}
-        governance_rows = policy_governance.get("rows", []) if isinstance(policy_governance.get("rows"), list) else []
-        governance_command = lambda review=policy_effect, dg_history=draw_guard_history, dg_tuning=dashboard.get("draw_release_guard_tuning_effect", {}), dg_rollback=dashboard.get("draw_release_guard_rollback_effect", {}), dg_freeze=dashboard.get("draw_release_guard_freeze_override", {}), dg_guard=dashboard.get("draw_release_guard_tuning_guard", {}): self.open_policy_governance_event_window(
-            review,
-            draw_release_guard_policy_history=dg_history,
-            draw_release_guard_tuning_effect_review=dg_tuning,
-            draw_release_guard_rollback_effect_review=dg_rollback,
-            draw_release_guard_freeze_override_status=dg_freeze,
-            draw_release_guard_tuning_guard=dg_guard,
-        )
-        self._strategy_section_title(right, "\u7b56\u7565\u6cbb\u7406\u4e8b\u4ef6")
-        self._strategy_row(
-            right,
-            str(policy_governance.get("summary_text") or "-"),
-            f"{policy_governance.get('latest_summary', '-')}\n\u70b9\u51fb\u67e5\u770b\u6cbb\u7406\u4e8b\u4ef6\u660e\u7ec6",
-            command=governance_command,
-        )
-        if governance_rows:
-            for row in governance_rows[:5]:
-                if isinstance(row, dict):
-                    try:
-                        replay_net = int(row.get("replay_guard_net", 0) or 0)
-                    except (TypeError, ValueError):
-                        replay_net = 0
-                    self._strategy_row(
-                        right,
-                        f"{row.get('event_label', '-')} | \u7248\u672c {row.get('version_id', '-')}",
-                        (
-                            f"\u6765\u6e90: {row.get('source', '-')} | \u5173\u8054 {row.get('related_version_id', '-')}\n"
-                            f"\u6548\u679c: {row.get('effect_label', '-')} | \u653e\u884c\u547d\u4e2d {row.get('allow_hit_rate_text', '-')} | "
-                            f"Replay\u51c0\u503c {replay_net:+d}\n"
-                            f"\u8bf4\u660e: {row.get('description', '-')}"
-                        ),
-                        command=governance_command,
-                    )
-        else:
-            self._strategy_row(
-                right,
-                "\u6682\u65e0\u6cbb\u7406\u4e8b\u4ef6",
-                "\u8d8b\u52bf\u95e8\u63a7\u3001\u53c2\u6570\u56de\u6eda\u548c\u89e3\u9664\u51bb\u7ed3\u5ba1\u8ba1\u4f1a\u5728\u8fd9\u91cc\u663e\u793a\u3002",
-            )
-
-        trend_tuning_effect = dashboard.get("trend_tuning_effect_review", {}) if isinstance(dashboard.get("trend_tuning_effect_review"), dict) else {}
-        self._strategy_section_title(right, "\u95e8\u63a7\u5efa\u8bae\u751f\u6548\u8ddf\u8e2a")
-        self._strategy_row(
-            right,
-            str(trend_tuning_effect.get("label") or "-"),
-            (
-                f"{trend_tuning_effect.get('summary_text', '-')}\n"
-                f"{trend_tuning_effect.get('recommendation_text', '-')}"
-            ),
-            command=lambda review=policy_effect: self.open_policy_effect_detail_window(review),
-        )
-        for row in trend_tuning_effect.get("rows", []) if isinstance(trend_tuning_effect.get("rows"), list) else []:
-            if isinstance(row, dict):
-                self._strategy_row(
-                    right,
-                    str(row.get("title") or "-"),
-                    str(row.get("body") or "-"),
-                    command=lambda review=policy_effect: self.open_policy_effect_detail_window(review),
-                )
-
-        rollback_effect = dashboard.get("rollback_effect_review", {}) if isinstance(dashboard.get("rollback_effect_review"), dict) else {}
-        self._strategy_section_title(right, "\u56de\u6eda\u4fee\u590d\u6548\u679c\u8ddf\u8e2a")
-        self._strategy_row(
-            right,
-            str(rollback_effect.get("label") or "-"),
-            (
-                f"{rollback_effect.get('summary_text', '-')}\n"
-                f"{rollback_effect.get('recommendation_text', '-')}"
-            ),
-            command=lambda review=policy_effect: self.open_policy_effect_detail_window(review),
-        )
-        for row in rollback_effect.get("rows", []) if isinstance(rollback_effect.get("rows"), list) else []:
-            if isinstance(row, dict):
-                self._strategy_row(
-                    right,
-                    str(row.get("title") or "-"),
-                    str(row.get("body") or "-"),
-                    command=lambda review=policy_effect: self.open_policy_effect_detail_window(review),
-                )
-        freeze_override = dashboard.get("freeze_override_status", {}) if isinstance(dashboard.get("freeze_override_status"), dict) else {}
-        if str(freeze_override.get("status") or "") in {"frozen", "overridden"}:
-            self._strategy_row(
-                right,
-                str(freeze_override.get("label") or "-"),
-                str(freeze_override.get("summary_text") or "-"),
-                command=lambda rollback=rollback_effect, override=freeze_override: self.apply_strategy_policy_freeze_override(rollback, override),
-            )
-
-        stability_monitor = dashboard.get("policy_stability_monitor", {}) if isinstance(dashboard.get("policy_stability_monitor"), dict) else {}
-        self._strategy_section_title(right, "\u7248\u672c\u7a33\u5b9a\u76d1\u63a7")
-        self._strategy_row(
-            right,
-            str(stability_monitor.get("summary_text") or "-"),
-            str(stability_monitor.get("recommendation_text") or "-"),
-            command=lambda review=policy_effect: self.open_policy_effect_detail_window(review),
-        )
-        for row in stability_monitor.get("weekly_rows", []) if isinstance(stability_monitor.get("weekly_rows"), list) else []:
-            if isinstance(row, dict):
-                self._strategy_row(
-                    right,
-                    str(row.get("title") or "-"),
-                    str(row.get("body") or "-"),
-                    command=lambda review=policy_effect: self.open_policy_effect_detail_window(review),
-                )
-        tuning_guard = dashboard.get("policy_tuning_guard", {}) if isinstance(dashboard.get("policy_tuning_guard"), dict) else {}
-        self._strategy_section_title(right, "\u8c03\u53c2\u95e8\u63a7")
-        self._strategy_row(
-            right,
-            str(tuning_guard.get("summary_text") or "-"),
-            str(tuning_guard.get("body") or "-"),
-            command=lambda review=policy_effect: self.open_policy_effect_detail_window(review),
-        )
-
-        entropy_backtest = dashboard.get("market_entropy_backtest", {}) if isinstance(dashboard.get("market_entropy_backtest"), dict) else {}
-        self._strategy_section_title(right, "MarketEntropy 避险回测")
-        self._strategy_row(
-            right,
-            f"{entropy_backtest.get('recommendation', '-')}: {entropy_backtest.get('summary_text', '-')}",
-            str(entropy_backtest.get("recommendation_text") or "-"),
-        )
-        for row in entropy_backtest.get("rows", []) if isinstance(entropy_backtest.get("rows"), list) else []:
-            if isinstance(row, dict):
-                self._strategy_row(
-                    right,
-                    f"{row.get('label', '-')} | 样本 {row.get('count', 0)} | 命中 {row.get('hit_rate_text', '-')}",
-                    (
-                        f"失误率 {row.get('miss_rate_text', '-')} | 平均熵值 {row.get('avg_score_text', '-')} | "
-                        f"风险覆盖 {row.get('risk_applied_count', 0)} | 主要信号 {row.get('top_signal', '-')}"
-                    ),
-                )
-
-        handicap_margin_backtest = dashboard.get("handicap_margin_backtest", {}) if isinstance(dashboard.get("handicap_margin_backtest"), dict) else {}
-        self._strategy_section_title(right, "Handicap Margin 回测")
-        self._strategy_row(
-            right,
-            f"{handicap_margin_backtest.get('recommendation', '-')}: {handicap_margin_backtest.get('summary_text', '-')}",
-            str(handicap_margin_backtest.get("recommendation_text") or "-"),
-        )
-        for row in handicap_margin_backtest.get("rows", []) if isinstance(handicap_margin_backtest.get("rows"), list) else []:
-            if isinstance(row, dict):
-                self._strategy_row(
-                    right,
-                    f"{row.get('label', '-')} | 样本 {row.get('count', 0)} | 让球命中 {row.get('hit_rate_text', '-')}",
-                    (
-                        f"让球失误率 {row.get('miss_rate_text', '-')} | 平均分 {row.get('avg_score_text', '-')} | "
-                        f"主要信号 {row.get('top_signal', '-')}"
-                    ),
-                )
-
-        draw_guard_review = dashboard.get("draw_release_guard_review", {}) if isinstance(dashboard.get("draw_release_guard_review"), dict) else {}
-        self._strategy_section_title(right, "\u5e73\u5c40\u62e6\u622a\u6548\u679c\u590d\u76d8")
-        self._strategy_row(
-            right,
-            f"{draw_guard_review.get('recommendation', '-')}: {draw_guard_review.get('summary_text', '-')}",
-            str(draw_guard_review.get("recommendation_text") or "-"),
-        )
-        for row in draw_guard_review.get("rows", []) if isinstance(draw_guard_review.get("rows"), list) else []:
-            if isinstance(row, dict):
-                self._strategy_row(
-                    right,
-                    f"{row.get('label', '-')} | \u6837\u672c {row.get('count', 0)} | \u62e6\u622a {row.get('blocked_count', 0)}",
-                    (
-                        f"\u907f\u514d\u5047\u9633 {row.get('avoid_count', 0)} ({row.get('avoid_rate_text', '-')}) | "
-                        f"\u9519\u8fc7\u771f\u5e73 {row.get('missed_count', 0)} ({row.get('missed_rate_text', '-')}) | "
-                        f"\u5e73\u5c40\u5206 {row.get('avg_draw_score_text', '-')} | \u4e3b\u56e0 {row.get('top_reason', '-')}"
-                    ),
-                )
-
-        draw_guard_tuning = dashboard.get("draw_release_guard_tuning", {}) if isinstance(dashboard.get("draw_release_guard_tuning"), dict) else {}
-        tuning_rows = draw_guard_tuning.get("rows", []) if isinstance(draw_guard_tuning.get("rows"), list) else []
-        if tuning_rows:
-            tuning_body = "\n".join(f"{label}: {value}" for label, value in tuning_rows if isinstance(label, str))
-            self._strategy_row(
-                right,
-                f"\u5e73\u5c40\u62e6\u622a\u8c03\u53c2: {draw_guard_tuning.get('label', '-')}",
-                tuning_body,
-                command=lambda tuning=draw_guard_tuning: self.apply_draw_release_guard_tuning(tuning),
-            )
-
-        draw_guard_effect = dashboard.get("draw_release_guard_tuning_effect", {}) if isinstance(dashboard.get("draw_release_guard_tuning_effect"), dict) else {}
-        self._strategy_row(
-            right,
-            f"DrawGuard\u751f\u6548\u8ffd\u8e2a: {draw_guard_effect.get('label', '-')}",
-            (
-                f"{draw_guard_effect.get('summary_text', '-')}\n"
-                f"{draw_guard_effect.get('recommendation_text', '-')}"
-                + ("\n\u5efa\u8bae\uff1a\u56de\u6eda DrawGuard \u4e0a\u4e00\u7248\u53c2\u6570\u3002" if bool(draw_guard_effect.get("rollback_recommended")) else "")
-            ),
-            command=self.rollback_latest_draw_guard_policy if bool(draw_guard_effect.get("rollback_recommended")) else None,
-        )
-        for row in draw_guard_effect.get("rows", []) if isinstance(draw_guard_effect.get("rows"), list) else []:
-            if isinstance(row, dict):
-                self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
-
-        draw_guard_rollback = dashboard.get("draw_release_guard_rollback_effect", {}) if isinstance(dashboard.get("draw_release_guard_rollback_effect"), dict) else {}
-        self._strategy_row(
-            right,
-            f"DrawGuard\u56de\u6eda\u4fee\u590d: {draw_guard_rollback.get('label', '-')}",
-            (
-                f"{draw_guard_rollback.get('summary_text', '-')}\n"
-                f"{draw_guard_rollback.get('recommendation_text', '-')}"
-            ),
-        )
-        for row in draw_guard_rollback.get("rows", []) if isinstance(draw_guard_rollback.get("rows"), list) else []:
-            if isinstance(row, dict):
-                self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
-
-        draw_guard_freeze = dashboard.get("draw_release_guard_freeze_override", {}) if isinstance(dashboard.get("draw_release_guard_freeze_override"), dict) else {}
-        draw_guard_tuning_guard = dashboard.get("draw_release_guard_tuning_guard", {}) if isinstance(dashboard.get("draw_release_guard_tuning_guard"), dict) else {}
-        self._strategy_row(
-            right,
-            f"DrawGuard\u8c03\u53c2\u95e8\u63a7: {draw_guard_tuning_guard.get('label', '-')}",
-            str(draw_guard_tuning_guard.get("body") or "-"),
-            command=(
-                (lambda rollback=draw_guard_rollback, override=draw_guard_freeze: self.apply_draw_release_guard_freeze_override(rollback, override))
-                if str(draw_guard_freeze.get("status") or "") == "frozen"
-                else None
-            ),
-        )
-        if str(draw_guard_freeze.get("status") or "") in {"frozen", "overridden"}:
-            self._strategy_row(
-                right,
-                str(draw_guard_freeze.get("label") or "-"),
-                str(draw_guard_freeze.get("summary_text") or "-"),
-                command=lambda rollback=draw_guard_rollback, override=draw_guard_freeze: self.apply_draw_release_guard_freeze_override(rollback, override),
-            )
-
-        statsbomb_review = dashboard.get("statsbomb_event_review", {}) if isinstance(dashboard.get("statsbomb_event_review"), dict) else {}
-        self._strategy_section_title(right, "StatsBomb \u8d5b\u540e\u4e8b\u4ef6")
-        self._strategy_row(
-            right,
-            str(statsbomb_review.get("summary_text") or "-"),
-            (
-                f"\u57fa\u7ebf {statsbomb_review.get('baseline_match_count', 0)} \u573a | "
-                f"xG\u5bf9\u9f50 {statsbomb_review.get('xg_alignment_rate_text', '-')} / \u57fa\u7ebf {statsbomb_review.get('baseline_xg_alignment_rate', '-')} | "
-                f"\u7ec8\u7ed3\u6ce2\u52a8 {statsbomb_review.get('finishing_variance_rate_text', '-')} / \u57fa\u7ebf {statsbomb_review.get('baseline_finishing_variance_rate', '-')}\n"
-                f"{statsbomb_review.get('leakage_note', '-')}"
-            ),
-        )
-        for row in statsbomb_review.get("rows", []) if isinstance(statsbomb_review.get("rows"), list) else []:
-            if isinstance(row, dict):
-                self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
-
-        evaluation_agent = dashboard.get("evaluation_agent", {}) if isinstance(dashboard.get("evaluation_agent"), dict) else {}
-        self._strategy_section_title(right, "Evaluation Agent")
-        self._strategy_row(
-            right,
-            f"{evaluation_agent.get('status', '-')} / score {evaluation_agent.get('score', '-')}",
-            str(evaluation_agent.get("summary_text") or "-"),
-        )
-        statsbomb_review_quality = dashboard.get("statsbomb_review_training_quality", {}) if isinstance(dashboard.get("statsbomb_review_training_quality"), dict) else {}
-        self._strategy_section_title(right, "StatsBomb 事件代理样本质量")
-        for row in statsbomb_review_quality.get("card_rows", []) if isinstance(statsbomb_review_quality.get("card_rows"), list) else []:
-            if isinstance(row, dict):
-                self._strategy_row(
-                    right,
-                    f"{row.get('label', '-')}: {row.get('value', '-')}",
-                    str(row.get("detail") or "-"),
-                )
-        label_rows = statsbomb_review_quality.get("label_rows", []) if isinstance(statsbomb_review_quality.get("label_rows"), list) else []
-        if label_rows:
-            self._strategy_row(
-                right,
-                "标签分布",
-                "\n".join(
-                    f"{row.get('label', '-')}: {row.get('detail', '-')}"
-                    for row in label_rows[:3]
-                    if isinstance(row, dict)
-                ),
-            )
-        weight_rows = statsbomb_review_quality.get("weight_rows", []) if isinstance(statsbomb_review_quality.get("weight_rows"), list) else []
-        if weight_rows:
-            self._strategy_row(
-                right,
-                "事件错因权重",
-                "\n".join(
-                    f"{row.get('label', '-')}: {row.get('value', '-')}"
-                    for row in weight_rows[:3]
-                    if isinstance(row, dict)
-                ),
-            )
-        quality_issues = statsbomb_review_quality.get("issues", []) if isinstance(statsbomb_review_quality.get("issues"), list) else []
-        if quality_issues:
-            self._strategy_row(
-                right,
-                "质量修复建议",
-                "\n".join(
-                    str(item.get("recommendation") or item.get("message") or "-")
-                    for item in quality_issues[:4]
-                    if isinstance(item, dict)
-                ),
-            )
-        for item in evaluation_agent.get("recommendations", []) if isinstance(evaluation_agent.get("recommendations"), list) else []:
-            if isinstance(item, dict):
-                self._strategy_row(right, str(item.get("title") or "-"), str(item.get("body") or "-"))
-        video_fewshot_memory = evaluation_agent.get("video_review_fewshot_memory", {}) if isinstance(evaluation_agent.get("video_review_fewshot_memory"), dict) else {}
-        video_memory_rows = video_fewshot_memory.get("rows", []) if isinstance(video_fewshot_memory.get("rows"), list) else []
-        if video_memory_rows:
-            self._strategy_section_title(right, "AI Video Few-shot \u8bb0\u5fc6")
-            self._strategy_row(
-                right,
-                str(video_fewshot_memory.get("summary_text") or "-"),
-                str(video_fewshot_memory.get("leakage_note") or "-"),
-            )
-            for row in video_memory_rows:
-                if isinstance(row, dict):
-                    self._strategy_row(right, str(row.get("title") or "-"), f"{row.get('body', '-')}\n{row.get('completion', '-')}")
-        video_memory_health = self._video_review_fewshot_memory_health_context(video_fewshot_memory)
-        self._strategy_section_title(right, "AI Video 记忆健康")
-        for row in video_memory_health.get("card_rows", []) if isinstance(video_memory_health.get("card_rows"), list) else []:
-            if isinstance(row, dict):
-                self._strategy_row(
-                    right,
-                    f"{row.get('label', '-')}: {row.get('value', '-')}",
-                    str(row.get("detail") or "-"),
-                )
-        self._strategy_section_title(right, "AI Video 补标注/补样建议")
-        self._strategy_row(
-            right,
-            str(video_memory_health.get("health", {}).get("summary_text") or "-"),
-            self._video_review_fewshot_action_text(video_memory_health.get("action_rows")),
-        )
-        workflow_rows = build_video_review_workflow_action_rows(
-            lambda: self.import_video_review_for_selection(review_tree, settlements),
-            lambda: self.annotate_video_review_for_selection(review_tree, settlements),
-            self.export_video_review_fewshot_samples,
-            self.preview_video_review_fewshot_merge_bundle,
-            self.apply_video_review_fewshot_merge_bundle,
-        )
-        self._strategy_section_title(right, "AI Video 建议动作入口")
-        for row in workflow_rows:
-            if isinstance(row, dict):
-                self._strategy_row(
-                    right,
-                    str(row.get("title") or "-"),
-                    str(row.get("body") or "-"),
-                    command=row.get("command"),
-                )
-        fewshot_memory = evaluation_agent.get("statsbomb_fewshot_memory", {}) if isinstance(evaluation_agent.get("statsbomb_fewshot_memory"), dict) else {}
-        memory_rows = fewshot_memory.get("rows", []) if isinstance(fewshot_memory.get("rows"), list) else []
-        if memory_rows:
-            self._strategy_section_title(right, "StatsBomb Few-shot \u8bb0\u5fc6")
-            self._strategy_row(
-                right,
-                str(fewshot_memory.get("summary_text") or "-"),
-                str(fewshot_memory.get("leakage_note") or "-"),
-            )
-            for row in memory_rows:
-                if isinstance(row, dict):
-                    self._strategy_row(right, str(row.get("title") or "-"), f"{row.get('body', '-')}\n{row.get('completion', '-')}")
-        fewshot_monitor = dashboard.get("statsbomb_fewshot_monitor", {}) if isinstance(dashboard.get("statsbomb_fewshot_monitor"), dict) else {}
-        try:
-            fewshot_monitor_sample_count = int(fewshot_monitor.get("sample_count") or 0)
-        except (TypeError, ValueError):
-            fewshot_monitor_sample_count = 0
-        if fewshot_monitor_sample_count:
-            self._strategy_section_title(right, "StatsBomb \u8bb0\u5fc6\u76d1\u63a7")
-            self._strategy_row(
-                right,
-                str(fewshot_monitor.get("summary_text") or "-"),
-                (
-                    f"\u547d\u4e2d/\u672a\u547d\u4e2d: {fewshot_monitor.get('hit_count', 0)} / {fewshot_monitor.get('miss_count', 0)}\n"
-                    f"\u5f53\u524d\u67e5\u8be2\u6807\u7b7e: {', '.join(fewshot_monitor.get('current_query_tags', [])) if isinstance(fewshot_monitor.get('current_query_tags'), list) else '-'}\n"
-                    f"\u7f3a\u53e3\u6807\u7b7e: {', '.join(fewshot_monitor.get('missing_tags', [])) if isinstance(fewshot_monitor.get('missing_tags'), list) else '-'}"
-                ),
-            )
-            for row in fewshot_monitor.get("tag_rows", []) if isinstance(fewshot_monitor.get("tag_rows"), list) else []:
-                if isinstance(row, dict):
-                    self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
-        fewshot_health = dashboard.get("statsbomb_fewshot_health", {}) if isinstance(dashboard.get("statsbomb_fewshot_health"), dict) else {}
-        health_issues = fewshot_health.get("issues", []) if isinstance(fewshot_health.get("issues"), list) else []
-        if health_issues:
-            self._strategy_section_title(right, "StatsBomb \u8bb0\u5fc6\u5065\u5eb7")
-            self._strategy_row(
-                right,
-                str(fewshot_health.get("summary_text") or "-"),
-                "\n".join(str(item.get("recommendation") or item.get("title") or "-") for item in health_issues if isinstance(item, dict)),
-            )
-        health_drivers = dashboard.get("statsbomb_fewshot_health_drivers", {}) if isinstance(dashboard.get("statsbomb_fewshot_health_drivers"), dict) else {}
-        driver_rows = health_drivers.get("rows", []) if isinstance(health_drivers.get("rows"), list) else []
-        if driver_rows:
-            self._strategy_section_title(right, "StatsBomb \u5065\u5eb7\u9a71\u52a8")
-            self._strategy_row(
-                right,
-                str(health_drivers.get("summary_text") or "-"),
-                "\u7528\u4e8e\u5224\u65ad\u5f53\u524d few-shot \u8bb0\u5fc6\u7f3a\u53e3\u3001\u8865\u6837\u5019\u9009\u548c\u6700\u8fd1\u5e94\u7528\u662f\u5426\u95ed\u73af\u3002",
-            )
-            for row in driver_rows[:6]:
-                if isinstance(row, dict):
-                    self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
-        self._strategy_statsbomb_workflow_panel(right, dashboard)
-        fewshot_quality = evaluation_agent.get("statsbomb_fewshot_quality", {}) if isinstance(evaluation_agent.get("statsbomb_fewshot_quality"), dict) else {}
-        quality_alerts = fewshot_quality.get("alerts", []) if isinstance(fewshot_quality.get("alerts"), list) else []
-        if quality_alerts:
-            self._strategy_section_title(right, "StatsBomb \u8bb0\u5fc6\u8d28\u91cf\u544a\u8b66")
-            self._strategy_row(
-                right,
-                str(fewshot_quality.get("summary_text") or "-"),
-                str(fewshot_monitor.get("leakage_note") or fewshot_quality.get("leakage_note") or "-"),
-            )
-            for row in quality_alerts:
-                if isinstance(row, dict):
-                    self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
-        backfill_queue = dashboard.get("statsbomb_backfill_queue", {}) if isinstance(dashboard.get("statsbomb_backfill_queue"), dict) else {}
-        backfill_tasks = backfill_queue.get("tasks", []) if isinstance(backfill_queue.get("tasks"), list) else []
-        backfill_candidates = backfill_queue.get("candidate_rows", []) if isinstance(backfill_queue.get("candidate_rows"), list) else []
-        if backfill_tasks:
-            self._strategy_section_title(right, "StatsBomb \u8865\u6837\u961f\u5217")
-            self._strategy_row(
-                right,
-                str(backfill_queue.get("summary_text") or "-"),
-                str(backfill_queue.get("leakage_note") or "-"),
-            )
-            for row in backfill_tasks[:4]:
-                if isinstance(row, dict):
-                    self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
-            for row in backfill_candidates[:4]:
-                if isinstance(row, dict):
-                    self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
 
         allowlist_summary = dashboard.get("allowlist_settlement_summary", {}) if isinstance(dashboard.get("allowlist_settlement_summary"), dict) else {}
         self._strategy_section_title(right, "\u653e\u884c\u590d\u76d8\u7edf\u8ba1")
@@ -11624,13 +11126,13 @@ class SmartMatchDashboard:
             self._strategy_row(right, f"\u653e\u884c\u95e8\u69db\u5efa\u8bae: {allowlist_tuning.get('label', '-')}", tuning_body)
         allowlist_settlement_rows = dashboard.get("allowlist_settlement_rows", [])
         if allowlist_settlement_rows:
-            for row in allowlist_settlement_rows:
+            for row in allowlist_settlement_rows[:4]:
                 if isinstance(row, dict):
                     self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
 
         self._strategy_section_title(right, "\u6b63\u5f0f\u653e\u884c\u5f85\u590d\u76d8\u6c60")
         if release_pool_rows:
-            for title, body_text in release_pool_rows:
+            for title, body_text in release_pool_rows[:4]:
                 self._strategy_row(right, title, body_text)
         else:
             self._strategy_row(
@@ -11640,7 +11142,7 @@ class SmartMatchDashboard:
             )
 
         self._strategy_section_title(right, "\u4f7f\u7528\u5efa\u8bae")
-        for row in dashboard.get("guidance_rows", []):
+        for row in dashboard.get("guidance_rows", [])[:4]:
             if isinstance(row, dict):
                 self._strategy_row(right, str(row.get("title") or "-"), str(row.get("body") or "-"))
 
