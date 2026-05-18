@@ -700,15 +700,56 @@ def build_statsbomb_review_training_weight_signal(
     }
 
 
+def _statsbomb_review_neutral_attribution_weights() -> dict[str, float]:
+    weights = dict(ERROR_ATTRIBUTION_WEIGHTS)
+    for code in STATSBOMB_EVENT_ATTRIBUTION_CODES:
+        weights[code] = 1.0
+    return weights
+
+
+def _gate_statsbomb_review_training_weight_signal(
+    signal: Mapping[str, object] | object,
+    quality_status: object,
+) -> dict[str, object]:
+    resolved = dict(_as_mapping(signal))
+    raw_weights = dict(_as_mapping(resolved.get("attribution_weights")))
+    status = str(quality_status or "").strip().lower()
+    enabled = status == "healthy" and _safe_int(resolved.get("sample_count")) > 0
+    if enabled:
+        resolved["weight_gate"] = {
+            "enabled": True,
+            "mode": "active",
+            "quality_status": status,
+            "reason": "statsbomb_review_quality_healthy",
+        }
+        resolved["raw_attribution_weights"] = raw_weights
+        return resolved
+
+    mode = "disabled" if status == "blocked" else "report_only" if status == "attention" else "disabled"
+    resolved["status"] = mode
+    resolved["attribution_weights"] = _statsbomb_review_neutral_attribution_weights()
+    resolved["raw_attribution_weights"] = raw_weights
+    resolved["active_codes"] = []
+    resolved["memory_tags"] = ["statsbomb_review_training_report_only"] if mode == "report_only" and _safe_int(resolved.get("sample_count")) > 0 else []
+    resolved["weight_gate"] = {
+        "enabled": False,
+        "mode": mode,
+        "quality_status": status or "-",
+        "reason": "statsbomb_review_quality_not_healthy",
+    }
+    resolved["summary_text"] = f"{resolved.get('summary_text') or '-'} | gate={mode}"
+    return resolved
+
+
 def build_statsbomb_review_training_quality_summary(
     payload: Mapping[str, object] | object | None,
 ) -> dict[str, object]:
     resolved = _as_mapping(payload)
     summary = _as_mapping(resolved.get("summary"))
-    signal = build_statsbomb_review_training_weight_signal(resolved)
+    raw_signal = build_statsbomb_review_training_weight_signal(resolved)
     label_counts = _as_mapping(summary.get("label_counts"))
-    sample_count = _safe_int(signal.get("sample_count"))
-    feature_count = _safe_int(signal.get("feature_count"))
+    sample_count = _safe_int(raw_signal.get("sample_count"))
+    feature_count = _safe_int(raw_signal.get("feature_count"))
     issues: list[dict[str, object]] = []
     label_rows: list[dict[str, object]] = []
     label_specs = [
@@ -787,14 +828,16 @@ def build_statsbomb_review_training_quality_summary(
     has_blocking = any(str(issue.get("severity") or "") == "blocking" for issue in issues)
     status = "blocked" if has_blocking else "attention" if issues else "healthy"
     tone = "bad" if status == "blocked" else "warning" if status == "attention" else "good"
+    signal = _gate_statsbomb_review_training_weight_signal(raw_signal, status)
     active_weights = _as_mapping(signal.get("attribution_weights"))
+    weight_gate = _as_mapping(signal.get("weight_gate"))
     weight_rows = [
         {
             "code": code,
             "label": ERROR_ATTRIBUTION_LABELS.get(code, code),
             "value": f"{_safe_float(active_weights.get(code), 1.0):.2f}",
-            "tone": "good" if _safe_float(active_weights.get(code), 1.0) > 1.0 else "neutral",
-            "detail": "赛后事件代理权重，仅用于Evaluation Agent错因排序。",
+            "tone": "good" if bool(weight_gate.get("enabled")) and _safe_float(active_weights.get(code), 1.0) > 1.0 else "neutral",
+            "detail": "赛后事件代理权重，仅在质量 healthy 时用于 Evaluation Agent 错因排序。",
         }
         for code in STATSBOMB_EVENT_ATTRIBUTION_CODES
     ]
@@ -820,7 +863,7 @@ def build_statsbomb_review_training_quality_summary(
         {
             "label": "当前权重",
             "value": f"{_safe_float(active_weights.get('statsbomb_finishing_variance'), 1.0):.2f}",
-            "tone": "good" if sample_count else "neutral",
+            "tone": "good" if bool(weight_gate.get("enabled")) else "warning" if status == "attention" else "neutral",
             "detail": str(signal.get("summary_text") or "-"),
         },
     ]
@@ -835,6 +878,8 @@ def build_statsbomb_review_training_quality_summary(
         "weight_rows": weight_rows,
         "card_rows": card_rows,
         "signal": signal,
+        "raw_signal": raw_signal,
+        "weight_gate": dict(weight_gate),
         "summary_text": f"事件代理样本 {sample_count} | 标签 {label_rows[0]['value'] if label_rows else '-'} | 状态 {status}",
         "leakage_note": signal.get("leakage_note"),
     }
@@ -6330,6 +6375,7 @@ def build_strategy_evaluation_agent_summary(
     )
     review_training_quality = build_statsbomb_review_training_quality_summary(statsbomb_review_training_samples or {})
     review_training_signal = _as_mapping(review_training_quality.get("signal"))
+    review_training_weight_gate = _as_mapping(review_training_signal.get("weight_gate"))
     review_training_weights = _as_mapping(review_training_signal.get("attribution_weights"))
     error_attribution = (
         _as_mapping(error_attribution)
@@ -6518,7 +6564,8 @@ def build_strategy_evaluation_agent_summary(
             tag_text = str(tag)
             if tag_text and tag_text not in memory_tags:
                 memory_tags.append(tag_text)
-        if any(_safe_int(reason_counts.get(code)) for code in STATSBOMB_EVENT_ATTRIBUTION_CODES):
+        has_statsbomb_reason = any(_safe_int(reason_counts.get(code)) for code in STATSBOMB_EVENT_ATTRIBUTION_CODES)
+        if bool(review_training_weight_gate.get("enabled")) and has_statsbomb_reason:
             recommendations.append(
                 {
                     "title": "应用StatsBomb事件代理权重",
@@ -6526,6 +6573,18 @@ def build_strategy_evaluation_agent_summary(
                         f"{review_training_signal.get('summary_text') or '-'}。"
                         "当前错因包含StatsBomb事件证据，排序已优先参考事件代理训练样本池；"
                         "该权重仅用于赛后Evaluation Agent归因，不进入赛前预测特征。"
+                    ),
+                }
+            )
+        elif has_statsbomb_reason:
+            recommendations.append(
+                {
+                    "title": "StatsBomb事件代理权重已守门",
+                    "body": (
+                        f"{review_training_signal.get('summary_text') or '-'}。"
+                        f"质量状态 {review_training_weight_gate.get('quality_status') or '-'}，"
+                        f"模式 {review_training_weight_gate.get('mode') or '-'}；"
+                        "当前只展示赛后报告，不参与 Evaluation Agent 错因加权。"
                     ),
                 }
             )
@@ -9434,6 +9493,7 @@ def build_high_accuracy_strategy_dashboard(
     settlement_summary = build_high_accuracy_strategy_settlement_summary(settlement_items)
     statsbomb_review_training_quality = build_statsbomb_review_training_quality_summary(statsbomb_review_training_samples or {})
     statsbomb_review_training_signal = _as_mapping(statsbomb_review_training_quality.get("signal"))
+    statsbomb_review_training_weight_gate = _as_mapping(statsbomb_review_training_signal.get("weight_gate"))
     error_attribution = build_strategy_error_attribution_summary(
         settlement_items,
         error_weight_overrides=_as_mapping(statsbomb_review_training_signal.get("attribution_weights")),
@@ -9593,9 +9653,9 @@ def build_high_accuracy_strategy_dashboard(
             "label": "StatsBomb\u6743\u91cd",
             "value": str(statsbomb_review_training_signal.get("summary_text") or "-"),
             "tone": "good"
-            if str(statsbomb_review_training_signal.get("status") or "") == "ready"
+            if bool(statsbomb_review_training_weight_gate.get("enabled"))
             else "warning"
-            if str(statsbomb_review_training_signal.get("status") or "") == "weak"
+            if str(statsbomb_review_training_weight_gate.get("mode") or "") == "report_only"
             else "neutral",
         },
         {

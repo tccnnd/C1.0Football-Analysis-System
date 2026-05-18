@@ -3202,6 +3202,64 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertTrue(any(issue["code"] == "prediction_miss_skewed" for issue in skewed["issues"]))
         self.assertEqual(skewed["label_rows"][0]["value"], "29/30")
         self.assertEqual(skewed["weight_rows"][0]["code"], "statsbomb_xg_against_pick")
+        self.assertFalse(skewed["signal"]["weight_gate"]["enabled"])
+        self.assertEqual(skewed["signal"]["weight_gate"]["mode"], "report_only")
+        self.assertEqual(skewed["signal"]["attribution_weights"]["statsbomb_finishing_variance"], 1.0)
+        self.assertEqual(skewed["signal"]["active_codes"], [])
+        self.assertEqual(missing["signal"]["weight_gate"]["mode"], "disabled")
+
+    def test_statsbomb_review_training_quality_gate_disables_attention_weights_in_evaluation(self) -> None:
+        settlements = [
+            {
+                "league": "1. Bundesliga",
+                "home_team": "Bayer Leverkusen",
+                "away_team": "RB Leipzig",
+                "statsbomb_event_summary": {
+                    "team_stats": {
+                        "Bayer Leverkusen": {"xg": 2.10, "shots": 16, "goals": 1},
+                        "RB Leipzig": {"xg": 0.92, "shots": 8, "goals": 2},
+                    }
+                },
+                "high_accuracy_strategy_items": [
+                    {
+                        "play_type": "market_1x2",
+                        "pick": "HOME",
+                        "actual": "AWAY",
+                        "confidence": 0.68,
+                        "min_confidence": 0.65,
+                        "backtest_accuracy": 0.70,
+                        "backtest_samples": 180,
+                        "is_hit": False,
+                    }
+                ],
+            }
+        ]
+        skewed_review_samples = {
+            "summary": {
+                "sample_count": 30,
+                "feature_order": ["xg_diff", "shot_diff", "event_count"],
+                "label_counts": {
+                    "prediction_miss": {"0": 1, "1": 29},
+                    "handicap_miss": {"0": 15, "1": 15},
+                    "ou_miss": {"0": 15, "1": 15},
+                },
+            },
+            "items": [{} for _ in range(30)],
+        }
+
+        evaluation = build_strategy_evaluation_agent_summary(
+            {"enabled": True},
+            settlements,
+            statsbomb_review_training_samples=skewed_review_samples,
+        )
+
+        signal = evaluation["statsbomb_review_training_signal"]
+        self.assertEqual(signal["weight_gate"]["mode"], "report_only")
+        self.assertFalse(signal["weight_gate"]["enabled"])
+        self.assertEqual(evaluation["error_attribution"]["rank_weights"]["statsbomb_finishing_variance"], 1.0)
+        self.assertNotIn("statsbomb_review_training_weighted", evaluation["memory_tags"])
+        self.assertIn("statsbomb_review_training_report_only", evaluation["memory_tags"])
+        self.assertTrue(any("StatsBomb" in item["title"] for item in evaluation["recommendations"]))
 
     def test_statsbomb_review_training_quality_report_filename_is_stable(self) -> None:
         self.assertEqual(
@@ -3335,6 +3393,7 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         )
 
         self.assertEqual(dashboard["evaluation_agent"]["statsbomb_review_training_signal"]["status"], "ready")
+        self.assertTrue(dashboard["evaluation_agent"]["statsbomb_review_training_signal"]["weight_gate"]["enabled"])
         self.assertEqual(dashboard["statsbomb_review_training_quality"]["status"], "healthy")
         self.assertEqual(dashboard["evaluation_agent"]["statsbomb_review_training_quality"]["status"], "healthy")
         self.assertEqual(list(dashboard["error_attribution"]["reason_counts"])[0], "statsbomb_finishing_variance")
