@@ -185,6 +185,39 @@ class CoreTrainingDataCoverageSummaryTests(unittest.TestCase):
         self.assertEqual(audit["no_same_date_count"], 1)
         self.assertEqual(audit["same_date_unmatched_count"], 1)
 
+    def test_statsbomb_coverage_matches_known_aliases_with_adjacent_dates(self) -> None:
+        settlements = [
+            {
+                "match_id": "cn-euro-1",
+                "match_date": "2024-06-16",
+                "league": "欧洲杯",
+                "home_team": "西班牙",
+                "away_team": "克罗地亚",
+            }
+        ]
+        statsbomb_items = [
+            {
+                "source_match_id": "sb-euro-1",
+                "match_date": "2024-06-15",
+                "league": "UEFA Euro",
+                "home_team": "Spain",
+                "away_team": "Croatia",
+            }
+        ]
+
+        audit = core._build_statsbomb_coverage_audit(settlements, statsbomb_items)
+        index = {}
+        for item in statsbomb_items:
+            for key in core._statsbomb_coverage_audit_exact_keys(item):
+                index[key] = item
+
+        self.assertEqual(audit["exact_match_count"], 1)
+        self.assertEqual(audit["coverage_gap_count"], 0)
+        self.assertEqual(
+            core._match_statsbomb_event_summary(settlements[0], index)["source_match_id"],
+            "sb-euro-1",
+        )
+
     def test_training_data_coverage_flags_no_date_overlap(self) -> None:
         settlements = [
             {
@@ -747,6 +780,105 @@ class CoreTrainingDataCoverageSummaryTests(unittest.TestCase):
         self.assertEqual(settlements_payload["items"][-1]["source"], "historical_review_import")
         self.assertEqual(review_payload["summary"]["sample_count"], 1)
         self.assertEqual(review_payload["items"][0]["match_id"], "hist-1")
+
+    def test_repair_training_data_health_imports_unlabeled_aligned_settlements_as_facts_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "data" / "state"
+            state.mkdir(parents=True)
+            (state / "settlements.json").write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "match_id": "current-1",
+                                "match_date": "2026-05-18",
+                                "home_team": "Current Home",
+                                "away_team": "Current Away",
+                                "source": "live_settlement",
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (state / "statsbomb_event_summaries.json").write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "source_match_id": "s1",
+                                "match_id": "s1",
+                                "match_date": "2024-04-14",
+                                "league": "1. Bundesliga",
+                                "home_team": "Bayer Leverkusen",
+                                "away_team": "Werder Bremen",
+                                "event_summary": {
+                                    "event_count": 10,
+                                    "shot_count": 12,
+                                    "xg_home": 2.1,
+                                    "xg_away": 0.5,
+                                },
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            input_path = state / "aligned_result_facts.json"
+            input_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "match_id": "hist-fact-1",
+                            "match_date": "2024-04-14",
+                            "match_time": "17:30",
+                            "league": "1. Bundesliga",
+                            "home_team": "Bayer Leverkusen",
+                            "away_team": "Werder Bremen",
+                            "home_goals": 5,
+                            "away_goals": 0,
+                            "statsbomb_source_match_id": "s1",
+                        }
+                    ],
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            store = core.StateStore(root)
+
+            with (
+                patch("v24_app.core.PROJECT_DIR", root),
+                patch("v24_app.core.STATE_STORE", store),
+                patch("v24_app.core.STATSBOMB_EVENT_SUMMARIES_FILE", state / "statsbomb_event_summaries.json"),
+                patch("v24_app.core.STATSBOMB_REVIEW_TRAINING_FILE", state / "statsbomb_review_training_samples.json"),
+            ):
+                result = core.repair_training_data_health(
+                    "import_aligned_historical_settlements",
+                    input_path=input_path,
+                )
+
+            settlements_payload = json.loads((state / "settlements.json").read_text(encoding="utf-8"))
+            review_payload = json.loads((state / "statsbomb_review_training_samples.json").read_text(encoding="utf-8"))
+
+        issue_codes = {
+            issue.get("code")
+            for issue in result["after"]["training_health"]["issues"]
+            if isinstance(issue, dict)
+        }
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["result"]["imported_settlements"], 1)
+        self.assertEqual(result["result"]["imported_unlabeled_settlements"], 1)
+        self.assertEqual(result["result"]["imported_labeled_settlements"], 0)
+        self.assertEqual(result["generated_sample_count"], 0)
+        self.assertEqual(result["result"]["skipped_unknown_label"], 1)
+        self.assertEqual(review_payload["summary"]["sample_count"], 0)
+        self.assertEqual(settlements_payload["items"][-1]["source"], "historical_result_fact_import")
+        self.assertFalse(settlements_payload["items"][-1]["labels_available"])
+        self.assertIsNone(result["after"]["statsbomb_events"]["coverage_blocker"])
+        self.assertIn("statsbomb_review_samples_missing", issue_codes)
 
     def test_training_model_gate_recommends_xgb_training_when_data_is_ready(self) -> None:
         coverage = {

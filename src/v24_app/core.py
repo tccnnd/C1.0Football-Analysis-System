@@ -11,7 +11,7 @@ import time
 import csv
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from itertools import product
 from math import log, log2, sqrt
@@ -5453,10 +5453,15 @@ def repair_training_data_health(action_key: str, *, input_path: Path | str | Non
     elif action == "import_aligned_historical_settlements":
         if input_path is None:
             raise ValueError("input_path is required for import_aligned_historical_settlements")
+        statsbomb_before = before.get("statsbomb_events", {}) if isinstance(before.get("statsbomb_events"), dict) else {}
         import_result = import_historical_review_settlements(
             project_dir=PROJECT_DIR,
             input_path=Path(input_path),
             replace=False,
+            limit=10000,
+            allow_unlabeled=True,
+            date_start=statsbomb_before.get("statsbomb_date_start"),
+            date_end=statsbomb_before.get("statsbomb_date_end"),
         )
         _RECENT_SETTLEMENTS_CACHE.clear()
         review_result = export_statsbomb_review_training_samples(
@@ -5479,6 +5484,7 @@ def repair_training_data_health(action_key: str, *, input_path: Path | str | Non
         message = (
             "Aligned historical review settlements imported: "
             f"rows={int(result.get('imported_settlements', 0) or 0)}, "
+            f"unlabeled_facts={int(result.get('imported_unlabeled_settlements', 0) or 0)}, "
             f"review_samples={sample_count}."
         )
     elif action == "build_statsbomb_review_samples":
@@ -13758,6 +13764,86 @@ def _statsbomb_key(*parts: object) -> str:
     return "|".join(normalize_text(part).lower() for part in parts if normalize_text(part))
 
 
+STATSBOMB_TEAM_ALIASES: dict[str, str] = {
+    "\u5fb7\u56fd": "Germany",
+    "\u82cf\u683c\u5170": "Scotland",
+    "\u5308\u7259\u5229": "Hungary",
+    "\u745e\u58eb": "Switzerland",
+    "\u897f\u73ed\u7259": "Spain",
+    "\u514b\u7f57\u5730\u4e9a": "Croatia",
+    "\u610f\u5927\u5229": "Italy",
+    "\u963f\u5c14\u5df4\u5c3c": "Albania",
+    "\u65af\u6d1b\u6587\u5c3c": "Slovenia",
+    "\u4e39\u9ea6": "Denmark",
+    "\u585e\u5c14\u7ef4\u4e9a": "Serbia",
+    "\u82f1\u683c\u5170": "England",
+    "\u6ce2\u5170": "Poland",
+    "\u8377\u5170": "Netherlands",
+    "\u7f57\u9a6c\u5c3c\u4e9a": "Romania",
+    "\u4e4c\u514b\u5170": "Ukraine",
+    "\u6bd4\u5229\u65f6": "Belgium",
+    "\u65af\u6d1b\u4f10\u514b": "Slovakia",
+    "\u5965\u5730\u5229": "Austria",
+    "\u6cd5\u56fd": "France",
+    "\u571f\u8033\u5176": "Turkey",
+    "\u683c\u9c81\u5409\u4e9a": "Georgia",
+    "\u8461\u8404\u7259": "Portugal",
+    "\u6377\u514b": "Czech Republic",
+    "\u52d2\u6c83\u5e93\u68ee": "Bayer Leverkusen",
+    "\u83b1\u7ea2\u725b": "RB Leipzig",
+    "\u83b1\u6bd4\u9521": "RB Leipzig",
+    "\u95e8\u5174": "Borussia M\u00f6nchengladbach",
+    "\u4e0d\u6765\u6885": "Werder Bremen",
+    "\u62dc\u4ec1": "Bayern Munich",
+    "\u65af\u56fe\u52a0\u7279": "VfB Stuttgart",
+}
+
+
+def _statsbomb_team_alias_values(value: object) -> set[str]:
+    text = normalize_text(value)
+    if not text:
+        return set()
+    values = {text}
+    alias = STATSBOMB_TEAM_ALIASES.get(text)
+    if alias:
+        values.add(alias)
+    return values
+
+
+def _statsbomb_date_values(value: object, *, include_adjacent_dates: bool = False) -> list[str]:
+    text = normalize_text(value)
+    if not text:
+        return []
+    values = [text]
+    if not include_adjacent_dates:
+        return values
+    try:
+        parsed = datetime.strptime(text, "%Y-%m-%d").date()
+    except Exception:
+        return values
+    for days in (-1, 1):
+        candidate = (parsed + timedelta(days=days)).isoformat()
+        if candidate not in values:
+            values.append(candidate)
+    return values
+
+
+def _statsbomb_identity_keys(item: dict, *, include_adjacent_dates: bool = False) -> set[str]:
+    dates = _statsbomb_date_values(item.get("match_date"), include_adjacent_dates=include_adjacent_dates)
+    home_values = _statsbomb_team_alias_values(item.get("home_team"))
+    away_values = _statsbomb_team_alias_values(item.get("away_team"))
+    keys = {
+        _statsbomb_key(item.get("match_id")),
+        _statsbomb_key(item.get("source_match_id")),
+    }
+    for date_value in dates:
+        for home_value in home_values:
+            for away_value in away_values:
+                keys.add(_statsbomb_key(date_value, home_value, away_value))
+                keys.add(_statsbomb_key(date_value, item.get("league"), home_value, away_value))
+    return {key for key in keys if key}
+
+
 def _load_statsbomb_event_summary_index() -> dict[str, dict]:
     if not STATSBOMB_EVENT_SUMMARIES_FILE.exists():
         return {}
@@ -13772,26 +13858,14 @@ def _load_statsbomb_event_summary_index() -> dict[str, dict]:
     for item in items:
         if not isinstance(item, dict):
             continue
-        keys = [
-            _statsbomb_key(item.get("match_id")),
-            _statsbomb_key(item.get("source_match_id")),
-            _statsbomb_key(item.get("match_date"), item.get("home_team"), item.get("away_team")),
-            _statsbomb_key(item.get("match_date"), item.get("league"), item.get("home_team"), item.get("away_team")),
-        ]
-        for key in keys:
+        for key in _statsbomb_identity_keys(item):
             if key and key not in index:
                 index[key] = item
     return index
 
 
-def _statsbomb_coverage_audit_exact_keys(item: dict) -> set[str]:
-    keys = {
-        _statsbomb_key(item.get("match_id")),
-        _statsbomb_key(item.get("source_match_id")),
-        _statsbomb_key(item.get("match_date"), item.get("home_team"), item.get("away_team")),
-        _statsbomb_key(item.get("match_date"), item.get("league"), item.get("home_team"), item.get("away_team")),
-    }
-    return {key for key in keys if key}
+def _statsbomb_coverage_audit_exact_keys(item: dict, *, include_adjacent_dates: bool = False) -> set[str]:
+    return _statsbomb_identity_keys(item, include_adjacent_dates=include_adjacent_dates)
 
 
 def _statsbomb_coverage_date_values(items: list[dict], *, date_key: str = "match_date") -> list[str]:
@@ -13815,8 +13889,13 @@ def _statsbomb_coverage_candidate_score(settlement: dict, statsbomb: dict) -> fl
         overlap = len(left_tokens & right_tokens) / max(len(left_tokens | right_tokens), 1)
         return max(ratio, overlap)
 
-    direct = (similarity(settlement.get("home_team"), statsbomb.get("home_team")) + similarity(settlement.get("away_team"), statsbomb.get("away_team"))) / 2.0
-    swapped = (similarity(settlement.get("home_team"), statsbomb.get("away_team")) + similarity(settlement.get("away_team"), statsbomb.get("home_team"))) / 2.0
+    def best_similarity(left: object, right: object) -> float:
+        left_values = _statsbomb_team_alias_values(left) or {normalize_text(left)}
+        right_values = _statsbomb_team_alias_values(right) or {normalize_text(right)}
+        return max((similarity(left_value, right_value) for left_value in left_values for right_value in right_values), default=0.0)
+
+    direct = (best_similarity(settlement.get("home_team"), statsbomb.get("home_team")) + best_similarity(settlement.get("away_team"), statsbomb.get("away_team"))) / 2.0
+    swapped = (best_similarity(settlement.get("home_team"), statsbomb.get("away_team")) + best_similarity(settlement.get("away_team"), statsbomb.get("home_team"))) / 2.0
     return round(max(direct, swapped), 4)
 
 
@@ -13847,7 +13926,7 @@ def _build_statsbomb_coverage_audit(
     overlap_dates = sorted(set(settlement_dates) & set(statsbomb_dates))
     for settlement in settlement_items:
         matched = None
-        for key in _statsbomb_coverage_audit_exact_keys(settlement):
+        for key in _statsbomb_coverage_audit_exact_keys(settlement, include_adjacent_dates=True):
             if key in statsbomb_index:
                 matched = statsbomb_index[key]
                 break
@@ -14242,12 +14321,17 @@ def _execute_statsbomb_coverage_import_plan(
 def _match_statsbomb_event_summary(settlement: dict, index: dict[str, dict]) -> dict | None:
     if not index:
         return None
-    keys = [
-        _statsbomb_key(settlement.get("match_id")),
-        _statsbomb_key(settlement.get("statsbomb_source_match_id")),
-        _statsbomb_key(settlement.get("match_date"), settlement.get("home_team"), settlement.get("away_team")),
-        _statsbomb_key(settlement.get("match_date"), settlement.get("league"), settlement.get("home_team"), settlement.get("away_team")),
-    ]
+    keys = _statsbomb_identity_keys(
+        {
+            "match_id": settlement.get("match_id"),
+            "source_match_id": settlement.get("statsbomb_source_match_id"),
+            "match_date": settlement.get("match_date"),
+            "league": settlement.get("league"),
+            "home_team": settlement.get("home_team"),
+            "away_team": settlement.get("away_team"),
+        },
+        include_adjacent_dates=True,
+    )
     for key in keys:
         if key and key in index:
             return index[key]

@@ -888,6 +888,7 @@ def _normalize_historical_review_settlement(
     row_index: int,
     *,
     source_file: str = "",
+    allow_unlabeled: bool = False,
 ) -> tuple[dict[str, Any] | None, str]:
     kickoff_date, kickoff_time = _parse_kickoff(_pick_value(row, "kickoff"))
     short_date, short_time = _parse_year_and_match_time(_pick_value(row, "year"), _pick_value(row, "match_time_raw"))
@@ -936,7 +937,8 @@ def _normalize_historical_review_settlement(
     if ou_is_correct is None:
         ou_is_correct = _review_hit(predicted_ou_key, ou_result_key)
 
-    if is_correct is None and handicap_is_correct is None and ou_is_correct is None:
+    labels_available = is_correct is not None or handicap_is_correct is not None or ou_is_correct is not None
+    if not labels_available and not allow_unlabeled:
         return None, "missing_label"
 
     home_ht_goals = _safe_int(_pick_value(row, "home_ht_goals"))
@@ -974,7 +976,8 @@ def _normalize_historical_review_settlement(
         "ou_is_correct": ou_is_correct,
         "statsbomb_source_match_id": source_match_id or None,
         "statsbomb_source_url": _normalize_text(_pick_value(row, "source_url")) or None,
-        "source": "historical_review_import",
+        "labels_available": bool(labels_available),
+        "source": "historical_review_import" if labels_available else "historical_result_fact_import",
         "source_file": source_file,
         "source_row_index": row_index,
         "source_detail": _normalize_text(row.get("source")),
@@ -987,6 +990,9 @@ def import_historical_review_settlements(
     input_path: Path,
     replace: bool = False,
     limit: int = 5000,
+    allow_unlabeled: bool = False,
+    date_start: str | None = None,
+    date_end: str | None = None,
 ) -> dict[str, Any]:
     input_path = input_path.resolve()
     records = _read_input_records(input_path)
@@ -994,6 +1000,9 @@ def import_historical_review_settlements(
     skipped_invalid = 0
     skipped_missing_label = 0
     skipped_missing_result = 0
+    skipped_outside_date_range = 0
+    resolved_date_start = _parse_date(date_start) if date_start else None
+    resolved_date_end = _parse_date(date_end) if date_end else None
     for index, row in enumerate(records, start=1):
         if not isinstance(row, dict):
             skipped_invalid += 1
@@ -1002,6 +1011,7 @@ def import_historical_review_settlements(
             row,
             index,
             source_file=input_path.name,
+            allow_unlabeled=allow_unlabeled,
         )
         if normalized is None:
             if reason == "missing_label":
@@ -1010,6 +1020,13 @@ def import_historical_review_settlements(
                 skipped_missing_result += 1
             else:
                 skipped_invalid += 1
+            continue
+        match_date = _normalize_text(normalized.get("match_date"))
+        if resolved_date_start and match_date and match_date < resolved_date_start:
+            skipped_outside_date_range += 1
+            continue
+        if resolved_date_end and match_date and match_date > resolved_date_end:
+            skipped_outside_date_range += 1
             continue
         normalized_rows.append(normalized)
 
@@ -1020,7 +1037,7 @@ def import_historical_review_settlements(
     for item in existing:
         if not isinstance(item, dict):
             continue
-        if replace and item.get("source") == "historical_review_import":
+        if replace and item.get("source") in {"historical_review_import", "historical_result_fact_import"}:
             continue
         match_id = _normalize_text(item.get("match_id"))
         if match_id:
@@ -1029,6 +1046,8 @@ def import_historical_review_settlements(
 
     skipped_duplicate = 0
     imported_settlements = 0
+    imported_labeled_settlements = 0
+    imported_unlabeled_settlements = 0
     for item in normalized_rows:
         match_id = _normalize_text(item.get("match_id"))
         if not match_id:
@@ -1040,6 +1059,10 @@ def import_historical_review_settlements(
         seen_match_ids.add(match_id)
         merged_items.append(item)
         imported_settlements += 1
+        if bool(item.get("labels_available")):
+            imported_labeled_settlements += 1
+        else:
+            imported_unlabeled_settlements += 1
 
     storage_limit = max(1, int(limit))
     store.save_settlements(merged_items, limit=storage_limit)
@@ -1048,10 +1071,15 @@ def import_historical_review_settlements(
         "ok": imported_settlements > 0,
         "input_path": str(input_path),
         "replace": bool(replace),
+        "allow_unlabeled": bool(allow_unlabeled),
+        "date_start": resolved_date_start,
+        "date_end": resolved_date_end,
         "raw_count": len(records),
         "valid_rows": len(normalized_rows),
         "existing_settlements_before": len(existing),
         "imported_settlements": imported_settlements,
+        "imported_labeled_settlements": imported_labeled_settlements,
+        "imported_unlabeled_settlements": imported_unlabeled_settlements,
         "merged_total": len(merged_items),
         "saved_total": saved_total,
         "storage_limit": storage_limit,
@@ -1059,6 +1087,7 @@ def import_historical_review_settlements(
         "skipped_invalid": skipped_invalid,
         "skipped_missing_result": skipped_missing_result,
         "skipped_missing_label": skipped_missing_label,
+        "skipped_outside_date_range": skipped_outside_date_range,
         "skipped_duplicate": skipped_duplicate,
         "source": "historical_review_import",
     }
