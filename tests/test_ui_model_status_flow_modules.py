@@ -97,6 +97,13 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
                     "source_provenance_ratio": 0.70,
                 },
             },
+            "statsbomb_events": {
+                "match_count": 3,
+                "review_sample_count": 0,
+                "review_feature_count": 0,
+                "coverage_gap_count": 0,
+                "coverage_candidate_count": 0,
+            },
             "fact_coverage": {
                 "match_fact": {"available_count": 90, "target_count": 120, "coverage_ratio": 0.75},
                 "action_fact": {"available_match_count": 3, "target_match_count": 5, "event_count": 1200},
@@ -253,6 +260,45 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
         self.assertIn("MatchFact 75.0%", fact_card["detail"])
         self.assertTrue(any(row["value"] == "Materialize MatchFact rows for history/XGB samples" for row in actions))
         self.assertTrue(any(row["action_key"] == "build_statsbomb_review_samples" for row in actions))
+
+    def test_training_health_action_rows_show_statsbomb_coverage_plan(self) -> None:
+        coverage = self._coverage_with_health(
+            "blocked",
+            [
+                {
+                    "code": "statsbomb_date_overlap_missing",
+                    "severity": "blocking",
+                    "message": "StatsBomb events exist, but the settlement date window does not overlap the StatsBomb date window.",
+                    "recommendation": "Import StatsBomb coverage for the settlement date range before building review samples.",
+                }
+            ],
+        )
+        coverage["statsbomb_events"]["coverage_import_plan"] = {
+            "status": "blocked",
+            "action_key": "import_statsbomb_for_settlement_date_range",
+            "target_date_start": "2024-04-14",
+            "target_date_end": "2024-04-15",
+            "source_date_start": "2024-03-10",
+            "source_date_end": "2024-03-11",
+        }
+
+        cards = build_training_health_card_rows(coverage)
+        actions = build_training_health_action_rows(coverage)
+        text = build_model_training_overview_text(
+            xgb_status={},
+            play_model_status={},
+            ensemble_status={},
+            bayes_status={},
+            threshold_status={},
+            policy_status={},
+            coverage_status=coverage,
+        )
+
+        statsbomb_card = next(row for row in cards if "计划" in row["detail"])
+        self.assertIn("计划 blocked", statsbomb_card["detail"])
+        self.assertTrue(any(row["action_key"] == "build_statsbomb_coverage_import_plan" for row in actions))
+        self.assertEqual(training_health_action_button_text("build_statsbomb_coverage_import_plan"), "生成覆盖计划")
+        self.assertIn("StatsBomb覆盖计划: blocked", text)
 
     def test_training_health_action_rows_show_healthy_next_step(self) -> None:
         coverage = self._coverage_with_health("healthy", [])

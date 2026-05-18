@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from typing import Mapping
 
@@ -82,6 +82,7 @@ def _training_health_action_for_issue(code: object, fallback: object = "") -> st
         "xgb_league_coverage_low": "补不同联赛样本",
         "xgb_date_range_missing": "修复样本日期字段",
         "league_profiles_missing": "生成联赛画像",
+        "statsbomb_date_overlap_missing": "生成StatsBomb覆盖导入计划",
         "statsbomb_review_samples_missing": "将事件摘要转为复盘训练样本",
     }
     actions.update(
@@ -104,6 +105,7 @@ def _training_health_action_key_for_issue(code: object) -> str:
         "xgb_league_coverage_low": "import_historical_samples",
         "xgb_date_range_missing": "rebuild_xgb_from_club_history",
         "league_profiles_missing": "build_league_profiles",
+        "statsbomb_date_overlap_missing": "build_statsbomb_coverage_import_plan",
         "statsbomb_review_samples_missing": "build_statsbomb_review_samples",
     }
     action_keys.update(
@@ -121,6 +123,7 @@ def training_health_action_button_text(action_key: object) -> str:
         "import_historical_samples": "导入历史样本",
         "rebuild_xgb_from_club_history": "重建XGB样本",
         "build_league_profiles": "生成联赛画像",
+        "build_statsbomb_coverage_import_plan": "生成覆盖计划",
         "build_statsbomb_review_samples": "生成复盘样本",
         "train_xgb": "训练XGB",
         "train_play_models": "训练玩法模型",
@@ -156,9 +159,11 @@ def build_training_health_card_rows(coverage_status: Mapping[str, object] | obje
     club_match_count = _safe_int(history.get("club_match_count", 0))
     min_club_match_count = _safe_int(history.get("min_club_match_count", 100))
     league_profile_count = _safe_int(history.get("league_profile_count", 0))
+    statsbomb = coverage.get("statsbomb_events", {}) if isinstance(coverage.get("statsbomb_events"), Mapping) else {}
     statsbomb_match_count = _safe_int(history.get("statsbomb_match_count", 0))
     statsbomb_review_sample_count = _safe_int(history.get("statsbomb_review_sample_count", 0))
     statsbomb_review_feature_count = _safe_int(history.get("statsbomb_review_feature_count", 0))
+    statsbomb_coverage_plan = statsbomb.get("coverage_import_plan", {}) if isinstance(statsbomb.get("coverage_import_plan"), Mapping) else {}
     club_team_count = _safe_int(rating.get("club_team_count", 0))
     national_team_count = _safe_int(rating.get("national_team_count", 0))
     match_fact_available_count = _safe_int(fact.get("match_fact_available_count", 0))
@@ -211,7 +216,7 @@ def build_training_health_card_rows(coverage_status: Mapping[str, object] | obje
             "label": "StatsBomb复盘",
             "value": str(statsbomb_review_sample_count),
             "tone": "warning" if statsbomb_match_count > 0 and statsbomb_review_sample_count <= 0 else "success" if statsbomb_review_sample_count > 0 else "neutral",
-            "detail": f"事件 {statsbomb_match_count} | 特征 {statsbomb_review_feature_count}",
+            "detail": f"事件 {statsbomb_match_count} | 特征 {statsbomb_review_feature_count} | 计划 {statsbomb_coverage_plan.get('status', '-')}",
         },
         {
             "label": "Fact Layer",
@@ -316,12 +321,20 @@ def build_training_health_repair_result_text(result: Mapping[str, object] | obje
     resolved = result if isinstance(result, Mapping) else {}
     payload = resolved.get("result", {}) if isinstance(resolved.get("result"), Mapping) else {}
     gate = resolved.get("training_gate", {}) if isinstance(resolved.get("training_gate"), Mapping) else {}
+    action_key = str(resolved.get("action_key") or "")
+    plan_line = ""
+    if action_key == "build_statsbomb_coverage_import_plan" and isinstance(payload, Mapping):
+        plan_line = (
+            f"- 计划: {payload.get('target_date_start', '-')} -> {payload.get('target_date_end', '-')} | "
+            f"next={payload.get('next_step', '-')}\n"
+        )
     return (
         f"训练健康修复: {'完成' if bool(resolved.get('ok', True)) else '未完成'}\n"
         + f"- 动作: {training_health_action_button_text(resolved.get('action_key'))}\n"
         + f"- 状态: {resolved.get('before_status') or '-'} -> {resolved.get('after_status') or '-'}\n"
         + f"- 结果: {resolved.get('message') or '-'}\n"
         + f"- 样本: imported={payload.get('imported_samples', '-')} | saved={payload.get('saved_total', '-')} | profiles={payload.get('league_profile_count', '-')}\n"
+        + plan_line
         + f"- 复检: {gate.get('status', '-')} | 建议: {gate.get('recommendation', '-')}"
     )
 
@@ -360,6 +373,7 @@ def build_model_training_overview_text(
     club_history = coverage.get("club_history", {}) if isinstance(coverage, Mapping) else {}
     world_cup = coverage.get("world_cup_history", {}) if isinstance(coverage, Mapping) else {}
     statsbomb = coverage.get("statsbomb_events", {}) if isinstance(coverage, Mapping) else {}
+    statsbomb_coverage_plan = statsbomb.get("coverage_import_plan", {}) if isinstance(statsbomb.get("coverage_import_plan"), Mapping) else {}
     rating_pools = coverage.get("rating_pools", {}) if isinstance(coverage, Mapping) else {}
     fact_coverage = coverage.get("fact_coverage", {}) if isinstance(coverage.get("fact_coverage"), Mapping) else {}
     match_fact = fact_coverage.get("match_fact", {}) if isinstance(fact_coverage.get("match_fact"), Mapping) else {}
@@ -398,6 +412,7 @@ def build_model_training_overview_text(
         f"- 联赛历史: {club_history.get('match_count', 0)} 场 | {club_history.get('date_start') or '-'} -> {club_history.get('date_end') or '-'} | profile={club_history.get('league_profile_count', 0)}",
         f"- 世界杯历史: {world_cup.get('match_count', 0)} 场 | {world_cup.get('year_start') or '-'}-{world_cup.get('year_end') or '-'} | 届数={world_cup.get('year_count', 0)}",
         f"- StatsBomb事件: {statsbomb.get('match_count', 0)} 场 | 复盘样本={statsbomb.get('review_sample_count', 0)} | 特征={statsbomb.get('review_feature_count', 0)} | 覆盖缺口={statsbomb.get('coverage_gap_count', 0)} | 候选={statsbomb.get('coverage_candidate_count', 0)}",
+        f"- StatsBomb覆盖计划: {statsbomb_coverage_plan.get('status', '-')}",
         f"- Fact Layer: MatchFact={match_fact.get('available_count', 0)}/{match_fact.get('target_count', 0)} ({_safe_float(match_fact.get('coverage_ratio'), 0.0):.1%}) | ActionFact={action_fact.get('available_match_count', 0)}/{action_fact.get('target_match_count', 0)} ({action_fact.get('event_count', 0)} events) | SourceProvenance={_safe_float(source_provenance.get('coverage_ratio'), 0.0):.1%} | TraceRefs={_safe_float(trace_fact_refs.get('trace_fact_ref_coverage_ratio'), 0.0):.1%}",
         f"- ELO评分池: 俱乐部 {rating_pools.get('club_team_count', 0)} 队 | 国家队 {rating_pools.get('national_team_count', 0)} 队",
         f"- 训练健康: {training_health.get('status', '-')} | blocking={training_health.get('blocking_count', 0)} | warning={training_health.get('warning_count', 0)}",

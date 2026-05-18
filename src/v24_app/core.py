@@ -4458,6 +4458,10 @@ def _state_summary_path(path: Path) -> Path:
     return path.with_name(f"{path.stem}_summary.json")
 
 
+def _statsbomb_coverage_import_plan_path() -> Path:
+    return PROJECT_DIR / "data" / "state" / "statsbomb_coverage_import_plan.json"
+
+
 def _load_state_items_summary(filename: str, *, date_key: str, year_key: str | None = None) -> dict:
     path = PROJECT_DIR / "data" / "state" / filename
     current_signature = _state_file_signature(path)
@@ -4963,6 +4967,7 @@ def get_training_data_coverage_status() -> dict:
         get_recent_settlements(limit=0),
         statsbomb_summary_items,
     )
+    statsbomb_coverage_import_plan = _build_statsbomb_coverage_import_plan(statsbomb_coverage_audit)
 
     club_ratings = STATE_STORE.load_ratings()
     national_team_ratings = STATE_STORE.load_national_team_ratings()
@@ -5033,6 +5038,7 @@ def get_training_data_coverage_status() -> dict:
             "date_overlap_count": int(statsbomb_coverage_audit.get("date_overlap_count", 0) or 0),
             "date_overlap_ratio": _safe_float(statsbomb_coverage_audit.get("date_overlap_ratio"), 0.0),
             "coverage_blocker": statsbomb_coverage_audit.get("coverage_blocker"),
+            "coverage_import_plan": statsbomb_coverage_import_plan,
             "summary_source": str(_state_summary_path(PROJECT_DIR / "data" / "state" / "statsbomb_event_summaries.json")),
         },
         "rating_pools": {
@@ -5419,6 +5425,19 @@ def repair_training_data_health(action_key: str, *, input_path: Path | str | Non
     elif action == "build_league_profiles":
         result = rebuild_league_profiles_from_club_history()
         message = str(result.get("message") or "-")
+    elif action == "build_statsbomb_coverage_import_plan":
+        coverage_status = get_training_data_coverage_status()
+        statsbomb_events = coverage_status.get("statsbomb_events", {}) if isinstance(coverage_status.get("statsbomb_events"), dict) else {}
+        audit = statsbomb_events.get("coverage_audit", {}) if isinstance(statsbomb_events.get("coverage_audit"), dict) else {}
+        result = _build_statsbomb_coverage_import_plan(audit)
+        coverage_plan_path = _statsbomb_coverage_import_plan_path()
+        coverage_plan_path.parent.mkdir(parents=True, exist_ok=True)
+        coverage_plan_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        message = (
+            "StatsBomb coverage import plan generated: "
+            f"{result.get('target_date_start') or '-'} -> {result.get('target_date_end') or '-'} | "
+            f"next_step={result.get('next_step') or '-'}"
+        )
     elif action == "build_statsbomb_review_samples":
         settlements = get_recent_settlements(limit=0)
         result = export_statsbomb_review_training_samples(
@@ -5441,7 +5460,7 @@ def repair_training_data_health(action_key: str, *, input_path: Path | str | Non
             "missing_statsbomb": int(result.get("skipped_missing_statsbomb", 0) or 0) if isinstance(result, dict) else 0,
             "unknown_label": int(result.get("skipped_unknown_label", 0) or 0) if isinstance(result, dict) else 0,
         },
-        "output_path": str(result.get("output_path", "")) if isinstance(result, dict) else "",
+        "output_path": str(result.get("output_path", _statsbomb_coverage_import_plan_path() if action == "build_statsbomb_coverage_import_plan" else "")) if isinstance(result, dict) else "",
         "before_status": (before.get("training_health") or {}).get("status") if isinstance(before.get("training_health"), dict) else None,
         "after_status": (after.get("training_health") or {}).get("status") if isinstance(after.get("training_health"), dict) else None,
         "after": after,
@@ -13869,6 +13888,81 @@ def _build_statsbomb_coverage_audit(
         "exact_rows": exact_rows[: max(0, int(candidate_limit))],
         "candidate_rows": candidate_rows[: max(0, int(candidate_limit))],
         "recommendation": recommendation,
+    }
+
+
+def _build_statsbomb_coverage_import_plan(audit: dict | None) -> dict[str, object]:
+    resolved = audit if isinstance(audit, dict) else {}
+    coverage_blocker = str(resolved.get("coverage_blocker") or "")
+    settlement_date_start = resolved.get("settlement_date_start")
+    settlement_date_end = resolved.get("settlement_date_end")
+    statsbomb_date_start = resolved.get("statsbomb_date_start")
+    statsbomb_date_end = resolved.get("statsbomb_date_end")
+    overlap_count = int(resolved.get("date_overlap_count", 0) or 0)
+    candidate_count = int(resolved.get("candidate_count", 0) or 0)
+    gap_count = int(resolved.get("coverage_gap_count", 0) or 0)
+
+    if coverage_blocker == "no_date_overlap":
+        status = "blocked"
+        action_key = "import_statsbomb_for_settlement_date_range"
+        next_step = "Import StatsBomb coverage for the settlement date range, then rebuild review samples."
+        steps = [
+            "Import StatsBomb data for the settlement date window.",
+            "Rebuild review training samples from enriched settlements.",
+            "Re-run coverage audit to confirm overlap exists.",
+        ]
+    elif coverage_blocker in {"no_settlement_dates", "no_statsbomb_dates"}:
+        status = "blocked"
+        action_key = "refresh_training_health"
+        next_step = "Repair the missing date window before building review samples."
+        steps = [
+            "Restore the missing date window in the source payload.",
+            "Re-run coverage audit after the date window is available.",
+        ]
+    elif candidate_count > 0:
+        status = "attention"
+        action_key = "review_team_aliases"
+        next_step = "Review same-date candidates and alias mapping before building review samples."
+        steps = [
+            "Review same-date candidate rows.",
+            "Fix team aliases or source identity mapping.",
+            "Rebuild review samples after alias reconciliation.",
+        ]
+    elif gap_count > 0:
+        status = "attention"
+        action_key = "collect_more_overlap"
+        next_step = "Collect more overlapping StatsBomb coverage before rebuilding review samples."
+        steps = [
+            "Collect additional StatsBomb matches that overlap the settlement window.",
+            "Re-run coverage audit after the new coverage is available.",
+        ]
+    else:
+        status = "healthy"
+        action_key = "refresh_training_health"
+        next_step = "Coverage is aligned; rebuild review samples or move to backtest validation."
+        steps = [
+            "Rebuild review samples.",
+            "Proceed to backtest or stability validation.",
+        ]
+
+    target_date_start = settlement_date_start or statsbomb_date_start
+    target_date_end = settlement_date_end or statsbomb_date_end
+    source_date_start = statsbomb_date_start
+    source_date_end = statsbomb_date_end
+    return {
+        "status": status,
+        "coverage_blocker": coverage_blocker or None,
+        "action_key": action_key,
+        "next_step": next_step,
+        "steps": steps,
+        "target_date_start": target_date_start,
+        "target_date_end": target_date_end,
+        "source_date_start": source_date_start,
+        "source_date_end": source_date_end,
+        "overlap_count": overlap_count,
+        "candidate_count": candidate_count,
+        "coverage_gap_count": gap_count,
+        "ready_to_build_review_samples": coverage_blocker not in {"no_settlement_dates", "no_statsbomb_dates", "no_date_overlap"},
     }
 
 

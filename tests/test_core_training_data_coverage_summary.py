@@ -252,6 +252,13 @@ class CoreTrainingDataCoverageSummaryTests(unittest.TestCase):
         self.assertEqual(audit["settlement_date_end"], "2024-04-15")
         self.assertEqual(audit["statsbomb_date_start"], "2024-03-10")
         self.assertEqual(audit["statsbomb_date_end"], "2024-03-11")
+        plan = status["statsbomb_events"]["coverage_import_plan"]
+        self.assertEqual(plan["status"], "blocked")
+        self.assertEqual(plan["action_key"], "import_statsbomb_for_settlement_date_range")
+        self.assertEqual(plan["target_date_start"], "2024-04-14")
+        self.assertEqual(plan["target_date_end"], "2024-04-15")
+        self.assertEqual(plan["source_date_start"], "2024-03-10")
+        self.assertEqual(plan["source_date_end"], "2024-03-11")
         self.assertIn("statsbomb_date_overlap_missing", codes)
 
     def test_training_health_is_healthy_when_thresholds_are_met(self) -> None:
@@ -435,6 +442,56 @@ class CoreTrainingDataCoverageSummaryTests(unittest.TestCase):
         self.assertTrue(result["output_path"].endswith("statsbomb_review_training_samples.json"))
         self.assertIn("after_status", result)
         self.assertIn("training_gate", result)
+
+    def test_repair_training_data_health_builds_statsbomb_coverage_import_plan(self) -> None:
+        settlements = [
+            {
+                "match_id": "m1",
+                "match_date": "2024-04-14",
+                "league": "1. Bundesliga",
+                "home_team": "Bayer Leverkusen",
+                "away_team": "Werder Bremen",
+            }
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "data" / "state"
+            state.mkdir(parents=True)
+            (state / "statsbomb_event_summaries.json").write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "source_match_id": "s1",
+                                "match_date": "2024-03-10",
+                                "league": "1. Bundesliga",
+                                "home_team": "Bayer Leverkusen",
+                                "away_team": "Werder Bremen",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            store = core.StateStore(root)
+
+            with (
+                patch("v24_app.core.PROJECT_DIR", root),
+                patch("v24_app.core.STATE_STORE", store),
+                patch("v24_app.core.get_recent_settlements", return_value=settlements),
+            ):
+                result = core.repair_training_data_health("build_statsbomb_coverage_import_plan")
+
+            payload = json.loads((root / "data" / "state" / "statsbomb_coverage_import_plan.json").read_text(encoding="utf-8"))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["action_key"], "build_statsbomb_coverage_import_plan")
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(payload["action_key"], "import_statsbomb_for_settlement_date_range")
+        self.assertTrue(result["output_path"].endswith("statsbomb_coverage_import_plan.json"))
+        self.assertEqual(result["result"]["target_date_start"], "2024-04-14")
+        self.assertEqual(result["result"]["source_date_start"], "2024-03-10")
+        self.assertIn("next_step", result["result"])
 
     def test_training_model_gate_recommends_xgb_training_when_data_is_ready(self) -> None:
         coverage = {
