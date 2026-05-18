@@ -2048,6 +2048,8 @@ def _build_parlay_leg(
         "match_date": match.match_date,
         "match_time": match.match_time,
         "league": match.league,
+        "source": match.source,
+        "source_id": match.source_id,
         "competition_group": match.competition_group,
         "group_round": match.group_round,
         "home_points": match.home_points,

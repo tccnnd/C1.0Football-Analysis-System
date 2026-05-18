@@ -77,6 +77,33 @@ class CoreParlayProbabilityTests(unittest.TestCase):
         self.assertTrue(mixed_discounts)
         self.assertLess(max(same_discounts), min(mixed_discounts))
 
+    def test_generated_parlay_legs_keep_source_metadata(self) -> None:
+        match = AppMatch(
+            home_team="A",
+            away_team="B",
+            league="L1",
+            match_time="20:00",
+            match_date="2026-04-05",
+            odds_home=2.1,
+            odds_draw=3.2,
+            odds_away=3.4,
+            source="live:titan",
+            source_id="titan-123",
+        )
+        other = self._match("C", "D", "L2", "21:00")
+        predictions = {
+            match.match_id: {"parlay_eligible_plays": [{"play_type": "handicap", "pick": "+1 让胜", "confidence": 0.8266}]},
+            other.match_id: {"parlay_eligible_plays": [{"play_type": "handicap", "pick": "+1 让胜", "confidence": 0.7973}]},
+        }
+
+        rows = generate_mix_parlay_recommendations([match, other], predictions, limit=5)
+        self.assertEqual(len(rows), 1)
+        legs = rows[0].get("legs", [])
+        self.assertEqual(legs[0]["source"], "live:titan")
+        self.assertEqual(legs[0]["source_id"], "titan-123")
+        self.assertEqual(legs[1]["source"], "unknown")
+        self.assertEqual(legs[1]["source_id"], "")
+
     def test_selection_diversifies_match_exposure(self) -> None:
         matches = [
             self._match("A", "B", "L1", "19:00"),
