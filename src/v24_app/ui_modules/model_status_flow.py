@@ -82,7 +82,7 @@ def _training_health_action_for_issue(code: object, fallback: object = "") -> st
         "xgb_league_coverage_low": "补不同联赛样本",
         "xgb_date_range_missing": "修复样本日期字段",
         "league_profiles_missing": "生成联赛画像",
-        "statsbomb_date_overlap_missing": "执行StatsBomb覆盖计划，导入可覆盖赛事并重建复盘样本",
+        "statsbomb_date_overlap_missing": "执行StatsBomb覆盖计划；若仍无交集，补重叠历史赛果或当前事件源",
         "statsbomb_review_samples_missing": "将事件摘要转为复盘训练样本",
     }
     actions.update(
@@ -318,6 +318,23 @@ def build_training_model_gate_rows(gate_status: Mapping[str, object] | object, *
     return rows[: max(0, int(limit))]
 
 
+def _statsbomb_no_overlap_fallback_lines(plan: Mapping[str, object] | object, *, limit: int = 3) -> list[str]:
+    resolved = plan if isinstance(plan, Mapping) else {}
+    fallback = resolved.get("no_overlap_fallback") if isinstance(resolved.get("no_overlap_fallback"), Mapping) else {}
+    if not isinstance(fallback, Mapping) or not fallback:
+        return []
+    lines = [
+        "StatsBomb无重叠兜底",
+        f"- 状态: {fallback.get('status', '-')} | reason={fallback.get('reason', '-')}",
+        f"- 说明: {fallback.get('message', '-')}",
+        f"- 可安全使用: {fallback.get('safe_use', '-')}",
+    ]
+    actions = [row for row in fallback.get("actions", []) if isinstance(row, Mapping)] if isinstance(fallback.get("actions"), list) else []
+    for row in actions[: max(0, int(limit))]:
+        lines.append(f"- {row.get('label', '-')}: {row.get('detail', '-')}")
+    return lines
+
+
 def build_training_health_repair_result_text(result: Mapping[str, object] | object) -> str:
     resolved = result if isinstance(result, Mapping) else {}
     payload = resolved.get("result", {}) if isinstance(resolved.get("result"), Mapping) else {}
@@ -411,6 +428,7 @@ def build_model_training_overview_text(
         f"- {row.get('label', '-')}: {row.get('value', '-')} | {row.get('detail', '-')}"
         for row in build_training_health_action_rows(coverage)
     ]
+    statsbomb_fallback_lines = _statsbomb_no_overlap_fallback_lines(statsbomb_coverage_plan)
     training_gate_lines = [
         f"- {row.get('label', '-')}: {row.get('value', '-')} | {row.get('detail', '-')}"
         for row in build_training_model_gate_rows(training_gate_status)
@@ -427,6 +445,7 @@ def build_model_training_overview_text(
         f"- 世界杯历史: {world_cup.get('match_count', 0)} 场 | {world_cup.get('year_start') or '-'}-{world_cup.get('year_end') or '-'} | 届数={world_cup.get('year_count', 0)}",
         f"- StatsBomb事件: {statsbomb.get('match_count', 0)} 场 | 复盘样本={statsbomb.get('review_sample_count', 0)} | 特征={statsbomb.get('review_feature_count', 0)} | 覆盖缺口={statsbomb.get('coverage_gap_count', 0)} | 候选={statsbomb.get('coverage_candidate_count', 0)}",
         f"- StatsBomb覆盖计划: {statsbomb_coverage_plan.get('status', '-')}",
+        *statsbomb_fallback_lines,
         f"- Fact Layer: MatchFact={match_fact.get('available_count', 0)}/{match_fact.get('target_count', 0)} ({_safe_float(match_fact.get('coverage_ratio'), 0.0):.1%}) | ActionFact={action_fact.get('available_match_count', 0)}/{action_fact.get('target_match_count', 0)} ({action_fact.get('event_count', 0)} events) | SourceProvenance={_safe_float(source_provenance.get('coverage_ratio'), 0.0):.1%} | TraceRefs={_safe_float(trace_fact_refs.get('trace_fact_ref_coverage_ratio'), 0.0):.1%}",
         f"- ELO评分池: 俱乐部 {rating_pools.get('club_team_count', 0)} 队 | 国家队 {rating_pools.get('national_team_count', 0)} 队",
         f"- 训练健康: {training_health.get('status', '-')} | blocking={training_health.get('blocking_count', 0)} | warning={training_health.get('warning_count', 0)}",

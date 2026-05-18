@@ -13926,6 +13926,7 @@ def _build_statsbomb_coverage_import_plan(audit: dict | None) -> dict[str, objec
     candidate_count = int(resolved.get("candidate_count", 0) or 0)
     gap_count = int(resolved.get("coverage_gap_count", 0) or 0)
 
+    no_overlap_fallback: dict[str, object] = {}
     if coverage_blocker == "no_date_overlap":
         status = "blocked"
         action_key = "import_statsbomb_for_settlement_date_range"
@@ -13935,6 +13936,36 @@ def _build_statsbomb_coverage_import_plan(audit: dict | None) -> dict[str, objec
             "Rebuild review training samples from enriched settlements.",
             "Re-run coverage audit to confirm overlap exists.",
         ]
+        no_overlap_fallback = {
+            "status": "blocked",
+            "reason": "no_date_overlap",
+            "can_build_current_review_samples": False,
+            "safe_use": "historical_event_review_memory_only",
+            "message": (
+                "Current settlements and StatsBomb events have no date overlap; do not generate "
+                "review samples until aligned settlements or aligned event coverage exists."
+            ),
+            "actions": [
+                {
+                    "priority": 1,
+                    "action_key": "import_aligned_historical_settlements",
+                    "label": "导入重叠历史赛果",
+                    "detail": "导入与 StatsBomb 事件日期重叠的历史赛果/预测快照，再重建复盘样本。",
+                },
+                {
+                    "priority": 2,
+                    "action_key": "collect_current_event_coverage",
+                    "label": "补当前事件覆盖",
+                    "detail": "接入能覆盖当前赛果窗口的事件源；StatsBomb Open Data 当前不覆盖时不能强行生成。",
+                },
+                {
+                    "priority": 3,
+                    "action_key": "build_historical_event_memory",
+                    "label": "沉淀历史复盘记忆",
+                    "detail": "现有 StatsBomb 事件可用于历史 few-shot/复盘记忆，但不能冒充当前赛果复盘样本。",
+                },
+            ],
+        }
     elif coverage_blocker in {"no_settlement_dates", "no_statsbomb_dates"}:
         status = "blocked"
         action_key = "refresh_training_health"
@@ -13973,7 +14004,7 @@ def _build_statsbomb_coverage_import_plan(audit: dict | None) -> dict[str, objec
     target_date_end = settlement_date_end or statsbomb_date_end
     source_date_start = statsbomb_date_start
     source_date_end = statsbomb_date_end
-    return {
+    plan = {
         "status": status,
         "coverage_blocker": coverage_blocker or None,
         "action_key": action_key,
@@ -13988,6 +14019,9 @@ def _build_statsbomb_coverage_import_plan(audit: dict | None) -> dict[str, objec
         "coverage_gap_count": gap_count,
         "ready_to_build_review_samples": coverage_blocker not in {"no_settlement_dates", "no_statsbomb_dates", "no_date_overlap"},
     }
+    if no_overlap_fallback:
+        plan["no_overlap_fallback"] = no_overlap_fallback
+    return plan
 
 
 def _load_statsbomb_coverage_import_plan() -> dict[str, object]:

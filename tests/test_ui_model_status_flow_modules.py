@@ -280,6 +280,21 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
             "target_date_end": "2024-04-15",
             "source_date_start": "2024-03-10",
             "source_date_end": "2024-03-11",
+            "no_overlap_fallback": {
+                "status": "blocked",
+                "reason": "no_date_overlap",
+                "can_build_current_review_samples": False,
+                "safe_use": "historical_event_review_memory_only",
+                "message": "Current settlements and StatsBomb events have no date overlap.",
+                "actions": [
+                    {
+                        "priority": 1,
+                        "action_key": "import_aligned_historical_settlements",
+                        "label": "导入重叠历史赛果",
+                        "detail": "导入与 StatsBomb 事件日期重叠的历史赛果/预测快照。",
+                    }
+                ],
+            },
         }
 
         cards = build_training_health_card_rows(coverage)
@@ -299,6 +314,8 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
         self.assertTrue(any(row["action_key"] == "execute_statsbomb_coverage_import_plan" for row in actions))
         self.assertEqual(training_health_action_button_text("execute_statsbomb_coverage_import_plan"), "执行覆盖计划")
         self.assertIn("StatsBomb覆盖计划: blocked", text)
+        self.assertIn("StatsBomb无重叠兜底", text)
+        self.assertIn("导入重叠历史赛果", text)
 
     def test_training_health_action_rows_show_healthy_next_step(self) -> None:
         coverage = self._coverage_with_health("healthy", [])

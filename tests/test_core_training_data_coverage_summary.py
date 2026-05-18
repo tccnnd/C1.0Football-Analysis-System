@@ -259,6 +259,11 @@ class CoreTrainingDataCoverageSummaryTests(unittest.TestCase):
         self.assertEqual(plan["target_date_end"], "2024-04-15")
         self.assertEqual(plan["source_date_start"], "2024-03-10")
         self.assertEqual(plan["source_date_end"], "2024-03-11")
+        fallback = plan["no_overlap_fallback"]
+        self.assertEqual(fallback["reason"], "no_date_overlap")
+        self.assertFalse(fallback["can_build_current_review_samples"])
+        self.assertEqual(fallback["safe_use"], "historical_event_review_memory_only")
+        self.assertEqual(fallback["actions"][0]["action_key"], "import_aligned_historical_settlements")
         self.assertIn("statsbomb_date_overlap_missing", codes)
 
     def test_training_health_is_healthy_when_thresholds_are_met(self) -> None:
