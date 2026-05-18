@@ -40,6 +40,7 @@ from v24_app.ai_dashboard import (
     build_statsbomb_review_training_execution_queue_report_lines,
     build_statsbomb_review_training_execution_queue_snapshot,
     build_statsbomb_review_training_execution_queue_staleness_summary,
+    build_statsbomb_review_training_execution_queue_dismissal_feedback,
     build_statsbomb_review_training_weight_gate_trend_summary,
     build_statsbomb_review_training_weight_gate_followup_record,
     build_statsbomb_review_training_weight_gate_followup_rows,
@@ -1138,6 +1139,49 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertEqual(summary["rows"][0]["consecutive_count"], 1)
         self.assertEqual(summary["rows"][0]["latest_feedback_at"], "2026-05-14 12:15:00")
 
+    def test_review_training_execution_queue_dismissal_feedback_resets_staleness(self) -> None:
+        snapshots = [
+            {
+                "generated_at": "2026-05-14 12:20:00",
+                "action_keys": ["recover_results"],
+            },
+            {
+                "generated_at": "2026-05-14 12:10:00",
+                "action_keys": ["recover_results"],
+            },
+            {
+                "generated_at": "2026-05-14 12:00:00",
+                "action_keys": ["recover_results"],
+            },
+        ]
+        feedback = build_statsbomb_review_training_execution_queue_dismissal_feedback(
+            "recover_results",
+            {"status": "attention", "sample_count": 18, "issue_count": 2},
+            {
+                "queue_status": "stale",
+                "escalation_level": "blocking",
+                "consecutive_count": 3,
+                "first_seen_at": "2026-05-14 12:00:00",
+                "latest_seen_at": "2026-05-14 12:20:00",
+            },
+            reason="manual close",
+            occurred_at=datetime(2026, 5, 14, 12, 25, 0),
+        )
+
+        summary = build_statsbomb_review_training_execution_queue_staleness_summary(snapshots, [feedback])
+
+        self.assertEqual(feedback["feedback_type"], "execution_queue_dismissal")
+        self.assertEqual(feedback["action_key"], "recover_results")
+        self.assertEqual(feedback["outcome"], "dismissed")
+        self.assertEqual(feedback["dismissed_escalation_level"], "blocking")
+        self.assertEqual(feedback["dismissed_consecutive_count"], 3)
+        self.assertEqual(summary["status"], "watch")
+        self.assertEqual(summary["stale_count"], 0)
+        self.assertEqual(summary["blocking_count"], 0)
+        self.assertEqual(summary["reminder_count"], 0)
+        self.assertEqual(summary["rows"][0]["consecutive_count"], 0)
+        self.assertEqual(summary["rows"][0]["latest_feedback_at"], "2026-05-14 12:25:00")
+
     def test_review_training_weight_gate_followup_record_captures_recovery(self) -> None:
         record = build_statsbomb_review_training_weight_gate_followup_record(
             {
@@ -1269,6 +1313,32 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertEqual(followup["after_alert_status"], "healthy")
         self.assertEqual(followup["followup_outcome"], "recovered")
         self.assertEqual(followup["tone"], "good")
+
+    def test_record_review_training_execution_queue_dismissal_skips_gate_audit(self) -> None:
+        dashboard = object.__new__(SmartMatchDashboard)
+        dashboard._log_event = lambda *args, **kwargs: None
+        feedback = build_statsbomb_review_training_execution_queue_dismissal_feedback(
+            "recover_results",
+            {"status": "attention", "sample_count": 18, "issue_count": 2},
+            {"queue_status": "stale", "escalation_level": "blocking", "consecutive_count": 3},
+            occurred_at=datetime(2026, 5, 14, 12, 25, 0),
+        )
+
+        with patch(
+            "v24_app.ai_dashboard._load_statsbomb_review_training_weight_gate_audit_log",
+            return_value=[],
+        ), patch(
+            "v24_app.ai_dashboard._append_statsbomb_review_training_action_feedback_log"
+        ) as append_feedback, patch(
+            "v24_app.ai_dashboard._append_statsbomb_review_training_weight_gate_audit_log"
+        ) as append_audit, patch(
+            "v24_app.ai_dashboard._append_statsbomb_review_training_weight_gate_followup_log"
+        ) as append_followup:
+            dashboard._record_statsbomb_review_training_action_feedback(feedback)
+
+        append_feedback.assert_called_once()
+        append_audit.assert_not_called()
+        append_followup.assert_not_called()
 
     def test_review_training_weight_gate_audit_log_appends_newest_and_caps(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

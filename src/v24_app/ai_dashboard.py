@@ -2389,6 +2389,47 @@ def build_statsbomb_review_training_action_feedback(
     }
 
 
+def build_statsbomb_review_training_execution_queue_dismissal_feedback(
+    action_key: str,
+    quality: dict | object,
+    staleness_row: dict | object | None = None,
+    *,
+    reason: str = "manual_dismissal",
+    occurred_at: datetime | None = None,
+) -> dict[str, object]:
+    payload = quality if isinstance(quality, dict) else {}
+    row = staleness_row if isinstance(staleness_row, dict) else {}
+    feedback = build_statsbomb_review_training_action_feedback(
+        action_key,
+        payload,
+        payload,
+        {"ok": True, "message": reason},
+        occurred_at=occurred_at,
+    )
+    escalation_level = str(row.get("escalation_level") or "-")
+    consecutive_count = int(row.get("consecutive_count", 0) or 0)
+    feedback.update(
+        {
+            "feedback_type": "execution_queue_dismissal",
+            "outcome": "dismissed",
+            "tone": "neutral",
+            "dismissal_reason": str(reason or "manual_dismissal"),
+            "dismissed_escalation_level": escalation_level,
+            "dismissed_consecutive_count": consecutive_count,
+            "dismissed_queue_status": str(row.get("queue_status") or "-"),
+            "dismissed_first_seen_at": str(row.get("first_seen_at") or "-"),
+            "dismissed_latest_seen_at": str(row.get("latest_seen_at") or "-"),
+            "summary_text": (
+                f"{action_key}: dismissed | escalation {escalation_level} | "
+                f"consecutive {consecutive_count}"
+            ),
+            "next_recommendation": "已关闭本轮滞留提醒；下一次导出若仍存在会重新开始观察。",
+            "message": str(reason or "manual_dismissal"),
+        }
+    )
+    return feedback
+
+
 def build_statsbomb_review_training_feedback_rows(records: list[dict] | object, limit: int = 5) -> list[dict[str, object]]:
     if not isinstance(records, list):
         return []
@@ -8045,6 +8086,9 @@ class SmartMatchDashboard:
         except Exception as exc:
             self._log_event("ERROR", f"事件代理修复闭环记录写入失败: {exc}")
             return
+        if str(feedback.get("feedback_type") or "") == "execution_queue_dismissal":
+            self._log_event("OK", str(feedback.get("summary_text") or "接管执行待办已关闭"))
+            return
         try:
             audit = build_statsbomb_review_training_weight_gate_audit_record_from_feedback(feedback)
             _append_statsbomb_review_training_weight_gate_audit_log(audit)
@@ -8058,6 +8102,31 @@ class SmartMatchDashboard:
         except Exception as exc:
             self._log_event("ERROR", f"StatsBomb gate审计记录写入失败: {exc}")
         self._log_event("OK", str(feedback.get("summary_text") or "事件代理修复闭环已记录"))
+
+    def dismiss_statsbomb_review_execution_queue_action(
+        self,
+        action_key: str,
+        staleness_row: dict | object | None = None,
+    ) -> None:
+        action = str(action_key or "").strip()
+        if not action:
+            return
+        feedback = build_statsbomb_review_training_execution_queue_dismissal_feedback(
+            action,
+            self._current_statsbomb_review_training_quality(),
+            staleness_row if isinstance(staleness_row, dict) else {},
+            reason="operator_dismissed_execution_queue_item",
+        )
+        self._record_statsbomb_review_training_action_feedback(feedback)
+        self.status_var.set(f"StatsBomb接管执行待办已关闭: {action}")
+        messagebox.showinfo(
+            "接管执行待办关闭",
+            (
+                f"已关闭本轮滞留待办: {action}\n\n"
+                f"{feedback.get('summary_text', '-')}\n\n"
+                f"下一步: {feedback.get('next_recommendation', '-')}"
+            ),
+        )
 
     def _rebuild_statsbomb_review_samples_after_recovery(self, recovery_result: dict) -> str:
         record = self.result_recovery_run_record if isinstance(self.result_recovery_run_record, dict) else {}
@@ -8938,6 +9007,16 @@ class SmartMatchDashboard:
                 return lambda: (window.destroy(), self.open_statsbomb_review_training_center_window())
             return lambda key=action_key: self.run_statsbomb_review_training_action(key)
 
+        def _dismiss_command(action_key: str, row: dict):
+            payload = dict(row)
+
+            def _run() -> None:
+                self.dismiss_statsbomb_review_execution_queue_action(action_key, payload)
+                window.destroy()
+                self.open_statsbomb_review_training_center_window()
+
+            return _run
+
         execution_queue_rows = summary.get("execution_queue_rows") if isinstance(summary.get("execution_queue_rows"), list) else []
         self._strategy_section_title(right, "接管执行待办", first=False)
         if execution_queue_rows:
@@ -8974,6 +9053,14 @@ class SmartMatchDashboard:
                         f"建议: {row.get('recommendation', '-')}"
                     ),
                 )
+                if str(row.get("queue_status") or "") == "stale":
+                    action_key = str(row.get("action_key") or "")
+                    self._strategy_row(
+                        right,
+                        f"关闭待办 | {action_key}",
+                        "人工确认本轮暂不执行该待办；点击后只写入关闭留痕，不删除历史快照。",
+                        command=_dismiss_command(action_key, row),
+                    )
         else:
             self._strategy_row(right, "暂无滞留动作", "当前没有连续滞留的接管执行待办。")
 
