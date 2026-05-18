@@ -70,6 +70,12 @@ SPECIAL_WORKBENCH_LAYOUT: tuple[tuple[str, tuple[dict[str, str], ...]], ...] = (
                 "tone": "neutral",
             },
             {
+                "title": "每日二串一",
+                "body": "查看今日二串一组合、组合命中率、相关性折扣和近期结算反馈。",
+                "action_key": "open_daily_parlay_window",
+                "tone": "info",
+            },
+            {
                 "title": "放行回收闭环",
                 "body": "检查正式放行后的待回收、缺快照、超期和质量趋势。",
                 "action_key": "open_strategy_release_recovery_loop_window",

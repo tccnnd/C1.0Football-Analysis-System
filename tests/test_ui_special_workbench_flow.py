@@ -37,6 +37,7 @@ class UISpecialWorkbenchFlowTests(unittest.TestCase):
         self.assertEqual([section[0] for section in sections], ["复盘闭环", "策略与接管", "数据与运行"])
         self.assertGreaterEqual(len(sections[0][1]), 5)
         self.assertIn("open_ai_video_review_center_window", action_keys)
+        self.assertIn("open_daily_parlay_window", action_keys)
         self.assertIn("open_play_model_takeover_gate_audit_history", action_keys)
         self.assertIn("open_strategy_policy_audit_history", action_keys)
         self.assertIn("open_data_center", action_keys)

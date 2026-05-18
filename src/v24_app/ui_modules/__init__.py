@@ -180,6 +180,12 @@ from .main_flow_governance import (
     summarize_main_flow_governance_statuses,
 )
 from .parlay_flow import build_parlay_detail_lines, refresh_parlay_recommendations
+from .daily_parlay_flow import (
+    build_daily_parlay_empty_state,
+    build_daily_parlay_settlement_rows,
+    build_daily_parlay_summary,
+    build_daily_parlay_ticket_rows,
+)
 from .handicap_monitor_flow import (
     build_handicap_dashboard_text,
     build_handicap_shadow_report_filename,
@@ -495,6 +501,10 @@ __all__ = [
     "summarize_main_flow_governance_statuses",
     "build_parlay_detail_lines",
     "refresh_parlay_recommendations",
+    "build_daily_parlay_empty_state",
+    "build_daily_parlay_settlement_rows",
+    "build_daily_parlay_summary",
+    "build_daily_parlay_ticket_rows",
     "build_handicap_dashboard_text",
     "build_handicap_shadow_report_filename",
     "build_handicap_shadow_report_lines",

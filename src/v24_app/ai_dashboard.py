@@ -28,6 +28,8 @@ from .core import (
     export_play_model_takeover_gate_audit_report as export_play_model_takeover_gate_audit_report_now,
     export_video_review_fewshot_samples_now,
     fetch_matches_v24,
+    generate_mix_parlay_recommendations,
+    get_active_parlay_recommendations,
     get_draw_specialist_backtest_status,
     get_draw_release_guard_policy_history,
     get_draw_release_guard_policy_status,
@@ -37,6 +39,8 @@ from .core import (
     get_play_model_training_status,
     get_high_accuracy_strategy_status,
     get_recent_settlements,
+    get_recent_parlay_settlements,
+    get_parlay_selector_metrics,
     get_video_review_for_match,
     get_video_review_fewshot_memory,
     repair_training_data_health,
@@ -196,6 +200,11 @@ from .ui_modules import (
     build_strategy_release_recovery_alerts,
     build_strategy_release_recovery_loop,
     build_strategy_release_pool_rows,
+    build_daily_parlay_empty_state,
+    build_daily_parlay_settlement_rows,
+    build_daily_parlay_summary,
+    build_daily_parlay_ticket_rows,
+    refresh_parlay_recommendations,
     build_c1_rows_from_marks,
     filter_main_flow_governance_rows,
     build_main_flow_governance_status,
@@ -4443,6 +4452,7 @@ class SmartMatchDashboard:
         tk.Label(right, text="\u5feb\u6377\u5165\u53e3", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(16, 10))
         shortcuts = [
             ("\u8d5b\u4e8b\u5206\u6790", "\u67e5\u770b\u91cd\u70b9\u8d5b\u4e8b\u3001\u98ce\u9669\u548c\u7f6e\u4fe1\u5ea6\u5206\u5e03", lambda: self._select_nav(1, self._build_main)),
+            ("每日二串一", "查看今日二串一组合、组合命中率、相关性折扣和近期结算反馈", self.open_daily_parlay_window),
             ("专项中心", "集中进入复盘、策略接管、数据运行相关专项窗口", self.open_special_workbench),
             ("\u4e3b\u6d41\u7a0b\u6cbb\u7406", "\u5148\u770b\u6b63\u5f0f\u5efa\u8bae\uff0c\u518d\u67e5 C1 \u5f85\u5ba1\u548c\u963b\u65ad", lambda: self.open_governance_filtered_matches("formal_ready")),
             ("\u6cbb\u7406\u8be6\u60c5", "\u6e05\u7406 C1 \u5f85\u5ba1\u4e0e\u963b\u65ad\u573a\u6b21\uff0c\u67e5\u770b\u51b3\u7b56\u94fe", self.open_governance_issue_center),
@@ -4505,6 +4515,7 @@ class SmartMatchDashboard:
             "open_statsbomb_review_training_center_window": self.open_statsbomb_review_training_center_window,
             "open_statsbomb_review_training_closure_window": self.open_statsbomb_review_training_closure_window,
             "open_strategy_library": self.open_strategy_library,
+            "open_daily_parlay_window": self.open_daily_parlay_window,
             "open_strategy_release_recovery_loop_window": self.open_strategy_release_recovery_loop_window,
             "open_play_model_takeover_gate_audit_history": self.open_play_model_takeover_gate_audit_history,
             "open_play_model_policy_detail_window": self.open_play_model_policy_detail_window,
@@ -12773,6 +12784,7 @@ class SmartMatchDashboard:
         toolbar.pack(fill=tk.X, pady=(0, 8))
         self._strategy_toolbar_button(toolbar, "刷新看板", self.open_strategy_library)
         self._strategy_toolbar_button(toolbar, "专项中心", self.open_special_workbench, primary=True)
+        self._strategy_toolbar_button(toolbar, "每日二串一", self.open_daily_parlay_window)
 
         scroll_wrap = tk.Frame(shell, bg=BG)
         scroll_wrap.pack(fill=tk.BOTH, expand=True)
@@ -12966,6 +12978,170 @@ class SmartMatchDashboard:
                 self._strategy_row(right, title, body_text)
         else:
             self._strategy_row(right, "暂无准入结果", "加载并分析赛事后，这里会显示正式放行、观察和阻断清单。")
+        self._bind_canvas_mousewheel(content, canvas)
+
+    def _daily_parlay_snapshot(self) -> dict[str, object]:
+        current_rows = [row for row in getattr(self, "rows", []) if isinstance(row, DashboardRow)]
+        matches = [row.match for row in current_rows]
+        predictions = {row.match.match_id: row.prediction for row in current_rows if isinstance(row.prediction, dict)}
+        active_tickets: list[dict] = []
+        refreshed_from_current = False
+        if len(predictions) >= 2:
+            try:
+                active_tickets = refresh_parlay_recommendations(
+                    matches=matches,
+                    predictions=predictions,
+                    active_release_allowed_ids=set(),
+                    generator_fn=generate_mix_parlay_recommendations,
+                    limit=10,
+                )
+                refreshed_from_current = bool(active_tickets)
+            except Exception as exc:
+                self._log_event("WARN", f"每日二串一刷新失败: {exc}")
+        if not active_tickets:
+            try:
+                active_tickets = get_active_parlay_recommendations(limit=20)
+            except Exception as exc:
+                active_tickets = []
+                self._log_event("WARN", f"每日二串一读取失败: {exc}")
+        try:
+            settled_tickets = get_recent_parlay_settlements(limit=20)
+        except Exception as exc:
+            settled_tickets = []
+            self._log_event("WARN", f"二串一结算读取失败: {exc}")
+        try:
+            selector_metrics = get_parlay_selector_metrics(limit=120)
+        except Exception as exc:
+            selector_metrics = {}
+            self._log_event("WARN", f"二串一健康指标读取失败: {exc}")
+        summary = build_daily_parlay_summary(active_tickets, settled_tickets)
+        return {
+            "active_tickets": active_tickets,
+            "settled_tickets": settled_tickets,
+            "summary": summary,
+            "selector_metrics": selector_metrics,
+            "ticket_rows": build_daily_parlay_ticket_rows(active_tickets, limit=8),
+            "settlement_rows": build_daily_parlay_settlement_rows(settled_tickets, limit=8),
+            "empty_state": build_daily_parlay_empty_state(summary),
+            "refreshed_from_current": refreshed_from_current,
+        }
+
+    def open_daily_parlay_window(self) -> None:
+        self.current_nav_index = 4
+        self.current_view = "daily_parlay"
+        self._refresh_nav_highlight()
+        snapshot = self._daily_parlay_snapshot()
+        summary = snapshot.get("summary") if isinstance(snapshot.get("summary"), dict) else {}
+        metrics = snapshot.get("selector_metrics") if isinstance(snapshot.get("selector_metrics"), dict) else {}
+        ticket_rows = snapshot.get("ticket_rows") if isinstance(snapshot.get("ticket_rows"), list) else []
+        settlement_rows = snapshot.get("settlement_rows") if isinstance(snapshot.get("settlement_rows"), list) else []
+        hit_rate_text = _pct1(summary.get("hit_rate")) if int(summary.get("settled_count", 0) or 0) else "-"
+        source_text = "当前分析" if bool(snapshot.get("refreshed_from_current")) else "已保存推荐"
+
+        shell = self._page_shell(
+            "每日二串一",
+            "集中查看今日二串一组合、组合命中率、相关性风险和近期结算反馈。",
+        )
+        toolbar = tk.Frame(shell, bg=BG)
+        toolbar.pack(fill=tk.X, pady=(0, 12))
+        tk.Label(
+            toolbar,
+            text=f"来源: {source_text} | 生成规则: 2串1 | 更新: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            bg=BG,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 10),
+        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self._strategy_toolbar_button(toolbar, "刷新二串一", self.open_daily_parlay_window, primary=True)
+        self._strategy_toolbar_button(toolbar, "赛事分析", lambda: self._select_nav(1, self._build_main))
+        self._strategy_toolbar_button(toolbar, "策略看板", self.open_strategy_library)
+
+        metric_bar = tk.Frame(shell, bg=BG)
+        metric_bar.pack(fill=tk.X, pady=(0, 16))
+        for label, value, color in [
+            ("今日组合", str(summary.get("active_count", 0)), GREEN if int(summary.get("active_count", 0) or 0) else MUTED),
+            ("平均命中", _pct1(summary.get("avg_expected_hit")), "#7aa2ff"),
+            ("历史二串一", str(summary.get("settled_count", 0)), TEXT),
+            ("近期命中", hit_rate_text, GREEN if float(summary.get("hit_rate", 0) or 0) >= 0.5 else YELLOW),
+        ]:
+            self._detail_metric(metric_bar, label, value, color)
+
+        scroll_wrap = tk.Frame(shell, bg=BG)
+        scroll_wrap.pack(fill=tk.BOTH, expand=True)
+        canvas = tk.Canvas(scroll_wrap, bg=BG, bd=0, highlightthickness=0)
+        scrollbar = tk.Scrollbar(scroll_wrap, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        content = tk.Frame(canvas, bg=BG)
+        window_id = canvas.create_window((0, 0), window=content, anchor=tk.NW)
+        content.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window_id, width=event.width))
+
+        body = tk.Frame(content, bg=BG)
+        body.pack(fill=tk.BOTH, expand=True)
+        left = self._card(body, PANEL)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 14))
+        right = self._card(body, PANEL)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self._strategy_section_title(left, "今日推荐组合", first=True)
+        if ticket_rows:
+            for index, row in enumerate([item for item in ticket_rows if isinstance(item, dict)], start=1):
+                expected_hit = float(row.get("expected_hit", 0) or 0)
+                mixed_text = "混合玩法" if bool(row.get("mixed")) else "同类玩法"
+                legs = row.get("legs") if isinstance(row.get("legs"), list) else []
+                legs_text = "\n".join(str(item) for item in legs[:2]) or str(row.get("body") or "-")
+                self._strategy_row(
+                    left,
+                    f"组合 {index} | {mixed_text} | 命中 {_pct1(expected_hit)}",
+                    (
+                        f"{legs_text}\n"
+                        f"状态: {row.get('status', '-')} | 创建: {row.get('created_at', '-') or '-'}\n"
+                        f"票据: {row.get('ticket_id', '-') or '-'}"
+                    ),
+                )
+        else:
+            self._strategy_row(
+                left,
+                "暂无今日二串一",
+                str(snapshot.get("empty_state") or "当前没有可展示的二串一组合。"),
+                command=lambda: self._select_nav(1, self._build_main),
+            )
+
+        self._strategy_section_title(right, "组合健康", first=True)
+        for label, value in [
+            ("当前票据", str(metrics.get("ticket_count", summary.get("active_count", 0)))),
+            ("唯一场次", str(metrics.get("unique_match_count", 0))),
+            ("最大场次暴露", str(metrics.get("max_match_exposure", 0))),
+            ("混合比例", _pct1(metrics.get("mixed_ratio", 0))),
+            ("最高组合命中", _pct1(metrics.get("max_expected_hit", 0))),
+            (
+                "风险提示",
+                f"低折扣 {int(metrics.get('low_discount_count', 0) or 0)} | 高爆冷腿 {int(metrics.get('high_upset_leg_count', 0) or 0)}",
+            ),
+        ]:
+            self._kv_row(right, label, value)
+
+        self._strategy_section_title(right, "近期结算", first=False)
+        if settlement_rows:
+            for row in [item for item in settlement_rows if isinstance(item, dict)]:
+                status = str(row.get("status") or "-")
+                status_text = "命中" if status == "won" else "未中" if status == "lost" else status
+                self._strategy_row(
+                    right,
+                    f"{status_text} | {row.get('settled_at', '-') or '-'} | 预期 {_pct1(row.get('expected_hit'))}",
+                    (
+                        f"{row.get('body', '-')}\n"
+                        f"类型: {'混合玩法' if bool(row.get('mixed')) else '同类玩法'} | "
+                        f"票据: {row.get('ticket_id', '-') or '-'}"
+                    ),
+                )
+        else:
+            self._strategy_row(right, "暂无二串一结算", "完成赛果回收后，这里会显示二串一命中和未中记录。")
+
+        self.status_var.set(
+            f"每日二串一: 当前 {summary.get('active_count', 0)} 组 | 历史 {summary.get('settled_count', 0)} 组 | 命中 {hit_rate_text}"
+        )
         self._bind_canvas_mousewheel(content, canvas)
 
     def open_strategy_release_recovery_loop_window(self) -> None:
