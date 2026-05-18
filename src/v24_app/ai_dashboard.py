@@ -63,6 +63,11 @@ from .core import (
     train_play_models_now,
     warmup_prediction_models,
 )
+from .training_samples import (
+    build_statsbomb_review_label_queue,
+    export_statsbomb_review_label_queue,
+    update_statsbomb_review_label_queue_settlements,
+)
 from .ui_modules import (
     build_background_task_rows,
     build_background_task_detail_lines,
@@ -7640,6 +7645,7 @@ class SmartMatchDashboard:
         quality = self._current_statsbomb_review_training_quality()
         repair_records = _load_statsbomb_review_training_action_feedback_log()
         summary = build_statsbomb_review_training_center_summary(quality, repair_records)
+        _label_queue_rows, label_queue_summary = build_statsbomb_review_label_queue(list(reversed(get_recent_settlements(limit=0))), limit=500)
 
         window = tk.Toplevel(self.root)
         window.title("事件代理专项中心")
@@ -7710,6 +7716,7 @@ class SmartMatchDashboard:
         for label, value, color in [
             ("质量状态", str(summary.get("status") or "-"), self._tone_color(str(summary.get("tone") or "neutral"))),
             ("复盘样本", str(summary.get("sample_count", 0)), TEXT),
+            ("标注队列", str(label_queue_summary.get("queue_count", 0)), YELLOW if int(label_queue_summary.get("queue_count", 0) or 0) else GREEN),
             ("问题数", str(summary.get("issue_count", 0)), RED if int(summary.get("issue_count", 0) or 0) else GREEN),
             ("修复记录", str(summary.get("repair_count", 0)), "#7aa2ff"),
         ]:
@@ -7749,6 +7756,17 @@ class SmartMatchDashboard:
 
         self._strategy_section_title(right, "可执行修复", first=True)
 
+        self._strategy_row(
+            right,
+            "复盘标注队列",
+            (
+                f"待补 {label_queue_summary.get('queue_count', 0)} | "
+                f"部分 {label_queue_summary.get('partial_label_count', 0)} | "
+                f"全空 {label_queue_summary.get('all_label_missing_count', 0)}"
+            ),
+            command=self.open_statsbomb_review_label_queue_editor_window,
+        )
+
         def _action_command(action_key: str):
             if action_key == "refresh_review_center":
                 return lambda: (window.destroy(), self.open_statsbomb_review_training_center_window())
@@ -7781,6 +7799,338 @@ class SmartMatchDashboard:
             "仅用于赛后复盘",
             "StatsBomb/Event Proxy 样本只进入 Evaluation Agent 复盘与错因归因，不写入赛前预测特征。",
         )
+
+    def open_statsbomb_review_label_queue_editor_window(self) -> None:
+        window = tk.Toplevel(self.root)
+        window.title("复盘标注队列")
+        window.geometry("1320x780")
+        window.configure(bg=BG)
+
+        shell = tk.Frame(window, bg=BG)
+        shell.pack(fill=tk.BOTH, expand=True, padx=16, pady=16)
+
+        header = tk.Frame(shell, bg=BG)
+        header.pack(fill=tk.X, pady=(0, 12))
+        tk.Label(header, text="复盘标注队列", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 15, "bold")).pack(side=tk.LEFT)
+
+        def _header_button(label: str, command, *, color: str = PANEL_2) -> None:
+            tk.Button(
+                header,
+                text=label,
+                command=command,
+                bg=color,
+                fg="white" if color == BLUE else TEXT,
+                activebackground="#3d5ee7" if color == BLUE else "#172638",
+                activeforeground="white",
+                relief=tk.FLAT,
+                font=("Microsoft YaHei UI", 10, "bold"),
+                padx=14,
+                pady=6,
+            ).pack(side=tk.RIGHT, padx=(8, 0))
+
+        queue_rows_cache: list[dict[str, object]] = []
+        queue_summary_cache: dict[str, object] = {}
+
+        def _export_queue() -> None:
+            settlements = list(reversed(get_recent_settlements(limit=0)))
+            result = export_statsbomb_review_label_queue(PROJECT_DIR, settlements, limit=500)
+            self.status_var.set(
+                f"复盘标注队列已导出: {int(result.get('queue_count', 0) or 0)} 行"
+            )
+            messagebox.showinfo(
+                "复盘标注队列",
+                f"已导出复盘标注队列:\n{result.get('output_path', '-')}\n\nCSV:\n{result.get('csv_path', '-')}",
+            )
+
+        def _refresh_after_save(selected_match_id: str | None = None) -> None:
+            nonlocal queue_rows_cache, queue_summary_cache
+            settlements = list(reversed(get_recent_settlements(limit=0)))
+            queue_rows_cache, queue_summary_cache = build_statsbomb_review_label_queue(settlements, limit=500)
+            review_samples = get_statsbomb_review_training_samples()
+            review_sample_count = int(review_samples.get("sample_count", 0) or 0) if isinstance(review_samples, dict) else 0
+            queue_count_var.set(str(queue_summary_cache.get("queue_count", 0)))
+            partial_count_var.set(str(queue_summary_cache.get("partial_label_count", 0)))
+            empty_count_var.set(str(queue_summary_cache.get("all_label_missing_count", 0)))
+            sample_count_var.set(str(review_sample_count))
+            tree.delete(*tree.get_children())
+            for index, row in enumerate(queue_rows_cache):
+                labels_text = " | ".join(
+                    [
+                        f"1X2={_label_option_from_value(row.get('is_correct'))}",
+                        f"让球={_label_option_from_value(row.get('handicap_is_correct'))}",
+                        f"大小={_label_option_from_value(row.get('ou_is_correct'))}",
+                    ]
+                ).replace("保持原值", "-")
+                tree.insert(
+                    "",
+                    tk.END,
+                    iid=str(index),
+                    values=(
+                        str(row.get("match_date") or "-"),
+                        str(row.get("league") or "-"),
+                        f"{row.get('home_team') or '-'} vs {row.get('away_team') or '-'}",
+                        str(row.get("score") or "-"),
+                        str(row.get("missing_label_fields") or "-"),
+                        labels_text,
+                        str(row.get("notes") or "-"),
+                        str(row.get("annotation_status") or "-"),
+                    ),
+                )
+            if not queue_rows_cache:
+                _clear_editor()
+                editor_status_var.set("当前没有待补标签的复盘样本。")
+                return
+            target_index = 0
+            if selected_match_id:
+                for index, row in enumerate(queue_rows_cache):
+                    if str(row.get("match_id") or "") == selected_match_id:
+                        target_index = index
+                        break
+            tree.selection_set(str(target_index))
+            tree.see(str(target_index))
+            _load_selected_row()
+            editor_status_var.set(
+                f"待补 {queue_summary_cache.get('queue_count', 0)} | 复盘样本 {review_sample_count}"
+            )
+
+        def _label_option_from_value(value: object) -> str:
+            if isinstance(value, bool):
+                return "命中" if value else "未命中"
+            text = str(value or "").strip().casefold()
+            compact = text.replace(" ", "").replace("_", "").replace("-", "")
+            if compact in {"1", "1.0", "true", "yes", "y", "hit", "correct", "pass", "命中", "是", "对", "正确"}:
+                return "命中"
+            if compact in {"0", "0.0", "false", "no", "n", "miss", "incorrect", "wrong", "fail", "未命中", "否", "错", "错误"}:
+                return "未命中"
+            return "保持原值"
+
+        def _label_value_from_option(value: str) -> bool | None:
+            if value == "命中":
+                return True
+            if value == "未命中":
+                return False
+            return None
+
+        def _selected_index() -> int | None:
+            selection = tree.selection()
+            if not selection:
+                return None
+            try:
+                index = int(selection[0])
+            except (TypeError, ValueError):
+                return None
+            if index < 0 or index >= len(queue_rows_cache):
+                return None
+            return index
+
+        def _current_row() -> dict[str, object] | None:
+            index = _selected_index()
+            if index is None:
+                return None
+            return queue_rows_cache[index]
+
+        def _clear_editor() -> None:
+            current_match_id_var.set("-")
+            current_source_match_id_var.set("-")
+            current_score_var.set("-")
+            current_missing_var.set("-")
+            current_prediction_var.set("-")
+            for field in label_fields:
+                label_vars[field].set("保持原值")
+            note_text.configure(state=tk.NORMAL)
+            note_text.delete("1.0", tk.END)
+            note_text.configure(state=tk.NORMAL)
+
+        def _load_selected_row(_event: object | None = None) -> None:
+            row = _current_row()
+            if not row:
+                return
+            current_match_id_var.set(str(row.get("match_id") or "-"))
+            current_source_match_id_var.set(str(row.get("statsbomb_source_match_id") or "-"))
+            current_score_var.set(str(row.get("score") or "-"))
+            current_missing_var.set(str(row.get("missing_label_fields") or "-"))
+            current_prediction_var.set(
+                " | ".join(
+                    [
+                        f"1X2={row.get('predicted') or '-'}",
+                        f"让球={row.get('predicted_handicap') or '-'}",
+                        f"大小={row.get('predicted_ou') or '-'}",
+                    ]
+                )
+            )
+            for field in label_fields:
+                label_vars[field].set(_label_option_from_value(row.get(field)))
+            note_text.configure(state=tk.NORMAL)
+            note_text.delete("1.0", tk.END)
+            note_text.insert("1.0", str(row.get("notes") or ""))
+            note_text.configure(state=tk.NORMAL)
+            editor_status_var.set(
+                f"待补 {queue_summary_cache.get('queue_count', 0)} | 当前 {row.get('match_id') or '-'}"
+            )
+
+        def _save_current(*, rebuild: bool) -> None:
+            row = _current_row()
+            if not row:
+                messagebox.showinfo("复盘标注队列", "请先选择一条待标注记录。")
+                return
+            payload: dict[str, object] = {"match_id": str(row.get("match_id") or "")}
+            for field in label_fields:
+                option = label_vars[field].get().strip()
+                if option == "保持原值":
+                    continue
+                payload[field] = _label_value_from_option(option)
+            note_value = note_text.get("1.0", tk.END).strip()
+            if note_value:
+                payload["notes"] = note_value
+            if len(payload) == 1:
+                messagebox.showinfo("复盘标注队列", "当前没有可保存的变更。")
+                return
+
+            update_result = update_statsbomb_review_label_queue_settlements(PROJECT_DIR, [payload], limit=10000)
+            if not bool(update_result.get("ok")):
+                messagebox.showerror(
+                    "复盘标注队列",
+                    f"保存失败:\n{update_result.get('skipped_missing_settlement', 0)} 条未找到对应结算记录。",
+                )
+                return
+
+            export_result = export_statsbomb_review_label_queue(PROJECT_DIR, list(reversed(get_recent_settlements(limit=0))), limit=500)
+            rebuild_result: dict[str, object] = {}
+            sample_count = int(get_statsbomb_review_training_samples().get("sample_count", 0) or 0)
+            if rebuild:
+                try:
+                    rebuild_result = repair_training_data_health("build_statsbomb_review_samples")
+                    invalidate_statsbomb_state_cache(STATSBOMB_REVIEW_TRAINING_FILE)
+                    sample_count = int(rebuild_result.get("generated_sample_count", 0) or sample_count)
+                except Exception as exc:
+                    rebuild_result = {"ok": False, "message": str(exc)}
+
+            summary_text = (
+                f"match_id={row.get('match_id', '-')}"
+                f" | saved={int(update_result.get('updated_count', 0) or 0)}"
+                f" | queue={int(export_result.get('queue_count', 0) or 0)}"
+                f" | review_samples={sample_count}"
+            )
+            self.status_var.set(f"复盘标注已保存: {row.get('match_id') or '-'}")
+            editor_status_var.set(summary_text)
+            messagebox.showinfo(
+                "复盘标注队列",
+                (
+                    f"已保存并{'重建复盘样本' if rebuild else '更新队列'}。\n\n"
+                    f"match_id: {row.get('match_id', '-')}\n"
+                    f"更新记录: {int(update_result.get('updated_count', 0) or 0)}\n"
+                    f"队列剩余: {int(export_result.get('queue_count', 0) or 0)}\n"
+                    f"复盘样本: {sample_count}\n"
+                    f"说明: {rebuild_result.get('message', '-') if rebuild_result else '-'}"
+                ),
+            )
+            _refresh_after_save(str(row.get("match_id") or ""))
+
+        def _refresh_current_selection() -> None:
+            row = _current_row()
+            _refresh_after_save(str(row.get("match_id") or "") if row else None)
+
+        _header_button("刷新", _refresh_current_selection)
+        _header_button("导出队列", _export_queue)
+        _header_button("保存并重建", lambda: _save_current(rebuild=True), color=BLUE)
+        _header_button("保存当前", lambda: _save_current(rebuild=False))
+        _header_button("关闭", window.destroy)
+
+        top = tk.Frame(shell, bg=BG)
+        top.pack(fill=tk.X, pady=(0, 12))
+        queue_count_var = tk.StringVar(value="0")
+        partial_count_var = tk.StringVar(value="0")
+        empty_count_var = tk.StringVar(value="0")
+        sample_count_var = tk.StringVar(value="0")
+        for label, value, color in [
+            ("待标注", queue_count_var, YELLOW),
+            ("部分已填", partial_count_var, TEXT),
+            ("全空", empty_count_var, TEXT),
+            ("复盘样本", sample_count_var, GREEN),
+        ]:
+            self._detail_metric(top, label, value, color)
+
+        body = tk.Frame(shell, bg=BG)
+        body.pack(fill=tk.BOTH, expand=True)
+        left = self._card(body, PANEL)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 12))
+        right = self._card(body, PANEL)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self._strategy_section_title(left, "待标注样本", first=True)
+        table_wrap = tk.Frame(left, bg=PANEL)
+        table_wrap.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
+        self._configure_dark_tree_style("StatsBombReviewQueue.Treeview", rowheight=27)
+        columns = ("date", "league", "match", "score", "missing", "labels", "note", "status")
+        tree = ttk.Treeview(table_wrap, columns=columns, show="headings", style="StatsBombReviewQueue.Treeview", height=18)
+        headings = {
+            "date": "日期",
+            "league": "联赛",
+            "match": "场次",
+            "score": "比分",
+            "missing": "缺失标签",
+            "labels": "当前标签",
+            "note": "备注",
+            "status": "状态",
+        }
+        widths = {"date": 92, "league": 86, "match": 240, "score": 60, "missing": 130, "labels": 220, "note": 160, "status": 72}
+        for key in columns:
+            tree.heading(key, text=headings[key])
+            tree.column(key, width=widths[key], minwidth=54, stretch=key == "match", anchor=tk.W)
+        scrollbar = tk.Scrollbar(table_wrap, orient=tk.VERTICAL, command=tree.yview)
+        tree.configure(yscrollcommand=scrollbar.set)
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        tree.bind("<<TreeviewSelect>>", _load_selected_row)
+
+        self._strategy_section_title(right, "样本信息", first=True)
+        info_frame = tk.Frame(right, bg=PANEL)
+        info_frame.pack(fill=tk.X, padx=18, pady=(0, 10))
+        current_match_id_var = tk.StringVar(value="-")
+        current_source_match_id_var = tk.StringVar(value="-")
+        current_score_var = tk.StringVar(value="-")
+        current_missing_var = tk.StringVar(value="-")
+        current_prediction_var = tk.StringVar(value="-")
+        for label, variable in [
+            ("match_id", current_match_id_var),
+            ("StatsBomb", current_source_match_id_var),
+            ("比分", current_score_var),
+            ("缺失", current_missing_var),
+            ("预测", current_prediction_var),
+        ]:
+            row = tk.Frame(info_frame, bg=PANEL)
+            row.pack(fill=tk.X, pady=2)
+            tk.Label(row, text=label, bg=PANEL, fg=MUTED, font=("Microsoft YaHei UI", 9, "bold"), width=12, anchor=tk.W).pack(side=tk.LEFT)
+            tk.Label(row, textvariable=variable, bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 9), anchor=tk.W, justify=tk.LEFT).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        self._strategy_section_title(right, "标签回填", first=False)
+        label_fields = ("is_correct", "handicap_is_correct", "ou_is_correct")
+        label_vars = {field: tk.StringVar(value="保持原值") for field in label_fields}
+        label_frame = tk.Frame(right, bg=PANEL)
+        label_frame.pack(fill=tk.X, padx=18, pady=(0, 10))
+        label_titles = {
+            "is_correct": "1X2",
+            "handicap_is_correct": "让球",
+            "ou_is_correct": "大小球",
+        }
+        options = ("保持原值", "命中", "未命中")
+        for index, field in enumerate(label_fields):
+            cell = tk.Frame(label_frame, bg=PANEL)
+            cell.grid(row=index // 2, column=index % 2, sticky=tk.W, padx=(0, 12), pady=(0, 8))
+            tk.Label(cell, text=label_titles[field], bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 9, "bold")).pack(anchor=tk.W)
+            combo = ttk.Combobox(cell, textvariable=label_vars[field], values=options, state="readonly", width=16)
+            combo.pack(anchor=tk.W)
+
+        note_wrap = tk.Frame(right, bg=PANEL)
+        note_wrap.pack(fill=tk.BOTH, expand=True, padx=18, pady=(0, 10))
+        tk.Label(note_wrap, text="备注", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 9, "bold")).pack(anchor=tk.W)
+        note_text = tk.Text(note_wrap, bg=PANEL_2, fg=TEXT, insertbackground=TEXT, relief=tk.FLAT, wrap=tk.WORD, height=6, font=("Microsoft YaHei UI", 10))
+        note_text.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
+
+        editor_status_var = tk.StringVar(value="选择一条待标注记录后开始回填。")
+        tk.Label(right, textvariable=editor_status_var, bg=PANEL, fg=MUTED, font=("Microsoft YaHei UI", 9)).pack(anchor=tk.W, padx=18, pady=(0, 10))
+
+        _refresh_after_save()
 
     def open_statsbomb_review_training_closure_window(self) -> None:
         review_samples = get_statsbomb_review_training_samples()

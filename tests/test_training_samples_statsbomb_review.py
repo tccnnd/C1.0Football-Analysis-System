@@ -15,6 +15,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from v24_app.training_samples import (
     STATSBOMB_REVIEW_FEATURE_ORDER,
+    build_statsbomb_review_label_queue,
     build_statsbomb_review_training_samples,
     build_statsbomb_sandbox_fewshot_samples,
     build_video_review_fewshot_samples,
@@ -22,7 +23,9 @@ from v24_app.training_samples import (
     export_statsbomb_review_training_samples,
     export_statsbomb_sandbox_fewshot_samples,
     export_video_review_fewshot_samples,
+    update_statsbomb_review_label_queue_settlements,
 )
+from v24_app.storage.state_store import StateStore
 
 
 def _settlement() -> dict:
@@ -217,6 +220,57 @@ class StatsBombReviewTrainingSamplesTests(unittest.TestCase):
         self.assertEqual(rows[0]["match_id"], "m1")
         self.assertEqual(rows[0]["missing_label_fields"], "is_correct,handicap_is_correct,ou_is_correct")
         self.assertEqual(rows[0]["annotation_status"], "pending")
+
+    def test_builds_review_label_queue_with_partial_status_and_notes(self) -> None:
+        partial = _settlement().copy()
+        partial.pop("is_correct")
+        partial["handicap_is_correct"] = True
+        partial["statsbomb_review_notes"] = "needs review"
+
+        rows, summary = build_statsbomb_review_label_queue([partial])
+
+        self.assertEqual(summary["queue_count"], 1)
+        self.assertEqual(rows[0]["annotation_status"], "partial")
+        self.assertEqual(rows[0]["notes"], "needs review")
+
+    def test_update_review_label_queue_backfills_settlement_and_closes_queue(self) -> None:
+        settlement = _settlement().copy()
+        settlement.pop("is_correct")
+        settlement.pop("handicap_is_correct")
+        settlement.pop("ou_is_correct")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = StateStore(root)
+            store.save_settlements([settlement])
+
+            update_result = update_statsbomb_review_label_queue_settlements(
+                root,
+                [
+                    {
+                        "match_id": "m1",
+                        "is_correct": True,
+                        "handicap_is_correct": False,
+                        "ou_is_correct": True,
+                        "notes": "manual backfill",
+                    }
+                ],
+            )
+            saved_settlements = store.load_settlements()
+            rows, queue_summary = build_statsbomb_review_label_queue(saved_settlements)
+            samples, sample_summary = build_statsbomb_review_training_samples(saved_settlements)
+
+        self.assertEqual(update_result["updated_count"], 1)
+        self.assertEqual(update_result["updated_match_ids"], ["m1"])
+        self.assertEqual(saved_settlements[0]["annotation_status"], "labeled")
+        self.assertTrue(saved_settlements[0]["is_correct"])
+        self.assertFalse(saved_settlements[0]["handicap_is_correct"])
+        self.assertTrue(saved_settlements[0]["ou_is_correct"])
+        self.assertEqual(saved_settlements[0]["statsbomb_review_notes"], "manual backfill")
+        self.assertEqual(queue_summary["queue_count"], 0)
+        self.assertEqual(rows, [])
+        self.assertEqual(sample_summary["sample_count"], 1)
+        self.assertEqual(len(samples), 1)
 
     def test_builds_statsbomb_sandbox_fewshot_samples(self) -> None:
         samples, summary = build_statsbomb_sandbox_fewshot_samples(_baseline())

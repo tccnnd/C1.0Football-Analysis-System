@@ -848,8 +848,8 @@ def build_statsbomb_review_label_queue(
             "home_shots": float(features.get("home_shots", 0.0)),
             "away_shots": float(features.get("away_shots", 0.0)),
             "shot_diff": float(features.get("shot_diff", 0.0)),
-            "annotation_status": "pending",
-            "notes": "",
+            "annotation_status": "partial" if len(missing_fields) < len(label_values) else "pending",
+            "notes": _normalize_text(item.get("statsbomb_review_notes") or item.get("notes")),
         }
         rows.append(row)
         if len(rows) >= max(1, int(limit)):
@@ -895,6 +895,93 @@ def export_statsbomb_review_label_queue(
         for row in rows:
             writer.writerow({key: row.get(key, "") for key in STATSBOMB_REVIEW_LABEL_QUEUE_FIELDS})
     return {**summary, "output_path": str(resolved_output), "csv_path": str(resolved_csv)}
+
+
+def update_statsbomb_review_label_queue_settlements(
+    project_dir: Path,
+    updates: list[dict[str, Any]],
+    *,
+    limit: int = 500,
+) -> dict[str, Any]:
+    store = StateStore(project_dir)
+    settlements = store.load_settlements()
+    match_index: dict[str, int] = {}
+    for index, item in enumerate(settlements):
+        if not isinstance(item, dict):
+            continue
+        match_id = _normalize_text(item.get("match_id"))
+        if match_id and match_id not in match_index:
+            match_index[match_id] = index
+
+    updated_count = 0
+    unchanged_count = 0
+    skipped_invalid = 0
+    skipped_missing_match = 0
+    skipped_missing_settlement = 0
+    updated_match_ids: list[str] = []
+    label_fields = ("is_correct", "handicap_is_correct", "ou_is_correct")
+    updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    for update in updates:
+        if not isinstance(update, dict):
+            skipped_invalid += 1
+            continue
+        match_id = _normalize_text(update.get("match_id"))
+        if not match_id:
+            skipped_missing_match += 1
+            continue
+        index = match_index.get(match_id)
+        if index is None:
+            skipped_missing_settlement += 1
+            continue
+
+        current = dict(settlements[index])
+        changed = False
+        changed_fields: list[str] = []
+        for field in label_fields:
+            if field not in update:
+                continue
+            raw_value = update.get(field)
+            if raw_value in (None, ""):
+                continue
+            parsed = _review_bool_label(raw_value)
+            if current.get(field) != parsed:
+                current[field] = parsed
+                changed = True
+                changed_fields.append(field)
+        if "notes" in update or "statsbomb_review_notes" in update:
+            note_value = _normalize_text(update.get("statsbomb_review_notes") if "statsbomb_review_notes" in update else update.get("notes"))
+            if current.get("statsbomb_review_notes") != note_value:
+                current["statsbomb_review_notes"] = note_value
+                changed = True
+        if changed:
+            known_label_count = sum(1 for field in label_fields if current.get(field) is not None)
+            current["annotation_status"] = "labeled" if known_label_count >= len(label_fields) else "partial" if known_label_count > 0 else "pending"
+            current["statsbomb_review_label_updated_at"] = updated_at
+            current["statsbomb_review_label_source"] = "manual_queue_editor"
+            if changed_fields:
+                current["statsbomb_review_label_fields"] = ",".join(changed_fields)
+            settlements[index] = current
+            updated_count += 1
+            updated_match_ids.append(match_id)
+        else:
+            unchanged_count += 1
+
+    if updated_count:
+        store.save_settlements(settlements, limit=limit)
+
+    return {
+        "ok": updated_count > 0,
+        "updated_count": updated_count,
+        "updated_match_ids": updated_match_ids,
+        "unchanged_count": unchanged_count,
+        "skipped_invalid": skipped_invalid,
+        "skipped_missing_match": skipped_missing_match,
+        "skipped_missing_settlement": skipped_missing_settlement,
+        "stored_count": len(settlements),
+        "settlements_path": str(store.settlements_file),
+        "updated_at": updated_at,
+    }
 
 
 def _review_bool_label(value: Any) -> bool | None:
