@@ -232,6 +232,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 REPORT_DIR = PROJECT_ROOT / "reports"
 SETTINGS_PATH = PROJECT_ROOT / "data" / "state" / "ai_dashboard_settings.json"
 STATSBOMB_REVIEW_REPAIR_ACTION_LOG = PROJECT_ROOT / "data" / "state" / "statsbomb_review_repair_action_log.json"
+STATSBOMB_REVIEW_WEIGHT_GATE_AUDIT_LOG = PROJECT_ROOT / "data" / "state" / "statsbomb_review_weight_gate_audit.json"
 VIDEO_REVIEW_EVIDENCE_GAP_ACTION_LOG = PROJECT_ROOT / "data" / "state" / "video_review_evidence_gap_action_log.json"
 VIDEO_REVIEW_EVIDENCE_GAP_BATCH_STATE = PROJECT_ROOT / "data" / "state" / "video_review_evidence_gap_batches.json"
 
@@ -1352,6 +1353,127 @@ def build_statsbomb_review_training_action_rows(quality: dict) -> list[dict[str,
     return rows[:4]
 
 
+def _statsbomb_review_training_weight_gate(quality: dict | object) -> dict:
+    payload = quality if isinstance(quality, dict) else {}
+    signal = payload.get("signal") if isinstance(payload.get("signal"), dict) else {}
+    gate = payload.get("weight_gate") if isinstance(payload.get("weight_gate"), dict) else signal.get("weight_gate")
+    return dict(gate) if isinstance(gate, dict) else {}
+
+
+def _statsbomb_review_training_signal_list(quality: dict | object, key: str, limit: int = 8) -> list[str]:
+    payload = quality if isinstance(quality, dict) else {}
+    signal = payload.get("signal") if isinstance(payload.get("signal"), dict) else {}
+    values = signal.get(key) if isinstance(signal.get(key), list) else []
+    return [str(item) for item in values[: max(0, int(limit))]]
+
+
+def _statsbomb_review_training_issue_codes(quality: dict | object, limit: int = 6) -> list[str]:
+    payload = quality if isinstance(quality, dict) else {}
+    issues = payload.get("issues") if isinstance(payload.get("issues"), list) else []
+    return [
+        str(item.get("code") or "-")
+        for item in issues[: max(0, int(limit))]
+        if isinstance(item, dict)
+    ]
+
+
+def build_statsbomb_review_training_weight_gate_audit_record(
+    trigger: str,
+    quality: dict | object,
+    result: dict | object | None = None,
+    *,
+    report_path: Path | str | None = None,
+    occurred_at: datetime | None = None,
+) -> dict[str, object]:
+    payload = quality if isinstance(quality, dict) else {}
+    gate = _statsbomb_review_training_weight_gate(payload)
+    result_payload = result if isinstance(result, dict) else {}
+    report_text = str(report_path) if report_path else ""
+    message = str(result_payload.get("message") or result_payload.get("reason") or "")
+    return {
+        "occurred_at": (occurred_at or datetime.now()).strftime("%Y-%m-%d %H:%M:%S"),
+        "trigger": str(trigger or "-"),
+        "quality_status": str(payload.get("status") or "-"),
+        "sample_count": int(payload.get("sample_count", 0) or 0),
+        "feature_count": int(payload.get("feature_count", 0) or 0),
+        "issue_count": int(payload.get("issue_count", 0) or 0),
+        "gate_mode": str(gate.get("mode") or "-"),
+        "gate_enabled": bool(gate.get("enabled")),
+        "gate_reason": str(gate.get("reason") or "-"),
+        "active_codes": _statsbomb_review_training_signal_list(payload, "active_codes"),
+        "memory_tags": _statsbomb_review_training_signal_list(payload, "memory_tags"),
+        "issue_codes": _statsbomb_review_training_issue_codes(payload),
+        "report_path": report_text,
+        "message": message,
+    }
+
+
+def build_statsbomb_review_training_weight_gate_audit_record_from_feedback(
+    feedback: dict | object,
+    *,
+    occurred_at: datetime | None = None,
+) -> dict[str, object]:
+    payload = feedback if isinstance(feedback, dict) else {}
+    quality = {
+        "status": payload.get("after_status"),
+        "sample_count": payload.get("after_sample_count"),
+        "feature_count": payload.get("after_feature_count"),
+        "issue_count": payload.get("after_issue_count"),
+        "weight_gate": {
+            "mode": payload.get("after_weight_gate_mode"),
+            "enabled": payload.get("after_weight_gate_enabled"),
+            "reason": payload.get("after_weight_gate_reason"),
+        },
+        "signal": {
+            "active_codes": payload.get("after_active_codes") if isinstance(payload.get("after_active_codes"), list) else [],
+            "memory_tags": payload.get("after_memory_tags") if isinstance(payload.get("after_memory_tags"), list) else [],
+        },
+        "issues": [
+            {"code": code}
+            for code in (payload.get("after_issue_codes") if isinstance(payload.get("after_issue_codes"), list) else [])
+        ],
+    }
+    return build_statsbomb_review_training_weight_gate_audit_record(
+        str(payload.get("action_key") or "action_feedback"),
+        quality,
+        {"message": str(payload.get("summary_text") or payload.get("message") or "")},
+        occurred_at=occurred_at,
+    )
+
+
+def build_statsbomb_review_training_weight_gate_audit_rows(
+    records: list[dict] | object,
+    limit: int = 5,
+) -> list[dict[str, object]]:
+    if not isinstance(records, list):
+        return []
+    items = [item for item in records if isinstance(item, dict)]
+    rows: list[dict[str, object]] = []
+    for index, record in enumerate(items[: max(0, int(limit))]):
+        previous = items[index + 1] if index + 1 < len(items) else {}
+        mode = str(record.get("gate_mode") or "-")
+        previous_mode = str(previous.get("gate_mode") or "-") if previous else "-"
+        transition = f"{previous_mode}->{mode}" if previous and previous_mode != mode else mode
+        tone = "good" if bool(record.get("gate_enabled")) else "warning" if mode == "report_only" else "bad" if mode == "disabled" else "neutral"
+        active_codes = record.get("active_codes") if isinstance(record.get("active_codes"), list) else []
+        issue_codes = record.get("issue_codes") if isinstance(record.get("issue_codes"), list) else []
+        rows.append(
+            {
+                "title": f"{record.get('occurred_at', '-')} | {record.get('trigger', '-')} | {transition}",
+                "body": (
+                    f"quality={record.get('quality_status', '-')} | "
+                    f"samples={record.get('sample_count', 0)} | "
+                    f"issues={record.get('issue_count', 0)}\n"
+                    f"enabled={bool(record.get('gate_enabled'))} | reason={record.get('gate_reason', '-')}\n"
+                    f"active={', '.join(str(item) for item in active_codes[:3]) or '-'} | "
+                    f"issues={', '.join(str(item) for item in issue_codes[:3]) or '-'}"
+                ),
+                "tone": tone,
+            }
+        )
+    return rows
+
+
 def build_statsbomb_review_training_action_feedback(
     action_key: str,
     before_quality: dict,
@@ -1365,16 +1487,13 @@ def build_statsbomb_review_training_action_feedback(
     after_status = str(after_quality.get("status") or "-")
     before_sample_count = int(before_quality.get("sample_count", 0) or 0)
     after_sample_count = int(after_quality.get("sample_count", 0) or 0)
+    before_feature_count = int(before_quality.get("feature_count", 0) or 0)
+    after_feature_count = int(after_quality.get("feature_count", 0) or 0)
     before_issue_count = int(before_quality.get("issue_count", len(before_quality.get("issues", []) if isinstance(before_quality.get("issues"), list) else [])) or 0)
     after_issue_count = int(after_quality.get("issue_count", len(after_quality.get("issues", []) if isinstance(after_quality.get("issues"), list) else [])) or 0)
 
-    def _weight_gate(quality: dict) -> dict:
-        signal = quality.get("signal") if isinstance(quality.get("signal"), dict) else {}
-        gate = quality.get("weight_gate") if isinstance(quality.get("weight_gate"), dict) else signal.get("weight_gate")
-        return gate if isinstance(gate, dict) else {}
-
-    before_gate = _weight_gate(before_quality)
-    after_gate = _weight_gate(after_quality)
+    before_gate = _statsbomb_review_training_weight_gate(before_quality)
+    after_gate = _statsbomb_review_training_weight_gate(after_quality)
     before_gate_mode = str(before_gate.get("mode") or "-")
     after_gate_mode = str(after_gate.get("mode") or "-")
     status_rank = {"healthy": 0, "attention": 1, "blocked": 2}
@@ -1397,10 +1516,6 @@ def build_statsbomb_review_training_action_feedback(
     else:
         outcome = "unchanged"
         tone = "warning"
-
-    def _issue_codes(quality: dict) -> list[str]:
-        issues = quality.get("issues") if isinstance(quality.get("issues"), list) else []
-        return [str(item.get("code") or "-") for item in issues[:4] if isinstance(item, dict)]
 
     sample_delta = after_sample_count - before_sample_count
     issue_delta = after_issue_count - before_issue_count
@@ -1431,6 +1546,8 @@ def build_statsbomb_review_training_action_feedback(
         "before_sample_count": before_sample_count,
         "after_sample_count": after_sample_count,
         "sample_delta": sample_delta,
+        "before_feature_count": before_feature_count,
+        "after_feature_count": after_feature_count,
         "before_issue_count": before_issue_count,
         "after_issue_count": after_issue_count,
         "issue_delta": issue_delta,
@@ -1438,9 +1555,15 @@ def build_statsbomb_review_training_action_feedback(
         "after_weight_gate_mode": after_gate_mode,
         "before_weight_gate_enabled": bool(before_gate.get("enabled")),
         "after_weight_gate_enabled": bool(after_gate.get("enabled")),
+        "before_weight_gate_reason": str(before_gate.get("reason") or "-"),
+        "after_weight_gate_reason": str(after_gate.get("reason") or "-"),
         "weight_gate_change": f"{before_gate_mode}->{after_gate_mode}",
-        "before_issue_codes": _issue_codes(before_quality),
-        "after_issue_codes": _issue_codes(after_quality),
+        "before_active_codes": _statsbomb_review_training_signal_list(before_quality, "active_codes"),
+        "after_active_codes": _statsbomb_review_training_signal_list(after_quality, "active_codes"),
+        "before_memory_tags": _statsbomb_review_training_signal_list(before_quality, "memory_tags"),
+        "after_memory_tags": _statsbomb_review_training_signal_list(after_quality, "memory_tags"),
+        "before_issue_codes": _statsbomb_review_training_issue_codes(before_quality, limit=4),
+        "after_issue_codes": _statsbomb_review_training_issue_codes(after_quality, limit=4),
         "message": str(result_payload.get("message") or result_payload.get("reason") or ""),
         "summary_text": summary_text,
         "next_recommendation": next_recommendation,
@@ -1474,9 +1597,14 @@ def build_statsbomb_review_training_feedback_rows(records: list[dict] | object, 
     return rows
 
 
-def build_statsbomb_review_training_center_summary(quality: dict | object, records: list[dict] | object) -> dict[str, object]:
+def build_statsbomb_review_training_center_summary(
+    quality: dict | object,
+    records: list[dict] | object,
+    gate_audit_records: list[dict] | object | None = None,
+) -> dict[str, object]:
     payload = quality if isinstance(quality, dict) else {}
     repair_records = [item for item in records if isinstance(item, dict)] if isinstance(records, list) else []
+    audit_records = [item for item in gate_audit_records if isinstance(item, dict)] if isinstance(gate_audit_records, list) else []
     status = str(payload.get("status") or "blocked")
     sample_count = int(payload.get("sample_count", 0) or 0)
     issue_count = int(payload.get("issue_count", 0) or 0)
@@ -1488,6 +1616,13 @@ def build_statsbomb_review_training_center_summary(quality: dict | object, recor
         if latest
         else "-"
     )
+    latest_audit = audit_records[0] if audit_records else {}
+    latest_audit_text = (
+        f"{latest_audit.get('occurred_at', '-')} | {latest_audit.get('trigger', '-')} | "
+        f"{latest_audit.get('gate_mode', '-')} | enabled={bool(latest_audit.get('gate_enabled'))}"
+        if latest_audit
+        else "-"
+    )
     return {
         "status": status,
         "tone": tone,
@@ -1495,11 +1630,15 @@ def build_statsbomb_review_training_center_summary(quality: dict | object, recor
         "issue_count": issue_count,
         "action_count": action_count,
         "repair_count": len(repair_records),
+        "gate_audit_count": len(audit_records),
         "latest_repair": latest_text,
+        "latest_gate_audit": latest_audit_text,
         "title": f"事件代理质量 | {status}",
         "body": (
-            f"样本 {sample_count} | 问题 {issue_count} | 可执行动作 {action_count} | 修复记录 {len(repair_records)}\n"
-            f"最近修复: {latest_text}"
+            f"样本 {sample_count} | 问题 {issue_count} | 可执行动作 {action_count} | "
+            f"修复记录 {len(repair_records)} | Gate审计 {len(audit_records)}\n"
+            f"最近修复: {latest_text}\n"
+            f"最近Gate审计: {latest_audit_text}"
         ),
     }
 
@@ -1942,23 +2081,34 @@ def build_video_review_evidence_gap_next_selection_index(
     return 0
 
 
-def build_statsbomb_review_training_quality_export_message(path: Path, quality: dict, record_count: int) -> str:
+def build_statsbomb_review_training_quality_export_message(
+    path: Path,
+    quality: dict,
+    record_count: int,
+    *,
+    gate_audit_count: int | None = None,
+) -> str:
     signal = quality.get("signal") if isinstance(quality.get("signal"), dict) else {}
     weight_gate = quality.get("weight_gate") if isinstance(quality.get("weight_gate"), dict) else signal.get("weight_gate") if isinstance(signal.get("weight_gate"), dict) else {}
-    return "\n".join(
+    lines = [
+        "StatsBomb/Event Proxy 样本质量报告已导出",
+        "",
+        f"文件: {path}",
+        f"质量状态: {quality.get('status') or '-'}",
+        f"样本: {quality.get('sample_count', 0) or 0}",
+        f"问题数: {quality.get('issue_count', 0) or 0}",
+        f"权重Gate: {weight_gate.get('mode') or '-'} | enabled={bool(weight_gate.get('enabled'))}",
+        f"修复记录: {record_count}",
+    ]
+    if gate_audit_count is not None:
+        lines.append(f"Gate审计记录: {gate_audit_count}")
+    lines.extend(
         [
-            "StatsBomb/Event Proxy 样本质量报告已导出",
-            "",
-            f"文件: {path}",
-            f"质量状态: {quality.get('status') or '-'}",
-            f"样本: {quality.get('sample_count', 0) or 0}",
-            f"问题数: {quality.get('issue_count', 0) or 0}",
-            f"权重Gate: {weight_gate.get('mode') or '-'} | enabled={bool(weight_gate.get('enabled'))}",
-            f"修复记录: {record_count}",
             "",
             "该报告只描述赛后复盘样本质量，不代表赛前预测结论。",
         ]
     )
+    return "\n".join(lines)
 
 
 def build_video_review_evidence_gap_action_rows(
@@ -3027,6 +3177,34 @@ def _append_statsbomb_review_training_action_feedback_log(
     limit: int = 50,
 ) -> None:
     records = [dict(record), *_load_statsbomb_review_training_action_feedback_log(path)]
+    records = records[: max(1, int(limit))]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps({"records": records}, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def _load_statsbomb_review_training_weight_gate_audit_log(
+    path: Path = STATSBOMB_REVIEW_WEIGHT_GATE_AUDIT_LOG,
+) -> list[dict]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if isinstance(payload, dict):
+        payload = payload.get("records")
+    if not isinstance(payload, list):
+        return []
+    return [item for item in payload if isinstance(item, dict)]
+
+
+def _append_statsbomb_review_training_weight_gate_audit_log(
+    record: dict,
+    path: Path = STATSBOMB_REVIEW_WEIGHT_GATE_AUDIT_LOG,
+    *,
+    limit: int = 100,
+) -> None:
+    records = [dict(record), *_load_statsbomb_review_training_weight_gate_audit_log(path)]
     records = records[: max(1, int(limit))]
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(".tmp")
@@ -6941,6 +7119,11 @@ class SmartMatchDashboard:
         except Exception as exc:
             self._log_event("ERROR", f"事件代理修复闭环记录写入失败: {exc}")
             return
+        try:
+            audit = build_statsbomb_review_training_weight_gate_audit_record_from_feedback(feedback)
+            _append_statsbomb_review_training_weight_gate_audit_log(audit)
+        except Exception as exc:
+            self._log_event("ERROR", f"StatsBomb gate审计记录写入失败: {exc}")
         self._log_event("OK", str(feedback.get("summary_text") or "事件代理修复闭环已记录"))
 
     def _rebuild_statsbomb_review_samples_after_recovery(self, recovery_result: dict) -> str:
@@ -7667,7 +7850,8 @@ class SmartMatchDashboard:
     def open_statsbomb_review_training_center_window(self) -> None:
         quality = self._current_statsbomb_review_training_quality()
         repair_records = _load_statsbomb_review_training_action_feedback_log()
-        summary = build_statsbomb_review_training_center_summary(quality, repair_records)
+        gate_audit_records = _load_statsbomb_review_training_weight_gate_audit_log()
+        summary = build_statsbomb_review_training_center_summary(quality, repair_records, gate_audit_records)
         _label_queue_rows, label_queue_summary = build_statsbomb_review_label_queue(list(reversed(get_recent_settlements(limit=0))), limit=500)
 
         window = tk.Toplevel(self.root)
@@ -7742,6 +7926,7 @@ class SmartMatchDashboard:
             ("标注队列", str(label_queue_summary.get("queue_count", 0)), YELLOW if int(label_queue_summary.get("queue_count", 0) or 0) else GREEN),
             ("问题数", str(summary.get("issue_count", 0)), RED if int(summary.get("issue_count", 0) or 0) else GREEN),
             ("修复记录", str(summary.get("repair_count", 0)), "#7aa2ff"),
+            ("Gate审计", str(summary.get("gate_audit_count", 0)), "#7aa2ff"),
         ]:
             self._detail_metric(top, label, value, color)
 
@@ -7815,6 +8000,18 @@ class SmartMatchDashboard:
                 )
         else:
             self._strategy_row(right, "暂无修复记录", "点击修复动作后，会记录动作前后的质量变化。")
+
+        self._strategy_section_title(right, "Gate审计", first=False)
+        audit_rows = build_statsbomb_review_training_weight_gate_audit_rows(gate_audit_records, limit=5)
+        if audit_rows:
+            for row in audit_rows:
+                self._strategy_row(
+                    right,
+                    str(row.get("title") or "-"),
+                    str(row.get("body") or "-"),
+                )
+        else:
+            self._strategy_row(right, "暂无Gate审计", "导出质量报告或执行修复动作后，会记录权重Gate状态。")
 
         self._strategy_section_title(right, "边界", first=False)
         self._strategy_row(
@@ -8268,10 +8465,27 @@ class SmartMatchDashboard:
             "\n".join(build_statsbomb_review_training_quality_report_lines(quality, repair_records)),
             encoding="utf-8",
         )
+        gate_audit_count: int | None = None
+        try:
+            audit = build_statsbomb_review_training_weight_gate_audit_record(
+                "quality_report_export",
+                quality,
+                {"message": "quality report exported"},
+                report_path=path,
+            )
+            _append_statsbomb_review_training_weight_gate_audit_log(audit)
+            gate_audit_count = len(_load_statsbomb_review_training_weight_gate_audit_log())
+        except Exception as exc:
+            self._log_event("ERROR", f"StatsBomb gate审计记录写入失败: {exc}")
         self.status_var.set(f"事件代理质量报告已导出: {path.name}")
         messagebox.showinfo(
             "事件代理质量报告",
-            build_statsbomb_review_training_quality_export_message(path, quality, len(repair_records)),
+            build_statsbomb_review_training_quality_export_message(
+                path,
+                quality,
+                len(repair_records),
+                gate_audit_count=gate_audit_count,
+            ),
         )
         return path
 

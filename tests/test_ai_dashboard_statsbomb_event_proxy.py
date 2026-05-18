@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -15,6 +16,9 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from v24_app.ai_dashboard import (
+    SmartMatchDashboard,
+    _append_statsbomb_review_training_weight_gate_audit_log,
+    _load_statsbomb_review_training_weight_gate_audit_log,
     build_statsbomb_event_proxy_review_samples_message,
     build_statsbomb_event_proxy_review_text,
     build_statsbomb_review_training_action_feedback,
@@ -22,6 +26,9 @@ from v24_app.ai_dashboard import (
     build_statsbomb_review_training_center_summary,
     build_statsbomb_review_training_feedback_rows,
     build_statsbomb_review_training_quality_export_message,
+    build_statsbomb_review_training_weight_gate_audit_record,
+    build_statsbomb_review_training_weight_gate_audit_record_from_feedback,
+    build_statsbomb_review_training_weight_gate_audit_rows,
     build_statsbomb_review_training_closure_summary,
     build_video_review_evidence_gap_batch_id,
     build_video_review_evidence_gap_batch_record,
@@ -632,6 +639,7 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
                 "weight_gate": {"mode": "report_only", "enabled": False},
             },
             3,
+            gate_audit_count=4,
         )
 
         self.assertIn("StatsBomb/Event Proxy 样本质量报告已导出", text)
@@ -640,6 +648,180 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertIn("问题数: 2", text)
         self.assertIn("权重Gate: report_only", text)
         self.assertIn("修复记录: 3", text)
+        self.assertIn("Gate", text)
+        self.assertIn("4", text)
+
+    def test_review_training_weight_gate_audit_record_extracts_gate_state(self) -> None:
+        record = build_statsbomb_review_training_weight_gate_audit_record(
+            "quality_report_export",
+            {
+                "status": "healthy",
+                "sample_count": 49,
+                "feature_count": 38,
+                "issue_count": 0,
+                "signal": {
+                    "weight_gate": {
+                        "mode": "active",
+                        "enabled": True,
+                        "reason": "statsbomb_review_quality_healthy",
+                    },
+                    "active_codes": ["statsbomb_xg_against_pick"],
+                    "memory_tags": ["statsbomb_event_proxy"],
+                },
+            },
+            {"message": "exported"},
+            report_path=Path("reports/quality.md"),
+            occurred_at=datetime(2026, 5, 14, 12, 0, 0),
+        )
+
+        self.assertEqual(record["occurred_at"], "2026-05-14 12:00:00")
+        self.assertEqual(record["trigger"], "quality_report_export")
+        self.assertEqual(record["quality_status"], "healthy")
+        self.assertEqual(record["sample_count"], 49)
+        self.assertEqual(record["feature_count"], 38)
+        self.assertEqual(record["gate_mode"], "active")
+        self.assertTrue(record["gate_enabled"])
+        self.assertEqual(record["gate_reason"], "statsbomb_review_quality_healthy")
+        self.assertEqual(record["active_codes"], ["statsbomb_xg_against_pick"])
+        self.assertEqual(record["memory_tags"], ["statsbomb_event_proxy"])
+        self.assertEqual(record["message"], "exported")
+        self.assertIn("quality.md", record["report_path"])
+
+    def test_review_training_weight_gate_audit_record_from_feedback_uses_after_gate(self) -> None:
+        feedback = build_statsbomb_review_training_action_feedback(
+            "build_statsbomb_review_samples",
+            {
+                "status": "blocked",
+                "sample_count": 0,
+                "issue_count": 1,
+                "weight_gate": {"mode": "disabled", "enabled": False},
+            },
+            {
+                "status": "attention",
+                "sample_count": 18,
+                "feature_count": 10,
+                "issue_count": 1,
+                "issues": [{"code": "statsbomb_review_sample_count_low"}],
+                "signal": {
+                    "weight_gate": {
+                        "mode": "report_only",
+                        "enabled": False,
+                        "reason": "statsbomb_review_quality_not_healthy",
+                    },
+                    "active_codes": ["statsbomb_xg_against_pick"],
+                    "memory_tags": ["statsbomb_event_proxy"],
+                },
+            },
+            {"ok": True},
+            occurred_at=datetime(2026, 5, 14, 12, 5, 0),
+        )
+        record = build_statsbomb_review_training_weight_gate_audit_record_from_feedback(
+            feedback,
+            occurred_at=datetime(2026, 5, 14, 12, 6, 0),
+        )
+
+        self.assertEqual(record["trigger"], "build_statsbomb_review_samples")
+        self.assertEqual(record["quality_status"], "attention")
+        self.assertEqual(record["sample_count"], 18)
+        self.assertEqual(record["feature_count"], 10)
+        self.assertEqual(record["gate_mode"], "report_only")
+        self.assertFalse(record["gate_enabled"])
+        self.assertEqual(record["gate_reason"], "statsbomb_review_quality_not_healthy")
+        self.assertEqual(record["active_codes"], ["statsbomb_xg_against_pick"])
+        self.assertEqual(record["issue_codes"], ["statsbomb_review_sample_count_low"])
+
+    def test_review_training_weight_gate_audit_rows_show_recent_transition(self) -> None:
+        rows = build_statsbomb_review_training_weight_gate_audit_rows(
+            [
+                {
+                    "occurred_at": "2026-05-14 12:10:00",
+                    "trigger": "quality_report_export",
+                    "quality_status": "healthy",
+                    "sample_count": 49,
+                    "issue_count": 0,
+                    "gate_mode": "active",
+                    "gate_enabled": True,
+                    "gate_reason": "statsbomb_review_quality_healthy",
+                    "active_codes": ["statsbomb_xg_against_pick"],
+                },
+                {
+                    "occurred_at": "2026-05-14 12:00:00",
+                    "trigger": "build_statsbomb_review_samples",
+                    "quality_status": "attention",
+                    "sample_count": 18,
+                    "issue_count": 1,
+                    "gate_mode": "report_only",
+                    "gate_enabled": False,
+                    "gate_reason": "statsbomb_review_quality_not_healthy",
+                },
+            ]
+        )
+
+        self.assertEqual(rows[0]["tone"], "good")
+        self.assertIn("report_only->active", rows[0]["title"])
+        self.assertIn("quality=healthy", rows[0]["body"])
+        self.assertIn("statsbomb_xg_against_pick", rows[0]["body"])
+
+    def test_review_training_weight_gate_audit_log_appends_newest_and_caps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "statsbomb_review_weight_gate_audit.json"
+            for index in range(3):
+                _append_statsbomb_review_training_weight_gate_audit_log(
+                    {
+                        "occurred_at": f"2026-05-14 12:0{index}:00",
+                        "trigger": f"trigger-{index}",
+                        "gate_mode": "active" if index == 2 else "report_only",
+                    },
+                    path=path,
+                    limit=2,
+                )
+
+            records = _load_statsbomb_review_training_weight_gate_audit_log(path)
+
+        self.assertEqual([record["trigger"] for record in records], ["trigger-2", "trigger-1"])
+
+    def test_export_review_training_quality_report_records_gate_audit(self) -> None:
+        class _StatusVar:
+            def __init__(self) -> None:
+                self.value = ""
+
+            def set(self, value: str) -> None:
+                self.value = value
+
+        dashboard = object.__new__(SmartMatchDashboard)
+        dashboard.status_var = _StatusVar()
+        quality = {
+            "status": "healthy",
+            "sample_count": 49,
+            "feature_count": 38,
+            "issue_count": 0,
+            "weight_gate": {
+                "mode": "active",
+                "enabled": True,
+                "reason": "statsbomb_review_quality_healthy",
+            },
+        }
+        dashboard._current_statsbomb_review_training_quality = lambda: quality
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("v24_app.ai_dashboard.REPORT_DIR", Path(tmp)), patch(
+                "v24_app.ai_dashboard._load_statsbomb_review_training_action_feedback_log",
+                return_value=[],
+            ), patch(
+                "v24_app.ai_dashboard._append_statsbomb_review_training_weight_gate_audit_log"
+            ) as append_audit, patch(
+                "v24_app.ai_dashboard._load_statsbomb_review_training_weight_gate_audit_log",
+                return_value=[{"gate_mode": "active"}],
+            ), patch("v24_app.ai_dashboard.messagebox.showinfo") as showinfo:
+                path = dashboard.export_statsbomb_review_training_quality_report()
+
+        self.assertTrue(path.name.startswith("statsbomb_review_training_quality_"))
+        append_audit.assert_called_once()
+        audit = append_audit.call_args.args[0]
+        self.assertEqual(audit["trigger"], "quality_report_export")
+        self.assertEqual(audit["gate_mode"], "active")
+        self.assertTrue(audit["gate_enabled"])
+        self.assertIn("quality report exported", audit["message"])
+        self.assertIn("Gate", showinfo.call_args.args[1])
 
     def test_review_training_action_feedback_summarizes_quality_delta(self) -> None:
         feedback = build_statsbomb_review_training_action_feedback(
@@ -742,6 +924,14 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
                     "outcome": "improved",
                 }
             ],
+            [
+                {
+                    "occurred_at": "2026-05-17 09:05:00",
+                    "trigger": "build_statsbomb_review_samples",
+                    "gate_mode": "report_only",
+                    "gate_enabled": False,
+                }
+            ],
         )
 
         self.assertEqual(summary["status"], "attention")
@@ -749,9 +939,11 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertEqual(summary["sample_count"], 18)
         self.assertEqual(summary["issue_count"], 2)
         self.assertEqual(summary["repair_count"], 1)
+        self.assertEqual(summary["gate_audit_count"], 1)
         self.assertIn("事件代理质量", summary["title"])
         self.assertIn("样本 18", summary["body"])
         self.assertIn("2026-05-17 09:00:00", summary["body"])
+        self.assertIn("2026-05-17 09:05:00", summary["body"])
 
     def test_review_training_closure_summary_tracks_pending_and_resolved_matches(self) -> None:
         review_samples = {
