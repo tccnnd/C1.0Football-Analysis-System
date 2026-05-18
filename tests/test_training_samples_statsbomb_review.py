@@ -25,6 +25,7 @@ from v24_app.training_samples import (
     export_video_review_fewshot_samples,
     update_statsbomb_review_label_queue_settlements,
 )
+from v24_app.core import backfill_statsbomb_review_settlement_labels
 from v24_app.storage.state_store import StateStore
 
 
@@ -267,6 +268,47 @@ class StatsBombReviewTrainingSamplesTests(unittest.TestCase):
         self.assertFalse(saved_settlements[0]["handicap_is_correct"])
         self.assertTrue(saved_settlements[0]["ou_is_correct"])
         self.assertEqual(saved_settlements[0]["statsbomb_review_notes"], "manual backfill")
+        self.assertEqual(queue_summary["queue_count"], 0)
+        self.assertEqual(rows, [])
+        self.assertEqual(sample_summary["sample_count"], 1)
+        self.assertEqual(len(samples), 1)
+
+    def test_backfill_statsbomb_review_settlement_labels_generates_training_samples(self) -> None:
+        settlement = _settlement().copy()
+        settlement.pop("is_correct")
+        settlement.pop("handicap_is_correct")
+        settlement.pop("ou_is_correct")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            store = StateStore(root)
+            store.save_settlements([settlement])
+
+            result = backfill_statsbomb_review_settlement_labels(
+                root,
+                predictor=lambda match: {
+                    "recommendation": "主胜",
+                    "confidence": 0.78,
+                    "handicap_recommendation": "让胜",
+                    "handicap_display": "+0 让胜",
+                    "handicap_confidence": 0.61,
+                    "ou_recommendation": "大2.5",
+                    "ou_confidence": 0.66,
+                },
+                settlements=[settlement],
+            )
+
+            saved_settlements = store.load_settlements()
+            rows, queue_summary = build_statsbomb_review_label_queue(saved_settlements)
+            samples, sample_summary = build_statsbomb_review_training_samples(saved_settlements)
+
+        self.assertEqual(result["updated_count"], 1)
+        self.assertEqual(result["ok"], True)
+        self.assertEqual(saved_settlements[0]["predicted"], "主胜")
+        self.assertTrue(saved_settlements[0]["is_correct"])
+        self.assertTrue(saved_settlements[0]["handicap_is_correct"])
+        self.assertTrue(saved_settlements[0]["ou_is_correct"])
+        self.assertEqual(saved_settlements[0]["statsbomb_review_label_source"], "current_model_backfill")
         self.assertEqual(queue_summary["queue_count"], 0)
         self.assertEqual(rows, [])
         self.assertEqual(sample_summary["sample_count"], 1)

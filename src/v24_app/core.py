@@ -16,7 +16,7 @@ from difflib import SequenceMatcher
 from itertools import product
 from math import log, log2, sqrt
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from .models.elo_rating import EloRatingEngine
 from .models.ensemble import (
@@ -5495,6 +5495,32 @@ def repair_training_data_health(action_key: str, *, input_path: Path | str | Non
             settlements=settlements,
         )
         message = f"StatsBomb复盘样本已生成: {int(result.get('sample_count', 0) or 0)} 条。"
+    elif action == "backfill_statsbomb_review_labels":
+        repair_result = backfill_statsbomb_review_settlement_labels(PROJECT_DIR)
+        _RECENT_SETTLEMENTS_CACHE.clear()
+        settlements = get_recent_settlements(limit=0)
+        queue_result = export_statsbomb_review_label_queue(
+            project_dir=PROJECT_DIR,
+            settlements=settlements,
+        )
+        review_result = export_statsbomb_review_training_samples(
+            project_dir=PROJECT_DIR,
+            settlements=settlements,
+        )
+        result = {
+            **repair_result,
+            **review_result,
+            "queue_count": int(queue_result.get("queue_count", 0) or 0),
+            "queue_output_path": queue_result.get("output_path"),
+            "queue_csv_path": queue_result.get("csv_path"),
+            "review_sample_count": int(review_result.get("sample_count", 0) or 0),
+        }
+        message = (
+            "StatsBomb review labels backfilled: "
+            f"updated={int(repair_result.get('updated_count', 0) or 0)}, "
+            f"queue={int(queue_result.get('queue_count', 0) or 0)}, "
+            f"review_samples={int(review_result.get('sample_count', 0) or 0)}."
+        )
     elif action == "export_statsbomb_review_label_queue":
         settlements = get_recent_settlements(limit=0)
         result = export_statsbomb_review_label_queue(
@@ -12222,6 +12248,212 @@ def persist_prediction_snapshots(items: Iterable[tuple[AppMatch, dict]]) -> dict
         "snapshot_count": snapshot_count,
         "analysis_count": analysis_count,
         "market_snapshot_count": market_snapshot_count,
+    }
+
+
+def _build_statsbomb_review_backfill_prediction_context(match: AppMatch) -> dict:
+    ratings_map = _load_match_ratings(match)
+    home_rating, away_rating, _ = _resolved_ratings(match, ratings_map)
+    league_strength = LEAGUE_STRENGTH.get(match.league, 0.92)
+    recent_form_features = _recent_form_features_for_match(match)
+    prediction = _predict_match_with_inputs(
+        match=match,
+        home_rating=home_rating,
+        away_rating=away_rating,
+        league_strength=league_strength,
+        recent_form_features=recent_form_features,
+    )
+    _ensure_prediction_trace(match, prediction)
+    return prediction
+
+
+def _build_statsbomb_review_backfill_fields(
+    match: AppMatch,
+    settlement: dict[str, Any],
+    prediction: dict | None,
+) -> dict[str, Any]:
+    if not isinstance(prediction, dict):
+        return {}
+
+    home_goals = _safe_int(settlement.get("home_goals"))
+    away_goals = _safe_int(settlement.get("away_goals"))
+    if home_goals is None or away_goals is None:
+        return {}
+
+    actual_score = f"{int(home_goals)}-{int(away_goals)}"
+    result = _result_label(int(home_goals), int(away_goals))
+    predicted = str(prediction.get("recommendation") or "").strip()
+    prediction_confidence = _safe_float(prediction.get("confidence"), default=0.0)
+    predicted_total_goals, predicted_total_goals_value, total_goals_confidence = _extract_total_goals_prediction(prediction)
+    predicted_score, score_confidence = _extract_score_prediction(prediction)
+    predicted_htft, htft_confidence = _extract_htft_prediction(prediction)
+
+    handicap_line = _safe_float(settlement.get("handicap_line"), default=_safe_float(match.handicap_line, default=0.0))
+    handicap_result_key = _handicap_outcome_key(int(home_goals), int(away_goals), handicap_line)
+    handicap_result = _format_handicap_display(handicap_line, handicap_result_key)
+    predicted_handicap_display, predicted_handicap_label, handicap_confidence = _extract_handicap_prediction(prediction)
+
+    ou_line = _safe_float(settlement.get("ou_line"), default=2.5) or 2.5
+    ou_result = _ou_result_label(int(home_goals) + int(away_goals), line=ou_line)
+    predicted_ou, ou_confidence = _extract_ou_prediction(prediction, line=ou_line)
+
+    return {
+        "result": result,
+        "predicted": predicted or None,
+        "is_correct": bool(predicted == result) if predicted else None,
+        "prediction_confidence": round(prediction_confidence, 4) if prediction_confidence is not None else None,
+        "total_goals": int(home_goals) + int(away_goals),
+        "predicted_total_goals": predicted_total_goals,
+        "total_goals_confidence": round(total_goals_confidence, 4) if total_goals_confidence is not None else None,
+        "total_goals_is_correct": bool(predicted_total_goals_value == (int(home_goals) + int(away_goals))) if predicted_total_goals_value is not None else None,
+        "predicted_score": predicted_score,
+        "score_confidence": round(score_confidence, 4) if score_confidence is not None else None,
+        "score_is_correct": bool(predicted_score == actual_score) if predicted_score else None,
+        "predicted_htft": predicted_htft,
+        "htft_confidence": round(htft_confidence, 4) if htft_confidence is not None else None,
+        "handicap_line": round(handicap_line, 2),
+        "handicap_result": handicap_result,
+        "predicted_handicap": predicted_handicap_display,
+        "handicap_confidence": round(handicap_confidence, 4) if handicap_confidence is not None else None,
+        "handicap_is_correct": bool(predicted_handicap_label == _handicap_label_from_key(handicap_result_key)) if predicted_handicap_label else None,
+        "ou_line": round(ou_line, 2),
+        "ou_result": ou_result,
+        "predicted_ou": predicted_ou,
+        "ou_confidence": round(ou_confidence, 4) if ou_confidence is not None else None,
+        "ou_is_correct": bool(predicted_ou == ou_result) if predicted_ou else None,
+        "statsbomb_review_prediction_source": "current_model_backfill",
+        "statsbomb_review_prediction_trace_id": str((prediction.get("trace") or {}).get("trace_id") or ""),
+    }
+
+
+def backfill_statsbomb_review_settlement_labels(
+    project_dir: Path,
+    *,
+    limit: int = 500,
+    only_missing: bool = True,
+    predictor: Callable[[AppMatch], dict] | None = None,
+    settlements: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    store = StateStore(project_dir)
+    raw_settlements = store.load_settlements()
+    enriched_settlements = settlements if settlements is not None else get_recent_settlements(limit=0)
+    raw_index = {
+        str(item.get("match_id") or "").strip(): index
+        for index, item in enumerate(raw_settlements)
+        if isinstance(item, dict) and str(item.get("match_id") or "").strip()
+    }
+    max_updates = max(1, int(limit))
+    prediction_factory = predictor or _build_statsbomb_review_backfill_prediction_context
+
+    updated_count = 0
+    unchanged_count = 0
+    skipped_invalid = 0
+    skipped_missing_statsbomb = 0
+    skipped_missing_match = 0
+    skipped_existing_labels = 0
+    updated_match_ids: list[str] = []
+    updated_prediction_trace_ids: list[str] = []
+    updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    label_fields = ("is_correct", "handicap_is_correct", "ou_is_correct")
+
+    for enriched_item in enriched_settlements:
+        if updated_count >= max_updates:
+            break
+        if not isinstance(enriched_item, dict):
+            skipped_invalid += 1
+            continue
+        if not isinstance(enriched_item.get("statsbomb_event_summary"), dict):
+            skipped_missing_statsbomb += 1
+            continue
+        match_id = str(enriched_item.get("match_id") or "").strip()
+        if not match_id:
+            skipped_missing_match += 1
+            continue
+        index = raw_index.get(match_id)
+        if index is None:
+            skipped_missing_match += 1
+            continue
+        base_item = raw_settlements[index]
+        if not isinstance(base_item, dict):
+            skipped_invalid += 1
+            continue
+
+        target_fields = (
+            "predicted",
+            "is_correct",
+            "predicted_handicap",
+            "handicap_is_correct",
+            "predicted_ou",
+            "ou_is_correct",
+        )
+        if only_missing and all(base_item.get(field) not in (None, "") for field in target_fields):
+            skipped_existing_labels += 1
+            continue
+
+        app_match = _app_match_from_payload(enriched_item, source="statsbomb_review_backfill")
+        if app_match is None:
+            skipped_missing_match += 1
+            continue
+
+        home_goals = _safe_int(enriched_item.get("home_goals"))
+        away_goals = _safe_int(enriched_item.get("away_goals"))
+        if home_goals is None or away_goals is None:
+            skipped_invalid += 1
+            continue
+
+        prediction = prediction_factory(app_match)
+        if not isinstance(prediction, dict):
+            skipped_invalid += 1
+            continue
+
+        updates = _build_statsbomb_review_backfill_fields(app_match, enriched_item, prediction)
+        if not updates:
+            unchanged_count += 1
+            continue
+
+        current = dict(base_item)
+        changed = False
+        for field, value in updates.items():
+            if only_missing and current.get(field) not in (None, "") and value not in (None, ""):
+                continue
+            if current.get(field) != value:
+                current[field] = value
+                changed = True
+
+        known_label_count = sum(1 for field in label_fields if current.get(field) is not None)
+        current["annotation_status"] = "labeled" if known_label_count >= len(label_fields) else "partial" if known_label_count > 0 else "pending"
+        current["statsbomb_review_label_updated_at"] = updated_at
+        current["statsbomb_review_label_source"] = "current_model_backfill"
+        current["statsbomb_review_label_fields"] = ",".join(
+            field for field in label_fields if current.get(field) is not None
+        )
+
+        if current != base_item:
+            raw_settlements[index] = current
+            updated_count += 1
+            updated_match_ids.append(match_id)
+            trace_id = str(current.get("statsbomb_review_prediction_trace_id") or "")
+            if trace_id:
+                updated_prediction_trace_ids.append(trace_id)
+        else:
+            unchanged_count += 1
+
+    if updated_count:
+        store.save_settlements(raw_settlements, limit=max(len(raw_settlements), 1))
+
+    return {
+        "ok": updated_count > 0,
+        "updated_count": updated_count,
+        "updated_match_ids": updated_match_ids,
+        "updated_prediction_trace_ids": updated_prediction_trace_ids,
+        "unchanged_count": unchanged_count,
+        "skipped_invalid": skipped_invalid,
+        "skipped_missing_statsbomb": skipped_missing_statsbomb,
+        "skipped_missing_match": skipped_missing_match,
+        "skipped_existing_labels": skipped_existing_labels,
+        "stored_count": len(raw_settlements),
+        "settlements_path": str(store.settlements_file),
+        "updated_at": updated_at,
     }
 
 

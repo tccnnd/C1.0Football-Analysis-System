@@ -126,6 +126,7 @@ def training_health_action_button_text(action_key: object) -> str:
         "build_statsbomb_coverage_import_plan": "生成覆盖计划",
         "execute_statsbomb_coverage_import_plan": "执行覆盖计划",
         "import_aligned_historical_settlements": "导入重叠复盘赛果",
+        "backfill_statsbomb_review_labels": "回测补齐标签",
         "build_statsbomb_review_samples": "生成复盘样本",
         "export_statsbomb_review_label_queue": "导出复盘标注队列",
         "train_xgb": "训练XGB",
@@ -297,10 +298,10 @@ def build_training_health_action_rows(coverage_status: Mapping[str, object] | ob
             rows.append(
                 {
                     "label": f"建议{index}",
-                    "value": "导出复盘标注队列",
+                    "value": "回测补齐标签",
                     "tone": "warning",
                     "detail": f"exact_match={statsbomb_exact_match_count} | review_samples={statsbomb_review_sample_count} | {issue.get('message', '-')}",
-                    "action_key": "export_statsbomb_review_label_queue",
+                    "action_key": "backfill_statsbomb_review_labels",
                 }
             )
             continue
@@ -425,6 +426,16 @@ def build_training_health_repair_result_text(result: Mapping[str, object] | obje
         settlement_line = (
             f"- 标注队列: rows={payload.get('queue_count', payload.get('sample_count', '-'))} | "
             f"csv={payload.get('csv_path', payload.get('output_path', '-'))}\n"
+        )
+    if action_key == "backfill_statsbomb_review_labels" and isinstance(payload, Mapping):
+        settlement_line = (
+            f"- 回填: updated={payload.get('updated_count', '-')} | "
+            f"queue={payload.get('queue_count', '-')}\n"
+        )
+        review_line = (
+            f"- 复盘: samples={payload.get('sample_count', payload.get('review_sample_count', '-'))} | "
+            f"missing={payload.get('skipped_missing_statsbomb', '-')} | "
+            f"unknown={payload.get('skipped_unknown_label', '-')}\n"
         )
     if action_key == "export_statsbomb_review_label_queue" and isinstance(payload, Mapping):
         settlement_line = (

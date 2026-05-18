@@ -261,7 +261,7 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
         self.assertTrue(any(row["value"] == "Materialize MatchFact rows for history/XGB samples" for row in actions))
         self.assertTrue(any(row["action_key"] == "build_statsbomb_review_samples" for row in actions))
 
-    def test_training_health_action_rows_show_statsbomb_label_queue_export(self) -> None:
+    def test_training_health_action_rows_show_statsbomb_backfill_labels(self) -> None:
         coverage = self._coverage_with_health(
             "attention",
             [
@@ -280,9 +280,31 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
 
         actions = build_training_health_action_rows(coverage)
 
-        self.assertEqual(actions[0]["action_key"], "export_statsbomb_review_label_queue")
-        self.assertEqual(actions[0]["value"], "导出复盘标注队列")
-        self.assertEqual(training_health_action_button_text("export_statsbomb_review_label_queue"), "导出复盘标注队列")
+        self.assertEqual(actions[0]["action_key"], "backfill_statsbomb_review_labels")
+        self.assertEqual(actions[0]["value"], training_health_action_button_text("backfill_statsbomb_review_labels"))
+
+    def test_training_health_repair_result_text_for_backfill_labels(self) -> None:
+        text = build_training_health_repair_result_text(
+            {
+                "action_key": "backfill_statsbomb_review_labels",
+                "ok": True,
+                "before_status": "attention",
+                "after_status": "healthy",
+                "message": "StatsBomb review labels backfilled: updated=49, queue=0, review_samples=49.",
+                "result": {
+                    "updated_count": 49,
+                    "queue_count": 0,
+                    "sample_count": 49,
+                    "skipped_missing_statsbomb": 0,
+                    "skipped_unknown_label": 0,
+                },
+                "training_gate": {"status": "ready_to_train_play_models", "recommendation": "Proceed to backtest."},
+            }
+        )
+
+        self.assertIn(training_health_action_button_text("backfill_statsbomb_review_labels"), text)
+        self.assertIn("updated=49", text)
+        self.assertIn("samples=49", text)
 
     def test_training_health_action_rows_show_statsbomb_coverage_plan(self) -> None:
         coverage = self._coverage_with_health(
