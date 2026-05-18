@@ -201,7 +201,11 @@ from .ui_modules import (
     build_strategy_release_recovery_loop,
     build_strategy_release_pool_rows,
     build_daily_parlay_empty_state,
+    build_daily_parlay_export_message,
+    build_daily_parlay_report_filename,
+    build_daily_parlay_report_lines,
     build_daily_parlay_settlement_rows,
+    build_daily_parlay_snapshot,
     build_daily_parlay_summary,
     build_daily_parlay_ticket_rows,
     refresh_parlay_recommendations,
@@ -244,6 +248,7 @@ STATSBOMB_REVIEW_REPAIR_ACTION_LOG = PROJECT_ROOT / "data" / "state" / "statsbom
 STATSBOMB_REVIEW_WEIGHT_GATE_AUDIT_LOG = PROJECT_ROOT / "data" / "state" / "statsbomb_review_weight_gate_audit.json"
 STATSBOMB_REVIEW_WEIGHT_GATE_FOLLOWUP_LOG = PROJECT_ROOT / "data" / "state" / "statsbomb_review_weight_gate_followup_log.json"
 STATSBOMB_REVIEW_EXECUTION_QUEUE_LOG = PROJECT_ROOT / "data" / "state" / "statsbomb_review_execution_queue_log.json"
+DAILY_PARLAY_SNAPSHOT_LOG = PROJECT_ROOT / "data" / "state" / "daily_parlay_snapshot_log.json"
 VIDEO_REVIEW_EVIDENCE_GAP_ACTION_LOG = PROJECT_ROOT / "data" / "state" / "video_review_evidence_gap_action_log.json"
 VIDEO_REVIEW_EVIDENCE_GAP_BATCH_STATE = PROJECT_ROOT / "data" / "state" / "video_review_evidence_gap_batches.json"
 
@@ -4174,6 +4179,34 @@ def _append_statsbomb_review_training_execution_queue_log(
     limit: int = 100,
 ) -> None:
     records = [dict(record), *_load_statsbomb_review_training_execution_queue_log(path)]
+    records = records[: max(1, int(limit))]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps({"records": records}, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def _load_daily_parlay_snapshot_log(
+    path: Path = DAILY_PARLAY_SNAPSHOT_LOG,
+) -> list[dict]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if isinstance(payload, dict):
+        payload = payload.get("records")
+    if not isinstance(payload, list):
+        return []
+    return [item for item in payload if isinstance(item, dict)]
+
+
+def _append_daily_parlay_snapshot_log(
+    record: dict,
+    path: Path = DAILY_PARLAY_SNAPSHOT_LOG,
+    *,
+    limit: int = 100,
+) -> None:
+    records = [dict(record), *_load_daily_parlay_snapshot_log(path)]
     records = records[: max(1, int(limit))]
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(".tmp")
@@ -13026,6 +13059,35 @@ class SmartMatchDashboard:
             "refreshed_from_current": refreshed_from_current,
         }
 
+    def export_daily_parlay_report(self) -> Path:
+        base_snapshot = self._daily_parlay_snapshot()
+        active_tickets = base_snapshot.get("active_tickets") if isinstance(base_snapshot.get("active_tickets"), list) else []
+        settled_tickets = base_snapshot.get("settled_tickets") if isinstance(base_snapshot.get("settled_tickets"), list) else []
+        selector_metrics = base_snapshot.get("selector_metrics") if isinstance(base_snapshot.get("selector_metrics"), dict) else {}
+        source_text = "当前分析" if bool(base_snapshot.get("refreshed_from_current")) else "已保存推荐"
+        now = datetime.now()
+        REPORT_DIR.mkdir(parents=True, exist_ok=True)
+        path = REPORT_DIR / build_daily_parlay_report_filename(now)
+        snapshot = build_daily_parlay_snapshot(
+            active_tickets,
+            settled_tickets,
+            selector_metrics,
+            generated_at=now,
+            report_path=path,
+            source=source_text,
+        )
+        path.write_text("\n".join(build_daily_parlay_report_lines(snapshot)), encoding="utf-8")
+        try:
+            _append_daily_parlay_snapshot_log(snapshot, DAILY_PARLAY_SNAPSHOT_LOG)
+        except Exception as exc:
+            self._log_event("ERROR", f"每日二串一快照留痕失败: {exc}")
+        self.status_var.set(f"每日二串一报告已导出: {path.name}")
+        messagebox.showinfo(
+            "每日二串一报告",
+            build_daily_parlay_export_message(path, snapshot),
+        )
+        return path
+
     def open_daily_parlay_window(self) -> None:
         self.current_nav_index = 4
         self.current_view = "daily_parlay"
@@ -13052,6 +13114,7 @@ class SmartMatchDashboard:
             font=("Microsoft YaHei UI", 10),
         ).pack(side=tk.LEFT, fill=tk.X, expand=True)
         self._strategy_toolbar_button(toolbar, "刷新二串一", self.open_daily_parlay_window, primary=True)
+        self._strategy_toolbar_button(toolbar, "导出报告", self.export_daily_parlay_report)
         self._strategy_toolbar_button(toolbar, "赛事分析", lambda: self._select_nav(1, self._build_main))
         self._strategy_toolbar_button(toolbar, "策略看板", self.open_strategy_library)
 

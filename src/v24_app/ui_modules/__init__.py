@@ -182,7 +182,11 @@ from .main_flow_governance import (
 from .parlay_flow import build_parlay_detail_lines, refresh_parlay_recommendations
 from .daily_parlay_flow import (
     build_daily_parlay_empty_state,
+    build_daily_parlay_export_message,
+    build_daily_parlay_report_filename,
+    build_daily_parlay_report_lines,
     build_daily_parlay_settlement_rows,
+    build_daily_parlay_snapshot,
     build_daily_parlay_summary,
     build_daily_parlay_ticket_rows,
 )
@@ -502,7 +506,11 @@ __all__ = [
     "build_parlay_detail_lines",
     "refresh_parlay_recommendations",
     "build_daily_parlay_empty_state",
+    "build_daily_parlay_export_message",
+    "build_daily_parlay_report_filename",
+    "build_daily_parlay_report_lines",
     "build_daily_parlay_settlement_rows",
+    "build_daily_parlay_snapshot",
     "build_daily_parlay_summary",
     "build_daily_parlay_ticket_rows",
     "build_handicap_dashboard_text",

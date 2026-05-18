@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 
@@ -14,7 +15,11 @@ if str(SRC_ROOT) not in sys.path:
 
 from v24_app.ui_modules import (
     build_daily_parlay_empty_state,
+    build_daily_parlay_export_message,
+    build_daily_parlay_report_filename,
+    build_daily_parlay_report_lines,
     build_daily_parlay_settlement_rows,
+    build_daily_parlay_snapshot,
     build_daily_parlay_summary,
     build_daily_parlay_ticket_rows,
 )
@@ -119,6 +124,67 @@ class UIDailyParlayFlowModuleTests(unittest.TestCase):
 
         self.assertEqual([row["ticket_id"] for row in active_rows], ["mixed-high", "mixed-low"])
         self.assertEqual([row["ticket_id"] for row in settled_rows], ["new", "middle"])
+
+    def test_report_filename_is_deterministic(self) -> None:
+        self.assertEqual(
+            build_daily_parlay_report_filename(datetime(2026, 5, 18, 12, 30, 5)),
+            "daily_parlay_recommendations_20260518_123005.md",
+        )
+
+    def test_snapshot_and_report_lines_include_export_context(self) -> None:
+        active = [
+            {
+                "ticket_id": "ticket-1",
+                "created_at": "2026-05-18 09:00:00",
+                "status": "pending",
+                "mixed": True,
+                "expected_hit": 0.36,
+                "legs": [
+                    {"play_type": "1x2", "home_team": "A", "away_team": "B", "pick": "home"},
+                    {"play_type": "total_goals", "home_team": "C", "away_team": "D", "pick": "over"},
+                ],
+            }
+        ]
+        settled = [{"ticket_id": "won-1", "status": "won", "is_hit": True, "expected_hit": 0.31}]
+        metrics = {"ticket_count": 1, "unique_match_count": 2, "mixed_ratio": 1.0, "low_discount_count": 0}
+
+        snapshot = build_daily_parlay_snapshot(
+            active,
+            settled,
+            metrics,
+            generated_at=datetime(2026, 5, 18, 12, 30, 5),
+            report_path=Path("reports") / "daily.md",
+            source="当前分析",
+        )
+        lines = build_daily_parlay_report_lines(snapshot)
+        payload = "\n".join(lines)
+
+        self.assertEqual(snapshot["generated_at"], "2026-05-18 12:30:05")
+        self.assertEqual(snapshot["source"], "当前分析")
+        self.assertEqual(snapshot["summary"]["active_count"], 1)
+        self.assertEqual(snapshot["selector_metrics"]["unique_match_count"], 2)
+        self.assertEqual(snapshot["ticket_rows"][0]["ticket_id"], "ticket-1")
+        self.assertIn("# 每日二串一推荐报告", payload)
+        self.assertIn("## 今日推荐组合", payload)
+        self.assertIn("## 近期二串一结算", payload)
+        self.assertIn("## 边界", payload)
+        self.assertIn("ticket-1", payload)
+        self.assertIn("won-1", payload)
+        self.assertIn("当前组合: 1", build_daily_parlay_export_message("daily.md", snapshot))
+
+    def test_snapshot_tolerates_dirty_inputs(self) -> None:
+        snapshot = build_daily_parlay_snapshot(
+            [None, {"ticket_id": object(), "expected_hit": "nan", "legs": "bad"}],
+            object(),
+            {"ticket_count": object()},
+            generated_at=datetime(2026, 5, 18, 12, 30, 5),
+        )
+        lines = build_daily_parlay_report_lines(snapshot)
+
+        self.assertEqual(snapshot["summary"]["active_count"], 1)
+        self.assertEqual(snapshot["summary"]["settled_count"], 0)
+        self.assertEqual(len(snapshot["ticket_rows"]), 1)
+        self.assertTrue(lines)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -13,11 +14,23 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from v24_app.ai_dashboard import DashboardRow, SmartMatchDashboard
+from v24_app.ai_dashboard import (
+    DashboardRow,
+    SmartMatchDashboard,
+    _append_daily_parlay_snapshot_log,
+    _load_daily_parlay_snapshot_log,
+)
 from v24_app.core import AppMatch
 
 
 class AIDashboardDailyParlayTests(unittest.TestCase):
+    class _StatusVar:
+        def __init__(self) -> None:
+            self.value = ""
+
+        def set(self, value: str) -> None:
+            self.value = value
+
     def _match(self, home: str, away: str) -> AppMatch:
         return AppMatch(
             home_team=home,
@@ -87,6 +100,58 @@ class AIDashboardDailyParlayTests(unittest.TestCase):
         self.assertFalse(snapshot["refreshed_from_current"])
         self.assertEqual(snapshot["summary"]["active_count"], 1)
         self.assertEqual(snapshot["ticket_rows"][0]["ticket_id"], "saved")
+
+    def test_daily_parlay_snapshot_log_roundtrip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "daily_parlay_snapshot_log.json"
+            _append_daily_parlay_snapshot_log({"generated_at": "first", "summary": {"active_count": 1}}, path, limit=2)
+            _append_daily_parlay_snapshot_log({"generated_at": "second", "summary": {"active_count": 2}}, path, limit=2)
+            _append_daily_parlay_snapshot_log({"generated_at": "third", "summary": {"active_count": 3}}, path, limit=2)
+
+            records = _load_daily_parlay_snapshot_log(path)
+
+        self.assertEqual([record["generated_at"] for record in records], ["third", "second"])
+        self.assertEqual(records[0]["summary"]["active_count"], 3)
+
+    def test_export_daily_parlay_report_writes_report_and_snapshot_log(self) -> None:
+        dashboard = object.__new__(SmartMatchDashboard)
+        dashboard.status_var = self._StatusVar()
+        dashboard._log_event = lambda *args, **kwargs: None
+        dashboard._daily_parlay_snapshot = lambda: {
+            "active_tickets": [
+                {
+                    "ticket_id": "ticket-1",
+                    "status": "pending",
+                    "expected_hit": 0.36,
+                    "mixed": True,
+                    "legs": [{"match_id": "m1"}, {"match_id": "m2"}],
+                }
+            ],
+            "settled_tickets": [{"ticket_id": "won-1", "status": "won", "is_hit": True, "expected_hit": 0.31}],
+            "selector_metrics": {"ticket_count": 1, "unique_match_count": 2},
+            "refreshed_from_current": True,
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report_dir = Path(tmp) / "reports"
+            log_path = Path(tmp) / "daily_parlay_snapshot_log.json"
+            with patch("v24_app.ai_dashboard.REPORT_DIR", report_dir), patch(
+                "v24_app.ai_dashboard.DAILY_PARLAY_SNAPSHOT_LOG",
+                log_path,
+            ), patch("v24_app.ai_dashboard.messagebox.showinfo") as showinfo:
+                path = dashboard.export_daily_parlay_report()
+            report_payload = path.read_text(encoding="utf-8")
+            records = _load_daily_parlay_snapshot_log(log_path)
+
+        self.assertTrue(path.name.startswith("daily_parlay_recommendations_"))
+        self.assertIn("每日二串一推荐报告", report_payload)
+        self.assertIn("ticket-1", report_payload)
+        self.assertIn("won-1", report_payload)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["source"], "当前分析")
+        self.assertEqual(records[0]["summary"]["active_count"], 1)
+        self.assertIn("每日二串一报告已导出", dashboard.status_var.value)
+        showinfo.assert_called_once()
 
 
 if __name__ == "__main__":

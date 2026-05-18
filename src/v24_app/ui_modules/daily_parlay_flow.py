@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 
@@ -41,6 +43,26 @@ def _ticket_time(ticket: Mapping[str, Any], *keys: str) -> str:
             if text:
                 return text
     return ""
+
+
+def _md_cell(value: Any) -> str:
+    return str(value if value is not None else "-").replace("|", "/").replace("\n", " ")
+
+
+def _pct_text(value: Any) -> str:
+    return f"{_safe_float(value) * 100:.1f}%"
+
+
+def _safe_json(value: Any) -> Any:
+    if isinstance(value, (str, int, bool)) or value is None:
+        return value
+    if isinstance(value, float):
+        return value if value == value else 0.0
+    if isinstance(value, Mapping):
+        return {str(key): _safe_json(item) for key, item in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [_safe_json(item) for item in value]
+    return str(value)
 
 
 def _leg_label(leg: Any) -> str:
@@ -200,3 +222,158 @@ def build_daily_parlay_empty_state(summary: Mapping[str, Any] | object) -> str:
     if settled_count > 0:
         return "当前没有 active 二串一组合；近期结算在下方可查看。"
     return "尚未生成每日二串一；请先刷新并分析今日赛事。"
+
+
+def build_daily_parlay_report_filename(now: datetime | None = None) -> str:
+    current = now or datetime.now()
+    return f"daily_parlay_recommendations_{current.strftime('%Y%m%d_%H%M%S')}.md"
+
+
+def build_daily_parlay_snapshot(
+    active_tickets: Sequence[Any] | object,
+    settled_tickets: Sequence[Any] | object,
+    selector_metrics: Mapping[str, Any] | object,
+    *,
+    generated_at: datetime | None = None,
+    report_path: Path | str | None = None,
+    source: str = "-",
+) -> dict[str, Any]:
+    active = _as_items(active_tickets)
+    settled = _as_items(settled_tickets)
+    metrics = selector_metrics if isinstance(selector_metrics, Mapping) else {}
+    summary = build_daily_parlay_summary(active, settled)
+    current = generated_at or datetime.now()
+    ticket_rows = build_daily_parlay_ticket_rows(active, limit=20)
+    settlement_rows = build_daily_parlay_settlement_rows(settled, limit=20)
+    return {
+        "schema_version": 1,
+        "generated_at": current.strftime("%Y-%m-%d %H:%M:%S"),
+        "report_path": str(report_path) if report_path else "",
+        "source": str(source or "-"),
+        "summary": summary,
+        "selector_metrics": _safe_json(metrics),
+        "active_tickets": _safe_json(active),
+        "settled_tickets": _safe_json(settled),
+        "ticket_rows": _safe_json(ticket_rows),
+        "settlement_rows": _safe_json(settlement_rows),
+        "empty_state": build_daily_parlay_empty_state(summary),
+        "snapshot_signature": (
+            f"active={summary.get('active_count', 0)} | settled={summary.get('settled_count', 0)} | "
+            f"avg_hit={_pct_text(summary.get('avg_expected_hit'))} | hit_rate={_pct_text(summary.get('hit_rate'))}"
+        ),
+        "boundary": "每日二串一导出仅做赛前推荐快照和赛后结算留痕，不自动调整策略门槛。",
+    }
+
+
+def build_daily_parlay_report_lines(snapshot: Mapping[str, Any] | object) -> list[str]:
+    payload = snapshot if isinstance(snapshot, Mapping) else {}
+    summary = payload.get("summary") if isinstance(payload.get("summary"), Mapping) else {}
+    metrics = payload.get("selector_metrics") if isinstance(payload.get("selector_metrics"), Mapping) else {}
+    ticket_rows = payload.get("ticket_rows") if isinstance(payload.get("ticket_rows"), list) else []
+    settlement_rows = payload.get("settlement_rows") if isinstance(payload.get("settlement_rows"), list) else []
+    lines = [
+        "# 每日二串一推荐报告",
+        "",
+        f"- 生成时间: {payload.get('generated_at') or '-'}",
+        f"- 来源: {payload.get('source') or '-'}",
+        f"- 快照签名: {payload.get('snapshot_signature') or '-'}",
+        f"- 当前组合: {summary.get('active_count', 0)}",
+        f"- 平均命中: {_pct_text(summary.get('avg_expected_hit'))}",
+        f"- 近期结算: {summary.get('settled_count', 0)}",
+        f"- 近期命中: {_pct_text(summary.get('hit_rate'))}",
+        "",
+        "## 组合健康",
+        "",
+        "| 指标 | 数值 |",
+        "| --- | ---: |",
+        f"| 当前票据 | {_md_cell(metrics.get('ticket_count', summary.get('active_count', 0)))} |",
+        f"| 唯一场次 | {_md_cell(metrics.get('unique_match_count', 0))} |",
+        f"| 最大场次暴露 | {_md_cell(metrics.get('max_match_exposure', 0))} |",
+        f"| 混合比例 | {_pct_text(metrics.get('mixed_ratio', 0))} |",
+        f"| 最高组合命中 | {_pct_text(metrics.get('max_expected_hit', 0))} |",
+        f"| 低折扣组合 | {_md_cell(metrics.get('low_discount_count', 0))} |",
+        f"| 高爆冷腿 | {_md_cell(metrics.get('high_upset_leg_count', 0))} |",
+        "",
+        "## 今日推荐组合",
+        "",
+        "| # | ticket_id | 类型 | 预期命中 | 状态 | 创建时间 | 组合腿 |",
+        "| ---: | --- | --- | ---: | --- | --- | --- |",
+    ]
+    visible_tickets = [item for item in ticket_rows if isinstance(item, Mapping)]
+    if not visible_tickets:
+        lines.append(f"| - | - | - | - | - | - | {_md_cell(payload.get('empty_state') or '当前没有可展示的二串一组合。')} |")
+    for index, row in enumerate(visible_tickets, start=1):
+        legs = row.get("legs") if isinstance(row.get("legs"), list) else []
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    str(index),
+                    _md_cell(row.get("ticket_id") or row.get("title") or "-"),
+                    "混合玩法" if _safe_bool(row.get("mixed")) else "同类玩法",
+                    _pct_text(row.get("expected_hit")),
+                    _md_cell(row.get("status") or "-"),
+                    _md_cell(row.get("created_at") or "-"),
+                    _md_cell(" + ".join(str(item) for item in legs) or row.get("body") or "-"),
+                ]
+            )
+            + " |"
+        )
+    lines.extend(
+        [
+            "",
+            "## 近期二串一结算",
+            "",
+            "| # | ticket_id | 结果 | 预期命中 | 结算时间 | 组合腿 |",
+            "| ---: | --- | --- | ---: | --- | --- |",
+        ]
+    )
+    visible_settlements = [item for item in settlement_rows if isinstance(item, Mapping)]
+    if not visible_settlements:
+        lines.append("| - | - | - | - | - | 暂无二串一结算记录 |")
+    for index, row in enumerate(visible_settlements, start=1):
+        status = str(row.get("status") or "-")
+        status_text = "命中" if status == "won" else "未中" if status == "lost" else status
+        legs = row.get("legs") if isinstance(row.get("legs"), list) else []
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    str(index),
+                    _md_cell(row.get("ticket_id") or row.get("title") or "-"),
+                    _md_cell(status_text),
+                    _pct_text(row.get("expected_hit")),
+                    _md_cell(row.get("settled_at") or "-"),
+                    _md_cell(" + ".join(str(item) for item in legs) or row.get("body") or "-"),
+                ]
+            )
+            + " |"
+        )
+    lines.extend(
+        [
+            "",
+            "## 边界",
+            "",
+            f"- {payload.get('boundary') or '每日二串一导出仅做推荐快照留痕。'}",
+            "- 推荐组合需要在赛前信息、盘口变化和策略准入状态更新后重新生成。",
+            "- 结算记录只用于复盘，不应反向写入赛前预测特征。",
+        ]
+    )
+    return lines
+
+
+def build_daily_parlay_export_message(path: Path | str, snapshot: Mapping[str, Any] | object) -> str:
+    payload = snapshot if isinstance(snapshot, Mapping) else {}
+    summary = payload.get("summary") if isinstance(payload.get("summary"), Mapping) else {}
+    return "\n".join(
+        [
+            "每日二串一报告已导出",
+            "",
+            f"文件: {path}",
+            f"当前组合: {summary.get('active_count', 0)}",
+            f"近期结算: {summary.get('settled_count', 0)}",
+            f"快照签名: {payload.get('snapshot_signature') or '-'}",
+            "",
+            "已同步写入快照留痕，便于后续赛果回收和复盘对照。",
+        ]
+    )
