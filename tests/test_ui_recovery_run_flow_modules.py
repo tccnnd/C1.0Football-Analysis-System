@@ -333,6 +333,7 @@ class UIRecoveryRunFlowModuleTests(unittest.TestCase):
                 "daily_parlay_snapshot_closure": {
                     "status": "partial",
                     "summary_text": "快照 1 | 已结算 1/2 | 新增闭环 1 | 命中 0 | 未中 1 | 待回收 1",
+                    "source_summary_text": "live:titan | titan-123",
                     "snapshot_count": 1,
                     "newly_settled_ticket_count": 1,
                 },
@@ -366,6 +367,8 @@ class UIRecoveryRunFlowModuleTests(unittest.TestCase):
         self.assertIn("已验证", detail)
         self.assertIn("实盘样本变化", detail)
         self.assertIn("每日二串一快照闭环", detail)
+        self.assertIn("来源追溯", detail)
+        self.assertIn("live:titan | titan-123", detail)
         self.assertIn("新增闭环票据: 1", detail)
         self.assertIn("- done", detail)
 

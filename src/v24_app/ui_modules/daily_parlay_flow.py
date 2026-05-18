@@ -172,12 +172,15 @@ def build_daily_parlay_ticket_rows(active_tickets: Sequence[Any] | object, limit
         expected_hit = round(_safe_float(ticket.get("expected_hit")), 4)
         labels = _leg_labels(ticket)
         ticket_id = str(ticket.get("ticket_id") or "").strip()
+        source_text, source_id_text = _ticket_source_summary(ticket)
         rows.append(
             {
                 "title": ticket_id or _ticket_time(ticket, "created_at") or "pending",
                 "body": _row_body(ticket, labels),
                 "tone": _expected_tone(expected_hit),
                 "ticket_id": ticket_id,
+                "source": source_text,
+                "source_id": source_id_text,
                 "expected_hit": expected_hit,
                 "mixed": _safe_bool(ticket.get("mixed")),
                 "status": _status(ticket, "pending"),
@@ -196,12 +199,15 @@ def build_daily_parlay_settlement_rows(settled_tickets: Sequence[Any] | object, 
         expected_hit = round(_safe_float(ticket.get("expected_hit")), 4)
         labels = _leg_labels(ticket)
         ticket_id = str(ticket.get("ticket_id") or "").strip()
+        source_text, source_id_text = _ticket_source_summary(ticket)
         rows.append(
             {
                 "title": ticket_id or _ticket_time(ticket, "settled_at", "created_at") or status,
                 "body": _row_body(ticket, labels),
                 "tone": _settlement_tone(status),
                 "ticket_id": ticket_id,
+                "source": source_text,
+                "source_id": source_id_text,
                 "expected_hit": expected_hit,
                 "mixed": _safe_bool(ticket.get("mixed")),
                 "status": status,
@@ -245,6 +251,17 @@ def build_daily_parlay_snapshot(
     current = generated_at or datetime.now()
     ticket_rows = build_daily_parlay_ticket_rows(active, limit=20)
     settlement_rows = build_daily_parlay_settlement_rows(settled, limit=20)
+    source_names: list[str] = []
+    source_ids: list[str] = []
+    for ticket in [*active, *settled]:
+        source_text, source_id_text = _ticket_source_summary(ticket)
+        if source_text != "-" and source_text not in source_names:
+            source_names.append(source_text)
+        if source_id_text != "-" and source_id_text not in source_ids:
+            source_ids.append(source_id_text)
+    summary["source"] = " / ".join(source_names) if source_names else "-"
+    summary["source_id"] = " / ".join(source_ids) if source_ids else "-"
+    summary["source_summary_text"] = f"{summary['source']} | {summary['source_id']}"
     return {
         "schema_version": 1,
         "generated_at": current.strftime("%Y-%m-%d %H:%M:%S"),
@@ -276,6 +293,26 @@ def _snapshot_tickets(record: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     return _as_items(record.get("ticket_rows"))
 
 
+def _ticket_source_summary(ticket: Mapping[str, Any] | object) -> tuple[str, str]:
+    if not isinstance(ticket, Mapping):
+        return "-", "-"
+    legs = ticket.get("legs", [])
+    if not isinstance(legs, Sequence) or isinstance(legs, (str, bytes, bytearray)):
+        return "-", "-"
+    sources: list[str] = []
+    source_ids: list[str] = []
+    for leg in legs:
+        if not isinstance(leg, Mapping):
+            continue
+        source = str(leg.get("source") or "").strip()
+        source_id = str(leg.get("source_id") or "").strip()
+        if source and source not in sources:
+            sources.append(source)
+        if source_id and source_id not in source_ids:
+            source_ids.append(source_id)
+    return (" / ".join(sources) if sources else "-", " / ".join(source_ids) if source_ids else "-")
+
+
 def build_daily_parlay_snapshot_settlement_closure(
     records: Sequence[Any] | object,
     settled_tickets: Sequence[Any] | object,
@@ -288,6 +325,8 @@ def build_daily_parlay_snapshot_settlement_closure(
     current = generated_at or datetime.now()
     updated_records: list[dict[str, Any]] = []
     status_counts: dict[str, int] = {}
+    summary_source_names: list[str] = []
+    summary_source_ids: list[str] = []
     summary = {
         "status": "empty" if not snapshot_records else "pending",
         "snapshot_count": len(snapshot_records),
@@ -308,6 +347,14 @@ def build_daily_parlay_snapshot_settlement_closure(
         next_record = dict(record)
         tickets = _snapshot_tickets(record)
         ticket_ids = [_ticket_id(item) for item in tickets if _ticket_id(item)]
+        source_names: list[str] = []
+        source_ids_list: list[str] = []
+        for ticket in tickets:
+            source_text, source_id_text = _ticket_source_summary(ticket)
+            if source_text != "-" and source_text not in source_names:
+                source_names.append(source_text)
+            if source_id_text != "-" and source_id_text not in source_ids_list:
+                source_ids_list.append(source_id_text)
         matched = [settlement_by_id[ticket_id] for ticket_id in ticket_ids if ticket_id in settlement_by_id]
         matched_ids = [_ticket_id(item) for item in matched if _ticket_id(item)]
         previous = record.get("parlay_recovery") if isinstance(record.get("parlay_recovery"), Mapping) else {}
@@ -338,6 +385,12 @@ def build_daily_parlay_snapshot_settlement_closure(
             "pending_ticket_count": pending,
             "won_count": won,
             "lost_count": lost,
+            "source": " / ".join(source_names) if source_names else "-",
+            "source_id": " / ".join(source_ids_list) if source_ids_list else "-",
+            "source_summary_text": (
+                f"{' / '.join(source_names) if source_names else '-'} | "
+                f"{' / '.join(source_ids_list) if source_ids_list else '-'}"
+            ),
             "matched_ticket_ids": sorted(matched_id_set),
             "pending_ticket_ids": [ticket_id for ticket_id in ticket_ids if ticket_id not in matched_id_set],
             "settled_rows": _safe_json(build_daily_parlay_settlement_rows(matched, limit=20)),
@@ -361,6 +414,12 @@ def build_daily_parlay_snapshot_settlement_closure(
             summary["changed"] = True
         updated_records.append(next_record)
         status_counts[status] = int(status_counts.get(status, 0) or 0) + 1
+        for source in source_names:
+            if source not in summary_source_names:
+                summary_source_names.append(source)
+        for source_id in source_ids_list:
+            if source_id not in summary_source_ids:
+                summary_source_ids.append(source_id)
         summary["checked_ticket_count"] += len(ticket_ids)
         summary["settled_ticket_count"] += len(set(matched_ids))
         summary["newly_settled_ticket_count"] += newly_settled
@@ -382,6 +441,9 @@ def build_daily_parlay_snapshot_settlement_closure(
         f"{summary['checked_ticket_count']} | 新增闭环 {summary['newly_settled_ticket_count']} | "
         f"命中 {summary['won_count']} | 未中 {summary['lost_count']} | 待回收 {summary['pending_ticket_count']}"
     )
+    summary["source"] = " / ".join(summary_source_names) if summary_source_names else "-"
+    summary["source_id"] = " / ".join(summary_source_ids) if summary_source_ids else "-"
+    summary["source_summary_text"] = f"{summary['source']} | {summary['source_id']}"
     return {"records": updated_records, "summary": summary}
 
 
@@ -401,6 +463,7 @@ def build_daily_parlay_report_lines(snapshot: Mapping[str, Any] | object) -> lis
         f"- 平均命中: {_pct_text(summary.get('avg_expected_hit'))}",
         f"- 近期结算: {summary.get('settled_count', 0)}",
         f"- 近期命中: {_pct_text(summary.get('hit_rate'))}",
+        f"- 票据来源: {summary.get('source') or '-'} | {summary.get('source_id') or '-'}",
         "",
         "## 组合健康",
         "",
@@ -416,8 +479,8 @@ def build_daily_parlay_report_lines(snapshot: Mapping[str, Any] | object) -> lis
         "",
         "## 今日推荐组合",
         "",
-        "| # | ticket_id | 类型 | 预期命中 | 状态 | 创建时间 | 组合腿 |",
-        "| ---: | --- | --- | ---: | --- | --- | --- |",
+        "| # | ticket_id | 来源 | 来源ID | 类型 | 预期命中 | 状态 | 创建时间 | 组合腿 |",
+        "| ---: | --- | --- | --- | --- | ---: | --- | --- | --- |",
     ]
     visible_tickets = [item for item in ticket_rows if isinstance(item, Mapping)]
     if not visible_tickets:
@@ -430,6 +493,8 @@ def build_daily_parlay_report_lines(snapshot: Mapping[str, Any] | object) -> lis
                 [
                     str(index),
                     _md_cell(row.get("ticket_id") or row.get("title") or "-"),
+                    _md_cell(row.get("source") or "-"),
+                    _md_cell(row.get("source_id") or "-"),
                     "混合玩法" if _safe_bool(row.get("mixed")) else "同类玩法",
                     _pct_text(row.get("expected_hit")),
                     _md_cell(row.get("status") or "-"),
@@ -444,8 +509,8 @@ def build_daily_parlay_report_lines(snapshot: Mapping[str, Any] | object) -> lis
             "",
             "## 近期二串一结算",
             "",
-            "| # | ticket_id | 结果 | 预期命中 | 结算时间 | 组合腿 |",
-            "| ---: | --- | --- | ---: | --- | --- |",
+            "| # | ticket_id | 来源 | 来源ID | 结果 | 预期命中 | 结算时间 | 组合腿 |",
+            "| ---: | --- | --- | --- | --- | ---: | --- | --- |",
         ]
     )
     visible_settlements = [item for item in settlement_rows if isinstance(item, Mapping)]
@@ -461,6 +526,8 @@ def build_daily_parlay_report_lines(snapshot: Mapping[str, Any] | object) -> lis
                 [
                     str(index),
                     _md_cell(row.get("ticket_id") or row.get("title") or "-"),
+                    _md_cell(row.get("source") or "-"),
+                    _md_cell(row.get("source_id") or "-"),
                     _md_cell(status_text),
                     _pct_text(row.get("expected_hit")),
                     _md_cell(row.get("settled_at") or "-"),

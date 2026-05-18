@@ -125,10 +125,21 @@ class AIDashboardDailyParlayTests(unittest.TestCase):
                     "status": "pending",
                     "expected_hit": 0.36,
                     "mixed": True,
-                    "legs": [{"match_id": "m1"}, {"match_id": "m2"}],
+                    "legs": [
+                        {"match_id": "m1", "source": "live:titan", "source_id": "titan-123"},
+                        {"match_id": "m2", "source": "live:titan", "source_id": "titan-123"},
+                    ],
                 }
             ],
-            "settled_tickets": [{"ticket_id": "won-1", "status": "won", "is_hit": True, "expected_hit": 0.31}],
+            "settled_tickets": [
+                {
+                    "ticket_id": "won-1",
+                    "status": "won",
+                    "is_hit": True,
+                    "expected_hit": 0.31,
+                    "legs": [{"source": "live:titan", "source_id": "titan-123"}],
+                }
+            ],
             "selector_metrics": {"ticket_count": 1, "unique_match_count": 2},
             "refreshed_from_current": True,
         }
@@ -148,9 +159,13 @@ class AIDashboardDailyParlayTests(unittest.TestCase):
         self.assertIn("每日二串一推荐报告", report_payload)
         self.assertIn("ticket-1", report_payload)
         self.assertIn("won-1", report_payload)
+        self.assertIn("live:titan", report_payload)
+        self.assertIn("titan-123", report_payload)
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]["source"], "当前分析")
         self.assertEqual(records[0]["summary"]["active_count"], 1)
+        self.assertEqual(records[0]["summary"]["source"], "live:titan")
+        self.assertEqual(records[0]["summary"]["source_id"], "titan-123")
         self.assertIn("每日二串一报告已导出", dashboard.status_var.value)
         showinfo.assert_called_once()
 
@@ -160,8 +175,22 @@ class AIDashboardDailyParlayTests(unittest.TestCase):
         snapshot = {
             "generated_at": "2026-05-18 12:30:05",
             "active_tickets": [
-                {"ticket_id": "ticket-1", "status": "pending", "legs": [{"match_id": "m1"}, {"match_id": "m2"}]},
-                {"ticket_id": "ticket-2", "status": "pending", "legs": [{"match_id": "m3"}, {"match_id": "m4"}]},
+                {
+                    "ticket_id": "ticket-1",
+                    "status": "pending",
+                    "legs": [
+                        {"match_id": "m1", "source": "live:titan", "source_id": "titan-123"},
+                        {"match_id": "m2", "source": "live:titan", "source_id": "titan-123"},
+                    ],
+                },
+                {
+                    "ticket_id": "ticket-2",
+                    "status": "pending",
+                    "legs": [
+                        {"match_id": "m3", "source": "live:titan", "source_id": "titan-123"},
+                        {"match_id": "m4", "source": "live:titan", "source_id": "titan-123"},
+                    ],
+                },
             ],
         }
 
@@ -177,6 +206,9 @@ class AIDashboardDailyParlayTests(unittest.TestCase):
 
         self.assertEqual(summary["status"], "partial")
         self.assertEqual(summary["newly_settled_ticket_count"], 1)
+        self.assertEqual(summary["source"], "live:titan")
+        self.assertEqual(summary["source_id"], "titan-123")
+        self.assertIn("live:titan", summary["source_summary_text"])
         self.assertEqual(records[0]["parlay_recovery"]["status"], "partial")
         self.assertEqual(records[0]["parlay_recovery"]["matched_ticket_ids"], ["ticket-1"])
 

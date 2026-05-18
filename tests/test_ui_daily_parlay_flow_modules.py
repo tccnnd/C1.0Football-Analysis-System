@@ -141,12 +141,34 @@ class UIDailyParlayFlowModuleTests(unittest.TestCase):
                 "mixed": True,
                 "expected_hit": 0.36,
                 "legs": [
-                    {"play_type": "1x2", "home_team": "A", "away_team": "B", "pick": "home"},
-                    {"play_type": "total_goals", "home_team": "C", "away_team": "D", "pick": "over"},
+                    {
+                        "play_type": "1x2",
+                        "home_team": "A",
+                        "away_team": "B",
+                        "pick": "home",
+                        "source": "live:titan",
+                        "source_id": "titan-123",
+                    },
+                    {
+                        "play_type": "total_goals",
+                        "home_team": "C",
+                        "away_team": "D",
+                        "pick": "over",
+                        "source": "live:titan",
+                        "source_id": "titan-123",
+                    },
                 ],
             }
         ]
-        settled = [{"ticket_id": "won-1", "status": "won", "is_hit": True, "expected_hit": 0.31}]
+        settled = [
+            {
+                "ticket_id": "won-1",
+                "status": "won",
+                "is_hit": True,
+                "expected_hit": 0.31,
+                "legs": [{"source": "live:titan", "source_id": "titan-123"}],
+            }
+        ]
         metrics = {"ticket_count": 1, "unique_match_count": 2, "mixed_ratio": 1.0, "low_discount_count": 0}
 
         snapshot = build_daily_parlay_snapshot(
@@ -164,13 +186,22 @@ class UIDailyParlayFlowModuleTests(unittest.TestCase):
         self.assertEqual(snapshot["source"], "当前分析")
         self.assertEqual(snapshot["summary"]["active_count"], 1)
         self.assertEqual(snapshot["selector_metrics"]["unique_match_count"], 2)
+        self.assertEqual(snapshot["summary"]["source"], "live:titan")
+        self.assertEqual(snapshot["summary"]["source_id"], "titan-123")
         self.assertEqual(snapshot["ticket_rows"][0]["ticket_id"], "ticket-1")
+        self.assertEqual(snapshot["ticket_rows"][0]["source"], "live:titan")
+        self.assertEqual(snapshot["ticket_rows"][0]["source_id"], "titan-123")
+        self.assertEqual(snapshot["settlement_rows"][0]["source"], "live:titan")
+        self.assertEqual(snapshot["settlement_rows"][0]["source_id"], "titan-123")
         self.assertIn("# 每日二串一推荐报告", payload)
         self.assertIn("## 今日推荐组合", payload)
         self.assertIn("## 近期二串一结算", payload)
         self.assertIn("## 边界", payload)
+        self.assertIn("票据来源", payload)
         self.assertIn("ticket-1", payload)
         self.assertIn("won-1", payload)
+        self.assertIn("live:titan", payload)
+        self.assertIn("titan-123", payload)
         self.assertIn("当前组合: 1", build_daily_parlay_export_message("daily.md", snapshot))
 
     def test_snapshot_tolerates_dirty_inputs(self) -> None:
@@ -194,13 +225,19 @@ class UIDailyParlayFlowModuleTests(unittest.TestCase):
                     "ticket_id": "ticket-1",
                     "status": "pending",
                     "expected_hit": 0.36,
-                    "legs": [{"match_id": "m1"}, {"match_id": "m2"}],
+                    "legs": [
+                        {"match_id": "m1", "source": "live:titan", "source_id": "titan-123"},
+                        {"match_id": "m2", "source": "live:titan", "source_id": "titan-123"},
+                    ],
                 },
                 {
                     "ticket_id": "ticket-2",
                     "status": "pending",
                     "expected_hit": 0.24,
-                    "legs": [{"match_id": "m3"}, {"match_id": "m4"}],
+                    "legs": [
+                        {"match_id": "m3", "source": "live:titan", "source_id": "titan-123"},
+                        {"match_id": "m4", "source": "live:titan", "source_id": "titan-123"},
+                    ],
                 },
             ],
             [],
@@ -223,6 +260,9 @@ class UIDailyParlayFlowModuleTests(unittest.TestCase):
         self.assertEqual(summary["newly_settled_ticket_count"], 1)
         self.assertTrue(summary["changed"])
         self.assertEqual(updated["parlay_recovery"]["status"], "partial")
+        self.assertEqual(updated["parlay_recovery"]["source"], "live:titan")
+        self.assertEqual(updated["parlay_recovery"]["source_id"], "titan-123")
+        self.assertIn("live:titan", updated["parlay_recovery"]["source_summary_text"])
         self.assertEqual(updated["parlay_recovery"]["matched_ticket_ids"], ["ticket-1"])
         self.assertEqual(updated["parlay_recovery"]["pending_ticket_ids"], ["ticket-2"])
 

@@ -933,6 +933,7 @@ def build_result_recovery_run_detail(record: Mapping[str, object] | object) -> s
         f"每日二串一快照闭环:\n"
         f"- 状态: {daily_parlay_closure.get('status') or '-'}\n"
         f"- 摘要: {daily_parlay_closure.get('summary_text') or '-'}\n"
+        f"- 来源追溯: {daily_parlay_closure.get('source_summary_text') or '-'}\n"
         f"- 新增闭环票据: {_safe_int(item.get('daily_parlay_snapshot_closed') or daily_parlay_closure.get('newly_settled_ticket_count'), 0)}\n"
         f"- 快照数: {_safe_int(daily_parlay_closure.get('snapshot_count'), 0)}\n\n"
         f"\u5feb\u7167\u53ef\u56de\u6536\u6027:\n"
