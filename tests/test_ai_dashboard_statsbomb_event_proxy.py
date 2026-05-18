@@ -625,7 +625,12 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
     def test_review_training_quality_export_message_summarizes_report(self) -> None:
         text = build_statsbomb_review_training_quality_export_message(
             Path("reports/statsbomb_review_training_quality_20260514_120000.md"),
-            {"status": "attention", "sample_count": 18, "issue_count": 2},
+            {
+                "status": "attention",
+                "sample_count": 18,
+                "issue_count": 2,
+                "weight_gate": {"mode": "report_only", "enabled": False},
+            },
             3,
         )
 
@@ -633,6 +638,7 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertIn("质量状态: attention", text)
         self.assertIn("样本: 18", text)
         self.assertIn("问题数: 2", text)
+        self.assertIn("权重Gate: report_only", text)
         self.assertIn("修复记录: 3", text)
 
     def test_review_training_action_feedback_summarizes_quality_delta(self) -> None:
@@ -643,12 +649,14 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
                 "sample_count": 0,
                 "issue_count": 2,
                 "issues": [{"code": "statsbomb_review_samples_missing"}],
+                "weight_gate": {"mode": "disabled", "enabled": False},
             },
             {
                 "status": "attention",
                 "sample_count": 18,
                 "issue_count": 1,
                 "issues": [{"code": "statsbomb_review_sample_count_low", "recommendation": "继续补样本"}],
+                "weight_gate": {"mode": "report_only", "enabled": False},
             },
             {"ok": True, "message": "done"},
         )
@@ -657,7 +665,11 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertEqual(feedback["tone"], "good")
         self.assertEqual(feedback["sample_delta"], 18)
         self.assertEqual(feedback["issue_delta"], -1)
+        self.assertEqual(feedback["before_weight_gate_mode"], "disabled")
+        self.assertEqual(feedback["after_weight_gate_mode"], "report_only")
+        self.assertFalse(feedback["after_weight_gate_enabled"])
         self.assertIn("blocked->attention", feedback["summary_text"])
+        self.assertIn("gate disabled->report_only", feedback["summary_text"])
         self.assertEqual(feedback["next_recommendation"], "继续补样本")
 
     def test_review_training_action_feedback_supports_recovery_rebuild(self) -> None:
@@ -701,6 +713,7 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
                     "action_key": "build_statsbomb_review_samples",
                     "outcome": "improved",
                     "summary_text": "samples 0->18",
+                    "weight_gate_change": "disabled->report_only",
                     "after_issue_codes": ["statsbomb_review_sample_count_low"],
                     "next_recommendation": "继续补样本",
                     "tone": "good",
@@ -711,6 +724,7 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertEqual(rows[0]["tone"], "good")
         self.assertIn("build_statsbomb_review_samples", rows[0]["title"])
         self.assertIn("samples 0->18", rows[0]["body"])
+        self.assertIn("权重Gate: disabled->report_only", rows[0]["body"])
         self.assertIn("继续补样本", rows[0]["body"])
 
     def test_review_training_center_summary_compacts_quality_and_repair_state(self) -> None:

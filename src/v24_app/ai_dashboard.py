@@ -1367,6 +1367,16 @@ def build_statsbomb_review_training_action_feedback(
     after_sample_count = int(after_quality.get("sample_count", 0) or 0)
     before_issue_count = int(before_quality.get("issue_count", len(before_quality.get("issues", []) if isinstance(before_quality.get("issues"), list) else [])) or 0)
     after_issue_count = int(after_quality.get("issue_count", len(after_quality.get("issues", []) if isinstance(after_quality.get("issues"), list) else [])) or 0)
+
+    def _weight_gate(quality: dict) -> dict:
+        signal = quality.get("signal") if isinstance(quality.get("signal"), dict) else {}
+        gate = quality.get("weight_gate") if isinstance(quality.get("weight_gate"), dict) else signal.get("weight_gate")
+        return gate if isinstance(gate, dict) else {}
+
+    before_gate = _weight_gate(before_quality)
+    after_gate = _weight_gate(after_quality)
+    before_gate_mode = str(before_gate.get("mode") or "-")
+    after_gate_mode = str(after_gate.get("mode") or "-")
     status_rank = {"healthy": 0, "attention": 1, "blocked": 2}
     before_rank = status_rank.get(before_status, 1)
     after_rank = status_rank.get(after_status, 1)
@@ -1396,6 +1406,7 @@ def build_statsbomb_review_training_action_feedback(
     issue_delta = after_issue_count - before_issue_count
     summary_text = (
         f"{action_key}: {outcome} | status {before_status}->{after_status} | "
+        f"gate {before_gate_mode}->{after_gate_mode} | "
         f"samples {before_sample_count}->{after_sample_count} ({sample_delta:+d}) | "
         f"issues {before_issue_count}->{after_issue_count} ({issue_delta:+d})"
     )
@@ -1423,6 +1434,11 @@ def build_statsbomb_review_training_action_feedback(
         "before_issue_count": before_issue_count,
         "after_issue_count": after_issue_count,
         "issue_delta": issue_delta,
+        "before_weight_gate_mode": before_gate_mode,
+        "after_weight_gate_mode": after_gate_mode,
+        "before_weight_gate_enabled": bool(before_gate.get("enabled")),
+        "after_weight_gate_enabled": bool(after_gate.get("enabled")),
+        "weight_gate_change": f"{before_gate_mode}->{after_gate_mode}",
         "before_issue_codes": _issue_codes(before_quality),
         "after_issue_codes": _issue_codes(after_quality),
         "message": str(result_payload.get("message") or result_payload.get("reason") or ""),
@@ -1440,11 +1456,15 @@ def build_statsbomb_review_training_feedback_rows(records: list[dict] | object, 
             continue
         issue_codes = record.get("after_issue_codes") if isinstance(record.get("after_issue_codes"), list) else []
         issue_text = ", ".join(str(item) for item in issue_codes[:3]) or "-"
+        gate_change = record.get("weight_gate_change")
+        if not gate_change:
+            gate_change = f"{record.get('before_weight_gate_mode', '-')}->{record.get('after_weight_gate_mode', '-')}"
         rows.append(
             {
                 "title": f"{record.get('occurred_at', '-')} | {record.get('action_key', '-')} | {record.get('outcome', '-')}",
                 "body": (
                     f"{record.get('summary_text', '-')}\n"
+                    f"权重Gate: {gate_change}\n"
                     f"剩余问题: {issue_text}\n"
                     f"下一步: {record.get('next_recommendation', '-')}"
                 ),
@@ -1923,6 +1943,8 @@ def build_video_review_evidence_gap_next_selection_index(
 
 
 def build_statsbomb_review_training_quality_export_message(path: Path, quality: dict, record_count: int) -> str:
+    signal = quality.get("signal") if isinstance(quality.get("signal"), dict) else {}
+    weight_gate = quality.get("weight_gate") if isinstance(quality.get("weight_gate"), dict) else signal.get("weight_gate") if isinstance(signal.get("weight_gate"), dict) else {}
     return "\n".join(
         [
             "StatsBomb/Event Proxy 样本质量报告已导出",
@@ -1931,6 +1953,7 @@ def build_statsbomb_review_training_quality_export_message(path: Path, quality: 
             f"质量状态: {quality.get('status') or '-'}",
             f"样本: {quality.get('sample_count', 0) or 0}",
             f"问题数: {quality.get('issue_count', 0) or 0}",
+            f"权重Gate: {weight_gate.get('mode') or '-'} | enabled={bool(weight_gate.get('enabled'))}",
             f"修复记录: {record_count}",
             "",
             "该报告只描述赛后复盘样本质量，不代表赛前预测结论。",

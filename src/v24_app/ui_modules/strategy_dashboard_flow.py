@@ -831,6 +831,7 @@ def build_statsbomb_review_training_quality_summary(
     signal = _gate_statsbomb_review_training_weight_signal(raw_signal, status)
     active_weights = _as_mapping(signal.get("attribution_weights"))
     weight_gate = _as_mapping(signal.get("weight_gate"))
+    gate_mode = str(weight_gate.get("mode") or "")
     weight_rows = [
         {
             "code": code,
@@ -859,6 +860,16 @@ def build_statsbomb_review_training_quality_summary(
             "value": label_rows[0]["value"] if label_rows else "-",
             "tone": str(label_rows[0]["tone"]) if label_rows else "neutral",
             "detail": str(label_rows[0]["detail"]) if label_rows else "-",
+        },
+        {
+            "label": "权重Gate",
+            "value": gate_mode or "-",
+            "tone": "good" if bool(weight_gate.get("enabled")) else "warning" if gate_mode == "report_only" else "bad" if gate_mode == "disabled" else "neutral",
+            "detail": (
+                f"enabled={bool(weight_gate.get('enabled'))} | "
+                f"quality={weight_gate.get('quality_status') or '-'} | "
+                f"reason={weight_gate.get('reason') or '-'}"
+            ),
         },
         {
             "label": "当前权重",
@@ -899,6 +910,10 @@ def build_statsbomb_review_training_quality_report_lines(
     weight_rows = [row for row in _as_list(resolved.get("weight_rows")) if isinstance(row, Mapping)]
     issues = [row for row in _as_list(resolved.get("issues")) if isinstance(row, Mapping)]
     feedback_rows = [row for row in _as_list(repair_feedback_records) if isinstance(row, Mapping)]
+    signal = _as_mapping(resolved.get("signal"))
+    weight_gate = _as_mapping(resolved.get("weight_gate") or signal.get("weight_gate"))
+    active_codes = ", ".join(str(code) for code in _as_list(signal.get("active_codes"))) or "-"
+    memory_tags = ", ".join(str(tag) for tag in _as_list(signal.get("memory_tags"))) or "-"
     lines = [
         "# StatsBomb/Event Proxy 样本质量报告",
         "",
@@ -908,6 +923,15 @@ def build_statsbomb_review_training_quality_report_lines(
         f"- issue_count: {_safe_int(resolved.get('issue_count'))}",
         f"- 摘要: {resolved.get('summary_text') or '-'}",
         "- 约束: StatsBomb/Event Proxy 仅用于赛后复盘，不进入赛前预测特征。",
+        "",
+        "## 权重Gate（weight_gate）",
+        "",
+        f"- enabled: {bool(weight_gate.get('enabled'))}",
+        f"- mode: {weight_gate.get('mode') or '-'}",
+        f"- quality_status: {weight_gate.get('quality_status') or '-'}",
+        f"- reason: {weight_gate.get('reason') or '-'}",
+        f"- active_codes: {active_codes}",
+        f"- memory_tags: {memory_tags}",
         "",
         "## 标签分布（label_rows）",
         "",

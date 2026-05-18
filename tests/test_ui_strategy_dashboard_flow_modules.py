@@ -3207,6 +3207,7 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertEqual(skewed["signal"]["attribution_weights"]["statsbomb_finishing_variance"], 1.0)
         self.assertEqual(skewed["signal"]["active_codes"], [])
         self.assertEqual(missing["signal"]["weight_gate"]["mode"], "disabled")
+        self.assertTrue(any(row["label"] == "权重Gate" for row in skewed["card_rows"]))
 
     def test_statsbomb_review_training_quality_gate_disables_attention_weights_in_evaluation(self) -> None:
         settlements = [
@@ -3303,6 +3304,7 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("总体质量状态: blocked", "\n".join(blocked_lines))
         self.assertIn("总体质量状态: attention", "\n".join(attention_lines))
         self.assertIn("总体质量状态: healthy", "\n".join(healthy_lines))
+        self.assertIn("权重Gate（weight_gate）", "\n".join(healthy_lines))
         self.assertIn("仅用于赛后复盘，不进入赛前预测特征", "\n".join(healthy_lines))
 
     def test_statsbomb_review_training_quality_report_lines_include_labels_weights_issues(self) -> None:
@@ -3320,6 +3322,7 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("标签分布（label_rows）", payload)
         self.assertIn("错因权重（weight_rows）", payload)
         self.assertIn("质量问题与建议（issues）", payload)
+        self.assertIn("权重Gate（weight_gate）", payload)
         self.assertIn("prediction_miss", payload)
         self.assertIn("statsbomb_xg_against_pick", payload)
         self.assertIn("prediction_miss_skewed", payload)
