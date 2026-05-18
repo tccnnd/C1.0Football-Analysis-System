@@ -72,6 +72,15 @@ def _feature_ratio_tone(value: float, target: float) -> str:
     return "success" if value >= target else "warning"
 
 
+def _statsbomb_review_quality_label_summary(quality: Mapping[str, object] | object, *, limit: int = 3) -> str:
+    resolved = quality if isinstance(quality, Mapping) else {}
+    rows = [row for row in resolved.get("label_rows", []) if isinstance(row, Mapping)] if isinstance(resolved.get("label_rows"), list) else []
+    parts = []
+    for row in rows[: max(0, int(limit))]:
+        parts.append(f"{row.get('code', row.get('label', '-'))}={row.get('value', '-')}")
+    return " | ".join(parts) if parts else "-"
+
+
 def _training_health_action_for_issue(code: object, fallback: object = "") -> str:
     actions = {
         "xgb_sample_count_low": "扩大历史赛果样本，优先最近4年主流联赛",
@@ -84,6 +93,7 @@ def _training_health_action_for_issue(code: object, fallback: object = "") -> st
         "league_profiles_missing": "生成联赛画像",
         "statsbomb_date_overlap_missing": "执行StatsBomb覆盖计划；若仍无交集，导入重叠复盘赛果",
         "statsbomb_review_samples_missing": "将事件摘要转为复盘训练样本",
+        "statsbomb_review_quality_attention": "导出StatsBomb复盘质量报告并修复弱标签/特征",
     }
     actions.update(
         {
@@ -107,6 +117,7 @@ def _training_health_action_key_for_issue(code: object) -> str:
         "league_profiles_missing": "build_league_profiles",
         "statsbomb_date_overlap_missing": "execute_statsbomb_coverage_import_plan",
         "statsbomb_review_samples_missing": "build_statsbomb_review_samples",
+        "statsbomb_review_quality_attention": "refresh_training_health",
     }
     action_keys.update(
         {
@@ -168,6 +179,7 @@ def build_training_health_card_rows(coverage_status: Mapping[str, object] | obje
     statsbomb_match_count = _safe_int(history.get("statsbomb_match_count", 0))
     statsbomb_review_sample_count = _safe_int(history.get("statsbomb_review_sample_count", 0))
     statsbomb_review_feature_count = _safe_int(history.get("statsbomb_review_feature_count", 0))
+    statsbomb_review_quality = statsbomb.get("review_quality", {}) if isinstance(statsbomb.get("review_quality"), Mapping) else {}
     statsbomb_label_queue_count = _safe_int(statsbomb_audit.get("exact_match_count", 0))
     statsbomb_coverage_plan = statsbomb.get("coverage_import_plan", {}) if isinstance(statsbomb.get("coverage_import_plan"), Mapping) else {}
     club_team_count = _safe_int(rating.get("club_team_count", 0))
@@ -221,8 +233,8 @@ def build_training_health_card_rows(coverage_status: Mapping[str, object] | obje
         {
             "label": "StatsBomb复盘",
             "value": str(statsbomb_review_sample_count),
-            "tone": "warning" if statsbomb_match_count > 0 and statsbomb_review_sample_count <= 0 else "success" if statsbomb_review_sample_count > 0 else "neutral",
-            "detail": f"事件 {statsbomb_match_count} | 标签队列 {statsbomb_label_queue_count} | 特征 {statsbomb_review_feature_count} | 计划 {statsbomb_coverage_plan.get('status', '-')}",
+            "tone": "warning" if statsbomb_match_count > 0 and statsbomb_review_sample_count <= 0 else _health_tone(statsbomb_review_quality.get("status")) if statsbomb_review_sample_count > 0 else "neutral",
+            "detail": f"事件 {statsbomb_match_count} | 标签队列 {statsbomb_label_queue_count} | 特征 {statsbomb_review_feature_count} | quality {statsbomb_review_quality.get('status', '-')} | 计划 {statsbomb_coverage_plan.get('status', '-')}",
         },
         {
             "label": "Fact Layer",
@@ -491,6 +503,8 @@ def build_model_training_overview_text(
     world_cup = coverage.get("world_cup_history", {}) if isinstance(coverage, Mapping) else {}
     statsbomb = coverage.get("statsbomb_events", {}) if isinstance(coverage, Mapping) else {}
     statsbomb_coverage_plan = statsbomb.get("coverage_import_plan", {}) if isinstance(statsbomb.get("coverage_import_plan"), Mapping) else {}
+    statsbomb_review_quality = statsbomb.get("review_quality", {}) if isinstance(statsbomb.get("review_quality"), Mapping) else {}
+    statsbomb_review_quality_labels = _statsbomb_review_quality_label_summary(statsbomb_review_quality)
     rating_pools = coverage.get("rating_pools", {}) if isinstance(coverage, Mapping) else {}
     fact_coverage = coverage.get("fact_coverage", {}) if isinstance(coverage.get("fact_coverage"), Mapping) else {}
     match_fact = fact_coverage.get("match_fact", {}) if isinstance(fact_coverage.get("match_fact"), Mapping) else {}
@@ -530,6 +544,7 @@ def build_model_training_overview_text(
         f"- 联赛历史: {club_history.get('match_count', 0)} 场 | {club_history.get('date_start') or '-'} -> {club_history.get('date_end') or '-'} | profile={club_history.get('league_profile_count', 0)}",
         f"- 世界杯历史: {world_cup.get('match_count', 0)} 场 | {world_cup.get('year_start') or '-'}-{world_cup.get('year_end') or '-'} | 届数={world_cup.get('year_count', 0)}",
         f"- StatsBomb事件: {statsbomb.get('match_count', 0)} 场 | 复盘样本={statsbomb.get('review_sample_count', 0)} | 标签队列={_safe_int(statsbomb.get('coverage_audit', {}).get('exact_match_count', 0)) if isinstance(statsbomb.get('coverage_audit'), Mapping) else 0} | 特征={statsbomb.get('review_feature_count', 0)} | 覆盖缺口={statsbomb.get('coverage_gap_count', 0)} | 候选={statsbomb.get('coverage_candidate_count', 0)}",
+        f"- StatsBomb复盘质量: {statsbomb_review_quality.get('status', '-')} | issues={statsbomb_review_quality.get('issue_count', 0)} | features={statsbomb_review_quality.get('feature_count', statsbomb.get('review_feature_count', 0))} | labels={statsbomb_review_quality_labels}",
         f"- StatsBomb覆盖计划: {statsbomb_coverage_plan.get('status', '-')}",
         *statsbomb_fallback_lines,
         f"- Fact Layer: MatchFact={match_fact.get('available_count', 0)}/{match_fact.get('target_count', 0)} ({_safe_float(match_fact.get('coverage_ratio'), 0.0):.1%}) | ActionFact={action_fact.get('available_match_count', 0)}/{action_fact.get('target_match_count', 0)} ({action_fact.get('event_count', 0)} events) | SourceProvenance={_safe_float(source_provenance.get('coverage_ratio'), 0.0):.1%} | TraceRefs={_safe_float(trace_fact_refs.get('trace_fact_ref_coverage_ratio'), 0.0):.1%}",

@@ -46,6 +46,52 @@ def _write_history_payload(path: Path, count: int) -> None:
     )
 
 
+def _write_statsbomb_review_payload(
+    path: Path,
+    count: int,
+    *,
+    prediction_miss_values: list[int] | None = None,
+) -> None:
+    values = prediction_miss_values or [index % 2 for index in range(count)]
+    items = []
+    for index in range(count):
+        prediction_miss = int(values[index % len(values)] if values else 0)
+        handicap_miss = index % 2
+        ou_miss = (index + 1) % 2
+        items.append(
+            {
+                "match_id": f"review-{index}",
+                "features": {"event_count": 100 + index, "xg_diff": float(index % 3) / 10},
+                "labels": {
+                    "prediction_miss": prediction_miss,
+                    "handicap_miss": handicap_miss,
+                    "ou_miss": ou_miss,
+                },
+            }
+        )
+    label_counts = {
+        key: {
+            "0": sum(1 for item in items if item["labels"][key] == 0),
+            "1": sum(1 for item in items if item["labels"][key] == 1),
+        }
+        for key in ("prediction_miss", "handicap_miss", "ou_miss")
+    }
+    path.write_text(
+        json.dumps(
+            {
+                "items": items,
+                "summary": {
+                    "sample_count": count,
+                    "feature_order": ["event_count", "xg_diff"],
+                    "label_counts": label_counts,
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+
 class CoreTrainingDataCoverageSummaryTests(unittest.TestCase):
     def test_state_items_summary_is_reused_when_source_signature_matches(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -111,6 +157,8 @@ class CoreTrainingDataCoverageSummaryTests(unittest.TestCase):
         self.assertEqual(status["club_history"]["league_profile_count"], 2)
         self.assertEqual(status["world_cup_history"]["year_count"], 2)
         self.assertEqual(status["statsbomb_events"]["review_feature_count"], 2)
+        self.assertEqual(status["statsbomb_events"]["review_quality"]["sample_count"], 1)
+        self.assertEqual(status["statsbomb_events"]["review_quality"]["feature_count"], 2)
         self.assertEqual(status["fact_coverage"]["match_fact"]["available_count"], 5)
         self.assertEqual(status["fact_coverage"]["match_fact"]["target_count"], 5)
         self.assertEqual(status["training_health"]["fact_readiness"]["match_fact_available_count"], 5)
@@ -318,6 +366,55 @@ class CoreTrainingDataCoverageSummaryTests(unittest.TestCase):
         self.assertEqual(health["xgb_trainability"]["valid_feature_ratio"], 1.0)
         self.assertEqual(health["xgb_trainability"]["label_class_count"], 3)
         self.assertEqual(health["fact_readiness"]["match_fact_coverage_ratio"], 1.0)
+
+    def test_statsbomb_review_quality_is_healthy_when_labels_are_balanced(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "data" / "state"
+            state.mkdir(parents=True)
+            (state / "league_profiles.json").write_text(json.dumps({"leagues": {"A": {}, "B": {}, "C": {}, "D": {}, "E": {}}}), encoding="utf-8")
+            _write_history_payload(state / "club_match_history.json", 300)
+            _write_statsbomb_review_payload(state / "statsbomb_review_training_samples.json", 24)
+            store = core.StateStore(root)
+            store.save_xgb_samples([_xgb_sample(index) for index in range(300)])
+
+            with patch("v24_app.core.PROJECT_DIR", root), patch("v24_app.core.STATE_STORE", store):
+                status = core.get_training_data_coverage_status()
+
+        quality = status["statsbomb_events"]["review_quality"]
+        self.assertEqual(quality["status"], "healthy")
+        self.assertEqual(quality["sample_count"], 24)
+        self.assertEqual(quality["feature_count"], 2)
+        self.assertEqual(quality["feature_complete_ratio"], 1.0)
+        self.assertEqual(quality["label_rows"][0]["value"], "12/24")
+        self.assertEqual(status["training_health"]["status"], "healthy")
+
+    def test_training_health_warns_when_statsbomb_review_quality_is_skewed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "data" / "state"
+            state.mkdir(parents=True)
+            (state / "league_profiles.json").write_text(json.dumps({"leagues": {"A": {}, "B": {}, "C": {}, "D": {}, "E": {}}}), encoding="utf-8")
+            _write_history_payload(state / "club_match_history.json", 300)
+            _write_statsbomb_review_payload(
+                state / "statsbomb_review_training_samples.json",
+                24,
+                prediction_miss_values=[1],
+            )
+            store = core.StateStore(root)
+            store.save_xgb_samples([_xgb_sample(index) for index in range(300)])
+
+            with patch("v24_app.core.PROJECT_DIR", root), patch("v24_app.core.STATE_STORE", store):
+                status = core.get_training_data_coverage_status()
+
+        quality = status["statsbomb_events"]["review_quality"]
+        health = status["training_health"]
+        codes = {issue["code"] for issue in health["issues"]}
+        self.assertEqual(quality["status"], "attention")
+        self.assertTrue(any(issue["code"] == "statsbomb_review_quality_prediction_miss_skewed" for issue in quality["issues"]))
+        self.assertEqual(health["status"], "attention")
+        self.assertIn("statsbomb_review_quality_attention", codes)
+        self.assertEqual(health["history_readiness"]["statsbomb_review_quality_status"], "attention")
 
     def test_training_health_warns_for_fact_layer_gaps(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -4529,6 +4529,15 @@ TRAINING_HEALTH_MIN_LEAGUES = 5
 TRAINING_HEALTH_MIN_CLUB_HISTORY = 100
 TRAINING_HEALTH_MIN_MATCH_FACT_COVERAGE_RATIO = 0.80
 TRAINING_HEALTH_MIN_SOURCE_PROVENANCE_RATIO = 0.80
+STATSBOMB_REVIEW_QUALITY_MIN_SAMPLES = 20
+STATSBOMB_REVIEW_QUALITY_MIN_FEATURE_RATIO = 0.95
+STATSBOMB_REVIEW_QUALITY_SKEW_LOW = 0.15
+STATSBOMB_REVIEW_QUALITY_SKEW_HIGH = 0.85
+STATSBOMB_REVIEW_LABEL_SPECS = (
+    ("prediction_miss", "1x2"),
+    ("handicap_miss", "handicap"),
+    ("ou_miss", "over_under"),
+)
 
 
 def _int_count_mapping(payload: object) -> dict[str, int]:
@@ -4561,6 +4570,171 @@ def _ratio(numerator: int | float, denominator: int | float) -> float:
         return round(max(0.0, min(float(numerator) / denominator_value, 1.0)), 4)
     except Exception:
         return 0.0
+
+
+def _binary_label_text(value: object) -> str:
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    text = normalize_text(value)
+    return text if text in {"0", "1"} else ""
+
+
+def _statsbomb_review_label_counts(
+    items: list[dict],
+    summary_label_counts: dict,
+    key: str,
+) -> dict[str, int]:
+    summary_counts = _int_count_mapping(summary_label_counts.get(key, {}))
+    if summary_counts:
+        return {
+            "0": int(summary_counts.get("0", 0) or 0),
+            "1": int(summary_counts.get("1", 0) or 0),
+        }
+    counts = {"0": 0, "1": 0}
+    for item in items:
+        labels = item.get("labels", {}) if isinstance(item.get("labels"), dict) else {}
+        label_value = _binary_label_text(labels.get(key))
+        if label_value:
+            counts[label_value] += 1
+    return counts
+
+
+def _statsbomb_review_feature_order(items: list[dict], summary: dict) -> list[str]:
+    feature_order = summary.get("feature_order", []) if isinstance(summary.get("feature_order"), list) else []
+    ordered = [normalize_text(item) for item in feature_order if normalize_text(item)]
+    if ordered:
+        return ordered
+    keys: set[str] = set()
+    for item in items:
+        features = item.get("features", {}) if isinstance(item.get("features"), dict) else {}
+        keys.update(normalize_text(key) for key in features if normalize_text(key))
+    return sorted(keys)
+
+
+def _build_statsbomb_review_quality_audit(payload: dict) -> dict:
+    resolved = payload if isinstance(payload, dict) else {}
+    items = _state_payload_items(resolved)
+    summary = resolved.get("summary", {}) if isinstance(resolved.get("summary"), dict) else {}
+    label_counts = summary.get("label_counts", {}) if isinstance(summary.get("label_counts"), dict) else {}
+    sample_count = len(items)
+    feature_order = _statsbomb_review_feature_order(items, summary)
+    feature_count = len(feature_order)
+    feature_complete_count = 0
+    for item in items:
+        features = item.get("features", {}) if isinstance(item.get("features"), dict) else {}
+        if feature_order:
+            if all(key in features for key in feature_order):
+                feature_complete_count += 1
+        elif features:
+            feature_complete_count += 1
+    feature_complete_ratio = feature_complete_count / sample_count if sample_count else 0.0
+    issues: list[dict[str, str]] = []
+    label_rows: list[dict[str, object]] = []
+
+    if sample_count <= 0:
+        issues.append(
+            _training_health_issue(
+                "statsbomb_review_quality_samples_missing",
+                "blocking",
+                "StatsBomb review training samples are missing.",
+                "Build StatsBomb review samples after result settlement and event summary alignment.",
+            )
+        )
+    elif sample_count < STATSBOMB_REVIEW_QUALITY_MIN_SAMPLES:
+        issues.append(
+            _training_health_issue(
+                "statsbomb_review_quality_sample_count_low",
+                "warning",
+                f"StatsBomb review sample count is low: {sample_count}/{STATSBOMB_REVIEW_QUALITY_MIN_SAMPLES}.",
+                "Continue settling matches with StatsBomb event summaries before relying on review memory.",
+            )
+        )
+    if sample_count > 0 and feature_count <= 0:
+        issues.append(
+            _training_health_issue(
+                "statsbomb_review_quality_features_missing",
+                "warning",
+                "StatsBomb review samples have no feature order.",
+                "Regenerate review samples so event proxy features are available for attribution.",
+            )
+        )
+    if sample_count > 0 and feature_complete_ratio < STATSBOMB_REVIEW_QUALITY_MIN_FEATURE_RATIO:
+        issues.append(
+            _training_health_issue(
+                "statsbomb_review_quality_feature_completeness_low",
+                "warning",
+                f"StatsBomb review feature completeness is low: {feature_complete_ratio:.1%}.",
+                "Regenerate or filter incomplete review samples before downstream training.",
+            )
+        )
+
+    for key, label in STATSBOMB_REVIEW_LABEL_SPECS:
+        counts = _statsbomb_review_label_counts(items, label_counts, key)
+        hit_count = int(counts.get("0", 0) or 0)
+        miss_count = int(counts.get("1", 0) or 0)
+        known_count = hit_count + miss_count
+        miss_rate = miss_count / known_count if known_count else None
+        tone = "neutral"
+        if known_count:
+            tone = (
+                "warning"
+                if miss_rate is not None
+                and (miss_rate <= STATSBOMB_REVIEW_QUALITY_SKEW_LOW or miss_rate >= STATSBOMB_REVIEW_QUALITY_SKEW_HIGH)
+                else "good"
+            )
+        label_rows.append(
+            {
+                "code": key,
+                "label": label,
+                "known_count": known_count,
+                "hit_count": hit_count,
+                "miss_count": miss_count,
+                "miss_rate": round(miss_rate, 4) if miss_rate is not None else None,
+                "value": f"{miss_count}/{known_count}" if known_count else "-",
+                "tone": tone,
+            }
+        )
+        if sample_count > 0 and known_count <= 0:
+            issues.append(
+                _training_health_issue(
+                    f"statsbomb_review_quality_{key}_missing",
+                    "warning",
+                    f"StatsBomb review label is missing: {label}.",
+                    "Backfill result labels before using event proxy samples for attribution.",
+                )
+            )
+        elif known_count > 0 and miss_rate is not None and (
+            miss_rate <= STATSBOMB_REVIEW_QUALITY_SKEW_LOW or miss_rate >= STATSBOMB_REVIEW_QUALITY_SKEW_HIGH
+        ):
+            issues.append(
+                _training_health_issue(
+                    f"statsbomb_review_quality_{key}_skewed",
+                    "warning",
+                    f"StatsBomb review label distribution is skewed: {label} miss_rate={miss_rate:.1%}.",
+                    "Add both hit and miss cases so Evaluation Agent attribution does not overfit one outcome.",
+                )
+            )
+
+    has_blocking = any(issue.get("severity") == "blocking" for issue in issues)
+    status = "blocked" if has_blocking else "attention" if issues else "healthy"
+    return {
+        "status": status,
+        "issue_count": len(issues),
+        "blocking_count": sum(1 for issue in issues if issue.get("severity") == "blocking"),
+        "warning_count": sum(1 for issue in issues if issue.get("severity") == "warning"),
+        "issues": issues,
+        "sample_count": sample_count,
+        "min_sample_count": STATSBOMB_REVIEW_QUALITY_MIN_SAMPLES,
+        "feature_count": feature_count,
+        "feature_complete_count": feature_complete_count,
+        "feature_complete_ratio": round(feature_complete_ratio, 4),
+        "min_feature_complete_ratio": STATSBOMB_REVIEW_QUALITY_MIN_FEATURE_RATIO,
+        "label_rows": label_rows,
+        "summary_text": (
+            f"StatsBomb review quality {status} | samples={sample_count} | "
+            f"features={feature_count} | issues={len(issues)}"
+        ),
+    }
 
 
 def _statsbomb_action_fact_summary(items: list[dict]) -> dict:
@@ -4803,6 +4977,7 @@ def _build_training_health_diagnostics(
     statsbomb_coverage_gap_count = int(statsbomb_events.get("coverage_gap_count", 0) or 0)
     statsbomb_coverage_candidate_count = int(statsbomb_events.get("coverage_candidate_count", 0) or 0)
     statsbomb_coverage_audit = statsbomb_events.get("coverage_audit", {}) if isinstance(statsbomb_events.get("coverage_audit"), dict) else {}
+    statsbomb_review_quality = statsbomb_events.get("review_quality", {}) if isinstance(statsbomb_events.get("review_quality"), dict) else {}
     statsbomb_coverage_blocker = str(statsbomb_coverage_audit.get("coverage_blocker") or "")
     statsbomb_settlement_date_start = statsbomb_coverage_audit.get("settlement_date_start")
     statsbomb_settlement_date_end = statsbomb_coverage_audit.get("settlement_date_end")
@@ -4826,6 +5001,18 @@ def _build_training_health_diagnostics(
                 "warning",
                 f"StatsBomb事件存在，但复盘训练样本为0（覆盖缺口 {statsbomb_coverage_gap_count}，候选 {statsbomb_coverage_candidate_count}）",
                 f"将事件摘要转成复盘训练样本，优先补齐覆盖缺口 {statsbomb_coverage_gap_count} 个并复核候选 {statsbomb_coverage_candidate_count} 个。",
+            )
+        )
+
+    statsbomb_review_quality_status = str(statsbomb_review_quality.get("status") or "")
+    if statsbomb_review_sample_count > 0 and statsbomb_review_quality_status in {"blocked", "attention"}:
+        issues.append(
+            _training_health_issue(
+                "statsbomb_review_quality_attention",
+                "warning",
+                f"StatsBomb review sample quality needs attention: {statsbomb_review_quality_status} "
+                f"({int(statsbomb_review_quality.get('issue_count', 0) or 0)} issues).",
+                "Export the StatsBomb review quality report and repair weak labels/features before expanding attribution training.",
             )
         )
 
@@ -4907,6 +5094,8 @@ def _build_training_health_diagnostics(
             "statsbomb_match_count": statsbomb_match_count,
             "statsbomb_review_sample_count": statsbomb_review_sample_count,
             "statsbomb_review_feature_count": int(statsbomb_events.get("review_feature_count", 0) or 0),
+            "statsbomb_review_quality_status": statsbomb_review_quality.get("status"),
+            "statsbomb_review_quality_issue_count": int(statsbomb_review_quality.get("issue_count", 0) or 0),
         },
         "rating_readiness": {
             "club_team_count": int(rating_pools.get("club_team_count", 0) or 0),
@@ -4973,6 +5162,7 @@ def get_training_data_coverage_status() -> dict:
     statsbomb_review_payload = _load_state_payload("statsbomb_review_training_samples.json")
     statsbomb_review_items = _state_payload_items(statsbomb_review_payload)
     statsbomb_review_summary = statsbomb_review_payload.get("summary", {}) if isinstance(statsbomb_review_payload.get("summary"), dict) else {}
+    statsbomb_review_quality = _build_statsbomb_review_quality_audit(statsbomb_review_payload)
     statsbomb_coverage_audit = _build_statsbomb_coverage_audit(
         get_recent_settlements(limit=0),
         statsbomb_summary_items,
@@ -5038,6 +5228,8 @@ def get_training_data_coverage_status() -> dict:
             "review_sample_count": len(statsbomb_review_items),
             "review_updated_at": statsbomb_review_payload.get("updated_at"),
             "review_feature_count": len(statsbomb_review_summary.get("feature_order", [])) if isinstance(statsbomb_review_summary.get("feature_order"), list) else 0,
+            "review_quality_status": statsbomb_review_quality.get("status"),
+            "review_quality": statsbomb_review_quality,
             "coverage_audit": statsbomb_coverage_audit,
             "coverage_gap_count": int(statsbomb_coverage_audit.get("coverage_gap_count", 0) or 0),
             "coverage_candidate_count": int(statsbomb_coverage_audit.get("candidate_count", 0) or 0),

@@ -103,6 +103,16 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
                 "review_feature_count": 0,
                 "coverage_gap_count": 0,
                 "coverage_candidate_count": 0,
+                "review_quality": {
+                    "status": "healthy",
+                    "issue_count": 0,
+                    "feature_count": 38,
+                    "label_rows": [
+                        {"code": "prediction_miss", "value": "8/20"},
+                        {"code": "handicap_miss", "value": "10/20"},
+                        {"code": "ou_miss", "value": "9/20"},
+                    ],
+                },
             },
             "fact_coverage": {
                 "match_fact": {"available_count": 90, "target_count": 120, "coverage_ratio": 0.75},
@@ -128,6 +138,16 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
                     "review_feature_count": 38,
                     "coverage_gap_count": 4,
                     "coverage_candidate_count": 1,
+                    "review_quality": {
+                        "status": "healthy",
+                        "issue_count": 0,
+                        "feature_count": 38,
+                        "label_rows": [
+                            {"code": "prediction_miss", "value": "1/2"},
+                            {"code": "handicap_miss", "value": "1/2"},
+                            {"code": "ou_miss", "value": "0/2"},
+                        ],
+                    },
                 },
             },
         )
@@ -137,6 +157,8 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
         self.assertIn("覆盖缺口=4", text)
         self.assertIn("候选=1", text)
         self.assertIn("Fact Layer", text)
+        self.assertIn("healthy", text)
+        self.assertIn("prediction_miss=1/2", text)
 
     def test_model_training_overview_shows_training_health_issues(self) -> None:
         text = build_model_training_overview_text(
@@ -282,6 +304,36 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
 
         self.assertEqual(actions[0]["action_key"], "backfill_statsbomb_review_labels")
         self.assertEqual(actions[0]["value"], training_health_action_button_text("backfill_statsbomb_review_labels"))
+
+    def test_training_health_rows_show_statsbomb_review_quality_attention(self) -> None:
+        coverage = self._coverage_with_health(
+            "attention",
+            [
+                {
+                    "code": "statsbomb_review_quality_attention",
+                    "severity": "warning",
+                    "message": "StatsBomb review sample quality needs attention.",
+                    "recommendation": "Export the quality report.",
+                }
+            ],
+        )
+        coverage["statsbomb_events"]["review_sample_count"] = 24
+        coverage["statsbomb_events"]["review_feature_count"] = 38
+        coverage["statsbomb_events"]["review_quality"] = {
+            "status": "attention",
+            "issue_count": 1,
+            "feature_count": 38,
+            "label_rows": [{"code": "prediction_miss", "value": "24/24"}],
+        }
+
+        cards = build_training_health_card_rows(coverage)
+        actions = build_training_health_action_rows(coverage)
+
+        statsbomb_card = next(row for row in cards if row["label"] == "StatsBomb复盘")
+        self.assertEqual(statsbomb_card["tone"], "warning")
+        self.assertIn("quality attention", statsbomb_card["detail"])
+        self.assertEqual(actions[0]["action_key"], "refresh_training_health")
+        self.assertIn("StatsBomb", actions[0]["value"])
 
     def test_training_health_repair_result_text_for_backfill_labels(self) -> None:
         text = build_training_health_repair_result_text(
