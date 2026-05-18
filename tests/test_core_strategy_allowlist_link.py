@@ -23,9 +23,11 @@ class _FakeStateStore:
         self.snapshots = dict(snapshots or {})
         self.history: dict[str, dict] = {}
         self.market: dict[str, dict] = {}
+        self.snapshot_migration_report: dict = {}
         self.snapshot_save_count = 0
         self.history_save_count = 0
         self.market_save_count = 0
+        self.snapshot_migration_report_save_count = 0
 
     def load_prediction_snapshots(self) -> dict[str, dict]:
         return dict(self.snapshots)
@@ -47,6 +49,10 @@ class _FakeStateStore:
     def save_market_snapshots(self, items: dict[str, dict]) -> None:
         self.market = dict(items)
         self.market_save_count += 1
+
+    def save_snapshot_migration_report(self, report: dict) -> None:
+        self.snapshot_migration_report = dict(report)
+        self.snapshot_migration_report_save_count += 1
 
     def upsert_prediction_snapshot(self, match_id: str, record: dict, limit: int = 3000) -> None:
         self.snapshots[match_id] = record
@@ -159,6 +165,117 @@ class CoreStrategyAllowlistLinkTests(unittest.TestCase):
         self.assertEqual(stored["trace"]["trace_id"], prediction["trace"]["trace_id"])
         self.assertEqual(stored["prediction"]["trace"]["trace_version"], "trace_v1")
         self.assertEqual(stored["prediction"]["trace"]["tool_calls"][0]["name"], "ready_for_report")
+        self.assertTrue(stored["prediction"]["trace"]["fact_refs"])
+
+    def test_ensure_prediction_trace_refreshes_existing_trace_without_fact_refs(self) -> None:
+        match = self._match()
+        prediction = {
+            "recommendation": "home",
+            "confidence": 0.66,
+            "risk_level": "LOW",
+            "trace": {"trace_id": "trc_existing", "trace_version": "trace_v1"},
+        }
+
+        trace = core._ensure_prediction_trace(match, prediction)
+
+        self.assertEqual(trace["trace_id"], "trc_existing")
+        self.assertTrue(any(item["kind"] == "match_fact" for item in trace["fact_refs"]))
+        self.assertTrue(any(item["kind"] == "source_provenance" for item in trace["fact_refs"]))
+        self.assertTrue(prediction["trace"]["fact_refs"])
+
+    def test_backfill_prediction_snapshot_trace_fact_refs_updates_legacy_snapshots(self) -> None:
+        match = self._match()
+        fake_store = _FakeStateStore(
+            {
+                match.match_id: {
+                    "match": core.serialize_match(match),
+                    "prediction": {
+                        "recommendation": "home",
+                        "confidence": 0.66,
+                        "risk_level": "LOW",
+                    },
+                }
+            }
+        )
+
+        with patch("v24_app.core.STATE_STORE", fake_store):
+            report = core.backfill_prediction_snapshot_trace_fact_refs()
+
+        stored = fake_store.snapshots[match.match_id]
+        self.assertEqual(report["checked"], 1)
+        self.assertEqual(report["updated"], 1)
+        self.assertEqual(fake_store.snapshot_save_count, 1)
+        self.assertIn("trace", stored)
+        self.assertTrue(stored["prediction"]["trace"]["fact_refs"])
+        self.assertTrue(any(item["kind"] == "match_fact" for item in stored["trace"]["fact_refs"]))
+        self.assertIn("trace_backfilled_at", stored)
+
+    def test_backfill_analysis_history_trace_fact_refs_updates_legacy_history(self) -> None:
+        match = self._match()
+        fake_store = _FakeStateStore()
+        fake_store.history = {
+            match.match_id: {
+                "match": core.serialize_match(match),
+                "prediction": {
+                    "recommendation": "home",
+                    "confidence": 0.66,
+                    "risk_level": "LOW",
+                },
+            }
+        }
+
+        with patch("v24_app.core.STATE_STORE", fake_store):
+            report = core.backfill_analysis_history_trace_fact_refs()
+
+        stored = fake_store.history[match.match_id]
+        self.assertEqual(report["checked"], 1)
+        self.assertEqual(report["updated"], 1)
+        self.assertEqual(fake_store.history_save_count, 1)
+        self.assertIn("trace", stored)
+        self.assertTrue(stored["prediction"]["trace"]["fact_refs"])
+        self.assertTrue(any(item["kind"] == "match_fact" for item in stored["trace"]["fact_refs"]))
+        self.assertIn("trace_backfilled_at", stored)
+
+    def test_migrate_prediction_snapshots_includes_analysis_history_trace_backfill(self) -> None:
+        fake_store = _FakeStateStore()
+
+        with (
+            patch("v24_app.core.STATE_STORE", fake_store),
+            patch("v24_app.core.MatchFetcherTitan", None),
+            patch("v24_app.core.backfill_prediction_snapshot_trace_fact_refs", return_value={"checked": 0, "updated": 0}),
+            patch("v24_app.core.backfill_analysis_history_trace_fact_refs", return_value={"checked": 2, "updated": 2}),
+        ):
+            report = core.migrate_prediction_snapshots()
+
+        self.assertEqual(report["trace_fact_ref_backfill"], {"checked": 0, "updated": 0})
+        self.assertEqual(report["analysis_history_trace_fact_ref_backfill"], {"checked": 2, "updated": 2})
+        self.assertEqual(fake_store.snapshot_migration_report_save_count, 1)
+        self.assertEqual(fake_store.snapshot_migration_report["analysis_history_trace_fact_ref_backfill"]["updated"], 2)
+
+    def test_backfill_prediction_snapshot_trace_fact_refs_skips_ready_snapshots(self) -> None:
+        match = self._match()
+        ready_trace = {
+            "trace_id": "trc_ready",
+            "trace_version": "trace_v1",
+            "fact_refs": [{"ref_id": "fact_ready", "kind": "match_fact", "schema_version": "match_fact_v1"}],
+        }
+        fake_store = _FakeStateStore(
+            {
+                match.match_id: {
+                    "match": core.serialize_match(match),
+                    "prediction": {"recommendation": "home", "confidence": 0.66, "trace": ready_trace},
+                    "trace": ready_trace,
+                }
+            }
+        )
+
+        with patch("v24_app.core.STATE_STORE", fake_store):
+            report = core.backfill_prediction_snapshot_trace_fact_refs()
+
+        self.assertEqual(report["checked"], 1)
+        self.assertEqual(report["already_ready"], 1)
+        self.assertEqual(report["updated"], 0)
+        self.assertEqual(fake_store.snapshot_save_count, 0)
 
     def test_persist_prediction_snapshots_batches_state_writes(self) -> None:
         first = self._match()

@@ -11581,7 +11581,8 @@ def _ensure_prediction_trace(
     if not isinstance(prediction, dict):
         return {}
     trace = prediction.get("trace")
-    if isinstance(trace, dict) and trace.get("trace_id"):
+    fact_refs = trace.get("fact_refs") if isinstance(trace, dict) else []
+    if isinstance(trace, dict) and trace.get("trace_id") and isinstance(fact_refs, list) and fact_refs:
         return trace
     trace = build_prediction_trace_envelope(
         match=match,
@@ -11591,6 +11592,134 @@ def _ensure_prediction_trace(
     )
     prediction["trace"] = trace
     return trace
+
+
+def _snapshot_record_match(record: dict, fallback_match_id: str = "") -> AppMatch | None:
+    match_payload = record.get("match") if isinstance(record, dict) else None
+    if not isinstance(match_payload, dict):
+        return None
+    source = normalize_text(match_payload.get("source", "")) or "snapshot:analysis"
+    app_match = _app_match_from_payload(match_payload, source=source)
+    if app_match is not None:
+        return app_match
+    try:
+        home_team = normalize_text(match_payload.get("home_team", ""))
+        away_team = normalize_text(match_payload.get("away_team", ""))
+        league = normalize_text(match_payload.get("league", ""))
+        match_time = normalize_text(match_payload.get("match_time", "")) or "00:00"
+        match_date = normalize_text(match_payload.get("match_date", ""))
+        if home_team and away_team and league and _looks_like_match_time(match_time) and _looks_like_date(match_date):
+            return AppMatch(
+                home_team=home_team,
+                away_team=away_team,
+                league=league,
+                match_time=match_time,
+                match_date=match_date,
+                odds_home=_safe_float(match_payload.get("odds_home"), default=2.20),
+                odds_draw=_safe_float(match_payload.get("odds_draw"), default=3.10),
+                odds_away=_safe_float(match_payload.get("odds_away"), default=2.80),
+                handicap_line=_safe_float(match_payload.get("handicap_line"), default=0.0),
+                opening_odds_home=_safe_float(match_payload.get("opening_odds_home"), default=0.0),
+                opening_odds_draw=_safe_float(match_payload.get("opening_odds_draw"), default=0.0),
+                opening_odds_away=_safe_float(match_payload.get("opening_odds_away"), default=0.0),
+                return_rate=_safe_float(match_payload.get("return_rate"), default=0.0),
+                kelly_home=_safe_float(match_payload.get("kelly_home"), default=0.0),
+                kelly_draw=_safe_float(match_payload.get("kelly_draw"), default=0.0),
+                kelly_away=_safe_float(match_payload.get("kelly_away"), default=0.0),
+                source=source,
+                source_id=normalize_text(match_payload.get("source_id", "")),
+                competition_group=normalize_text(match_payload.get("competition_group", "")),
+                group_round=_optional_int(match_payload.get("group_round")) or 0,
+                home_points=_optional_int(match_payload.get("home_points")),
+                away_points=_optional_int(match_payload.get("away_points")),
+                home_goal_diff=_optional_int(match_payload.get("home_goal_diff")),
+                away_goal_diff=_optional_int(match_payload.get("away_goal_diff")),
+                home_group_rank=_optional_int(match_payload.get("home_group_rank")),
+                away_group_rank=_optional_int(match_payload.get("away_group_rank")),
+            )
+    except Exception:
+        pass
+    if fallback_match_id and "|" in str(fallback_match_id):
+        parts = str(fallback_match_id).split("|")
+        if len(parts) >= 4:
+            fallback_payload = dict(match_payload)
+            fallback_payload.setdefault("match_date", parts[0])
+            fallback_payload.setdefault("league", parts[1])
+            fallback_payload.setdefault("home_team", parts[2])
+            fallback_payload.setdefault("away_team", parts[3])
+            fallback_payload.setdefault("match_time", "00:00")
+            return _app_match_from_payload(fallback_payload, source=source)
+    return None
+
+
+def backfill_prediction_snapshot_trace_fact_refs(max_records: int = 5000) -> dict:
+    limit = max(1, int(max_records))
+    snapshots = STATE_STORE.load_prediction_snapshots()
+    report = {
+        "checked": 0,
+        "updated": 0,
+        "already_ready": 0,
+        "missing_prediction": 0,
+        "invalid_match": 0,
+        "skipped_limit": 0,
+        "fact_ref_kinds": {},
+        "updated_items": [],
+    }
+    if not isinstance(snapshots, dict) or not snapshots:
+        return report
+
+    changed = False
+    for match_id, record in snapshots.items():
+        if report["checked"] >= limit:
+            report["skipped_limit"] = max(0, len(snapshots) - int(report["checked"]))
+            break
+        if not isinstance(record, dict):
+            continue
+        report["checked"] += 1
+        prediction = record.get("prediction")
+        if not isinstance(prediction, dict):
+            report["missing_prediction"] += 1
+            continue
+        trace = prediction.get("trace") if isinstance(prediction.get("trace"), dict) else record.get("trace")
+        fact_refs = trace.get("fact_refs") if isinstance(trace, dict) else []
+        if isinstance(trace, dict) and trace.get("trace_id") and isinstance(fact_refs, list) and fact_refs:
+            report["already_ready"] += 1
+            continue
+        app_match = _snapshot_record_match(record, fallback_match_id=match_id)
+        if app_match is None:
+            report["invalid_match"] += 1
+            continue
+
+        stored_prediction = dict(prediction)
+        if isinstance(record.get("trace"), dict) and not isinstance(stored_prediction.get("trace"), dict):
+            stored_prediction["trace"] = dict(record["trace"])
+        trace = _ensure_prediction_trace(app_match, stored_prediction)
+        record["prediction"] = stored_prediction
+        if trace:
+            record["trace"] = dict(trace)
+            for item in trace.get("fact_refs", []) if isinstance(trace.get("fact_refs"), list) else []:
+                if not isinstance(item, dict):
+                    continue
+                kind = str(item.get("kind") or "-")
+                fact_counts = report["fact_ref_kinds"]
+                if isinstance(fact_counts, dict):
+                    fact_counts[kind] = int(fact_counts.get(kind, 0) or 0) + 1
+        record["trace_backfilled_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        snapshots[match_id] = record
+        report["updated"] += 1
+        if len(report["updated_items"]) < 20:
+            report["updated_items"].append(
+                {
+                    "match_id": match_id,
+                    "trace_id": trace.get("trace_id") if isinstance(trace, dict) else "",
+                    "fact_ref_count": len(trace.get("fact_refs", [])) if isinstance(trace, dict) and isinstance(trace.get("fact_refs"), list) else 0,
+                }
+            )
+        changed = True
+
+    if changed:
+        STATE_STORE.save_prediction_snapshots(snapshots)
+    return report
 
 
 def _strategy_allowlist_marker(
@@ -12004,12 +12133,84 @@ def backfill_analysis_history_from_prediction_snapshots(max_backfilled: int = 50
     }
 
 
+def backfill_analysis_history_trace_fact_refs(max_records: int = 5000) -> dict:
+    limit = max(1, int(max_records))
+    history = STATE_STORE.load_analysis_history()
+    report = {
+        "checked": 0,
+        "updated": 0,
+        "already_ready": 0,
+        "missing_prediction": 0,
+        "invalid_match": 0,
+        "skipped_limit": 0,
+        "fact_ref_kinds": {},
+        "updated_items": [],
+    }
+    if not isinstance(history, dict) or not history:
+        return report
+
+    changed = False
+    for match_id, record in reversed(list(history.items())):
+        if report["checked"] >= limit:
+            report["skipped_limit"] = max(0, len(history) - int(report["checked"]))
+            break
+        if not isinstance(record, dict):
+            continue
+        report["checked"] += 1
+        prediction = record.get("prediction")
+        if not isinstance(prediction, dict):
+            report["missing_prediction"] += 1
+            continue
+        trace = prediction.get("trace") if isinstance(prediction.get("trace"), dict) else record.get("trace")
+        fact_refs = trace.get("fact_refs") if isinstance(trace, dict) else []
+        if isinstance(trace, dict) and trace.get("trace_id") and isinstance(fact_refs, list) and fact_refs:
+            report["already_ready"] += 1
+            continue
+
+        app_match = _snapshot_record_match(record, fallback_match_id=match_id)
+        if app_match is None:
+            report["invalid_match"] += 1
+            continue
+
+        stored_prediction = dict(prediction)
+        if isinstance(record.get("trace"), dict) and not isinstance(stored_prediction.get("trace"), dict):
+            stored_prediction["trace"] = dict(record["trace"])
+        trace = _ensure_prediction_trace(app_match, stored_prediction)
+        record["prediction"] = stored_prediction
+        if trace:
+            record["trace"] = dict(trace)
+            for item in trace.get("fact_refs", []) if isinstance(trace.get("fact_refs"), list) else []:
+                if not isinstance(item, dict):
+                    continue
+                kind = str(item.get("kind") or "-")
+                fact_counts = report["fact_ref_kinds"]
+                if isinstance(fact_counts, dict):
+                    fact_counts[kind] = int(fact_counts.get(kind, 0) or 0) + 1
+        record["trace_backfilled_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        history[match_id] = record
+        report["updated"] += 1
+        changed = True
+        if len(report["updated_items"]) < 20:
+            report["updated_items"].append(
+                {
+                    "match_id": match_id,
+                    "trace_id": trace.get("trace_id") if isinstance(trace, dict) else "",
+                    "fact_ref_count": len(trace.get("fact_refs", [])) if isinstance(trace, dict) and isinstance(trace.get("fact_refs"), list) else 0,
+                }
+            )
+
+    if changed:
+        STATE_STORE.save_analysis_history(history)
+    return report
+
+
 def repair_prediction_snapshots_from_analysis_history(
     lookback_days: int = 3,
     max_restored: int = 100,
 ) -> dict:
     lookback_days = max(0, min(int(lookback_days), 14))
     max_restored = max(1, int(max_restored))
+    history_trace_backfill = backfill_analysis_history_trace_fact_refs()
     snapshots = STATE_STORE.load_prediction_snapshots()
     history = STATE_STORE.load_analysis_history()
     settled_ids = {str(item.get("match_id", "")) for item in STATE_STORE.load_settlements() if item.get("match_id")}
@@ -12070,6 +12271,7 @@ def repair_prediction_snapshots_from_analysis_history(
         "skipped_out_of_window": skipped_out_of_window,
         "lookback_days": lookback_days,
         "items": restored_items,
+        "history_trace_fact_ref_backfill": history_trace_backfill,
     }
 
 
@@ -13166,6 +13368,8 @@ def migrate_prediction_snapshots(max_unresolved: int = 50) -> dict:
     snapshots = STATE_STORE.load_prediction_snapshots()
     report["total_snapshots"] = len(snapshots)
     if not snapshots or MatchFetcherTitan is None:
+        report["trace_fact_ref_backfill"] = backfill_prediction_snapshot_trace_fact_refs()
+        report["analysis_history_trace_fact_ref_backfill"] = backfill_analysis_history_trace_fact_refs()
         STATE_STORE.save_snapshot_migration_report(report)
         return report
 
@@ -13273,6 +13477,8 @@ def migrate_prediction_snapshots(max_unresolved: int = 50) -> dict:
 
     if changed:
         STATE_STORE.save_prediction_snapshots(snapshots)
+    report["trace_fact_ref_backfill"] = backfill_prediction_snapshot_trace_fact_refs()
+    report["analysis_history_trace_fact_ref_backfill"] = backfill_analysis_history_trace_fact_refs()
     STATE_STORE.save_snapshot_migration_report(report)
     return report
 
@@ -13765,6 +13971,7 @@ def auto_settle_finished_matches(
         "restored_snapshots": int(repair_report.get("restored", 0) or 0),
         "snapshot_repair": repair_report,
         "analysis_history_backfill": history_backfill,
+        "analysis_history_trace_fact_ref_backfill": repair_report.get("history_trace_fact_ref_backfill", {}),
         "source": "none",
         "messages": [],
         "items": [],

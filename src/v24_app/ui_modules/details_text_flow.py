@@ -11,6 +11,21 @@ from .strategy_dashboard_flow import (
 )
 
 
+def _format_backfill_report_lines(title: str, report: Mapping[str, object] | object) -> list[str]:
+    resolved = report if isinstance(report, Mapping) else {}
+    if not resolved:
+        return []
+    lines = ["", title]
+    for key in ("checked", "updated", "restored", "already_ready", "missing_prediction", "invalid_match", "skipped_limit", "backfilled"):
+        if key in resolved:
+            lines.append(f"- {key}: {resolved.get(key, 0)}")
+    fact_ref_kinds = resolved.get("fact_ref_kinds")
+    if isinstance(fact_ref_kinds, Mapping) and fact_ref_kinds:
+        counts = ", ".join(f"{key}={int(value or 0)}" for key, value in sorted(fact_ref_kinds.items()))
+        lines.append(f"- fact_ref_kinds: {counts}")
+    return lines
+
+
 def build_diagnostics_text(
     *,
     diagnostics: Any,
@@ -48,6 +63,12 @@ def build_diagnostics_text(
                 f"- unresolved: {migration.get('unresolved', 0)}",
             ]
         )
+        trace_backfill = migration.get("trace_fact_ref_backfill")
+        if isinstance(trace_backfill, Mapping) and trace_backfill:
+            lines.extend(_format_backfill_report_lines("Trace Fact 回填", trace_backfill))
+        history_trace_backfill = migration.get("analysis_history_trace_fact_ref_backfill")
+        if isinstance(history_trace_backfill, Mapping) and history_trace_backfill:
+            lines.extend(_format_backfill_report_lines("Analysis History Trace 回填", history_trace_backfill))
 
     status = xgb_status if isinstance(xgb_status, Mapping) else {}
     label_counts = status.get("label_counts", {}) if isinstance(status, Mapping) else {}

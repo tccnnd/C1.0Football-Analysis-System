@@ -34,13 +34,31 @@ class UIDetailsTextFlowModuleTests(unittest.TestCase):
         )
         text = build_diagnostics_text(
             diagnostics=diagnostics,
-            snapshot_migration_report={"total_snapshots": 10, "resolved": 8, "already_bound": 1, "unresolved": 1},
+            snapshot_migration_report={
+                "total_snapshots": 10,
+                "resolved": 8,
+                "already_bound": 1,
+                "unresolved": 1,
+                "trace_fact_ref_backfill": {
+                    "checked": 24,
+                    "updated": 24,
+                    "fact_ref_kinds": {"match_fact": 24, "source_provenance": 24},
+                },
+                "analysis_history_trace_fact_ref_backfill": {
+                    "checked": 213,
+                    "updated": 213,
+                    "fact_ref_kinds": {"match_fact": 213, "source_provenance": 213},
+                },
+            },
             xgb_status={"sample_count": 120, "valid_feature_count": 110, "label_counts": {0: 40, 1: 30, 2: 50}, "model_ready": True, "model_updated_at": "2026-04-04"},
         )
         self.assertIn("V24 取数诊断", text)
         self.assertIn("fixture_source_guard: 通过", text)
         self.assertIn("fixture_page_guard: 未通过", text)
         self.assertIn("快照迁移", text)
+        self.assertIn("Trace Fact 回填", text)
+        self.assertIn("Analysis History Trace 回填", text)
+        self.assertIn("updated: 213", text)
         self.assertIn("labels(主/平/客): 40/30/50", text)
 
     def test_build_pending_match_details_text(self) -> None:

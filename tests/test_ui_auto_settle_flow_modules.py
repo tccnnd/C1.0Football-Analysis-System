@@ -42,6 +42,12 @@ class UIAutoSettleFlowModuleTests(unittest.TestCase):
                 "snapshot_result_misses": 4,
                 "snapshot_result_miss_reasons": {"no_result": 3, "state_not_finished": 1},
                 "snapshot_predictions": 5,
+                "analysis_history_backfill": {"snapshot_count": 24, "history_count": 213, "backfilled": 24},
+                "analysis_history_trace_fact_ref_backfill": {
+                    "checked": 213,
+                    "updated": 213,
+                    "fact_ref_kinds": {"match_fact": 213, "source_provenance": 213},
+                },
                 "messages": ["ok1", "ok2"],
             }
         )
@@ -50,6 +56,9 @@ class UIAutoSettleFlowModuleTests(unittest.TestCase):
         self.assertIn("赛果回查: 检查 10 / 命中 6", message)
         self.assertIn("no_result=3", message)
         self.assertIn("state_not_finished=1", message)
+        self.assertIn("历史快照回填", message)
+        self.assertIn("历史 Trace 回填", message)
+        self.assertIn("updated: 213", message)
         self.assertIn("- ok1", message)
 
     def test_should_refresh_after_auto_settle(self) -> None:
