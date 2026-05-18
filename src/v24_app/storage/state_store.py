@@ -73,6 +73,14 @@ class StateStore:
         }
         self.settlements_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    def save_settlements(self, items: list[dict], limit: int = 500) -> None:
+        normalized = items[-limit:] if len(items) > limit else items
+        payload = {
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "items": normalized,
+        }
+        self.settlements_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
     def load_parlay_tickets(self) -> list[dict]:
         if not self.parlay_tickets_file.exists():
             return []

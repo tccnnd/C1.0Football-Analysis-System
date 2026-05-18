@@ -39,6 +39,7 @@ from .training_samples import (
     build_team_histories_from_state,
     export_statsbomb_review_training_samples,
     export_video_review_fewshot_samples,
+    import_historical_review_settlements,
     import_historical_xgb_samples,
 )
 
@@ -5449,6 +5450,37 @@ def repair_training_data_health(action_key: str, *, input_path: Path | str | Non
     elif action == "execute_statsbomb_coverage_import_plan":
         result = _execute_statsbomb_coverage_import_plan(project_dir=PROJECT_DIR)
         message = str(result.get("message") or "StatsBomb 覆盖计划执行完成。")
+    elif action == "import_aligned_historical_settlements":
+        if input_path is None:
+            raise ValueError("input_path is required for import_aligned_historical_settlements")
+        import_result = import_historical_review_settlements(
+            project_dir=PROJECT_DIR,
+            input_path=Path(input_path),
+            replace=False,
+        )
+        _RECENT_SETTLEMENTS_CACHE.clear()
+        review_result = export_statsbomb_review_training_samples(
+            project_dir=PROJECT_DIR,
+            settlements=get_recent_settlements(limit=0),
+        )
+        sample_count = int(review_result.get("sample_count", 0) or 0)
+        result = {
+            **import_result,
+            "ok": bool(import_result.get("ok")) or sample_count > 0,
+            "sample_count": sample_count,
+            "review_sample_count": sample_count,
+            "skipped_missing_statsbomb": int(review_result.get("skipped_missing_statsbomb", 0) or 0),
+            "skipped_unknown_label": int(review_result.get("skipped_unknown_label", 0) or 0),
+            "feature_order": review_result.get("feature_order", []),
+            "review_output_path": review_result.get("output_path"),
+            "output_path": review_result.get("output_path"),
+            "review_result": review_result,
+        }
+        message = (
+            "Aligned historical review settlements imported: "
+            f"rows={int(result.get('imported_settlements', 0) or 0)}, "
+            f"review_samples={sample_count}."
+        )
     elif action == "build_statsbomb_review_samples":
         settlements = get_recent_settlements(limit=0)
         result = export_statsbomb_review_training_samples(

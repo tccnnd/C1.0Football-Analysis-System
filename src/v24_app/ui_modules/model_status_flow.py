@@ -82,7 +82,7 @@ def _training_health_action_for_issue(code: object, fallback: object = "") -> st
         "xgb_league_coverage_low": "补不同联赛样本",
         "xgb_date_range_missing": "修复样本日期字段",
         "league_profiles_missing": "生成联赛画像",
-        "statsbomb_date_overlap_missing": "执行StatsBomb覆盖计划；若仍无交集，补重叠历史赛果或当前事件源",
+        "statsbomb_date_overlap_missing": "执行StatsBomb覆盖计划；若仍无交集，导入重叠复盘赛果",
         "statsbomb_review_samples_missing": "将事件摘要转为复盘训练样本",
     }
     actions.update(
@@ -125,6 +125,7 @@ def training_health_action_button_text(action_key: object) -> str:
         "build_league_profiles": "生成联赛画像",
         "build_statsbomb_coverage_import_plan": "生成覆盖计划",
         "execute_statsbomb_coverage_import_plan": "执行覆盖计划",
+        "import_aligned_historical_settlements": "导入重叠复盘赛果",
         "build_statsbomb_review_samples": "生成复盘样本",
         "train_xgb": "训练XGB",
         "train_play_models": "训练玩法模型",
@@ -235,6 +236,29 @@ def build_training_health_card_rows(coverage_status: Mapping[str, object] | obje
     return rows[: max(0, int(limit))]
 
 
+def _statsbomb_no_overlap_fallback_action_rows(coverage_status: Mapping[str, object] | object) -> list[dict[str, str]]:
+    coverage = coverage_status if isinstance(coverage_status, Mapping) else {}
+    statsbomb = coverage.get("statsbomb_events", {}) if isinstance(coverage.get("statsbomb_events"), Mapping) else {}
+    plan = statsbomb.get("coverage_import_plan", {}) if isinstance(statsbomb.get("coverage_import_plan"), Mapping) else {}
+    fallback = plan.get("no_overlap_fallback", {}) if isinstance(plan.get("no_overlap_fallback"), Mapping) else {}
+    actions = [row for row in fallback.get("actions", []) if isinstance(row, Mapping)] if isinstance(fallback.get("actions"), list) else []
+    rows: list[dict[str, str]] = []
+    for index, row in enumerate(actions, start=1):
+        action_key = str(row.get("action_key") or "")
+        if action_key not in {"import_aligned_historical_settlements"}:
+            continue
+        rows.append(
+            {
+                "label": f"兜底{index}",
+                "value": str(row.get("detail") or row.get("label") or "导入与 StatsBomb 重叠的历史复盘赛果"),
+                "tone": "danger" if str(fallback.get("status") or "") == "blocked" else "warning",
+                "detail": f"{fallback.get('status', '-')} | {action_key} | {fallback.get('reason', '-')}",
+                "action_key": action_key,
+            }
+        )
+    return rows
+
+
 def build_training_health_action_rows(coverage_status: Mapping[str, object] | object, *, limit: int = 5) -> list[dict[str, str]]:
     coverage = coverage_status if isinstance(coverage_status, Mapping) else {}
     health = coverage.get("training_health", {}) if isinstance(coverage.get("training_health"), Mapping) else {}
@@ -270,7 +294,15 @@ def build_training_health_action_rows(coverage_status: Mapping[str, object] | ob
                 "action_key": _training_health_action_key_for_issue(issue.get("code")),
             }
         )
-    return rows
+    fallback_rows = _statsbomb_no_overlap_fallback_action_rows(coverage)
+    fallback_action_keys = {row.get("action_key", "") for row in fallback_rows}
+    for row in rows:
+        action_key = row.get("action_key", "")
+        if action_key in fallback_action_keys:
+            continue
+        fallback_rows.append(row)
+    rows = fallback_rows
+    return rows[: max(0, int(limit))]
 
 
 def build_training_model_gate_rows(gate_status: Mapping[str, object] | object, *, limit: int = 6) -> list[dict[str, str]]:
@@ -343,26 +375,40 @@ def build_training_health_repair_result_text(result: Mapping[str, object] | obje
     plan_line = ""
     import_line = ""
     review_line = ""
+    settlement_line = ""
     if action_key in {"build_statsbomb_coverage_import_plan", "execute_statsbomb_coverage_import_plan"} and isinstance(payload, Mapping):
         plan_line = (
             f"- 计划: {payload.get('target_date_start', '-')} -> {payload.get('target_date_end', '-')} | "
             f"next={payload.get('next_step', payload.get('plan_next_step', '-'))}\n"
         )
-    if action_key == "execute_statsbomb_coverage_import_plan" and isinstance(payload, Mapping):
+    if action_key in {"execute_statsbomb_coverage_import_plan", "import_aligned_historical_settlements"} and isinstance(payload, Mapping):
         import_line = (
             f"- 导入: competitions={len(payload.get('import_runs', []) if isinstance(payload.get('import_runs'), list) else [])} | "
-            f"records={payload.get('imported_records', '-')} | output={payload.get('output_records', '-')}\n"
+            f"records={payload.get('imported_records', payload.get('imported_settlements', '-'))} | "
+            f"output={payload.get('output_records', payload.get('saved_total', '-'))}\n"
         )
+        if action_key == "import_aligned_historical_settlements":
+            import_line = (
+                f"- 导入: rows={payload.get('imported_settlements', '-')} | "
+                f"duplicates={payload.get('skipped_duplicate', '-')} | "
+                f"missing_label={payload.get('skipped_missing_label', '-')}\n"
+            )
         review_line = (
-            f"- 复盘: samples={payload.get('sample_count', '-')} | missing={payload.get('skipped_missing_statsbomb', '-')} | "
+            f"- 复盘: samples={payload.get('sample_count', payload.get('review_sample_count', '-'))} | missing={payload.get('skipped_missing_statsbomb', '-')} | "
             f"unknown={payload.get('skipped_unknown_label', '-')}\n"
+        )
+    if action_key == "import_aligned_historical_settlements" and isinstance(payload, Mapping):
+        settlement_line = (
+            f"- 赛果: imported={payload.get('imported_settlements', '-')} | "
+            f"duplicate={payload.get('skipped_duplicate', '-')} | missing_label={payload.get('skipped_missing_label', '-')}\n"
         )
     return (
         f"训练健康修复: {'完成' if bool(resolved.get('ok', True)) else '未完成'}\n"
         + f"- 动作: {training_health_action_button_text(resolved.get('action_key'))}\n"
         + f"- 状态: {resolved.get('before_status') or '-'} -> {resolved.get('after_status') or '-'}\n"
         + f"- 结果: {resolved.get('message') or '-'}\n"
-        + f"- 样本: imported={payload.get('imported_samples', '-')} | saved={payload.get('saved_total', '-')} | profiles={payload.get('league_profile_count', '-')}\n"
+        + f"- 样本: imported={payload.get('imported_samples', payload.get('imported_settlements', '-'))} | saved={payload.get('saved_total', '-')} | profiles={payload.get('league_profile_count', '-')}\n"
+        + settlement_line
         + plan_line
         + import_line
         + review_line

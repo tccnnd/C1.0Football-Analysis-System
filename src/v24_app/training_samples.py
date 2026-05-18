@@ -50,6 +50,25 @@ FIELD_ALIASES.update(
     }
 )
 
+FIELD_ALIASES.update(
+    {
+        "source_match_id": ("source_match_id", "statsbomb_source_match_id", "provider_match_id"),
+        "source_url": ("source_url", "statsbomb_source_url", "provider_url"),
+        "predicted": ("predicted", "prediction", "recommendation", "predicted_result", "pick", "selection"),
+        "is_correct": ("is_correct", "prediction_correct", "prediction_is_correct", "is_hit", "hit", "correct"),
+        "prediction_confidence": ("prediction_confidence", "confidence", "pick_confidence"),
+        "handicap_result": ("handicap_result", "actual_handicap", "handicap_actual"),
+        "predicted_handicap": ("predicted_handicap", "handicap_prediction", "handicap_pick"),
+        "handicap_is_correct": ("handicap_is_correct", "handicap_correct", "handicap_is_hit"),
+        "handicap_confidence": ("handicap_confidence", "handicap_pick_confidence"),
+        "ou_line": ("ou_line", "total_line", "over_under_line"),
+        "ou_result": ("ou_result", "actual_ou", "over_under_result"),
+        "predicted_ou": ("predicted_ou", "ou_prediction", "over_under_pick"),
+        "ou_is_correct": ("ou_is_correct", "ou_correct", "over_under_is_correct"),
+        "ou_confidence": ("ou_confidence", "ou_pick_confidence"),
+    }
+)
+
 DATE_FORMATS = ("%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d", "%Y%m%d")
 TIME_FORMATS = ("%H:%M", "%H%M", "%H:%M:%S")
 DATETIME_FORMATS = (
@@ -710,6 +729,315 @@ def export_statsbomb_review_training_samples(
     }
     resolved_output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return {**summary, "output_path": str(resolved_output)}
+
+
+def _review_bool_label(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value in (None, ""):
+        return None
+    text = _normalize_text(value).casefold()
+    compact = text.replace(" ", "").replace("_", "").replace("-", "")
+    truthy = {
+        "1",
+        "1.0",
+        "true",
+        "yes",
+        "y",
+        "hit",
+        "correct",
+        "pass",
+        "\u662f",
+        "\u5bf9",
+        "\u6b63\u786e",
+        "\u547d\u4e2d",
+    }
+    falsy = {
+        "0",
+        "0.0",
+        "false",
+        "no",
+        "n",
+        "miss",
+        "incorrect",
+        "wrong",
+        "fail",
+        "\u5426",
+        "\u9519",
+        "\u9519\u8bef",
+        "\u672a\u547d\u4e2d",
+    }
+    if compact in truthy:
+        return True
+    if compact in falsy:
+        return False
+    try:
+        numeric = float(compact)
+    except Exception:
+        return None
+    if numeric == 1.0:
+        return True
+    if numeric == 0.0:
+        return False
+    return None
+
+
+def _review_outcome_key(value: Any) -> str | None:
+    text = _normalize_text(value).casefold()
+    if not text:
+        return None
+    compact = text.replace(" ", "").replace("_", "").replace("-", "")
+    if compact in {"home", "h", "1", "1.0", "homewin", "host", "win", "\u4e3b", "\u4e3b\u80dc", "\u80dc"}:
+        return "home"
+    if compact in {"draw", "d", "x", "0", "0.0", "tie", "\u5e73", "\u5e73\u5c40"}:
+        return "draw"
+    if compact in {"away", "a", "2", "2.0", "awaywin", "guest", "visitor", "loss", "\u5ba2", "\u5ba2\u80dc", "\u8d1f"}:
+        return "away"
+    if "home" in compact and "win" in compact:
+        return "home"
+    if "away" in compact and "win" in compact:
+        return "away"
+    if "\u4e3b\u80dc" in compact:
+        return "home"
+    if "\u5ba2\u80dc" in compact:
+        return "away"
+    if "\u5e73" in compact:
+        return "draw"
+    return None
+
+
+def _review_handicap_key(value: Any) -> str | None:
+    text = _normalize_text(value).casefold()
+    if not text:
+        return None
+    compact = text.replace(" ", "").replace("_", "").replace("-", "")
+    if "\u8ba9\u80dc" in compact or compact in {"home", "h", "1", "1.0", "win", "handicaphome"}:
+        return "home"
+    if "\u8ba9\u5e73" in compact or compact in {"draw", "d", "x", "0", "0.0", "push", "void"}:
+        return "draw"
+    if "\u8ba9\u8d1f" in compact or compact in {"away", "a", "2", "2.0", "loss", "lose", "handicapaway"}:
+        return "away"
+    return _review_outcome_key(value)
+
+
+def _review_ou_key(value: Any) -> str | None:
+    text = _normalize_text(value).casefold()
+    if not text:
+        return None
+    compact = text.replace(" ", "").replace("_", "").replace("-", "")
+    if "\u5927" in compact or compact.startswith(">") or compact in {"over", "o", "big", "da"}:
+        return "over"
+    if "\u5c0f" in compact or compact.startswith("<") or compact in {"under", "u", "small", "xiao"}:
+        return "under"
+    return None
+
+
+def _review_result_key(home_goals: int, away_goals: int) -> str:
+    if home_goals > away_goals:
+        return "home"
+    if home_goals < away_goals:
+        return "away"
+    return "draw"
+
+
+def _review_handicap_result_key(home_goals: int, away_goals: int, handicap_line: float) -> str:
+    adjusted_home = float(home_goals) + float(handicap_line)
+    if adjusted_home > float(away_goals):
+        return "home"
+    if adjusted_home < float(away_goals):
+        return "away"
+    return "draw"
+
+
+def _review_ou_result_key(total_goals: int, ou_line: float) -> str:
+    return "over" if int(total_goals) > float(ou_line) else "under"
+
+
+def _review_hit(predicted_key: str | None, actual_key: str | None) -> bool | None:
+    if not predicted_key or not actual_key:
+        return None
+    return predicted_key == actual_key
+
+
+def _normalize_historical_review_settlement(
+    row: dict[str, Any],
+    row_index: int,
+    *,
+    source_file: str = "",
+) -> tuple[dict[str, Any] | None, str]:
+    kickoff_date, kickoff_time = _parse_kickoff(_pick_value(row, "kickoff"))
+    short_date, short_time = _parse_year_and_match_time(_pick_value(row, "year"), _pick_value(row, "match_time_raw"))
+    match_date = _parse_date(_pick_value(row, "match_date")) or kickoff_date or short_date
+    match_time = _parse_time(_pick_value(row, "match_time")) or kickoff_time or short_time or "00:00"
+    league = _normalize_text(_pick_value(row, "league"))
+    home_team = _normalize_text(_pick_value(row, "home_team"))
+    away_team = _normalize_text(_pick_value(row, "away_team"))
+    home_goals = _safe_int(_pick_value(row, "home_goals"))
+    away_goals = _safe_int(_pick_value(row, "away_goals"))
+    if home_goals is None or away_goals is None:
+        home_goals, away_goals = _parse_score_pair(_pick_value(row, "full_score_text"))
+    if not match_date or not league or not home_team or not away_team:
+        return None, "invalid_identity"
+    if home_goals is None or away_goals is None:
+        return None, "missing_result"
+
+    source_match_id = _normalize_text(_pick_value(row, "source_match_id"))
+    explicit_match_id = _normalize_text(_pick_value(row, "match_id"))
+    match_id = explicit_match_id or f"{match_date}|{league}|{home_team}|{away_team}"
+    result_key = _review_result_key(int(home_goals), int(away_goals))
+    predicted_raw = _pick_value(row, "predicted")
+    predicted_key = _review_outcome_key(predicted_raw)
+    is_correct = _review_bool_label(_pick_value(row, "is_correct"))
+    if is_correct is None:
+        is_correct = _review_hit(predicted_key, result_key)
+
+    handicap_line = _safe_float(_pick_value(row, "handicap_line"), default=0.0) or 0.0
+    handicap_result_key = _review_handicap_key(_pick_value(row, "handicap_result")) or _review_handicap_result_key(
+        int(home_goals),
+        int(away_goals),
+        float(handicap_line),
+    )
+    predicted_handicap_raw = _pick_value(row, "predicted_handicap")
+    predicted_handicap_key = _review_handicap_key(predicted_handicap_raw)
+    handicap_is_correct = _review_bool_label(_pick_value(row, "handicap_is_correct"))
+    if handicap_is_correct is None:
+        handicap_is_correct = _review_hit(predicted_handicap_key, handicap_result_key)
+
+    total_goals = int(home_goals) + int(away_goals)
+    ou_line = _safe_float(_pick_value(row, "ou_line"), default=2.5) or 2.5
+    ou_result_key = _review_ou_key(_pick_value(row, "ou_result")) or _review_ou_result_key(total_goals, float(ou_line))
+    predicted_ou_raw = _pick_value(row, "predicted_ou")
+    predicted_ou_key = _review_ou_key(predicted_ou_raw)
+    ou_is_correct = _review_bool_label(_pick_value(row, "ou_is_correct"))
+    if ou_is_correct is None:
+        ou_is_correct = _review_hit(predicted_ou_key, ou_result_key)
+
+    if is_correct is None and handicap_is_correct is None and ou_is_correct is None:
+        return None, "missing_label"
+
+    home_ht_goals = _safe_int(_pick_value(row, "home_ht_goals"))
+    away_ht_goals = _safe_int(_pick_value(row, "away_ht_goals"))
+    if home_ht_goals is None or away_ht_goals is None:
+        home_ht_goals, away_ht_goals = _parse_score_pair(_pick_value(row, "half_score_text"))
+
+    timestamp = _normalize_text(row.get("timestamp")) or f"{match_date} {match_time}"
+    return {
+        "timestamp": timestamp,
+        "match_id": match_id,
+        "match_date": match_date,
+        "match_time": match_time,
+        "league": league,
+        "home_team": home_team,
+        "away_team": away_team,
+        "home_goals": int(home_goals),
+        "away_goals": int(away_goals),
+        "home_ht_goals": home_ht_goals,
+        "away_ht_goals": away_ht_goals,
+        "result": result_key,
+        "predicted": predicted_key or _normalize_text(predicted_raw),
+        "is_correct": is_correct,
+        "prediction_confidence": _safe_float(_pick_value(row, "prediction_confidence")),
+        "total_goals": total_goals,
+        "handicap_line": float(handicap_line),
+        "handicap_result": handicap_result_key,
+        "predicted_handicap": predicted_handicap_key or _normalize_text(predicted_handicap_raw),
+        "handicap_confidence": _safe_float(_pick_value(row, "handicap_confidence")),
+        "handicap_is_correct": handicap_is_correct,
+        "ou_line": float(ou_line),
+        "ou_result": ou_result_key,
+        "predicted_ou": predicted_ou_key or _normalize_text(predicted_ou_raw),
+        "ou_confidence": _safe_float(_pick_value(row, "ou_confidence")),
+        "ou_is_correct": ou_is_correct,
+        "statsbomb_source_match_id": source_match_id or None,
+        "statsbomb_source_url": _normalize_text(_pick_value(row, "source_url")) or None,
+        "source": "historical_review_import",
+        "source_file": source_file,
+        "source_row_index": row_index,
+        "source_detail": _normalize_text(row.get("source")),
+        "imported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }, "ok"
+
+
+def import_historical_review_settlements(
+    project_dir: Path,
+    input_path: Path,
+    replace: bool = False,
+    limit: int = 5000,
+) -> dict[str, Any]:
+    input_path = input_path.resolve()
+    records = _read_input_records(input_path)
+    normalized_rows: list[dict[str, Any]] = []
+    skipped_invalid = 0
+    skipped_missing_label = 0
+    skipped_missing_result = 0
+    for index, row in enumerate(records, start=1):
+        if not isinstance(row, dict):
+            skipped_invalid += 1
+            continue
+        normalized, reason = _normalize_historical_review_settlement(
+            row,
+            index,
+            source_file=input_path.name,
+        )
+        if normalized is None:
+            if reason == "missing_label":
+                skipped_missing_label += 1
+            elif reason == "missing_result":
+                skipped_missing_result += 1
+            else:
+                skipped_invalid += 1
+            continue
+        normalized_rows.append(normalized)
+
+    store = StateStore(project_dir)
+    existing = store.load_settlements()
+    merged_items: list[dict[str, Any]] = []
+    seen_match_ids: set[str] = set()
+    for item in existing:
+        if not isinstance(item, dict):
+            continue
+        if replace and item.get("source") == "historical_review_import":
+            continue
+        match_id = _normalize_text(item.get("match_id"))
+        if match_id:
+            seen_match_ids.add(match_id)
+        merged_items.append(item)
+
+    skipped_duplicate = 0
+    imported_settlements = 0
+    for item in normalized_rows:
+        match_id = _normalize_text(item.get("match_id"))
+        if not match_id:
+            skipped_invalid += 1
+            continue
+        if match_id in seen_match_ids:
+            skipped_duplicate += 1
+            continue
+        seen_match_ids.add(match_id)
+        merged_items.append(item)
+        imported_settlements += 1
+
+    storage_limit = max(1, int(limit))
+    store.save_settlements(merged_items, limit=storage_limit)
+    saved_total = min(len(merged_items), storage_limit)
+    return {
+        "ok": imported_settlements > 0,
+        "input_path": str(input_path),
+        "replace": bool(replace),
+        "raw_count": len(records),
+        "valid_rows": len(normalized_rows),
+        "existing_settlements_before": len(existing),
+        "imported_settlements": imported_settlements,
+        "merged_total": len(merged_items),
+        "saved_total": saved_total,
+        "storage_limit": storage_limit,
+        "dropped_by_limit": max(0, len(merged_items) - saved_total),
+        "skipped_invalid": skipped_invalid,
+        "skipped_missing_result": skipped_missing_result,
+        "skipped_missing_label": skipped_missing_label,
+        "skipped_duplicate": skipped_duplicate,
+        "source": "historical_review_import",
+    }
 
 
 def _statsbomb_baseline_items(payload: dict[str, Any]) -> list[dict[str, Any]]:

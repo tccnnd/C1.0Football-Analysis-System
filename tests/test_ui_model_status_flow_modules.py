@@ -317,6 +317,9 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
         self.assertIn("StatsBomb无重叠兜底", text)
         self.assertIn("导入重叠历史赛果", text)
 
+        self.assertTrue(any(row["action_key"] == "import_aligned_historical_settlements" for row in actions))
+        self.assertEqual(training_health_action_button_text("import_aligned_historical_settlements"), "导入重叠复盘赛果")
+
     def test_training_health_action_rows_show_healthy_next_step(self) -> None:
         coverage = self._coverage_with_health("healthy", [])
         coverage["training_health"]["blocking_count"] = 0

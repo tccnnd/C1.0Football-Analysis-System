@@ -828,6 +828,9 @@ class FootballPredictionApp:
         if action_key == "import_historical_samples":
             self._import_training_health_samples()
             return
+        if action_key == "import_aligned_historical_settlements":
+            self._import_training_health_review_settlements()
+            return
         if action_key == "export_play_model_takeover_gate_audit_report":
             self.export_play_model_takeover_gate_audit_report()
             return
@@ -856,6 +859,27 @@ class FootballPredictionApp:
             task_key="training_health_repair:import_historical_samples",
             start_status="正在导入历史赛果样本...",
             worker=lambda: repair_training_data_health("import_historical_samples", input_path=input_path),
+            on_success=self._apply_training_health_repair_result,
+            error_title="训练健康修复失败",
+        )
+
+    def _import_training_health_review_settlements(self) -> None:
+        path_text = filedialog.askopenfilename(
+            title="选择重叠复盘赛果文件",
+            filetypes=[
+                ("History files", "*.csv *.json *.jsonl"),
+                ("CSV files", "*.csv"),
+                ("JSON files", "*.json *.jsonl"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not path_text:
+            return
+        input_path = Path(path_text)
+        self._run_background(
+            task_key="training_health_repair:import_aligned_historical_settlements",
+            start_status="正在导入重叠复盘赛果...",
+            worker=lambda: repair_training_data_health("import_aligned_historical_settlements", input_path=input_path),
             on_success=self._apply_training_health_repair_result,
             error_title="训练健康修复失败",
         )
