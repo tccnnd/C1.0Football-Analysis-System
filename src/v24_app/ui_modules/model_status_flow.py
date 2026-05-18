@@ -127,6 +127,7 @@ def training_health_action_button_text(action_key: object) -> str:
         "execute_statsbomb_coverage_import_plan": "执行覆盖计划",
         "import_aligned_historical_settlements": "导入重叠复盘赛果",
         "build_statsbomb_review_samples": "生成复盘样本",
+        "export_statsbomb_review_label_queue": "导出复盘标注队列",
         "train_xgb": "训练XGB",
         "train_play_models": "训练玩法模型",
         "run_play_model_backtest": "运行稳定性回测",
@@ -162,9 +163,11 @@ def build_training_health_card_rows(coverage_status: Mapping[str, object] | obje
     min_club_match_count = _safe_int(history.get("min_club_match_count", 100))
     league_profile_count = _safe_int(history.get("league_profile_count", 0))
     statsbomb = coverage.get("statsbomb_events", {}) if isinstance(coverage.get("statsbomb_events"), Mapping) else {}
+    statsbomb_audit = statsbomb.get("coverage_audit", {}) if isinstance(statsbomb.get("coverage_audit"), Mapping) else {}
     statsbomb_match_count = _safe_int(history.get("statsbomb_match_count", 0))
     statsbomb_review_sample_count = _safe_int(history.get("statsbomb_review_sample_count", 0))
     statsbomb_review_feature_count = _safe_int(history.get("statsbomb_review_feature_count", 0))
+    statsbomb_label_queue_count = _safe_int(statsbomb_audit.get("exact_match_count", 0))
     statsbomb_coverage_plan = statsbomb.get("coverage_import_plan", {}) if isinstance(statsbomb.get("coverage_import_plan"), Mapping) else {}
     club_team_count = _safe_int(rating.get("club_team_count", 0))
     national_team_count = _safe_int(rating.get("national_team_count", 0))
@@ -218,7 +221,7 @@ def build_training_health_card_rows(coverage_status: Mapping[str, object] | obje
             "label": "StatsBomb复盘",
             "value": str(statsbomb_review_sample_count),
             "tone": "warning" if statsbomb_match_count > 0 and statsbomb_review_sample_count <= 0 else "success" if statsbomb_review_sample_count > 0 else "neutral",
-            "detail": f"事件 {statsbomb_match_count} | 特征 {statsbomb_review_feature_count} | 计划 {statsbomb_coverage_plan.get('status', '-')}",
+            "detail": f"事件 {statsbomb_match_count} | 标签队列 {statsbomb_label_queue_count} | 特征 {statsbomb_review_feature_count} | 计划 {statsbomb_coverage_plan.get('status', '-')}",
         },
         {
             "label": "Fact Layer",
@@ -263,6 +266,10 @@ def build_training_health_action_rows(coverage_status: Mapping[str, object] | ob
     coverage = coverage_status if isinstance(coverage_status, Mapping) else {}
     health = coverage.get("training_health", {}) if isinstance(coverage.get("training_health"), Mapping) else {}
     issues = [row for row in health.get("issues", []) if isinstance(row, Mapping)] if isinstance(health.get("issues"), list) else []
+    statsbomb = coverage.get("statsbomb_events", {}) if isinstance(coverage.get("statsbomb_events"), Mapping) else {}
+    statsbomb_audit = statsbomb.get("coverage_audit", {}) if isinstance(statsbomb.get("coverage_audit"), Mapping) else {}
+    statsbomb_review_sample_count = _safe_int(statsbomb.get("review_sample_count", 0))
+    statsbomb_exact_match_count = _safe_int(statsbomb_audit.get("exact_match_count", 0))
     if not issues:
         return [
             {
@@ -285,6 +292,18 @@ def build_training_health_action_rows(coverage_status: Mapping[str, object] | ob
     rows = []
     for index, issue in enumerate(ordered[: max(0, int(limit))], start=1):
         severity = str(issue.get("severity") or "-")
+        code = str(issue.get("code") or "")
+        if code == "statsbomb_review_samples_missing" and statsbomb_exact_match_count > 0 and statsbomb_review_sample_count <= 0:
+            rows.append(
+                {
+                    "label": f"建议{index}",
+                    "value": "导出复盘标注队列",
+                    "tone": "warning",
+                    "detail": f"exact_match={statsbomb_exact_match_count} | review_samples={statsbomb_review_sample_count} | {issue.get('message', '-')}",
+                    "action_key": "export_statsbomb_review_label_queue",
+                }
+            )
+            continue
         rows.append(
             {
                 "label": f"建议{index}",
@@ -402,6 +421,16 @@ def build_training_health_repair_result_text(result: Mapping[str, object] | obje
             f"- 赛果: imported={payload.get('imported_settlements', '-')} | "
             f"duplicate={payload.get('skipped_duplicate', '-')} | missing_label={payload.get('skipped_missing_label', '-')}\n"
         )
+    if action_key == "export_statsbomb_review_label_queue" and isinstance(payload, Mapping):
+        settlement_line = (
+            f"- 标注队列: rows={payload.get('queue_count', payload.get('sample_count', '-'))} | "
+            f"csv={payload.get('csv_path', payload.get('output_path', '-'))}\n"
+        )
+    if action_key == "export_statsbomb_review_label_queue" and isinstance(payload, Mapping):
+        settlement_line = (
+            f"- 标注队列: rows={payload.get('queue_count', payload.get('sample_count', '-'))} | "
+            f"csv={payload.get('csv_path', payload.get('output_path', '-'))}\n"
+        )
     return (
         f"训练健康修复: {'完成' if bool(resolved.get('ok', True)) else '未完成'}\n"
         + f"- 动作: {training_health_action_button_text(resolved.get('action_key'))}\n"
@@ -489,7 +518,7 @@ def build_model_training_overview_text(
         f"- 联赛样例: {', '.join(samples.get('league_examples', []) or []) or '-'}",
         f"- 联赛历史: {club_history.get('match_count', 0)} 场 | {club_history.get('date_start') or '-'} -> {club_history.get('date_end') or '-'} | profile={club_history.get('league_profile_count', 0)}",
         f"- 世界杯历史: {world_cup.get('match_count', 0)} 场 | {world_cup.get('year_start') or '-'}-{world_cup.get('year_end') or '-'} | 届数={world_cup.get('year_count', 0)}",
-        f"- StatsBomb事件: {statsbomb.get('match_count', 0)} 场 | 复盘样本={statsbomb.get('review_sample_count', 0)} | 特征={statsbomb.get('review_feature_count', 0)} | 覆盖缺口={statsbomb.get('coverage_gap_count', 0)} | 候选={statsbomb.get('coverage_candidate_count', 0)}",
+        f"- StatsBomb事件: {statsbomb.get('match_count', 0)} 场 | 复盘样本={statsbomb.get('review_sample_count', 0)} | 标签队列={_safe_int(statsbomb.get('coverage_audit', {}).get('exact_match_count', 0)) if isinstance(statsbomb.get('coverage_audit'), Mapping) else 0} | 特征={statsbomb.get('review_feature_count', 0)} | 覆盖缺口={statsbomb.get('coverage_gap_count', 0)} | 候选={statsbomb.get('coverage_candidate_count', 0)}",
         f"- StatsBomb覆盖计划: {statsbomb_coverage_plan.get('status', '-')}",
         *statsbomb_fallback_lines,
         f"- Fact Layer: MatchFact={match_fact.get('available_count', 0)}/{match_fact.get('target_count', 0)} ({_safe_float(match_fact.get('coverage_ratio'), 0.0):.1%}) | ActionFact={action_fact.get('available_match_count', 0)}/{action_fact.get('target_match_count', 0)} ({action_fact.get('event_count', 0)} events) | SourceProvenance={_safe_float(source_provenance.get('coverage_ratio'), 0.0):.1%} | TraceRefs={_safe_float(trace_fact_refs.get('trace_fact_ref_coverage_ratio'), 0.0):.1%}",

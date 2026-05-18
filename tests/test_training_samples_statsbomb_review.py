@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import sys
 import tempfile
@@ -17,6 +18,7 @@ from v24_app.training_samples import (
     build_statsbomb_review_training_samples,
     build_statsbomb_sandbox_fewshot_samples,
     build_video_review_fewshot_samples,
+    export_statsbomb_review_label_queue,
     export_statsbomb_review_training_samples,
     export_statsbomb_sandbox_fewshot_samples,
     export_video_review_fewshot_samples,
@@ -196,6 +198,25 @@ class StatsBombReviewTrainingSamplesTests(unittest.TestCase):
         self.assertEqual(payload["purpose"], "post_match_review_error_attribution")
         self.assertIn("must not be used as pre-match", payload["leakage_note"])
         self.assertEqual(len(payload["items"]), 1)
+
+    def test_export_writes_review_label_queue_for_unlabeled_settlement(self) -> None:
+        unlabeled = _settlement().copy()
+        unlabeled.pop("is_correct")
+        unlabeled.pop("handicap_is_correct")
+        unlabeled.pop("ou_is_correct")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            result = export_statsbomb_review_label_queue(root, [unlabeled])
+            payload = json.loads((root / "data" / "state" / "statsbomb_review_label_queue.json").read_text(encoding="utf-8"))
+            with (root / "data" / "state" / "statsbomb_review_label_queue.csv").open("r", encoding="utf-8-sig", newline="") as fh:
+                rows = list(csv.DictReader(fh))
+
+        self.assertEqual(result["queue_count"], 1)
+        self.assertEqual(payload["purpose"], "post_match_review_label_annotation_queue")
+        self.assertEqual(len(payload["items"]), 1)
+        self.assertEqual(rows[0]["match_id"], "m1")
+        self.assertEqual(rows[0]["missing_label_fields"], "is_correct,handicap_is_correct,ou_is_correct")
+        self.assertEqual(rows[0]["annotation_status"], "pending")
 
     def test_builds_statsbomb_sandbox_fewshot_samples(self) -> None:
         samples, summary = build_statsbomb_sandbox_fewshot_samples(_baseline())

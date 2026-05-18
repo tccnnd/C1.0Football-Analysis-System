@@ -880,6 +880,95 @@ class CoreTrainingDataCoverageSummaryTests(unittest.TestCase):
         self.assertIsNone(result["after"]["statsbomb_events"]["coverage_blocker"])
         self.assertIn("statsbomb_review_samples_missing", issue_codes)
 
+    def test_repair_training_data_health_exports_statsbomb_review_label_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "data" / "state"
+            state.mkdir(parents=True)
+            (state / "settlements.json").write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "match_id": "current-1",
+                                "match_date": "2026-05-18",
+                                "home_team": "Current Home",
+                                "away_team": "Current Away",
+                                "source": "live_settlement",
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (state / "statsbomb_event_summaries.json").write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "source_match_id": "s1",
+                                "match_id": "s1",
+                                "match_date": "2024-04-14",
+                                "league": "1. Bundesliga",
+                                "home_team": "Bayer Leverkusen",
+                                "away_team": "Werder Bremen",
+                                "event_summary": {
+                                    "event_count": 10,
+                                    "shot_count": 12,
+                                    "xg_home": 2.1,
+                                    "xg_away": 0.5,
+                                },
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            input_path = state / "aligned_result_facts.json"
+            input_path.write_text(
+                json.dumps(
+                    [
+                        {
+                            "match_id": "hist-fact-1",
+                            "match_date": "2024-04-14",
+                            "match_time": "17:30",
+                            "league": "1. Bundesliga",
+                            "home_team": "Bayer Leverkusen",
+                            "away_team": "Werder Bremen",
+                            "home_goals": 5,
+                            "away_goals": 0,
+                            "statsbomb_source_match_id": "s1",
+                        }
+                    ],
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            store = core.StateStore(root)
+
+            with (
+                patch("v24_app.core.PROJECT_DIR", root),
+                patch("v24_app.core.STATE_STORE", store),
+                patch("v24_app.core.STATSBOMB_EVENT_SUMMARIES_FILE", state / "statsbomb_event_summaries.json"),
+                patch("v24_app.core.STATSBOMB_REVIEW_TRAINING_FILE", state / "statsbomb_review_training_samples.json"),
+            ):
+                core.repair_training_data_health("import_aligned_historical_settlements", input_path=input_path)
+                result = core.repair_training_data_health("export_statsbomb_review_label_queue")
+
+            queue_payload = json.loads((state / "statsbomb_review_label_queue.json").read_text(encoding="utf-8"))
+            queue_csv = (state / "statsbomb_review_label_queue.csv").read_text(encoding="utf-8-sig")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["action_key"], "export_statsbomb_review_label_queue")
+        self.assertEqual(result["result"]["queue_count"], 1)
+        self.assertTrue(result["output_path"].endswith("statsbomb_review_label_queue.json"))
+        self.assertTrue(queue_payload["items"][0]["annotation_status"] == "pending")
+        self.assertTrue(queue_payload["items"][0]["missing_label_fields"])
+        self.assertIn("match_id", queue_csv)
+        self.assertIn("missing_label_fields", queue_csv)
+
     def test_training_model_gate_recommends_xgb_training_when_data_is_ready(self) -> None:
         coverage = {
             "training_health": {

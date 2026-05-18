@@ -755,6 +755,148 @@ def export_statsbomb_review_training_samples(
     return {**summary, "output_path": str(resolved_output)}
 
 
+STATSBOMB_REVIEW_LABEL_QUEUE_FIELDS = [
+    "queue_id",
+    "match_id",
+    "match_date",
+    "match_time",
+    "league",
+    "home_team",
+    "away_team",
+    "score",
+    "statsbomb_source_match_id",
+    "missing_label_fields",
+    "predicted",
+    "is_correct",
+    "predicted_handicap",
+    "handicap_is_correct",
+    "predicted_ou",
+    "ou_is_correct",
+    "event_count",
+    "home_xg",
+    "away_xg",
+    "xg_diff",
+    "home_shots",
+    "away_shots",
+    "shot_diff",
+    "annotation_status",
+    "notes",
+]
+
+
+def _queue_label_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return _normalize_text(value)
+
+
+def build_statsbomb_review_label_queue(
+    settlements: list[dict[str, Any]],
+    *,
+    limit: int = 500,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    skipped_missing_statsbomb = 0
+    skipped_complete_labels = 0
+    partial_label_count = 0
+    all_label_missing_count = 0
+    for item in settlements:
+        if not isinstance(item, dict):
+            continue
+        if not _statsbomb_summary_from_settlement(item):
+            skipped_missing_statsbomb += 1
+            continue
+        label_values = {
+            "is_correct": _known_bool_label(item.get("is_correct")),
+            "handicap_is_correct": _known_bool_label(item.get("handicap_is_correct")),
+            "ou_is_correct": _known_bool_label(item.get("ou_is_correct")),
+        }
+        missing_fields = [key for key, value in label_values.items() if value is None]
+        if not missing_fields:
+            skipped_complete_labels += 1
+            continue
+        if len(missing_fields) == len(label_values):
+            all_label_missing_count += 1
+        else:
+            partial_label_count += 1
+        features = _statsbomb_review_feature_map(item)
+        home_goals = _safe_int(item.get("home_goals"))
+        away_goals = _safe_int(item.get("away_goals"))
+        score = f"{int(home_goals)}-{int(away_goals)}" if home_goals is not None and away_goals is not None else ""
+        match_id = _normalize_text(item.get("match_id"))
+        row = {
+            "queue_id": f"statsbomb_label:{match_id or item.get('statsbomb_source_match_id') or len(rows) + 1}",
+            "match_id": match_id,
+            "match_date": _normalize_text(item.get("match_date")),
+            "match_time": _normalize_text(item.get("match_time")),
+            "league": _normalize_text(item.get("league")),
+            "home_team": _normalize_text(item.get("home_team")),
+            "away_team": _normalize_text(item.get("away_team")),
+            "score": score,
+            "statsbomb_source_match_id": _normalize_text(item.get("statsbomb_source_match_id")),
+            "missing_label_fields": ",".join(missing_fields),
+            "predicted": _normalize_text(item.get("predicted")),
+            "is_correct": _queue_label_value(item.get("is_correct")),
+            "predicted_handicap": _normalize_text(item.get("predicted_handicap")),
+            "handicap_is_correct": _queue_label_value(item.get("handicap_is_correct")),
+            "predicted_ou": _normalize_text(item.get("predicted_ou")),
+            "ou_is_correct": _queue_label_value(item.get("ou_is_correct")),
+            "event_count": int(features.get("event_count", 0.0)),
+            "home_xg": float(features.get("home_xg", 0.0)),
+            "away_xg": float(features.get("away_xg", 0.0)),
+            "xg_diff": float(features.get("xg_diff", 0.0)),
+            "home_shots": float(features.get("home_shots", 0.0)),
+            "away_shots": float(features.get("away_shots", 0.0)),
+            "shot_diff": float(features.get("shot_diff", 0.0)),
+            "annotation_status": "pending",
+            "notes": "",
+        }
+        rows.append(row)
+        if len(rows) >= max(1, int(limit)):
+            break
+    summary = {
+        "queue_count": len(rows),
+        "sample_count": len(rows),
+        "skipped_missing_statsbomb": skipped_missing_statsbomb,
+        "skipped_complete_labels": skipped_complete_labels,
+        "partial_label_count": partial_label_count,
+        "all_label_missing_count": all_label_missing_count,
+        "field_order": list(STATSBOMB_REVIEW_LABEL_QUEUE_FIELDS),
+        "leakage_note": "Rows are post-match annotation templates; filled labels may be used only for Evaluation Agent review training.",
+    }
+    return rows, summary
+
+
+def export_statsbomb_review_label_queue(
+    project_dir: Path,
+    settlements: list[dict[str, Any]],
+    output_path: Path | None = None,
+    csv_path: Path | None = None,
+    *,
+    limit: int = 500,
+) -> dict[str, Any]:
+    rows, summary = build_statsbomb_review_label_queue(settlements, limit=limit)
+    resolved_output = output_path or project_dir / "data" / "state" / "statsbomb_review_label_queue.json"
+    resolved_csv = csv_path or resolved_output.with_suffix(".csv")
+    resolved_output.parent.mkdir(parents=True, exist_ok=True)
+    resolved_csv.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "source": "StatsBomb Open Data + aligned historical settlements",
+        "purpose": "post_match_review_label_annotation_queue",
+        "leakage_note": summary["leakage_note"],
+        "summary": summary,
+        "items": rows,
+    }
+    resolved_output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    with resolved_csv.open("w", encoding="utf-8-sig", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=STATSBOMB_REVIEW_LABEL_QUEUE_FIELDS)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: row.get(key, "") for key in STATSBOMB_REVIEW_LABEL_QUEUE_FIELDS})
+    return {**summary, "output_path": str(resolved_output), "csv_path": str(resolved_csv)}
+
+
 def _review_bool_label(value: Any) -> bool | None:
     if isinstance(value, bool):
         return value

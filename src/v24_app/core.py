@@ -37,6 +37,7 @@ from .trace_envelope import build_prediction_trace_envelope
 from .training_samples import (
     build_recent_form_feature_map,
     build_team_histories_from_state,
+    export_statsbomb_review_label_queue,
     export_statsbomb_review_training_samples,
     export_video_review_fewshot_samples,
     import_historical_review_settlements,
@@ -5494,6 +5495,17 @@ def repair_training_data_health(action_key: str, *, input_path: Path | str | Non
             settlements=settlements,
         )
         message = f"StatsBomb复盘样本已生成: {int(result.get('sample_count', 0) or 0)} 条。"
+    elif action == "export_statsbomb_review_label_queue":
+        settlements = get_recent_settlements(limit=0)
+        result = export_statsbomb_review_label_queue(
+            project_dir=PROJECT_DIR,
+            settlements=settlements,
+        )
+        message = (
+            "StatsBomb review label queue exported: "
+            f"rows={int(result.get('queue_count', 0) or 0)}, "
+            f"csv={result.get('csv_path') or '-'}."
+        )
     else:
         raise ValueError(f"Unsupported training data repair action: {action_key}")
 

@@ -261,6 +261,29 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
         self.assertTrue(any(row["value"] == "Materialize MatchFact rows for history/XGB samples" for row in actions))
         self.assertTrue(any(row["action_key"] == "build_statsbomb_review_samples" for row in actions))
 
+    def test_training_health_action_rows_show_statsbomb_label_queue_export(self) -> None:
+        coverage = self._coverage_with_health(
+            "attention",
+            [
+                {
+                    "code": "statsbomb_review_samples_missing",
+                    "severity": "warning",
+                    "message": "StatsBomb events exist, but review training samples are still missing.",
+                    "recommendation": "Export the label queue first.",
+                }
+            ],
+        )
+        coverage["statsbomb_events"]["review_sample_count"] = 0
+        coverage["statsbomb_events"]["coverage_audit"] = {
+            "exact_match_count": 49,
+        }
+
+        actions = build_training_health_action_rows(coverage)
+
+        self.assertEqual(actions[0]["action_key"], "export_statsbomb_review_label_queue")
+        self.assertEqual(actions[0]["value"], "导出复盘标注队列")
+        self.assertEqual(training_health_action_button_text("export_statsbomb_review_label_queue"), "导出复盘标注队列")
+
     def test_training_health_action_rows_show_statsbomb_coverage_plan(self) -> None:
         coverage = self._coverage_with_health(
             "blocked",
