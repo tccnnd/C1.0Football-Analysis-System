@@ -185,6 +185,75 @@ class CoreTrainingDataCoverageSummaryTests(unittest.TestCase):
         self.assertEqual(audit["no_same_date_count"], 1)
         self.assertEqual(audit["same_date_unmatched_count"], 1)
 
+    def test_training_data_coverage_flags_no_date_overlap(self) -> None:
+        settlements = [
+            {
+                "match_id": "m1",
+                "match_date": "2024-04-14",
+                "league": "1. Bundesliga",
+                "home_team": "Bayer Leverkusen",
+                "away_team": "Werder Bremen",
+            },
+            {
+                "match_id": "m2",
+                "match_date": "2024-04-15",
+                "league": "1. Bundesliga",
+                "home_team": "Borussia Dortmund",
+                "away_team": "Bayern Munich",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "data" / "state"
+            state.mkdir(parents=True)
+            (state / "league_profiles.json").write_text(json.dumps({"leagues": {"A": {}, "B": {}, "C": {}, "D": {}, "E": {}}}), encoding="utf-8")
+            _write_history_payload(state / "club_match_history.json", 100)
+            (state / "statsbomb_event_summaries.json").write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "source_match_id": "s1",
+                                "match_date": "2024-03-10",
+                                "league": "1. Bundesliga",
+                                "home_team": "Bayer Leverkusen",
+                                "away_team": "Werder Bremen",
+                            },
+                            {
+                                "source_match_id": "s2",
+                                "match_date": "2024-03-11",
+                                "league": "1. Bundesliga",
+                                "home_team": "Borussia Dortmund",
+                                "away_team": "Bayern Munich",
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (state / "statsbomb_review_training_samples.json").write_text(json.dumps({"items": [], "summary": {}}), encoding="utf-8")
+            store = core.StateStore(root)
+            store.save_xgb_samples([_xgb_sample(index) for index in range(300)])
+
+            with (
+                patch("v24_app.core.PROJECT_DIR", root),
+                patch("v24_app.core.STATE_STORE", store),
+                patch("v24_app.core.get_recent_settlements", return_value=settlements),
+            ):
+                status = core.get_training_data_coverage_status()
+
+        audit = status["statsbomb_events"]["coverage_audit"]
+        health = status["training_health"]
+        codes = {issue["code"] for issue in health["issues"]}
+        self.assertEqual(audit["coverage_blocker"], "no_date_overlap")
+        self.assertEqual(audit["date_overlap_count"], 0)
+        self.assertEqual(audit["date_overlap_ratio"], 0.0)
+        self.assertEqual(audit["settlement_date_start"], "2024-04-14")
+        self.assertEqual(audit["settlement_date_end"], "2024-04-15")
+        self.assertEqual(audit["statsbomb_date_start"], "2024-03-10")
+        self.assertEqual(audit["statsbomb_date_end"], "2024-03-11")
+        self.assertIn("statsbomb_date_overlap_missing", codes)
+
     def test_training_health_is_healthy_when_thresholds_are_met(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

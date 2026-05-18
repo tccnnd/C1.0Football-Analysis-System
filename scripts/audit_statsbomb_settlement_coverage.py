@@ -57,6 +57,15 @@ def exact_match_keys(item: dict[str, Any]) -> set[str]:
     return {key for key in keys if key}
 
 
+def date_values(items: list[dict[str, Any]], *, date_key: str = "match_date") -> list[str]:
+    dates = {
+        str(item.get(date_key) or "").strip()
+        for item in items
+        if isinstance(item, dict) and str(item.get(date_key) or "").strip()
+    }
+    return sorted(dates)
+
+
 def similarity(left: object, right: object) -> float:
     left_text = norm(left)
     right_text = norm(right)
@@ -100,6 +109,9 @@ def build_coverage_audit(
     exact_rows: list[dict[str, Any]] = []
     candidates: list[dict[str, Any]] = []
     no_same_date = 0
+    settlement_dates = date_values(settlements)
+    statsbomb_dates = date_values(statsbomb_items)
+    overlap_dates = sorted(set(settlement_dates) & set(statsbomb_dates))
     for settlement in settlements:
         matched = None
         for key in exact_match_keys(settlement):
@@ -154,10 +166,30 @@ def build_coverage_audit(
     exact_count = len(exact_rows)
     candidate_count = len(candidates)
     settlement_count = len(settlements)
+    coverage_blocker = (
+        "no_settlement_dates"
+        if not settlement_dates
+        else "no_statsbomb_dates"
+        if not statsbomb_dates
+        else "no_date_overlap"
+        if not overlap_dates
+        else None
+    )
     return {
         "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "settlement_count": settlement_count,
         "statsbomb_match_count": len(statsbomb_items),
+        "settlement_date_count": len(settlement_dates),
+        "settlement_date_start": settlement_dates[0] if settlement_dates else None,
+        "settlement_date_end": settlement_dates[-1] if settlement_dates else None,
+        "statsbomb_date_count": len(statsbomb_dates),
+        "statsbomb_date_start": statsbomb_dates[0] if statsbomb_dates else None,
+        "statsbomb_date_end": statsbomb_dates[-1] if statsbomb_dates else None,
+        "date_overlap_count": len(overlap_dates),
+        "date_overlap_start": overlap_dates[0] if overlap_dates else None,
+        "date_overlap_end": overlap_dates[-1] if overlap_dates else None,
+        "date_overlap_ratio": round(len(overlap_dates) / settlement_count, 4) if settlement_count else 0.0,
+        "coverage_blocker": coverage_blocker,
         "exact_match_count": exact_count,
         "exact_match_rate": round(exact_count / settlement_count, 4) if settlement_count else 0.0,
         "candidate_count": candidate_count,
@@ -166,7 +198,9 @@ def build_coverage_audit(
         "exact_rows": exact_rows[:candidate_limit],
         "candidate_rows": candidates[:candidate_limit],
         "recommendation": (
-            "expand_statsbomb_import"
+            "import_statsbomb_for_settlement_date_range"
+            if coverage_blocker == "no_date_overlap"
+            else "expand_statsbomb_import"
             if no_same_date >= max(1, settlement_count - exact_count)
             else "review_team_aliases"
             if candidate_count

@@ -61,6 +61,51 @@ class AuditStatsBombSettlementCoverageTests(unittest.TestCase):
         self.assertEqual(audit["no_same_date_count"], 1)
         self.assertEqual(audit["candidate_rows"][0]["statsbomb"]["source_match_id"], 3895302)
 
+    def test_build_coverage_audit_reports_no_date_overlap(self) -> None:
+        settlements = [
+            {
+                "match_id": "m1",
+                "match_date": "2024-04-14",
+                "league": "1. Bundesliga",
+                "home_team": "Bayer Leverkusen",
+                "away_team": "Werder Bremen",
+            },
+            {
+                "match_id": "m2",
+                "match_date": "2024-04-15",
+                "league": "1. Bundesliga",
+                "home_team": "Borussia Dortmund",
+                "away_team": "Bayern Munich",
+            },
+        ]
+        statsbomb = [
+            {
+                "source_match_id": 3895302,
+                "match_date": "2024-03-10",
+                "league": "1. Bundesliga",
+                "home_team": "Bayer Leverkusen",
+                "away_team": "Werder Bremen",
+            },
+            {
+                "source_match_id": 3895303,
+                "match_date": "2024-03-11",
+                "league": "1. Bundesliga",
+                "home_team": "Borussia Dortmund",
+                "away_team": "Bayern Munich",
+            },
+        ]
+
+        audit = build_coverage_audit(settlements, statsbomb, min_candidate_score=0.5)
+
+        self.assertEqual(audit["coverage_blocker"], "no_date_overlap")
+        self.assertEqual(audit["date_overlap_count"], 0)
+        self.assertEqual(audit["date_overlap_ratio"], 0.0)
+        self.assertEqual(audit["settlement_date_start"], "2024-04-14")
+        self.assertEqual(audit["settlement_date_end"], "2024-04-15")
+        self.assertEqual(audit["statsbomb_date_start"], "2024-03-10")
+        self.assertEqual(audit["statsbomb_date_end"], "2024-03-11")
+        self.assertEqual(audit["recommendation"], "import_statsbomb_for_settlement_date_range")
+
     def test_main_writes_audit_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
