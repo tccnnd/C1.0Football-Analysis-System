@@ -906,6 +906,7 @@ def build_statsbomb_review_training_quality_report_lines(
     quality: Mapping[str, object] | object,
     repair_feedback_records: Sequence[Mapping[str, object] | object] | None = None,
     gate_audit_records: Sequence[Mapping[str, object] | object] | None = None,
+    gate_alert_action_rows: Sequence[Mapping[str, object] | object] | None = None,
 ) -> list[str]:
     resolved = _as_mapping(quality)
     label_rows = [row for row in _as_list(resolved.get("label_rows")) if isinstance(row, Mapping)]
@@ -913,6 +914,7 @@ def build_statsbomb_review_training_quality_report_lines(
     issues = [row for row in _as_list(resolved.get("issues")) if isinstance(row, Mapping)]
     feedback_rows = [row for row in _as_list(repair_feedback_records) if isinstance(row, Mapping)]
     audit_rows = [row for row in _as_list(gate_audit_records) if isinstance(row, Mapping)]
+    alert_action_rows = [row for row in _as_list(gate_alert_action_rows) if isinstance(row, Mapping)]
     signal = _as_mapping(resolved.get("signal"))
     weight_gate = _as_mapping(resolved.get("weight_gate") or signal.get("weight_gate"))
     active_codes = ", ".join(str(code) for code in _as_list(signal.get("active_codes"))) or "-"
@@ -972,11 +974,35 @@ def build_statsbomb_review_training_quality_report_lines(
         )
     lines.extend(
         [
-        "",
-        "## 标签分布（label_rows）",
-        "",
-        "| 标签 | 值 | 已知样本 | hit | miss | miss_rate |",
-        "| --- | --- | ---: | ---: | ---: | --- |",
+            "",
+            "## 权重Gate处置动作（gate_alert_actions）",
+            "",
+            "| action_key | 标题 | 说明 | tone |",
+            "| --- | --- | --- | --- |",
+        ]
+    )
+    if not alert_action_rows:
+        lines.append("| - | - | - | - |")
+    for row in alert_action_rows:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    _md_cell(row.get("action_key")),
+                    _md_cell(row.get("title")),
+                    _md_cell(row.get("body")),
+                    _md_cell(row.get("tone")),
+                ]
+            )
+            + " |"
+        )
+    lines.extend(
+        [
+            "",
+            "## 标签分布（label_rows）",
+            "",
+            "| 标签 | 值 | 已知样本 | hit | miss | miss_rate |",
+            "| --- | --- | ---: | ---: | ---: | --- |",
         ]
     )
     if not label_rows:

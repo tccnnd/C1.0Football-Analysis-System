@@ -3393,6 +3393,20 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
                         "gate_reason": "statsbomb_review_quality_not_healthy",
                     },
                 ],
+                gate_alert_action_rows=[
+                    {
+                        "action_key": "recover_results",
+                        "title": "先回收赛果标签",
+                        "body": "先回收已完场赛果，再重建样本。",
+                        "tone": "danger",
+                    },
+                    {
+                        "action_key": "build_statsbomb_review_samples",
+                        "title": "重新生成事件代理复盘样本",
+                        "body": "重建 StatsBomb/Event Proxy 复盘样本。",
+                        "tone": "warning",
+                    },
+                ],
             )
         )
 
@@ -3401,6 +3415,9 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("transition_count: 2", payload)
         self.assertIn("active/report_only/disabled: 1/1/1", payload)
         self.assertIn("quality_report_export", payload)
+        self.assertIn("权重Gate处置动作", payload)
+        self.assertIn("recover_results", payload)
+        self.assertIn("build_statsbomb_review_samples", payload)
 
     def test_dashboard_exposes_statsbomb_review_training_weight_signal(self) -> None:
         settlements = [

@@ -1770,6 +1770,100 @@ def build_statsbomb_review_training_weight_gate_alert_lines(
     return lines
 
 
+def build_statsbomb_review_training_weight_gate_alert_action_rows(
+    alert_summary: dict | object,
+    limit: int = 4,
+) -> list[dict[str, object]]:
+    payload = alert_summary if isinstance(alert_summary, dict) else {}
+    alerts = payload.get("alerts") if isinstance(payload.get("alerts"), list) else []
+    if not alerts:
+        return []
+
+    latest_mode = str(payload.get("latest_mode") or "-")
+    status = str(payload.get("status") or "empty")
+    blocking_count = int(payload.get("blocking_count", 0) or 0)
+    warning_count = int(payload.get("warning_count", 0) or 0)
+    top_alert = alerts[0] if isinstance(alerts[0], dict) else {}
+    top_message = str(top_alert.get("message") or "-")
+    top_recommendation = str(top_alert.get("recommendation") or "-")
+    codes = [str(item.get("code") or "-") for item in alerts if isinstance(item, dict)]
+    rebuild_codes = {
+        "gate_disabled_now",
+        "gate_non_active_streak",
+        "gate_unknown_mode",
+        "gate_active_regression",
+        "gate_report_only_now",
+    }
+    should_rebuild = latest_mode in {"disabled", "report_only"} or any(code in rebuild_codes for code in codes)
+    should_recover = any(code in {"gate_non_active_streak", "gate_active_regression"} for code in codes) or "回退" in top_message
+    rows: list[dict[str, object]] = []
+    seen: set[str] = set()
+
+    def _append(action_key: str, title: str, body: str, *, tone: str, priority: int) -> None:
+        if action_key in seen:
+            return
+        seen.add(action_key)
+        rows.append(
+            {
+                "action_key": action_key,
+                "title": title,
+                "body": body,
+                "tone": tone,
+                "priority": priority,
+                "enabled": True,
+            }
+        )
+
+    if should_recover:
+        _append(
+            "recover_results",
+            "先回收赛果标签",
+            (
+                f"{top_message}\n"
+                f"建议: {top_recommendation}\n"
+                "先回收已完场赛果，再重建样本，减少 gate 长期停在 report_only/disabled。"
+            ),
+            tone="danger" if blocking_count else "warning",
+            priority=0,
+        )
+
+    if should_rebuild:
+        _append(
+            "build_statsbomb_review_samples",
+            "重新生成事件代理复盘样本",
+            (
+                f"{top_message}\n"
+                f"建议: {top_recommendation}\n"
+                "执行后会重建 StatsBomb/Event Proxy 复盘样本并刷新 gate 状态。"
+            ),
+            tone="danger" if blocking_count else "warning",
+            priority=1,
+        )
+
+    if status in {"blocked", "attention"}:
+        _append(
+            "refresh_review_center",
+            "刷新复盘质量看板",
+            "处理完成后重新读取 gate 审计与质量状态，确认是否恢复 active。",
+            tone="neutral",
+            priority=9,
+        )
+
+    rows.sort(key=lambda row: (int(row.get("priority", 99)), str(row.get("title") or "")))
+    if warning_count and not rows:
+        rows.append(
+            {
+                "action_key": "refresh_review_center",
+                "title": "刷新复盘质量看板",
+                "body": "暂无直接修复动作；重新读取 gate 审计与质量状态。",
+                "tone": "neutral",
+                "priority": 9,
+                "enabled": True,
+            }
+        )
+    return rows[: max(0, int(limit))]
+
+
 def build_statsbomb_review_training_action_feedback(
     action_key: str,
     before_quality: dict,
@@ -8348,6 +8442,19 @@ class SmartMatchDashboard:
         else:
             self._strategy_row(right, "暂无Gate告警", "当前 gate 审计记录没有触发连续非 active 或 active 回退告警。")
 
+        gate_alert_action_rows = build_statsbomb_review_training_weight_gate_alert_action_rows(gate_alert_summary)
+        self._strategy_section_title(right, "Gate告警处置", first=False)
+        if gate_alert_action_rows:
+            for row in gate_alert_action_rows:
+                self._strategy_row(
+                    right,
+                    str(row.get("title") or "-"),
+                    str(row.get("body") or "-"),
+                    command=_action_command(str(row.get("action_key") or "")),
+                )
+        else:
+            self._strategy_row(right, "暂无Gate处置动作", "当前没有需要一键执行的补样/补标签动作。")
+
         self._strategy_section_title(right, "Gate审计", first=False)
         audit_rows = build_statsbomb_review_training_weight_gate_audit_rows(gate_audit_records, limit=5)
         if audit_rows:
@@ -8816,12 +8923,14 @@ class SmartMatchDashboard:
             report_path=path,
         )
         report_gate_audit_records = [audit, *existing_gate_audit_records]
+        gate_alert_summary = build_statsbomb_review_training_weight_gate_alert_summary(report_gate_audit_records)
+        gate_alert_action_rows = build_statsbomb_review_training_weight_gate_alert_action_rows(gate_alert_summary)
         report_lines = build_statsbomb_review_training_quality_report_lines(
             quality,
             repair_records,
             gate_audit_records=report_gate_audit_records,
+            gate_alert_action_rows=gate_alert_action_rows,
         )
-        gate_alert_summary = build_statsbomb_review_training_weight_gate_alert_summary(report_gate_audit_records)
         report_lines.extend(build_statsbomb_review_training_weight_gate_alert_lines(gate_alert_summary))
         path.write_text("\n".join(report_lines), encoding="utf-8")
         gate_audit_count: int | None = len(report_gate_audit_records)

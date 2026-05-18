@@ -31,6 +31,7 @@ from v24_app.ai_dashboard import (
     build_statsbomb_review_training_weight_gate_audit_rows,
     build_statsbomb_review_training_weight_gate_alert_summary,
     build_statsbomb_review_training_weight_gate_alert_lines,
+    build_statsbomb_review_training_weight_gate_alert_action_rows,
     build_statsbomb_review_training_weight_gate_trend_summary,
     build_statsbomb_review_training_closure_summary,
     build_video_review_evidence_gap_batch_id,
@@ -890,6 +891,39 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertIn("gate_non_active_streak", payload)
         self.assertIn("blocking", payload)
 
+    def test_review_training_weight_gate_alert_action_rows_map_to_fix_actions(self) -> None:
+        summary = build_statsbomb_review_training_weight_gate_alert_summary(
+            [
+                {
+                    "occurred_at": "2026-05-14 12:10:00",
+                    "trigger": "quality_report_export",
+                    "quality_status": "attention",
+                    "gate_mode": "report_only",
+                    "gate_enabled": False,
+                },
+                {
+                    "occurred_at": "2026-05-14 12:05:00",
+                    "trigger": "build_statsbomb_review_samples",
+                    "quality_status": "attention",
+                    "gate_mode": "disabled",
+                    "gate_enabled": False,
+                },
+                {
+                    "occurred_at": "2026-05-14 12:00:00",
+                    "trigger": "refresh_review_center",
+                    "quality_status": "blocked",
+                    "gate_mode": "report_only",
+                    "gate_enabled": False,
+                },
+            ]
+        )
+        rows = build_statsbomb_review_training_weight_gate_alert_action_rows(summary)
+
+        self.assertEqual([row["action_key"] for row in rows], ["recover_results", "build_statsbomb_review_samples", "refresh_review_center"])
+        self.assertEqual(rows[0]["tone"], "danger")
+        self.assertIn("先回收已完场赛果", rows[0]["body"])
+        self.assertIn("重建 StatsBomb/Event Proxy", rows[1]["body"])
+
     def test_review_training_weight_gate_audit_log_appends_newest_and_caps(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "statsbomb_review_weight_gate_audit.json"
@@ -945,6 +979,7 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
 
         self.assertTrue(path.name.startswith("statsbomb_review_training_quality_"))
         self.assertIn("权重Gate趋势", report_payload)
+        self.assertIn("权重Gate处置动作", report_payload)
         self.assertIn("权重Gate告警", report_payload)
         self.assertIn("quality_report_export", report_payload)
         append_audit.assert_called_once()
