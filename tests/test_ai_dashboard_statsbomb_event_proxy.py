@@ -32,6 +32,7 @@ from v24_app.ai_dashboard import (
     build_statsbomb_review_training_weight_gate_alert_summary,
     build_statsbomb_review_training_weight_gate_alert_lines,
     build_statsbomb_review_training_weight_gate_alert_action_rows,
+    build_statsbomb_review_training_execution_queue_rows,
     build_statsbomb_review_training_weight_gate_trend_summary,
     build_statsbomb_review_training_weight_gate_followup_record,
     build_statsbomb_review_training_weight_gate_followup_rows,
@@ -929,6 +930,64 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertIn("先回收已完场赛果", rows[0]["body"])
         self.assertIn("重建 StatsBomb/Event Proxy", rows[1]["body"])
 
+    def test_review_training_execution_queue_prioritizes_gate_actions(self) -> None:
+        quality = {
+            "status": "attention",
+            "sample_count": 12,
+            "issue_count": 2,
+            "issues": [
+                {
+                    "code": "statsbomb_review_sample_count_low",
+                    "severity": "warning",
+                    "message": "样本偏少",
+                    "recommendation": "继续补样本。",
+                }
+            ],
+        }
+        alert_summary = build_statsbomb_review_training_weight_gate_alert_summary(
+            [
+                {
+                    "occurred_at": "2026-05-14 12:10:00",
+                    "trigger": "quality_report_export",
+                    "quality_status": "attention",
+                    "gate_mode": "report_only",
+                    "gate_enabled": False,
+                },
+                {
+                    "occurred_at": "2026-05-14 12:05:00",
+                    "trigger": "build_statsbomb_review_samples",
+                    "quality_status": "attention",
+                    "gate_mode": "disabled",
+                    "gate_enabled": False,
+                },
+                {
+                    "occurred_at": "2026-05-14 12:00:00",
+                    "trigger": "refresh_review_center",
+                    "quality_status": "blocked",
+                    "gate_mode": "report_only",
+                    "gate_enabled": False,
+                },
+            ]
+        )
+
+        rows = build_statsbomb_review_training_execution_queue_rows(
+            quality,
+            alert_summary,
+            [
+                {
+                    "followup_outcome": "improved",
+                    "before_alert_status": "blocked",
+                    "after_alert_status": "attention",
+                }
+            ],
+        )
+
+        self.assertEqual([row["action_key"] for row in rows[:3]], ["recover_results", "build_statsbomb_review_samples", "refresh_review_center"])
+        self.assertEqual(rows[0]["source"], "gate")
+        self.assertEqual(rows[0]["queue_status"], "pending")
+        self.assertIn("最近复检", rows[0]["body"])
+        self.assertEqual(len([row for row in rows if row["action_key"] == "build_statsbomb_review_samples"]), 1)
+
     def test_review_training_weight_gate_followup_record_captures_recovery(self) -> None:
         record = build_statsbomb_review_training_weight_gate_followup_record(
             {
@@ -1274,11 +1333,14 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertEqual(summary["gate_audit_count"], 2)
         self.assertEqual(summary["gate_alert_count"], 3)
         self.assertEqual(summary["gate_followup_count"], 1)
+        self.assertEqual(summary["execution_queue_count"], 3)
         self.assertEqual(summary["gate_trend"]["status"], "report_only")
         self.assertEqual(summary["gate_alert_status"], "attention")
+        self.assertEqual(summary["execution_queue_rows"][0]["action_key"], "recover_results")
         self.assertIn("09:12:00", summary["latest_gate_followup"])
         self.assertIn("事件代理质量", summary["title"])
         self.assertIn("样本 18", summary["body"])
+        self.assertIn("待办 3", summary["body"])
         self.assertIn("2026-05-17 09:00:00", summary["body"])
         self.assertIn("2026-05-17 09:10:00", summary["body"])
         self.assertIn("Gate复检", summary["body"])

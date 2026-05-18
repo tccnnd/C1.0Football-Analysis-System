@@ -1958,6 +1958,77 @@ def build_statsbomb_review_training_weight_gate_alert_action_rows(
     return rows[: max(0, int(limit))]
 
 
+def build_statsbomb_review_training_execution_queue_rows(
+    quality: dict | object,
+    gate_alert_summary: dict | object,
+    gate_followup_records: list[dict] | object | None = None,
+    *,
+    limit: int = 6,
+) -> list[dict[str, object]]:
+    quality_actions = build_statsbomb_review_training_action_rows(quality if isinstance(quality, dict) else {})
+    gate_actions = build_statsbomb_review_training_weight_gate_alert_action_rows(gate_alert_summary)
+    followups = [item for item in gate_followup_records if isinstance(item, dict)] if isinstance(gate_followup_records, list) else []
+    latest_followup = followups[0] if followups else {}
+    rows: list[dict[str, object]] = []
+    seen: set[str] = set()
+    priority_by_action = {
+        "recover_results": 0,
+        "build_statsbomb_review_samples": 1,
+        "run_high_accuracy_strategy_backtest": 5,
+        "refresh_review_center": 9,
+    }
+
+    def _append(source: str, item: dict[str, object]) -> None:
+        action_key = str(item.get("action_key") or "")
+        if not action_key or action_key in seen:
+            return
+        seen.add(action_key)
+        base_priority = priority_by_action.get(action_key, 7)
+        source_priority = 0 if source == "gate" else 1
+        tone = str(item.get("tone") or "neutral")
+        followup_text = ""
+        if latest_followup:
+            followup_text = (
+                f"\n最近复检: {latest_followup.get('followup_outcome', '-')} | "
+                f"{latest_followup.get('before_alert_status', '-')}->{latest_followup.get('after_alert_status', '-')}"
+            )
+        rows.append(
+            {
+                "action_key": action_key,
+                "title": str(item.get("title") or action_key),
+                "body": f"{item.get('body', '-')}\n来源: {source}{followup_text}",
+                "tone": tone,
+                "priority": base_priority * 10 + source_priority,
+                "source": source,
+                "queue_status": "pending",
+                "enabled": bool(item.get("enabled", True)),
+            }
+        )
+
+    for item in gate_actions:
+        if isinstance(item, dict):
+            _append("gate", item)
+    for item in quality_actions:
+        if isinstance(item, dict):
+            _append("quality", item)
+
+    if not rows:
+        rows.append(
+            {
+                "action_key": "refresh_review_center",
+                "title": "刷新复盘质量看板",
+                "body": "当前没有待执行修复动作；重新读取 StatsBomb/Event Proxy 样本质量与 Gate 审计。",
+                "tone": "neutral",
+                "priority": 90,
+                "source": "system",
+                "queue_status": "pending",
+                "enabled": True,
+            }
+        )
+    rows.sort(key=lambda row: (int(row.get("priority", 99)), str(row.get("title") or "")))
+    return rows[: max(0, int(limit))]
+
+
 def build_statsbomb_review_training_action_feedback(
     action_key: str,
     before_quality: dict,
@@ -2094,6 +2165,7 @@ def build_statsbomb_review_training_center_summary(
     gate_trend = build_statsbomb_review_training_weight_gate_trend_summary(audit_records)
     gate_alert_summary = build_statsbomb_review_training_weight_gate_alert_summary(audit_records)
     gate_followup_rows = build_statsbomb_review_training_weight_gate_followup_rows(followup_records)
+    execution_queue_rows = build_statsbomb_review_training_execution_queue_rows(payload, gate_alert_summary, followup_records)
     status = str(payload.get("status") or "blocked")
     sample_count = int(payload.get("sample_count", 0) or 0)
     issue_count = int(payload.get("issue_count", 0) or 0)
@@ -2143,10 +2215,12 @@ def build_statsbomb_review_training_center_summary(
         "gate_trend": gate_trend,
         "gate_alert_summary": gate_alert_summary,
         "gate_followup_rows": gate_followup_rows,
+        "execution_queue_rows": execution_queue_rows,
+        "execution_queue_count": len(execution_queue_rows),
         "title": f"事件代理质量 | {status}",
         "body": (
             f"样本 {sample_count} | 问题 {issue_count} | 可执行动作 {action_count} | "
-            f"修复记录 {len(repair_records)} | Gate审计 {len(audit_records)} | Gate复检 {len(followup_records)}\n"
+            f"待办 {len(execution_queue_rows)} | 修复记录 {len(repair_records)} | Gate审计 {len(audit_records)} | Gate复检 {len(followup_records)}\n"
             f"最近修复: {latest_text}\n"
             f"最近Gate审计: {latest_audit_text}\n"
             f"最近Gate复检: {latest_followup_text}\n"
@@ -8490,6 +8564,7 @@ class SmartMatchDashboard:
             ("复盘样本", str(summary.get("sample_count", 0)), TEXT),
             ("标注队列", str(label_queue_summary.get("queue_count", 0)), YELLOW if int(label_queue_summary.get("queue_count", 0) or 0) else GREEN),
             ("问题数", str(summary.get("issue_count", 0)), RED if int(summary.get("issue_count", 0) or 0) else GREEN),
+            ("执行待办", str(summary.get("execution_queue_count", 0)), YELLOW if int(summary.get("execution_queue_count", 0) or 0) else GREEN),
             ("修复记录", str(summary.get("repair_count", 0)), "#7aa2ff"),
             ("Gate审计", str(summary.get("gate_audit_count", 0)), "#7aa2ff"),
             ("Gate告警", str(summary.get("gate_alert_count", 0)), RED if int(summary.get("gate_alert_count", 0) or 0) else GREEN),
@@ -8546,6 +8621,19 @@ class SmartMatchDashboard:
             if action_key == "refresh_review_center":
                 return lambda: (window.destroy(), self.open_statsbomb_review_training_center_window())
             return lambda key=action_key: self.run_statsbomb_review_training_action(key)
+
+        execution_queue_rows = summary.get("execution_queue_rows") if isinstance(summary.get("execution_queue_rows"), list) else []
+        self._strategy_section_title(right, "接管执行待办", first=False)
+        if execution_queue_rows:
+            for row in [item for item in execution_queue_rows if isinstance(item, dict)][:6]:
+                self._strategy_row(
+                    right,
+                    f"P{int(row.get('priority', 99) or 99):02d} | {row.get('title', '-')}",
+                    str(row.get("body") or "-"),
+                    command=_action_command(str(row.get("action_key") or "")),
+                )
+        else:
+            self._strategy_row(right, "暂无执行待办", "当前没有待处理的 Gate 或质量修复动作。")
 
         for row in build_statsbomb_review_training_action_rows(quality):
             if isinstance(row, dict):
