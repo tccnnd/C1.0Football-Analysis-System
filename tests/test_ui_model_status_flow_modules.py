@@ -296,8 +296,8 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
 
         statsbomb_card = next(row for row in cards if "计划" in row["detail"])
         self.assertIn("计划 blocked", statsbomb_card["detail"])
-        self.assertTrue(any(row["action_key"] == "build_statsbomb_coverage_import_plan" for row in actions))
-        self.assertEqual(training_health_action_button_text("build_statsbomb_coverage_import_plan"), "生成覆盖计划")
+        self.assertTrue(any(row["action_key"] == "execute_statsbomb_coverage_import_plan" for row in actions))
+        self.assertEqual(training_health_action_button_text("execute_statsbomb_coverage_import_plan"), "执行覆盖计划")
         self.assertIn("StatsBomb覆盖计划: blocked", text)
 
     def test_training_health_action_rows_show_healthy_next_step(self) -> None:
@@ -342,6 +342,34 @@ class UIModelStatusFlowModuleTests(unittest.TestCase):
         self.assertIn("动作: 生成联赛画像", text)
         self.assertIn("attention -> healthy", text)
         self.assertIn("复检: ready_to_train_play_models", text)
+
+    def test_training_health_repair_result_text_for_execute_plan(self) -> None:
+        text = build_training_health_repair_result_text(
+            {
+                "action_key": "execute_statsbomb_coverage_import_plan",
+                "ok": True,
+                "before_status": "blocked",
+                "after_status": "attention",
+                "message": "StatsBomb 覆盖计划执行完成。",
+                "result": {
+                    "target_date_start": "2024-04-14",
+                    "target_date_end": "2024-04-15",
+                    "next_step": "Import StatsBomb coverage for the settlement date range, then rebuild review samples.",
+                    "import_runs": [{"competition_id": 1}],
+                    "imported_records": 3,
+                    "output_records": 3,
+                    "sample_count": 2,
+                    "skipped_missing_statsbomb": 0,
+                    "skipped_unknown_label": 0,
+                },
+                "training_gate": {"status": "ready_to_train_xgb", "recommendation": "Proceed to backtest."},
+            }
+        )
+
+        self.assertIn("执行覆盖计划", text)
+        self.assertIn("导入", text)
+        self.assertIn("复盘", text)
+        self.assertIn("samples=2", text)
 
     def test_training_model_gate_rows_expose_training_actions(self) -> None:
         rows = build_training_model_gate_rows(

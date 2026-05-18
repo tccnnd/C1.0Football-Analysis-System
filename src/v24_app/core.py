@@ -5,6 +5,7 @@ import hashlib
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import csv
@@ -59,6 +60,13 @@ except Exception:
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = PACKAGE_DIR.parent.parent
+SCRIPTS_ROOT = PROJECT_DIR / "scripts"
+if str(SCRIPTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_ROOT))
+try:
+    from import_statsbomb_open_data import import_statsbomb_open_data
+except Exception:
+    import_statsbomb_open_data = None
 CACHE_FILE = PROJECT_DIR / "data" / "cache" / "500_matches_today.json"
 REPORT_DIR = PROJECT_DIR / "reports"
 VIDEO_REVIEW_DIR = PROJECT_DIR / "data" / "video_reviews"
@@ -5438,6 +5446,9 @@ def repair_training_data_health(action_key: str, *, input_path: Path | str | Non
             f"{result.get('target_date_start') or '-'} -> {result.get('target_date_end') or '-'} | "
             f"next_step={result.get('next_step') or '-'}"
         )
+    elif action == "execute_statsbomb_coverage_import_plan":
+        result = _execute_statsbomb_coverage_import_plan(project_dir=PROJECT_DIR)
+        message = str(result.get("message") or "StatsBomb 覆盖计划执行完成。")
     elif action == "build_statsbomb_review_samples":
         settlements = get_recent_settlements(limit=0)
         result = export_statsbomb_review_training_samples(
@@ -5460,7 +5471,20 @@ def repair_training_data_health(action_key: str, *, input_path: Path | str | Non
             "missing_statsbomb": int(result.get("skipped_missing_statsbomb", 0) or 0) if isinstance(result, dict) else 0,
             "unknown_label": int(result.get("skipped_unknown_label", 0) or 0) if isinstance(result, dict) else 0,
         },
-        "output_path": str(result.get("output_path", _statsbomb_coverage_import_plan_path() if action == "build_statsbomb_coverage_import_plan" else "")) if isinstance(result, dict) else "",
+        "output_path": str(
+            result.get(
+                "output_path",
+                (
+                    _statsbomb_coverage_import_plan_path()
+                    if action == "build_statsbomb_coverage_import_plan"
+                    else STATSBOMB_REVIEW_TRAINING_FILE
+                    if action == "execute_statsbomb_coverage_import_plan"
+                    else ""
+                ),
+            )
+        )
+        if isinstance(result, dict)
+        else "",
         "before_status": (before.get("training_health") or {}).get("status") if isinstance(before.get("training_health"), dict) else None,
         "after_status": (after.get("training_health") or {}).get("status") if isinstance(after.get("training_health"), dict) else None,
         "after": after,
@@ -13963,6 +13987,189 @@ def _build_statsbomb_coverage_import_plan(audit: dict | None) -> dict[str, objec
         "candidate_count": candidate_count,
         "coverage_gap_count": gap_count,
         "ready_to_build_review_samples": coverage_blocker not in {"no_settlement_dates", "no_statsbomb_dates", "no_date_overlap"},
+    }
+
+
+def _load_statsbomb_coverage_import_plan() -> dict[str, object]:
+    path = _statsbomb_coverage_import_plan_path()
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _ensure_statsbomb_coverage_import_plan() -> tuple[dict[str, object], str]:
+    saved_plan = _load_statsbomb_coverage_import_plan()
+    if saved_plan:
+        return saved_plan, "saved"
+    coverage_status = get_training_data_coverage_status()
+    statsbomb_events = coverage_status.get("statsbomb_events", {}) if isinstance(coverage_status.get("statsbomb_events"), dict) else {}
+    audit = statsbomb_events.get("coverage_audit", {}) if isinstance(statsbomb_events.get("coverage_audit"), dict) else {}
+    plan = _build_statsbomb_coverage_import_plan(audit)
+    path = _statsbomb_coverage_import_plan_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+    return plan, "recomputed"
+
+
+def _execute_statsbomb_coverage_import_plan(
+    *,
+    project_dir: Path | None = None,
+    offline_dir: Path | None = None,
+    timeout: int = 30,
+) -> dict[str, object]:
+    resolved_project_dir = PROJECT_DIR if project_dir is None else Path(project_dir)
+    plan, plan_source = _ensure_statsbomb_coverage_import_plan()
+    plan_path = _statsbomb_coverage_import_plan_path()
+    selected_competitions = [
+        item
+        for item in plan.get("top_overlap_competitions", [])
+        if isinstance(item, dict) and int(item.get("overlap_settlement_count", 0) or 0) > 0
+    ] if isinstance(plan.get("top_overlap_competitions"), list) else []
+
+    if not selected_competitions:
+        return {
+            "ok": False,
+            "reason": "no_overlap_competitions",
+            "message": "StatsBomb 覆盖计划中没有可执行的重叠赛事，未执行导入。",
+            "plan_status": plan.get("status"),
+            "plan_source": plan_source,
+            "plan_path": str(plan_path),
+            "plan_next_step": plan.get("next_step"),
+            "next_step": plan.get("next_step"),
+            "plan_overlap_competition_count": int(plan.get("overlap_competition_count", 0) or 0),
+            "target_date_start": plan.get("target_date_start"),
+            "target_date_end": plan.get("target_date_end"),
+            "source_date_start": plan.get("settlement_date_start") or plan.get("source_date_start"),
+            "source_date_end": plan.get("settlement_date_end") or plan.get("source_date_end"),
+            "import_runs": [],
+            "imported_records": 0,
+            "output_records": 0,
+            "failure_count": 0,
+            "skipped_existing": 0,
+            "sample_count": 0,
+            "skipped_missing_statsbomb": 0,
+            "skipped_unknown_label": 0,
+            "output_path": str(plan_path),
+            "plan": plan,
+        }
+
+    if not callable(import_statsbomb_open_data):
+        return {
+            "ok": False,
+            "reason": "importer_unavailable",
+            "message": "StatsBomb 导入器不可用，无法执行覆盖计划。",
+            "plan_status": plan.get("status"),
+            "plan_source": plan_source,
+            "plan_path": str(plan_path),
+            "plan_next_step": plan.get("next_step"),
+            "next_step": plan.get("next_step"),
+            "plan_overlap_competition_count": int(plan.get("overlap_competition_count", 0) or 0),
+            "target_date_start": plan.get("target_date_start"),
+            "target_date_end": plan.get("target_date_end"),
+            "source_date_start": plan.get("settlement_date_start") or plan.get("source_date_start"),
+            "source_date_end": plan.get("settlement_date_end") or plan.get("source_date_end"),
+            "import_runs": [],
+            "imported_records": 0,
+            "output_records": 0,
+            "failure_count": 0,
+            "skipped_existing": 0,
+            "sample_count": 0,
+            "skipped_missing_statsbomb": 0,
+            "skipped_unknown_label": 0,
+            "output_path": str(plan_path),
+            "plan": plan,
+        }
+
+    import_runs: list[dict[str, object]] = []
+    total_imported_records = 0
+    total_output_records = 0
+    total_failure_count = 0
+    total_skipped_existing = 0
+    summaries_path = ""
+    audit_path = ""
+    for competition in selected_competitions:
+        competition_id = int(competition.get("competition_id", 0) or 0)
+        season_id = int(competition.get("season_id", 0) or 0)
+        if competition_id <= 0 or season_id <= 0:
+            continue
+        result = import_statsbomb_open_data(
+            project_root=resolved_project_dir,
+            offline_dir=offline_dir,
+            competition_id=competition_id,
+            season_id=season_id,
+            match_date_from=plan.get("target_date_start") or plan.get("settlement_date_start"),
+            match_date_to=plan.get("target_date_end") or plan.get("settlement_date_end"),
+            merge=True,
+            skip_existing=True,
+            timeout=max(1, int(timeout)),
+        )
+        if not isinstance(result, dict):
+            result = {}
+        import_runs.append(
+            {
+                "competition_id": competition_id,
+                "season_id": season_id,
+                "competition_name": competition.get("competition_name"),
+                "season_name": competition.get("season_name"),
+                "match_count": int(competition.get("match_count", 0) or 0),
+                "overlap_settlement_count": int(competition.get("overlap_settlement_count", 0) or 0),
+                "result": result,
+            }
+        )
+        total_imported_records += int(result.get("records", 0) or 0)
+        total_output_records += int(result.get("output_records", 0) or 0)
+        total_failure_count += int(result.get("failure_count", 0) or 0)
+        total_skipped_existing += int(result.get("skipped_existing", 0) or 0)
+        summaries_path = str(result.get("summaries_path") or summaries_path)
+        audit_path = str(result.get("audit_path") or audit_path)
+
+    settlements = get_recent_settlements(limit=0)
+    review_result = export_statsbomb_review_training_samples(
+        project_dir=resolved_project_dir,
+        settlements=settlements,
+    )
+    sample_count = int(review_result.get("sample_count", 0) or 0)
+    review_output_path = str(review_result.get("output_path") or "")
+    ok = total_failure_count == 0
+    message = (
+        "StatsBomb 覆盖计划执行完成: "
+        f"导入 {total_imported_records} 场，输出 {total_output_records} 场，复盘样本 {sample_count} 条。"
+    )
+    if not summaries_path:
+        summaries_path = str(STATSBOMB_EVENT_SUMMARIES_FILE)
+    if not review_output_path:
+        review_output_path = str(STATSBOMB_REVIEW_TRAINING_FILE)
+    return {
+        "ok": ok,
+        "reason": "ok" if ok else "import_failed",
+        "message": message,
+        "plan_status": plan.get("status"),
+        "plan_source": plan_source,
+        "plan_path": str(plan_path),
+        "plan_next_step": plan.get("next_step"),
+        "next_step": plan.get("next_step"),
+        "plan_overlap_competition_count": int(plan.get("overlap_competition_count", 0) or 0),
+        "target_date_start": plan.get("target_date_start"),
+        "target_date_end": plan.get("target_date_end"),
+        "source_date_start": plan.get("settlement_date_start") or plan.get("source_date_start"),
+        "source_date_end": plan.get("settlement_date_end") or plan.get("source_date_end"),
+        "import_runs": import_runs,
+        "imported_records": total_imported_records,
+        "output_records": total_output_records,
+        "failure_count": total_failure_count,
+        "skipped_existing": total_skipped_existing,
+        "sample_count": sample_count,
+        "skipped_missing_statsbomb": int(review_result.get("skipped_missing_statsbomb", 0) or 0),
+        "skipped_unknown_label": int(review_result.get("skipped_unknown_label", 0) or 0),
+        "feature_order": review_result.get("feature_order", []),
+        "output_path": review_output_path,
+        "summaries_path": summaries_path,
+        "audit_path": audit_path,
+        "plan": plan,
     }
 
 

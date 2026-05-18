@@ -493,6 +493,159 @@ class CoreTrainingDataCoverageSummaryTests(unittest.TestCase):
         self.assertEqual(result["result"]["source_date_start"], "2024-03-10")
         self.assertIn("next_step", result["result"])
 
+    def test_repair_training_data_health_executes_statsbomb_coverage_import_plan(self) -> None:
+        settlement = {
+            "match_id": "m1",
+            "match_date": "2024-04-14",
+            "match_time": "17:30",
+            "league": "1. Bundesliga",
+            "home_team": "Bayer Leverkusen",
+            "away_team": "Werder Bremen",
+            "home_goals": 5,
+            "away_goals": 0,
+            "is_correct": False,
+            "handicap_is_correct": True,
+            "ou_is_correct": False,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "data" / "state"
+            state.mkdir(parents=True)
+            (state / "settlements.json").write_text(json.dumps({"items": [settlement]}), encoding="utf-8")
+            (state / "statsbomb_coverage_import_plan.json").write_text(
+                json.dumps(
+                    {
+                        "status": "blocked",
+                        "coverage_blocker": "no_date_overlap",
+                        "plan_source": "saved",
+                        "plan_path": str(state / "statsbomb_coverage_import_plan.json"),
+                        "target_date_start": "2024-04-14",
+                        "target_date_end": "2024-04-15",
+                        "settlement_date_start": "2024-04-14",
+                        "settlement_date_end": "2024-04-15",
+                        "next_step": "Import StatsBomb coverage for the settlement date range, then rebuild review samples.",
+                        "overlap_competition_count": 1,
+                        "top_overlap_competitions": [
+                            {
+                                "competition_id": 1,
+                                "season_id": 10,
+                                "competition_name": "Overlap League",
+                                "season_name": "2024",
+                                "match_count": 1,
+                                "overlap_settlement_count": 1,
+                                "date_start": "2024-04-14",
+                                "date_end": "2024-04-15",
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            store = core.StateStore(root)
+
+            def _fake_import_statsbomb_open_data(**kwargs):
+                state_dir = Path(kwargs["project_root"]) / "data" / "state"
+                summary_path = state_dir / "statsbomb_event_summaries.json"
+                summary_path.write_text(
+                    json.dumps(
+                        {
+                            "items": [
+                                {
+                                    "source_match_id": "s1",
+                                    "match_id": "s1",
+                                    "match_date": "2024-04-14",
+                                    "league": "1. Bundesliga",
+                                    "home_team": "Bayer Leverkusen",
+                                    "away_team": "Werder Bremen",
+                                    "source_url": "https://example.com/statsbomb/s1",
+                                    "event_summary": {
+                                        "event_count": 10,
+                                        "shot_count": 12,
+                                        "xg_home": 2.1,
+                                        "xg_away": 0.5,
+                                    },
+                                }
+                            ]
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+                return {
+                    "records": 1,
+                    "output_records": 1,
+                    "failure_count": 0,
+                    "skipped_existing": 0,
+                    "summaries_path": str(summary_path),
+                    "audit_path": str(state_dir / "statsbomb_import_audit.json"),
+                }
+
+            with (
+                patch("v24_app.core.PROJECT_DIR", root),
+                patch("v24_app.core.STATE_STORE", store),
+                patch("v24_app.core.STATSBOMB_EVENT_SUMMARIES_FILE", state / "statsbomb_event_summaries.json"),
+                patch("v24_app.core.STATSBOMB_REVIEW_TRAINING_FILE", state / "statsbomb_review_training_samples.json"),
+                patch("v24_app.core.import_statsbomb_open_data", side_effect=_fake_import_statsbomb_open_data) as importer,
+            ):
+                result = core.repair_training_data_health("execute_statsbomb_coverage_import_plan")
+
+            payload = json.loads((root / "data" / "state" / "statsbomb_review_training_samples.json").read_text(encoding="utf-8"))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["action_key"], "execute_statsbomb_coverage_import_plan")
+        self.assertEqual(result["result"]["plan_source"], "saved")
+        self.assertEqual(result["result"]["imported_records"], 1)
+        self.assertEqual(result["result"]["sample_count"], 1)
+        self.assertEqual(result["generated_sample_count"], 1)
+        self.assertEqual(result["result"]["skipped_missing_statsbomb"], 0)
+        self.assertEqual(result["result"]["skipped_unknown_label"], 0)
+        self.assertTrue(result["output_path"].endswith("statsbomb_review_training_samples.json"))
+        self.assertEqual(payload["summary"]["sample_count"], 1)
+        self.assertEqual(payload["items"][0]["match_id"], "m1")
+        importer.assert_called_once()
+
+    def test_repair_training_data_health_executes_statsbomb_coverage_import_plan_no_overlap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "data" / "state"
+            state.mkdir(parents=True)
+            (state / "settlements.json").write_text(json.dumps({"items": [{"match_date": "2026-04-14"}]}), encoding="utf-8")
+            (state / "statsbomb_coverage_import_plan.json").write_text(
+                json.dumps(
+                    {
+                        "status": "blocked",
+                        "coverage_blocker": "no_date_overlap",
+                        "plan_path": str(state / "statsbomb_coverage_import_plan.json"),
+                        "target_date_start": "2026-04-14",
+                        "target_date_end": "2026-04-15",
+                        "settlement_date_start": "2026-04-14",
+                        "settlement_date_end": "2026-04-15",
+                        "next_step": "No overlap available.",
+                        "overlap_competition_count": 0,
+                        "top_overlap_competitions": [],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            store = core.StateStore(root)
+
+            with (
+                patch("v24_app.core.PROJECT_DIR", root),
+                patch("v24_app.core.STATE_STORE", store),
+                patch("v24_app.core.STATSBOMB_EVENT_SUMMARIES_FILE", state / "statsbomb_event_summaries.json"),
+                patch("v24_app.core.STATSBOMB_REVIEW_TRAINING_FILE", state / "statsbomb_review_training_samples.json"),
+                patch("v24_app.core.import_statsbomb_open_data") as importer,
+            ):
+                result = core.repair_training_data_health("execute_statsbomb_coverage_import_plan")
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["result"]["reason"], "no_overlap_competitions")
+        self.assertEqual(result["result"]["sample_count"], 0)
+        self.assertEqual(result["generated_sample_count"], 0)
+        importer.assert_not_called()
+
     def test_training_model_gate_recommends_xgb_training_when_data_is_ready(self) -> None:
         coverage = {
             "training_health": {

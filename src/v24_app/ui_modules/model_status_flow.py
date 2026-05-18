@@ -82,7 +82,7 @@ def _training_health_action_for_issue(code: object, fallback: object = "") -> st
         "xgb_league_coverage_low": "补不同联赛样本",
         "xgb_date_range_missing": "修复样本日期字段",
         "league_profiles_missing": "生成联赛画像",
-        "statsbomb_date_overlap_missing": "生成StatsBomb覆盖导入计划",
+        "statsbomb_date_overlap_missing": "执行StatsBomb覆盖计划，导入可覆盖赛事并重建复盘样本",
         "statsbomb_review_samples_missing": "将事件摘要转为复盘训练样本",
     }
     actions.update(
@@ -105,7 +105,7 @@ def _training_health_action_key_for_issue(code: object) -> str:
         "xgb_league_coverage_low": "import_historical_samples",
         "xgb_date_range_missing": "rebuild_xgb_from_club_history",
         "league_profiles_missing": "build_league_profiles",
-        "statsbomb_date_overlap_missing": "build_statsbomb_coverage_import_plan",
+        "statsbomb_date_overlap_missing": "execute_statsbomb_coverage_import_plan",
         "statsbomb_review_samples_missing": "build_statsbomb_review_samples",
     }
     action_keys.update(
@@ -124,6 +124,7 @@ def training_health_action_button_text(action_key: object) -> str:
         "rebuild_xgb_from_club_history": "重建XGB样本",
         "build_league_profiles": "生成联赛画像",
         "build_statsbomb_coverage_import_plan": "生成覆盖计划",
+        "execute_statsbomb_coverage_import_plan": "执行覆盖计划",
         "build_statsbomb_review_samples": "生成复盘样本",
         "train_xgb": "训练XGB",
         "train_play_models": "训练玩法模型",
@@ -323,10 +324,21 @@ def build_training_health_repair_result_text(result: Mapping[str, object] | obje
     gate = resolved.get("training_gate", {}) if isinstance(resolved.get("training_gate"), Mapping) else {}
     action_key = str(resolved.get("action_key") or "")
     plan_line = ""
-    if action_key == "build_statsbomb_coverage_import_plan" and isinstance(payload, Mapping):
+    import_line = ""
+    review_line = ""
+    if action_key in {"build_statsbomb_coverage_import_plan", "execute_statsbomb_coverage_import_plan"} and isinstance(payload, Mapping):
         plan_line = (
             f"- 计划: {payload.get('target_date_start', '-')} -> {payload.get('target_date_end', '-')} | "
-            f"next={payload.get('next_step', '-')}\n"
+            f"next={payload.get('next_step', payload.get('plan_next_step', '-'))}\n"
+        )
+    if action_key == "execute_statsbomb_coverage_import_plan" and isinstance(payload, Mapping):
+        import_line = (
+            f"- 导入: competitions={len(payload.get('import_runs', []) if isinstance(payload.get('import_runs'), list) else [])} | "
+            f"records={payload.get('imported_records', '-')} | output={payload.get('output_records', '-')}\n"
+        )
+        review_line = (
+            f"- 复盘: samples={payload.get('sample_count', '-')} | missing={payload.get('skipped_missing_statsbomb', '-')} | "
+            f"unknown={payload.get('skipped_unknown_label', '-')}\n"
         )
     return (
         f"训练健康修复: {'完成' if bool(resolved.get('ok', True)) else '未完成'}\n"
@@ -335,6 +347,8 @@ def build_training_health_repair_result_text(result: Mapping[str, object] | obje
         + f"- 结果: {resolved.get('message') or '-'}\n"
         + f"- 样本: imported={payload.get('imported_samples', '-')} | saved={payload.get('saved_total', '-')} | profiles={payload.get('league_profile_count', '-')}\n"
         + plan_line
+        + import_line
+        + review_line
         + f"- 复检: {gate.get('status', '-')} | 建议: {gate.get('recommendation', '-')}"
     )
 
