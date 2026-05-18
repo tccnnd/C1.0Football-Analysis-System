@@ -17,6 +17,8 @@ if str(SRC_ROOT) not in sys.path:
 
 from v24_app.ai_dashboard import (
     SmartMatchDashboard,
+    _append_statsbomb_review_training_execution_queue_log,
+    _load_statsbomb_review_training_execution_queue_log,
     _append_statsbomb_review_training_weight_gate_audit_log,
     _load_statsbomb_review_training_weight_gate_audit_log,
     build_statsbomb_event_proxy_review_samples_message,
@@ -33,6 +35,10 @@ from v24_app.ai_dashboard import (
     build_statsbomb_review_training_weight_gate_alert_lines,
     build_statsbomb_review_training_weight_gate_alert_action_rows,
     build_statsbomb_review_training_execution_queue_rows,
+    build_statsbomb_review_training_execution_queue_export_message,
+    build_statsbomb_review_training_execution_queue_report_filename,
+    build_statsbomb_review_training_execution_queue_report_lines,
+    build_statsbomb_review_training_execution_queue_snapshot,
     build_statsbomb_review_training_weight_gate_trend_summary,
     build_statsbomb_review_training_weight_gate_followup_record,
     build_statsbomb_review_training_weight_gate_followup_rows,
@@ -988,6 +994,63 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertIn("最近复检", rows[0]["body"])
         self.assertEqual(len([row for row in rows if row["action_key"] == "build_statsbomb_review_samples"]), 1)
 
+    def test_review_training_execution_queue_report_snapshot_and_lines(self) -> None:
+        quality = {
+            "status": "attention",
+            "sample_count": 12,
+            "issue_count": 1,
+            "issues": [{"code": "statsbomb_review_sample_count_low", "severity": "warning", "message": "样本偏少"}],
+            "weight_gate": {"mode": "report_only", "enabled": False},
+        }
+        alert_summary = build_statsbomb_review_training_weight_gate_alert_summary(
+            [
+                {
+                    "occurred_at": "2026-05-14 12:10:00",
+                    "trigger": "quality_report_export",
+                    "quality_status": "attention",
+                    "gate_mode": "report_only",
+                    "gate_enabled": False,
+                }
+            ]
+        )
+        snapshot = build_statsbomb_review_training_execution_queue_snapshot(
+            quality,
+            alert_summary,
+            generated_at=datetime(2026, 5, 14, 12, 15, 0),
+            report_path=Path("reports") / "queue.md",
+        )
+        lines = build_statsbomb_review_training_execution_queue_report_lines(snapshot)
+        payload = "\n".join(lines)
+
+        self.assertEqual(
+            build_statsbomb_review_training_execution_queue_report_filename(datetime(2026, 5, 14, 12, 15, 0)),
+            "statsbomb_review_execution_queue_20260514_121500.md",
+        )
+        self.assertEqual(snapshot["quality_status"], "attention")
+        self.assertEqual(snapshot["gate_mode"], "report_only")
+        self.assertGreaterEqual(snapshot["execution_queue_count"], 1)
+        self.assertIn("build_statsbomb_review_samples", snapshot["queue_signature"])
+        self.assertIn("StatsBomb/Event Proxy 接管执行待办", payload)
+        self.assertIn("build_statsbomb_review_samples", payload)
+        self.assertIn("仅做留痕", build_statsbomb_review_training_execution_queue_export_message("queue.md", snapshot))
+
+    def test_review_training_execution_queue_log_appends_newest_and_caps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "statsbomb_review_execution_queue_log.json"
+            for index in range(3):
+                _append_statsbomb_review_training_execution_queue_log(
+                    {
+                        "generated_at": f"2026-05-14 12:0{index}:00",
+                        "queue_signature": f"action-{index}",
+                    },
+                    path=path,
+                    limit=2,
+                )
+
+            records = _load_statsbomb_review_training_execution_queue_log(path)
+
+        self.assertEqual([record["queue_signature"] for record in records], ["action-2", "action-1"])
+
     def test_review_training_weight_gate_followup_record_captures_recovery(self) -> None:
         record = build_statsbomb_review_training_weight_gate_followup_record(
             {
@@ -1188,6 +1251,58 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertIn("Gate", showinfo.call_args.args[1])
         self.assertIn("Gate告警", showinfo.call_args.args[1])
         self.assertIn("Gate复检", showinfo.call_args.args[1])
+
+    def test_export_review_training_execution_queue_report_writes_snapshot_log(self) -> None:
+        class _StatusVar:
+            def __init__(self) -> None:
+                self.value = ""
+
+            def set(self, value: str) -> None:
+                self.value = value
+
+        dashboard = object.__new__(SmartMatchDashboard)
+        dashboard.status_var = _StatusVar()
+        dashboard._log_event = lambda *args, **kwargs: None
+        quality = {
+            "status": "attention",
+            "sample_count": 12,
+            "feature_count": 3,
+            "issue_count": 1,
+            "issues": [{"code": "statsbomb_review_sample_count_low", "severity": "warning"}],
+            "weight_gate": {"mode": "report_only", "enabled": False},
+        }
+        dashboard._current_statsbomb_review_training_quality = lambda: quality
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("v24_app.ai_dashboard.REPORT_DIR", Path(tmp)), patch(
+                "v24_app.ai_dashboard._load_statsbomb_review_training_weight_gate_audit_log",
+                return_value=[
+                    {
+                        "occurred_at": "2026-05-14 12:10:00",
+                        "trigger": "quality_report_export",
+                        "quality_status": "attention",
+                        "gate_mode": "report_only",
+                        "gate_enabled": False,
+                    }
+                ],
+            ), patch(
+                "v24_app.ai_dashboard._load_statsbomb_review_training_weight_gate_followup_log",
+                return_value=[],
+            ), patch(
+                "v24_app.ai_dashboard._append_statsbomb_review_training_execution_queue_log"
+            ) as append_log, patch("v24_app.ai_dashboard.messagebox.showinfo") as showinfo:
+                path = dashboard.export_statsbomb_review_training_execution_queue_report()
+                report_payload = path.read_text(encoding="utf-8")
+
+        self.assertTrue(path.name.startswith("statsbomb_review_execution_queue_"))
+        self.assertIn("接管执行待办", dashboard.status_var.value)
+        self.assertIn("StatsBomb/Event Proxy 接管执行待办", report_payload)
+        self.assertIn("build_statsbomb_review_samples", report_payload)
+        append_log.assert_called_once()
+        snapshot = append_log.call_args.args[0]
+        self.assertEqual(snapshot["quality_status"], "attention")
+        self.assertEqual(snapshot["gate_mode"], "report_only")
+        self.assertGreaterEqual(snapshot["execution_queue_count"], 1)
+        self.assertIn("待办数", showinfo.call_args.args[1])
 
     def test_review_training_action_feedback_summarizes_quality_delta(self) -> None:
         feedback = build_statsbomb_review_training_action_feedback(

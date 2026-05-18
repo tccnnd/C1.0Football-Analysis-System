@@ -234,6 +234,7 @@ SETTINGS_PATH = PROJECT_ROOT / "data" / "state" / "ai_dashboard_settings.json"
 STATSBOMB_REVIEW_REPAIR_ACTION_LOG = PROJECT_ROOT / "data" / "state" / "statsbomb_review_repair_action_log.json"
 STATSBOMB_REVIEW_WEIGHT_GATE_AUDIT_LOG = PROJECT_ROOT / "data" / "state" / "statsbomb_review_weight_gate_audit.json"
 STATSBOMB_REVIEW_WEIGHT_GATE_FOLLOWUP_LOG = PROJECT_ROOT / "data" / "state" / "statsbomb_review_weight_gate_followup_log.json"
+STATSBOMB_REVIEW_EXECUTION_QUEUE_LOG = PROJECT_ROOT / "data" / "state" / "statsbomb_review_execution_queue_log.json"
 VIDEO_REVIEW_EVIDENCE_GAP_ACTION_LOG = PROJECT_ROOT / "data" / "state" / "video_review_evidence_gap_action_log.json"
 VIDEO_REVIEW_EVIDENCE_GAP_BATCH_STATE = PROJECT_ROOT / "data" / "state" / "video_review_evidence_gap_batches.json"
 
@@ -2027,6 +2028,117 @@ def build_statsbomb_review_training_execution_queue_rows(
         )
     rows.sort(key=lambda row: (int(row.get("priority", 99)), str(row.get("title") or "")))
     return rows[: max(0, int(limit))]
+
+
+def build_statsbomb_review_training_execution_queue_report_filename(now: datetime | None = None) -> str:
+    current = now or datetime.now()
+    return f"statsbomb_review_execution_queue_{current.strftime('%Y%m%d_%H%M%S')}.md"
+
+
+def build_statsbomb_review_training_execution_queue_snapshot(
+    quality: dict | object,
+    gate_alert_summary: dict | object,
+    gate_followup_records: list[dict] | object | None = None,
+    *,
+    generated_at: datetime | None = None,
+    report_path: Path | str | None = None,
+) -> dict[str, object]:
+    payload = quality if isinstance(quality, dict) else {}
+    alerts = gate_alert_summary if isinstance(gate_alert_summary, dict) else {}
+    rows = build_statsbomb_review_training_execution_queue_rows(payload, alerts, gate_followup_records)
+    action_keys = [str(row.get("action_key") or "-") for row in rows if isinstance(row, dict)]
+    gate = _statsbomb_review_training_weight_gate(payload)
+    current = generated_at or datetime.now()
+    return {
+        "generated_at": current.strftime("%Y-%m-%d %H:%M:%S"),
+        "report_path": str(report_path) if report_path else "",
+        "quality_status": str(payload.get("status") or "-"),
+        "sample_count": int(payload.get("sample_count", 0) or 0),
+        "issue_count": int(payload.get("issue_count", 0) or 0),
+        "gate_mode": str(gate.get("mode") or "-"),
+        "gate_enabled": bool(gate.get("enabled")),
+        "gate_alert_status": str(alerts.get("status") or "empty"),
+        "gate_alert_count": int(alerts.get("alert_count", 0) or 0),
+        "execution_queue_count": len(rows),
+        "action_keys": action_keys,
+        "queue_signature": " > ".join(action_keys) or "-",
+        "rows": rows,
+        "summary_text": (
+            f"quality={payload.get('status') or '-'} | gate={gate.get('mode') or '-'} | "
+            f"alerts={int(alerts.get('alert_count', 0) or 0)} | queue={len(rows)} | "
+            f"actions={' > '.join(action_keys) or '-'}"
+        ),
+    }
+
+
+def build_statsbomb_review_training_execution_queue_report_lines(
+    snapshot: dict | object,
+) -> list[str]:
+    payload = snapshot if isinstance(snapshot, dict) else {}
+    rows = payload.get("rows") if isinstance(payload.get("rows"), list) else []
+    lines = [
+        "# StatsBomb/Event Proxy 接管执行待办",
+        "",
+        f"- 生成时间: {payload.get('generated_at') or '-'}",
+        f"- 质量状态: {payload.get('quality_status') or '-'}",
+        f"- 样本/问题: {payload.get('sample_count', 0)} / {payload.get('issue_count', 0)}",
+        f"- Gate: {payload.get('gate_mode') or '-'} | enabled={bool(payload.get('gate_enabled'))}",
+        f"- Gate告警: {payload.get('gate_alert_status') or '-'} / {payload.get('gate_alert_count', 0)}",
+        f"- 待办数: {payload.get('execution_queue_count', 0)}",
+        f"- 动作顺序: {payload.get('queue_signature') or '-'}",
+        "",
+        "## 执行队列",
+        "",
+        "| priority | action_key | source | status | tone | title | body |",
+        "| ---: | --- | --- | --- | --- | --- | --- |",
+    ]
+    if not rows:
+        lines.append("| - | - | - | - | - | - | - |")
+    for row in [item for item in rows if isinstance(item, dict)]:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    _md_cell(row.get("priority")),
+                    _md_cell(row.get("action_key")),
+                    _md_cell(row.get("source")),
+                    _md_cell(row.get("queue_status")),
+                    _md_cell(row.get("tone")),
+                    _md_cell(row.get("title")),
+                    _md_cell(row.get("body")),
+                ]
+            )
+            + " |"
+        )
+    lines.extend(
+        [
+            "",
+            "## 边界",
+            "",
+            "- 本报告只记录接管执行待办，不自动执行修复动作。",
+            "- StatsBomb/Event Proxy 仅用于赛后复盘、Evaluation Agent 归因和 Gate 复检，不写入赛前预测特征。",
+        ]
+    )
+    return lines
+
+
+def build_statsbomb_review_training_execution_queue_export_message(
+    path: Path | str,
+    snapshot: dict | object,
+) -> str:
+    payload = snapshot if isinstance(snapshot, dict) else {}
+    return "\n".join(
+        [
+            "StatsBomb/Event Proxy 接管执行待办已导出",
+            "",
+            f"文件: {path}",
+            f"待办数: {payload.get('execution_queue_count', 0)}",
+            f"动作顺序: {payload.get('queue_signature') or '-'}",
+            f"质量/Gate: {payload.get('quality_status') or '-'} / {payload.get('gate_mode') or '-'}",
+            "",
+            "该报告仅做留痕，不会自动执行修复动作。",
+        ]
+    )
 
 
 def build_statsbomb_review_training_action_feedback(
@@ -3826,6 +3938,34 @@ def _append_statsbomb_review_training_weight_gate_followup_log(
     limit: int = 100,
 ) -> None:
     records = [dict(record), *_load_statsbomb_review_training_weight_gate_followup_log(path)]
+    records = records[: max(1, int(limit))]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps({"records": records}, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def _load_statsbomb_review_training_execution_queue_log(
+    path: Path = STATSBOMB_REVIEW_EXECUTION_QUEUE_LOG,
+) -> list[dict]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if isinstance(payload, dict):
+        payload = payload.get("records")
+    if not isinstance(payload, list):
+        return []
+    return [item for item in payload if isinstance(item, dict)]
+
+
+def _append_statsbomb_review_training_execution_queue_log(
+    record: dict,
+    path: Path = STATSBOMB_REVIEW_EXECUTION_QUEUE_LOG,
+    *,
+    limit: int = 100,
+) -> None:
+    records = [dict(record), *_load_statsbomb_review_training_execution_queue_log(path)]
     records = records[: max(1, int(limit))]
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(".tmp")
@@ -8532,6 +8672,19 @@ class SmartMatchDashboard:
         ).pack(side=tk.RIGHT, padx=(8, 0))
         tk.Button(
             header,
+            text="导出待办",
+            command=self.export_statsbomb_review_training_execution_queue_report,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=14,
+            pady=6,
+        ).pack(side=tk.RIGHT, padx=(8, 0))
+        tk.Button(
+            header,
             text="生成事件代理样本",
             command=self.export_statsbomb_event_proxy_review_samples,
             bg=BLUE,
@@ -9211,6 +9364,36 @@ class SmartMatchDashboard:
                 gate_alert_count=int(gate_alert_summary.get("alert_count", 0) or 0),
                 gate_followup_count=len(gate_followup_rows),
             ),
+        )
+        return path
+
+    def export_statsbomb_review_training_execution_queue_report(self) -> Path:
+        quality = self._current_statsbomb_review_training_quality()
+        gate_audit_records = _load_statsbomb_review_training_weight_gate_audit_log()
+        gate_followup_records = _load_statsbomb_review_training_weight_gate_followup_log()
+        gate_alert_summary = build_statsbomb_review_training_weight_gate_alert_summary(gate_audit_records)
+        now = datetime.now()
+        REPORT_DIR.mkdir(parents=True, exist_ok=True)
+        path = REPORT_DIR / build_statsbomb_review_training_execution_queue_report_filename(now)
+        snapshot = build_statsbomb_review_training_execution_queue_snapshot(
+            quality,
+            gate_alert_summary,
+            gate_followup_records,
+            generated_at=now,
+            report_path=path,
+        )
+        path.write_text(
+            "\n".join(build_statsbomb_review_training_execution_queue_report_lines(snapshot)),
+            encoding="utf-8",
+        )
+        try:
+            _append_statsbomb_review_training_execution_queue_log(snapshot)
+        except Exception as exc:
+            self._log_event("ERROR", f"StatsBomb执行待办留痕写入失败: {exc}")
+        self.status_var.set(f"StatsBomb接管执行待办已导出: {path.name}")
+        messagebox.showinfo(
+            "StatsBomb接管执行待办",
+            build_statsbomb_review_training_execution_queue_export_message(path, snapshot),
         )
         return path
 
