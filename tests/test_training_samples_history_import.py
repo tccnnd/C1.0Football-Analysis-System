@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import sys
 import tempfile
@@ -84,6 +85,76 @@ class TrainingSamplesHistoryImportTests(unittest.TestCase):
             self.assertEqual(result["storage_limit"], 2)
             self.assertEqual(result["dropped_by_limit"], 1)
             self.assertEqual(result["sample_limit_override"], 2)
+
+    def test_import_accepts_jc_results_csv_multirow_header(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            input_path = temp_path / "jc_results.csv"
+            with input_path.open("w", encoding="utf-8-sig", newline="") as fh:
+                writer = csv.writer(fh)
+                writer.writerow(["比赛信息-严禁用于赌博", "", "", "竞官方胜平负全套指数"])
+                writer.writerow(["有问题咨询反馈交流", "", "", "初胜平负"])
+                writer.writerow(
+                    [
+                        "编号",
+                        "年份",
+                        "赛事",
+                        "比赛时间",
+                        "主队",
+                        "客队",
+                        "半场",
+                        "全场",
+                        "竞官方初胜",
+                        "竞官方初平",
+                        "竞官方初负",
+                        "竞官方终胜",
+                        "竞官方终平",
+                        "竞官方终负",
+                        "让球数",
+                        "竞终胜凯利",
+                        "竞终平凯利",
+                        "竞终负凯利",
+                    ]
+                )
+                writer.writerow(
+                    [
+                        "1",
+                        "2021",
+                        "英超",
+                        "01-02 01:30",
+                        "埃弗顿",
+                        "西汉姆联",
+                        "0 - 0",
+                        "0 - 1",
+                        "1.85",
+                        "3.30",
+                        "3.40",
+                        "1.85",
+                        "3.30",
+                        "3.38",
+                        "-1",
+                        "0.80",
+                        "0.92",
+                        "0.98",
+                    ]
+                )
+
+            result = import_historical_xgb_samples(
+                project_dir=temp_path,
+                input_path=input_path,
+                replace=True,
+                sync_ratings=False,
+            )
+            payload = json.loads((temp_path / "data" / "state" / "xgb_training_samples.json").read_text(encoding="utf-8"))
+
+            self.assertEqual(result["imported_samples"], 1)
+            self.assertEqual(result["date_range"], {"start": "2021-01-02", "end": "2021-01-02"})
+            self.assertEqual(result["label_counts"][2], 1)
+            self.assertEqual(payload["items"][0]["meta"]["league"], "英超")
+            self.assertEqual(payload["items"][0]["meta"]["home_team"], "埃弗顿")
+            self.assertEqual(payload["items"][0]["meta"]["away_team"], "西汉姆联")
+            self.assertEqual(payload["items"][0]["meta"]["opening_odds_home"], 1.85)
+            self.assertEqual(payload["items"][0]["features"]["odds_away"], 3.38)
 
 
 if __name__ == "__main__":

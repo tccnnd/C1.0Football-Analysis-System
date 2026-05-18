@@ -69,6 +69,30 @@ FIELD_ALIASES.update(
     }
 )
 
+FIELD_ALIASES.update(
+    {
+        "year": ("year", "年份", "骞翠唤"),
+        "match_date": ("match_date", "date", "kickoff_date", "matchday", "dt", "日期"),
+        "match_time_raw": ("match_time_raw", "比赛时间", "姣旇禌鏃堕棿"),
+        "league": ("league", "competition", "league_name", "tournament", "赛事", "璧涗簨"),
+        "home_team": ("home_team", "home", "home_name", "homeClub", "host_team", "主队", "涓婚槦"),
+        "away_team": ("away_team", "away", "away_name", "awayClub", "guest_team", "客队", "瀹㈤槦"),
+        "odds_home": ("odds_home", "home_odds", "win_odds", "sp_home", "竞官方终胜", "竞官方初胜", "百均终胜", "百均初胜"),
+        "odds_draw": ("odds_draw", "draw_odds", "tie_odds", "sp_draw", "竞官方终平", "竞官方初平", "百均终平", "百均初平"),
+        "odds_away": ("odds_away", "away_odds", "lose_odds", "sp_away", "竞官方终负", "竞官方初负", "百均终负", "百均初负"),
+        "full_score_text": ("full_score_text", "全场", "全场比分", "比分", "鍏ㄥ満姣斿垎", "鍏ㄥ満"),
+        "half_score_text": ("half_score_text", "半场", "半场比分", "鍗婂満姣斿垎", "鍗婂満"),
+        "handicap_line": ("handicap_line", "asian_handicap", "ah_line", "rq", "goal", "让球数"),
+        "opening_odds_home": ("opening_odds_home", "open_odds_home", "opening_home_odds", "竞官方初胜", "百均初胜"),
+        "opening_odds_draw": ("opening_odds_draw", "open_odds_draw", "opening_draw_odds", "竞官方初平", "百均初平"),
+        "opening_odds_away": ("opening_odds_away", "open_odds_away", "opening_away_odds", "竞官方初负", "百均初负"),
+        "return_rate": ("return_rate", "payout_rate", "return", "竞终返还率", "竞初返还率"),
+        "kelly_home": ("kelly_home", "kelly_win", "home_kelly", "竞终胜凯利", "竞初胜凯利"),
+        "kelly_draw": ("kelly_draw", "kelly_draw_index", "draw_kelly", "竞终平凯利", "竞初平凯利"),
+        "kelly_away": ("kelly_away", "kelly_lose", "away_kelly", "竞终负凯利", "竞初负凯利"),
+    }
+)
+
 DATE_FORMATS = ("%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d", "%Y%m%d")
 TIME_FORMATS = ("%H:%M", "%H%M", "%H:%M:%S")
 DATETIME_FORMATS = (
@@ -1424,6 +1448,20 @@ def _read_input_records(input_path: Path) -> list[dict[str, Any]]:
             if {"年份", "赛事", "比赛时间", "主队", "客队"}.issubset({str(item).strip() for item in row}):
                 header_index = index
                 break
+        header_patterns = [
+            {"编号", "年份", "赛事", "比赛时间", "主队", "客队"},
+            {"match_id", "year", "league", "match_time", "home_team", "away_team"},
+        ]
+        best_header_index = header_index
+        best_score = -1
+        for index, row in enumerate(rows[:20]):
+            values = {str(item).strip() for item in row if str(item).strip()}
+            score = max((sum(1 for marker in pattern if marker in values) for pattern in header_patterns), default=0)
+            if score > best_score:
+                best_score = score
+                best_header_index = index
+        if best_score >= 4:
+            header_index = best_header_index
         if header_index >= len(rows):
             return []
         header = [str(item).strip() for item in rows[header_index]]
