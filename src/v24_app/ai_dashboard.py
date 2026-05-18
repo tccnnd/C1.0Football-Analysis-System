@@ -12187,11 +12187,16 @@ class SmartMatchDashboard:
         release_pool_rows = self._strategy_release_pool_rows(settlements, release_loop=release_loop)
         play_model_status = get_play_model_policy_status()
         accuracy_diagnostics = self._accuracy_diagnostics(settlements)
+        statsbomb_review_training_quality = dashboard.get("statsbomb_review_training_quality", {})
+        evaluation_agent = dashboard.get("evaluation_agent", {}) if isinstance(dashboard.get("evaluation_agent"), dict) else {}
+        statsbomb_review_training_signal = evaluation_agent.get("statsbomb_review_training_signal", {}) if isinstance(evaluation_agent, dict) else {}
         special_summary_rows = build_strategy_special_summary_rows(
             play_model_policy_status=play_model_status,
             release_recovery_loop=release_loop,
             draw_release_guard_tuning=dashboard.get("draw_release_guard_tuning", {}),
             accuracy_diagnostics=accuracy_diagnostics,
+            statsbomb_review_training_quality=statsbomb_review_training_quality,
+            statsbomb_review_training_signal=statsbomb_review_training_signal,
         )
         shell = self._page_shell(
             "\u7b56\u7565\u770b\u677f",
@@ -12287,6 +12292,7 @@ class SmartMatchDashboard:
             "open_strategy_release_recovery_loop_window": self.open_strategy_release_recovery_loop_window,
             "open_play_model_takeover_gate_audit_history": self.open_play_model_takeover_gate_audit_history,
             "open_play_model_policy_detail_window": self.open_play_model_policy_detail_window,
+            "open_statsbomb_review_training_center_window": self.open_statsbomb_review_training_center_window,
             "open_draw_specialist_backtest_window": self.open_draw_specialist_backtest_window,
             "open_accuracy_diagnostics": self.open_accuracy_diagnostics,
             "open_strategy_policy_audit_history": self.open_strategy_policy_audit_history,

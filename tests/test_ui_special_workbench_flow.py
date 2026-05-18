@@ -79,6 +79,22 @@ class UISpecialWorkbenchFlowTests(unittest.TestCase):
             release_recovery_loop={"summary_text": "闭环 2 场 | 待回收 1 场", "ready_for_recovery_count": 1, "alert_count": 2},
             draw_release_guard_tuning={"summary_text": "平局专项诊断 | warning", "reason_text": "sample_count_low", "tone": "warning"},
             accuracy_diagnostics={"sample_count": 12, "overall": "62.5%", "priority": "调高1X2命中率"},
+            statsbomb_review_training_quality={
+                "status": "attention",
+                "sample_count": 18,
+                "issue_count": 2,
+                "summary_text": "StatsBomb review training attention",
+            },
+            statsbomb_review_training_signal={
+                "status": "ready",
+                "summary_text": "StatsBomb 训练信号 ready",
+                "weight_gate": {
+                    "mode": "report_only",
+                    "enabled": False,
+                    "reason": "statsbomb_review_quality_not_healthy",
+                    "recommendation": "先补样本后再进入执行层",
+                },
+            },
         )
 
         self.assertEqual(
@@ -87,6 +103,7 @@ class UISpecialWorkbenchFlowTests(unittest.TestCase):
                 "open_strategy_release_recovery_loop_window",
                 "open_play_model_takeover_gate_audit_history",
                 "open_play_model_policy_detail_window",
+                "open_statsbomb_review_training_center_window",
                 "open_draw_specialist_backtest_window",
                 "open_accuracy_diagnostics",
                 "open_strategy_policy_audit_history",
@@ -95,8 +112,9 @@ class UISpecialWorkbenchFlowTests(unittest.TestCase):
         self.assertIn("放行回收闭环", rows[0]["title"])
         self.assertIn("历史 2", rows[1]["body"])
         self.assertIn("blocked=True", rows[2]["body"])
-        self.assertIn("sample_count_low", rows[3]["body"])
-        self.assertIn("样本 12", rows[4]["body"])
+        self.assertIn("report_only", rows[3]["body"])
+        self.assertIn("sample_count_low", rows[4]["body"])
+        self.assertIn("样本 12", rows[5]["body"])
 
     def test_build_special_workbench_overview_rows_summarizes_groups(self) -> None:
         rows = build_special_workbench_overview_rows()

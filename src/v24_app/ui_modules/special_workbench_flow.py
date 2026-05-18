@@ -217,12 +217,17 @@ def build_strategy_special_summary_rows(
     release_recovery_loop: Mapping[str, object] | object,
     draw_release_guard_tuning: Mapping[str, object] | object,
     accuracy_diagnostics: Mapping[str, object] | object,
-    limit: int = 6,
+    statsbomb_review_training_quality: Mapping[str, object] | object | None = None,
+    statsbomb_review_training_signal: Mapping[str, object] | object | None = None,
+    limit: int = 7,
 ) -> list[dict[str, object]]:
     play_status = _as_mapping(play_model_policy_status)
     release = _as_mapping(release_recovery_loop)
     draw_tuning = _as_mapping(draw_release_guard_tuning)
     accuracy = _as_mapping(accuracy_diagnostics)
+    statsbomb_quality = _as_mapping(statsbomb_review_training_quality)
+    statsbomb_signal = _as_mapping(statsbomb_review_training_signal)
+    statsbomb_weight_gate = _as_mapping(statsbomb_signal.get("weight_gate"))
     policy = _as_mapping(play_status.get("policy"))
     effective_policy = _as_mapping(play_status.get("effective_policy"))
     takeover_gate = _as_mapping(play_status.get("takeover_gate"))
@@ -257,6 +262,29 @@ def build_strategy_special_summary_rows(
             ),
             "action_key": "open_play_model_policy_detail_window",
             "tone": "warning" if bool(play_status.get("policy_blocked_by_gate")) else "neutral",
+        },
+        {
+            "title": "StatsBomb接管执行层",
+            "body": (
+                f"quality {_text(statsbomb_quality.get('status'), '-')} | "
+                f"signal {_text(statsbomb_signal.get('status'), '-')} | "
+                f"samples {_safe_int(statsbomb_quality.get('sample_count'))} | "
+                f"issues {_safe_int(statsbomb_quality.get('issue_count'))}\n"
+                f"gate {_text(statsbomb_weight_gate.get('mode'), '-')} | "
+                f"enabled={bool(statsbomb_weight_gate.get('enabled'))} | "
+                f"reason {_text(statsbomb_weight_gate.get('reason'), _text(statsbomb_signal.get('summary_text'), '-'))}\n"
+                f"next {_text(statsbomb_weight_gate.get('recommendation'), _text(statsbomb_signal.get('summary_text'), '-'))}"
+            ),
+            "action_key": "open_statsbomb_review_training_center_window",
+            "tone": (
+                "good"
+                if _text(statsbomb_quality.get("status"), "") == "healthy" and _text(statsbomb_weight_gate.get("mode"), "") == "active"
+                else "danger"
+                if _text(statsbomb_quality.get("status"), "") == "blocked" or _text(statsbomb_weight_gate.get("mode"), "") == "disabled"
+                else "warning"
+                if _text(statsbomb_quality.get("status"), "") == "attention" or _text(statsbomb_weight_gate.get("mode"), "") == "report_only"
+                else "neutral"
+            ),
         },
         {
             "title": "平局专项诊断",
