@@ -187,6 +187,7 @@ from .daily_parlay_flow import (
     build_daily_parlay_report_lines,
     build_daily_parlay_settlement_rows,
     build_daily_parlay_snapshot,
+    build_daily_parlay_snapshot_settlement_closure,
     build_daily_parlay_summary,
     build_daily_parlay_ticket_rows,
 )
@@ -511,6 +512,7 @@ __all__ = [
     "build_daily_parlay_report_lines",
     "build_daily_parlay_settlement_rows",
     "build_daily_parlay_snapshot",
+    "build_daily_parlay_snapshot_settlement_closure",
     "build_daily_parlay_summary",
     "build_daily_parlay_ticket_rows",
     "build_handicap_dashboard_text",

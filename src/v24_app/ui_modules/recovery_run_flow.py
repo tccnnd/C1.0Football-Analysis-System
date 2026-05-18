@@ -897,6 +897,7 @@ def build_result_recovery_run_detail(record: Mapping[str, object] | object) -> s
     release_loop_health = item.get("strategy_release_loop_health") or result.get("strategy_release_loop_health") or "-"
     release_loop_hit_rate = item.get("strategy_release_loop_hit_rate_text") or result.get("strategy_release_loop_hit_rate_text") or "-"
     live_feedback_validation = _as_mapping(item.get("live_feedback_validation") or result.get("live_feedback_validation"))
+    daily_parlay_closure = _as_mapping(item.get("daily_parlay_snapshot_closure") or result.get("daily_parlay_snapshot_closure"))
     live_feedback_rows = live_feedback_validation.get("rows")
     if isinstance(live_feedback_rows, Sequence) and not isinstance(live_feedback_rows, (str, bytes)):
         live_feedback_detail = "\n".join(
@@ -929,6 +930,11 @@ def build_result_recovery_run_detail(record: Mapping[str, object] | object) -> s
         f"- \u5feb\u7167\u56de\u67e5\u672a\u547d\u4e2d: {_safe_int(item.get('snapshot_result_misses') or result.get('snapshot_result_misses'), 0)}\n"
         f"- \u672a\u547d\u4e2d\u539f\u56e0: {_reason_counts_text(miss_reasons)}\n"
         f"- \u9884\u6d4b\u5feb\u7167\u547d\u4e2d: {_safe_int(item.get('snapshot_predictions') or result.get('snapshot_predictions'), 0)}\n\n"
+        f"每日二串一快照闭环:\n"
+        f"- 状态: {daily_parlay_closure.get('status') or '-'}\n"
+        f"- 摘要: {daily_parlay_closure.get('summary_text') or '-'}\n"
+        f"- 新增闭环票据: {_safe_int(item.get('daily_parlay_snapshot_closed') or daily_parlay_closure.get('newly_settled_ticket_count'), 0)}\n"
+        f"- 快照数: {_safe_int(daily_parlay_closure.get('snapshot_count'), 0)}\n\n"
         f"\u5feb\u7167\u53ef\u56de\u6536\u6027:\n"
         f"- \u53ef\u81ea\u52a8\u56de\u67e5: {_safe_int(item.get('snapshot_recoverable') or result.get('snapshot_recoverable'), 0)}\n"
         f"- \u7f3a source_id: {_safe_int(item.get('snapshot_missing_source_id') or result.get('snapshot_missing_source_id'), 0)}\n"

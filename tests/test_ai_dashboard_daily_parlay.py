@@ -19,6 +19,7 @@ from v24_app.ai_dashboard import (
     SmartMatchDashboard,
     _append_daily_parlay_snapshot_log,
     _load_daily_parlay_snapshot_log,
+    _save_daily_parlay_snapshot_log,
 )
 from v24_app.core import AppMatch
 
@@ -152,6 +153,32 @@ class AIDashboardDailyParlayTests(unittest.TestCase):
         self.assertEqual(records[0]["summary"]["active_count"], 1)
         self.assertIn("每日二串一报告已导出", dashboard.status_var.value)
         showinfo.assert_called_once()
+
+    def test_closes_daily_parlay_snapshots_after_result_recovery(self) -> None:
+        dashboard = object.__new__(SmartMatchDashboard)
+        dashboard._log_event = lambda *args, **kwargs: None
+        snapshot = {
+            "generated_at": "2026-05-18 12:30:05",
+            "active_tickets": [
+                {"ticket_id": "ticket-1", "status": "pending", "legs": [{"match_id": "m1"}, {"match_id": "m2"}]},
+                {"ticket_id": "ticket-2", "status": "pending", "legs": [{"match_id": "m3"}, {"match_id": "m4"}]},
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "daily_parlay_snapshot_log.json"
+            _save_daily_parlay_snapshot_log([snapshot], log_path)
+            with patch("v24_app.ai_dashboard.DAILY_PARLAY_SNAPSHOT_LOG", log_path), patch(
+                "v24_app.ai_dashboard.get_recent_parlay_settlements",
+                return_value=[{"ticket_id": "ticket-1", "status": "lost", "is_hit": False}],
+            ):
+                summary = dashboard._close_daily_parlay_snapshots_after_recovery()
+            records = _load_daily_parlay_snapshot_log(log_path)
+
+        self.assertEqual(summary["status"], "partial")
+        self.assertEqual(summary["newly_settled_ticket_count"], 1)
+        self.assertEqual(records[0]["parlay_recovery"]["status"], "partial")
+        self.assertEqual(records[0]["parlay_recovery"]["matched_ticket_ids"], ["ticket-1"])
 
 
 if __name__ == "__main__":

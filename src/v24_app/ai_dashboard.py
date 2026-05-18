@@ -206,6 +206,7 @@ from .ui_modules import (
     build_daily_parlay_report_lines,
     build_daily_parlay_settlement_rows,
     build_daily_parlay_snapshot,
+    build_daily_parlay_snapshot_settlement_closure,
     build_daily_parlay_summary,
     build_daily_parlay_ticket_rows,
     refresh_parlay_recommendations,
@@ -4214,6 +4215,20 @@ def _append_daily_parlay_snapshot_log(
     tmp_path.replace(path)
 
 
+def _save_daily_parlay_snapshot_log(
+    records: list[dict],
+    path: Path = DAILY_PARLAY_SNAPSHOT_LOG,
+    *,
+    limit: int = 100,
+) -> None:
+    normalized = [dict(item) for item in records if isinstance(item, dict)]
+    normalized = normalized[: max(1, int(limit))]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps({"records": normalized}, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(path)
+
+
 class SmartMatchDashboard:
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -5027,6 +5042,11 @@ class SmartMatchDashboard:
             live_feedback_after,
             new_settled=int(result_payload.get("new_settled", 0) or 0),
         )
+        daily_parlay_closure = (
+            result_payload.get("daily_parlay_snapshot_closure")
+            if isinstance(result_payload.get("daily_parlay_snapshot_closure"), dict)
+            else {}
+        )
         record.update(
             {
                 "status": status,
@@ -5059,6 +5079,8 @@ class SmartMatchDashboard:
                 "messages": [str(item) for item in messages if item],
                 "live_feedback_after": live_feedback_after,
                 "live_feedback_validation": live_feedback_validation,
+                "daily_parlay_snapshot_closure": daily_parlay_closure,
+                "daily_parlay_snapshot_closed": int(daily_parlay_closure.get("newly_settled_ticket_count", 0) or 0),
             }
         )
         if error is not None:
@@ -10355,6 +10377,15 @@ class SmartMatchDashboard:
             self._log_event("INFO", message)
 
     def _finish_result_recovery(self, result: dict, elapsed: float, show_popup: bool = True) -> None:
+        result = dict(result) if isinstance(result, dict) else {}
+        try:
+            result["daily_parlay_snapshot_closure"] = self._close_daily_parlay_snapshots_after_recovery()
+        except Exception as exc:
+            self._log_event("ERROR", f"每日二串一快照闭环失败: {exc}")
+            result["daily_parlay_snapshot_closure"] = {
+                "status": "error",
+                "summary_text": f"每日二串一快照闭环失败: {exc}",
+            }
         new_settled = int(result.get("new_settled", 0) or 0)
         fetched = int(result.get("fetched_finished", 0) or 0)
         restored = int(result.get("restored_snapshots", 0) or 0)
@@ -10388,6 +10419,13 @@ class SmartMatchDashboard:
         )
         if live_feedback_validation:
             detail = f"{detail}\n\n\u5b9e\u76d8\u53cd\u9988\u9a8c\u8bc1:\n{live_feedback_validation.get('summary_text') or '-'}"
+        daily_parlay_closure = (
+            result.get("daily_parlay_snapshot_closure")
+            if isinstance(result.get("daily_parlay_snapshot_closure"), dict)
+            else {}
+        )
+        if daily_parlay_closure:
+            detail = f"{detail}\n\n每日二串一快照闭环:\n{daily_parlay_closure.get('summary_text') or '-'}"
         if report_path is not None:
             detail = f"{detail}\n\n\u653e\u884c\u56de\u6536\u95ed\u73af\u62a5\u544a:\n{report_path}"
         if statsbomb_repair_feedback_text:
@@ -13087,6 +13125,35 @@ class SmartMatchDashboard:
             build_daily_parlay_export_message(path, snapshot),
         )
         return path
+
+    def _close_daily_parlay_snapshots_after_recovery(self) -> dict[str, object]:
+        records = _load_daily_parlay_snapshot_log(DAILY_PARLAY_SNAPSHOT_LOG)
+        if not records:
+            return {
+                "status": "empty",
+                "snapshot_count": 0,
+                "updated_snapshot_count": 0,
+                "newly_settled_ticket_count": 0,
+                "summary_text": "暂无每日二串一导出快照。",
+            }
+        try:
+            settled_tickets = get_recent_parlay_settlements(limit=0)
+        except Exception as exc:
+            self._log_event("WARN", f"每日二串一结算读取失败: {exc}")
+            settled_tickets = []
+        closure = build_daily_parlay_snapshot_settlement_closure(
+            records,
+            settled_tickets,
+            generated_at=datetime.now(),
+        )
+        summary = closure.get("summary") if isinstance(closure.get("summary"), dict) else {}
+        updated_records = closure.get("records") if isinstance(closure.get("records"), list) else records
+        if bool(summary.get("changed")):
+            _save_daily_parlay_snapshot_log(
+                [item for item in updated_records if isinstance(item, dict)],
+                DAILY_PARLAY_SNAPSHOT_LOG,
+            )
+        return dict(summary)
 
     def open_daily_parlay_window(self) -> None:
         self.current_nav_index = 4

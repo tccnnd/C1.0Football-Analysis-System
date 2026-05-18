@@ -20,6 +20,7 @@ from v24_app.ui_modules import (
     build_daily_parlay_report_lines,
     build_daily_parlay_settlement_rows,
     build_daily_parlay_snapshot,
+    build_daily_parlay_snapshot_settlement_closure,
     build_daily_parlay_summary,
     build_daily_parlay_ticket_rows,
 )
@@ -185,6 +186,53 @@ class UIDailyParlayFlowModuleTests(unittest.TestCase):
         self.assertEqual(snapshot["summary"]["settled_count"], 0)
         self.assertEqual(len(snapshot["ticket_rows"]), 1)
         self.assertTrue(lines)
+
+    def test_snapshot_settlement_closure_updates_recovery_state(self) -> None:
+        snapshot = build_daily_parlay_snapshot(
+            [
+                {
+                    "ticket_id": "ticket-1",
+                    "status": "pending",
+                    "expected_hit": 0.36,
+                    "legs": [{"match_id": "m1"}, {"match_id": "m2"}],
+                },
+                {
+                    "ticket_id": "ticket-2",
+                    "status": "pending",
+                    "expected_hit": 0.24,
+                    "legs": [{"match_id": "m3"}, {"match_id": "m4"}],
+                },
+            ],
+            [],
+            {},
+            generated_at=datetime(2026, 5, 18, 12, 30, 5),
+        )
+        closure = build_daily_parlay_snapshot_settlement_closure(
+            [snapshot],
+            [{"ticket_id": "ticket-1", "status": "won", "is_hit": True, "settled_at": "2026-05-18 23:00:00"}],
+            generated_at=datetime(2026, 5, 18, 23, 30, 5),
+        )
+
+        summary = closure["summary"]
+        updated = closure["records"][0]
+
+        self.assertEqual(summary["status"], "partial")
+        self.assertEqual(summary["snapshot_count"], 1)
+        self.assertEqual(summary["checked_ticket_count"], 2)
+        self.assertEqual(summary["settled_ticket_count"], 1)
+        self.assertEqual(summary["newly_settled_ticket_count"], 1)
+        self.assertTrue(summary["changed"])
+        self.assertEqual(updated["parlay_recovery"]["status"], "partial")
+        self.assertEqual(updated["parlay_recovery"]["matched_ticket_ids"], ["ticket-1"])
+        self.assertEqual(updated["parlay_recovery"]["pending_ticket_ids"], ["ticket-2"])
+
+        second_closure = build_daily_parlay_snapshot_settlement_closure(
+            closure["records"],
+            [{"ticket_id": "ticket-1", "status": "won", "is_hit": True, "settled_at": "2026-05-18 23:00:00"}],
+            generated_at=datetime(2026, 5, 19, 0, 0, 0),
+        )
+        self.assertFalse(second_closure["summary"]["changed"])
+        self.assertEqual(second_closure["summary"]["newly_settled_ticket_count"], 0)
 
 
 if __name__ == "__main__":

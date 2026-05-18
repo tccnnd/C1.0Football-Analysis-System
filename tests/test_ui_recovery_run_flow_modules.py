@@ -330,6 +330,13 @@ class UIRecoveryRunFlowModuleTests(unittest.TestCase):
                         {"title": "\u5b9e\u76d8\u6837\u672c\u53d8\u5316", "body": "\u6837\u672c 5 -> 8 (+3) | \u547d\u4e2d 4 -> 6 (+2)"},
                     ],
                 },
+                "daily_parlay_snapshot_closure": {
+                    "status": "partial",
+                    "summary_text": "快照 1 | 已结算 1/2 | 新增闭环 1 | 命中 0 | 未中 1 | 待回收 1",
+                    "snapshot_count": 1,
+                    "newly_settled_ticket_count": 1,
+                },
+                "daily_parlay_snapshot_closed": 1,
                 "messages": ["done"],
             }
         ]
@@ -358,6 +365,8 @@ class UIRecoveryRunFlowModuleTests(unittest.TestCase):
         self.assertIn("实盘反馈验证", detail)
         self.assertIn("已验证", detail)
         self.assertIn("实盘样本变化", detail)
+        self.assertIn("每日二串一快照闭环", detail)
+        self.assertIn("新增闭环票据: 1", detail)
         self.assertIn("- done", detail)
 
     def test_quality_alerts_detect_failures_no_settlement_and_slow_runs(self) -> None:

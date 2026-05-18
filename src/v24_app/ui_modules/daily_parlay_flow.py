@@ -265,6 +265,126 @@ def build_daily_parlay_snapshot(
     }
 
 
+def _ticket_id(item: Mapping[str, Any] | object) -> str:
+    return str(item.get("ticket_id") or "").strip() if isinstance(item, Mapping) else ""
+
+
+def _snapshot_tickets(record: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    tickets = _as_items(record.get("active_tickets"))
+    if tickets:
+        return tickets
+    return _as_items(record.get("ticket_rows"))
+
+
+def build_daily_parlay_snapshot_settlement_closure(
+    records: Sequence[Any] | object,
+    settled_tickets: Sequence[Any] | object,
+    *,
+    generated_at: datetime | None = None,
+) -> dict[str, Any]:
+    snapshot_records = _as_items(records)
+    settlements = [item for item in _as_items(settled_tickets) if _status(item, "") in {"won", "lost"}]
+    settlement_by_id = {_ticket_id(item): item for item in settlements if _ticket_id(item)}
+    current = generated_at or datetime.now()
+    updated_records: list[dict[str, Any]] = []
+    status_counts: dict[str, int] = {}
+    summary = {
+        "status": "empty" if not snapshot_records else "pending",
+        "snapshot_count": len(snapshot_records),
+        "updated_snapshot_count": 0,
+        "checked_ticket_count": 0,
+        "settled_ticket_count": 0,
+        "newly_settled_ticket_count": 0,
+        "pending_ticket_count": 0,
+        "won_count": 0,
+        "lost_count": 0,
+        "status_counts": status_counts,
+        "updated_at": current.strftime("%Y-%m-%d %H:%M:%S"),
+        "changed": False,
+        "summary_text": "暂无每日二串一导出快照。",
+    }
+
+    for record in snapshot_records:
+        next_record = dict(record)
+        tickets = _snapshot_tickets(record)
+        ticket_ids = [_ticket_id(item) for item in tickets if _ticket_id(item)]
+        matched = [settlement_by_id[ticket_id] for ticket_id in ticket_ids if ticket_id in settlement_by_id]
+        matched_ids = [_ticket_id(item) for item in matched if _ticket_id(item)]
+        previous = record.get("parlay_recovery") if isinstance(record.get("parlay_recovery"), Mapping) else {}
+        previous_matched_ids = previous.get("matched_ticket_ids") if isinstance(previous, Mapping) else []
+        previous_ids = (
+            {str(item) for item in previous_matched_ids if str(item).strip()}
+            if isinstance(previous_matched_ids, Sequence) and not isinstance(previous_matched_ids, (str, bytes, bytearray))
+            else set()
+        )
+        matched_id_set = set(matched_ids)
+        newly_settled = len(matched_id_set - previous_ids)
+        won = sum(1 for item in matched if _status(item, "") == "won")
+        lost = sum(1 for item in matched if _status(item, "") == "lost")
+        pending = max(0, len(ticket_ids) - len(set(matched_ids)))
+        if not ticket_ids:
+            status = "empty"
+        elif pending == 0:
+            status = "settled"
+        elif matched_ids:
+            status = "partial"
+        else:
+            status = "pending"
+        recovery = {
+            "status": status,
+            "checked_ticket_count": len(ticket_ids),
+            "settled_ticket_count": len(set(matched_ids)),
+            "newly_settled_ticket_count": newly_settled,
+            "pending_ticket_count": pending,
+            "won_count": won,
+            "lost_count": lost,
+            "matched_ticket_ids": sorted(matched_id_set),
+            "pending_ticket_ids": [ticket_id for ticket_id in ticket_ids if ticket_id not in matched_id_set],
+            "settled_rows": _safe_json(build_daily_parlay_settlement_rows(matched, limit=20)),
+            "updated_at": current.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        compare_keys = (
+            "status",
+            "checked_ticket_count",
+            "settled_ticket_count",
+            "pending_ticket_count",
+            "won_count",
+            "lost_count",
+            "matched_ticket_ids",
+            "pending_ticket_ids",
+        )
+        previous_compare = {key: previous.get(key) for key in compare_keys} if isinstance(previous, Mapping) else {}
+        recovery_compare = {key: recovery.get(key) for key in compare_keys}
+        if previous_compare != recovery_compare:
+            next_record["parlay_recovery"] = recovery
+            summary["updated_snapshot_count"] += 1
+            summary["changed"] = True
+        updated_records.append(next_record)
+        status_counts[status] = int(status_counts.get(status, 0) or 0) + 1
+        summary["checked_ticket_count"] += len(ticket_ids)
+        summary["settled_ticket_count"] += len(set(matched_ids))
+        summary["newly_settled_ticket_count"] += newly_settled
+        summary["pending_ticket_count"] += pending
+        summary["won_count"] += won
+        summary["lost_count"] += lost
+
+    if status_counts:
+        if int(status_counts.get("pending", 0) or 0) == len(snapshot_records):
+            summary["status"] = "pending"
+        elif int(status_counts.get("settled", 0) or 0) == len(snapshot_records):
+            summary["status"] = "settled"
+        elif int(status_counts.get("partial", 0) or 0) or int(status_counts.get("settled", 0) or 0):
+            summary["status"] = "partial"
+        else:
+            summary["status"] = "empty"
+    summary["summary_text"] = (
+        f"快照 {summary['snapshot_count']} | 已结算 {summary['settled_ticket_count']}/"
+        f"{summary['checked_ticket_count']} | 新增闭环 {summary['newly_settled_ticket_count']} | "
+        f"命中 {summary['won_count']} | 未中 {summary['lost_count']} | 待回收 {summary['pending_ticket_count']}"
+    )
+    return {"records": updated_records, "summary": summary}
+
+
 def build_daily_parlay_report_lines(snapshot: Mapping[str, Any] | object) -> list[str]:
     payload = snapshot if isinstance(snapshot, Mapping) else {}
     summary = payload.get("summary") if isinstance(payload.get("summary"), Mapping) else {}
