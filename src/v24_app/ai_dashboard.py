@@ -2182,6 +2182,7 @@ def build_statsbomb_review_training_execution_queue_staleness_summary(
     feedback_records: list[dict] | object,
     *,
     consecutive_threshold: int = 2,
+    blocking_threshold: int = 3,
     limit: int = 6,
 ) -> dict[str, object]:
     snapshots = [item for item in queue_records if isinstance(item, dict)] if isinstance(queue_records, list) else []
@@ -2225,35 +2226,51 @@ def build_statsbomb_review_training_execution_queue_staleness_summary(
             if not latest_seen_at:
                 latest_seen_at = seen_text
             first_seen_at = seen_text
-        queue_status = "stale" if consecutive_count >= max(1, int(consecutive_threshold)) else "pending"
-        tone = "danger" if queue_status == "stale" else "warning" if consecutive_count > 1 else "neutral"
+        reminder_threshold = max(1, int(consecutive_threshold))
+        resolved_blocking_threshold = max(reminder_threshold + 1, int(blocking_threshold))
+        if consecutive_count >= resolved_blocking_threshold:
+            escalation_level = "blocking"
+        elif consecutive_count >= reminder_threshold:
+            escalation_level = "reminder"
+        else:
+            escalation_level = "watch"
+        queue_status = "stale" if escalation_level in {"reminder", "blocking"} else "pending"
+        tone = "danger" if escalation_level == "blocking" else "warning" if escalation_level == "reminder" else "neutral"
         latest_feedback_text = latest_feedback_at.strftime("%Y-%m-%d %H:%M:%S") if latest_feedback_at else "-"
         rows.append(
             {
                 "action_key": action_key,
                 "queue_status": queue_status,
+                "escalation_level": escalation_level,
                 "tone": tone,
                 "consecutive_count": consecutive_count,
+                "reminder_threshold": reminder_threshold,
+                "blocking_threshold": resolved_blocking_threshold,
                 "first_seen_at": first_seen_at or "-",
                 "latest_seen_at": latest_seen_at or "-",
                 "latest_feedback_at": latest_feedback_text,
                 "recommendation": (
-                    "该待办已连续滞留，建议优先执行或确认是否需要关闭。"
-                    if queue_status == "stale"
+                    "该待办已升级为阻塞，先执行或手动关闭后再继续观察 Gate。"
+                    if escalation_level == "blocking"
+                    else "该待办已连续滞留，建议优先执行或确认是否需要关闭。"
+                    if escalation_level == "reminder"
                     else "继续观察；若下次导出仍存在再升级为滞留。"
                 ),
             }
         )
     stale_rows = [row for row in rows if row.get("queue_status") == "stale"]
+    blocking_rows = [row for row in rows if row.get("escalation_level") == "blocking"]
+    reminder_rows = [row for row in rows if row.get("escalation_level") == "reminder"]
     rows.sort(
         key=lambda row: (
-            0 if row.get("queue_status") == "stale" else 1,
+            0 if row.get("escalation_level") == "blocking" else 1 if row.get("escalation_level") == "reminder" else 2,
             -int(row.get("consecutive_count", 0) or 0),
             str(row.get("action_key") or ""),
         )
     )
-    status = "stale" if stale_rows else "watch" if rows else "empty"
-    tone = "danger" if stale_rows else "warning" if rows else "neutral"
+    status = "blocked" if blocking_rows else "stale" if stale_rows else "watch" if rows else "empty"
+    tone = "danger" if blocking_rows else "warning" if stale_rows else "neutral"
+    priority_row = rows[0] if rows else {}
     return {
         "status": status,
         "tone": tone,
@@ -2261,11 +2278,17 @@ def build_statsbomb_review_training_execution_queue_staleness_summary(
         "latest_generated_at": latest_generated_at,
         "latest_action_count": len(latest_actions),
         "stale_count": len(stale_rows),
+        "blocking_count": len(blocking_rows),
+        "reminder_count": len(reminder_rows),
+        "priority_action_key": str(priority_row.get("action_key") or "-"),
+        "priority_escalation_level": str(priority_row.get("escalation_level") or "-"),
         "rows": rows[: max(0, int(limit))],
-        "title": f"执行待办滞留 | {status}",
+        "title": f"执行待办升级 | {status}",
         "body": (
             f"快照 {len(snapshots)} | 最新 {latest_generated_at} | "
-            f"当前动作 {len(latest_actions)} | 滞留 {len(stale_rows)}"
+            f"当前动作 {len(latest_actions)} | 滞留 {len(stale_rows)} | "
+            f"提醒 {len(reminder_rows)} | 阻塞 {len(blocking_rows)} | "
+            f"优先 {str(priority_row.get('action_key') or '-')}"
         ),
     }
 
@@ -8940,9 +8963,12 @@ class SmartMatchDashboard:
             for row in [item for item in staleness_rows if isinstance(item, dict)][:4]:
                 self._strategy_row(
                     right,
-                    f"{row.get('queue_status', '-')} | {row.get('action_key', '-')}",
+                    f"{row.get('escalation_level', '-')} | {row.get('action_key', '-')}",
                     (
                         f"连续 {row.get('consecutive_count', 0)} 次 | "
+                        f"提醒 {row.get('reminder_threshold', '-')} | "
+                        f"阻塞 {row.get('blocking_threshold', '-')}\n"
+                        f"状态: {row.get('queue_status', '-')}\n"
                         f"{row.get('first_seen_at', '-')} -> {row.get('latest_seen_at', '-')}\n"
                         f"最近执行: {row.get('latest_feedback_at', '-')}\n"
                         f"建议: {row.get('recommendation', '-')}"

@@ -1070,11 +1070,41 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
 
         summary = build_statsbomb_review_training_execution_queue_staleness_summary(snapshots, [])
 
-        self.assertEqual(summary["status"], "stale")
+        self.assertEqual(summary["status"], "blocked")
         self.assertEqual(summary["stale_count"], 2)
+        self.assertEqual(summary["blocking_count"], 1)
+        self.assertEqual(summary["reminder_count"], 1)
+        self.assertEqual(summary["priority_escalation_level"], "blocking")
         self.assertEqual(summary["rows"][0]["queue_status"], "stale")
+        self.assertEqual(summary["rows"][0]["escalation_level"], "blocking")
+        self.assertEqual(summary["rows"][0]["tone"], "danger")
         self.assertEqual(summary["rows"][0]["consecutive_count"], 3)
-        self.assertIn("滞留", summary["rows"][0]["recommendation"])
+        self.assertEqual(summary["rows"][0]["reminder_threshold"], 2)
+        self.assertEqual(summary["rows"][0]["blocking_threshold"], 3)
+
+    def test_review_training_execution_queue_staleness_reminds_before_blocking(self) -> None:
+        snapshots = [
+            {
+                "generated_at": "2026-05-14 12:20:00",
+                "action_keys": ["recover_results"],
+            },
+            {
+                "generated_at": "2026-05-14 12:10:00",
+                "action_keys": ["recover_results"],
+            },
+        ]
+
+        summary = build_statsbomb_review_training_execution_queue_staleness_summary(snapshots, [])
+
+        self.assertEqual(summary["status"], "stale")
+        self.assertEqual(summary["stale_count"], 1)
+        self.assertEqual(summary["blocking_count"], 0)
+        self.assertEqual(summary["reminder_count"], 1)
+        self.assertEqual(summary["priority_escalation_level"], "reminder")
+        self.assertEqual(summary["rows"][0]["queue_status"], "stale")
+        self.assertEqual(summary["rows"][0]["escalation_level"], "reminder")
+        self.assertEqual(summary["rows"][0]["tone"], "warning")
+        self.assertEqual(summary["rows"][0]["consecutive_count"], 2)
 
     def test_review_training_execution_queue_staleness_uses_feedback_to_reset_count(self) -> None:
         snapshots = [
@@ -1102,6 +1132,9 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
 
         self.assertEqual(summary["status"], "watch")
         self.assertEqual(summary["stale_count"], 0)
+        self.assertEqual(summary["blocking_count"], 0)
+        self.assertEqual(summary["reminder_count"], 0)
+        self.assertEqual(summary["priority_escalation_level"], "watch")
         self.assertEqual(summary["rows"][0]["consecutive_count"], 1)
         self.assertEqual(summary["rows"][0]["latest_feedback_at"], "2026-05-14 12:15:00")
 
@@ -1518,6 +1551,9 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertEqual(summary["gate_alert_status"], "attention")
         self.assertEqual(summary["execution_queue_rows"][0]["action_key"], "recover_results")
         self.assertEqual(summary["execution_queue_staleness"]["status"], "stale")
+        self.assertEqual(summary["execution_queue_staleness"]["reminder_count"], 3)
+        self.assertEqual(summary["execution_queue_staleness"]["blocking_count"], 0)
+        self.assertEqual(summary["execution_queue_staleness"]["priority_escalation_level"], "reminder")
         self.assertIn("09:12:00", summary["latest_gate_followup"])
         self.assertIn("事件代理质量", summary["title"])
         self.assertIn("样本 18", summary["body"])
