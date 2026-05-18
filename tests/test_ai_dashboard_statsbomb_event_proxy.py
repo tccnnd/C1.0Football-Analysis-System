@@ -29,6 +29,8 @@ from v24_app.ai_dashboard import (
     build_statsbomb_review_training_weight_gate_audit_record,
     build_statsbomb_review_training_weight_gate_audit_record_from_feedback,
     build_statsbomb_review_training_weight_gate_audit_rows,
+    build_statsbomb_review_training_weight_gate_alert_summary,
+    build_statsbomb_review_training_weight_gate_alert_lines,
     build_statsbomb_review_training_weight_gate_trend_summary,
     build_statsbomb_review_training_closure_summary,
     build_video_review_evidence_gap_batch_id,
@@ -799,6 +801,95 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertIn("disabled -> report_only -> active", summary["trend_text"])
         self.assertIn("A1/R1/D1", summary["card_rows"][2]["value"])
 
+    def test_review_training_weight_gate_alert_summary_flags_streak_and_regression(self) -> None:
+        streak_summary = build_statsbomb_review_training_weight_gate_alert_summary(
+            [
+                {
+                    "occurred_at": "2026-05-14 12:10:00",
+                    "trigger": "quality_report_export",
+                    "quality_status": "attention",
+                    "gate_mode": "report_only",
+                    "gate_enabled": False,
+                },
+                {
+                    "occurred_at": "2026-05-14 12:05:00",
+                    "trigger": "build_statsbomb_review_samples",
+                    "quality_status": "attention",
+                    "gate_mode": "disabled",
+                    "gate_enabled": False,
+                },
+                {
+                    "occurred_at": "2026-05-14 12:00:00",
+                    "trigger": "refresh_review_center",
+                    "quality_status": "blocked",
+                    "gate_mode": "report_only",
+                    "gate_enabled": False,
+                },
+            ]
+        )
+        regression_summary = build_statsbomb_review_training_weight_gate_alert_summary(
+            [
+                {
+                    "occurred_at": "2026-05-14 12:15:00",
+                    "trigger": "quality_report_export",
+                    "quality_status": "attention",
+                    "gate_mode": "report_only",
+                    "gate_enabled": False,
+                },
+                {
+                    "occurred_at": "2026-05-14 12:10:00",
+                    "trigger": "build_statsbomb_review_samples",
+                    "quality_status": "healthy",
+                    "gate_mode": "active",
+                    "gate_enabled": True,
+                },
+            ]
+        )
+
+        self.assertEqual(streak_summary["status"], "blocked")
+        self.assertEqual(streak_summary["alert_count"], 2)
+        self.assertEqual(streak_summary["blocking_count"], 1)
+        self.assertEqual(streak_summary["warning_count"], 1)
+        self.assertEqual(streak_summary["non_active_streak"], 3)
+        self.assertIn("最近 3 次 gate 都不是 active", streak_summary["body"])
+        self.assertIn("gate_non_active_streak", {item["code"] for item in streak_summary["alerts"]})
+        self.assertEqual(regression_summary["status"], "attention")
+        self.assertEqual(regression_summary["regression_count"], 1)
+        self.assertIn("active -> report_only/disabled 回退", regression_summary["body"])
+        self.assertIn("gate_active_regression", {item["code"] for item in regression_summary["alerts"]})
+
+    def test_review_training_weight_gate_alert_lines_render_table(self) -> None:
+        summary = build_statsbomb_review_training_weight_gate_alert_summary(
+            [
+                {
+                    "occurred_at": "2026-05-14 12:10:00",
+                    "trigger": "quality_report_export",
+                    "quality_status": "attention",
+                    "gate_mode": "report_only",
+                    "gate_enabled": False,
+                },
+                {
+                    "occurred_at": "2026-05-14 12:05:00",
+                    "trigger": "build_statsbomb_review_samples",
+                    "quality_status": "attention",
+                    "gate_mode": "disabled",
+                    "gate_enabled": False,
+                },
+                {
+                    "occurred_at": "2026-05-14 12:00:00",
+                    "trigger": "refresh_review_center",
+                    "quality_status": "blocked",
+                    "gate_mode": "report_only",
+                    "gate_enabled": False,
+                },
+            ]
+        )
+        payload = "\n".join(build_statsbomb_review_training_weight_gate_alert_lines(summary))
+
+        self.assertIn("权重Gate告警", payload)
+        self.assertIn("gate_non_active_streak", payload)
+        self.assertIn("blocking", payload)
+
     def test_review_training_weight_gate_audit_log_appends_newest_and_caps(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "statsbomb_review_weight_gate_audit.json"
@@ -854,6 +945,7 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
 
         self.assertTrue(path.name.startswith("statsbomb_review_training_quality_"))
         self.assertIn("权重Gate趋势", report_payload)
+        self.assertIn("权重Gate告警", report_payload)
         self.assertIn("quality_report_export", report_payload)
         append_audit.assert_called_once()
         audit = append_audit.call_args.args[0]
@@ -862,6 +954,7 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertTrue(audit["gate_enabled"])
         self.assertIn("quality report exported", audit["message"])
         self.assertIn("Gate", showinfo.call_args.args[1])
+        self.assertIn("Gate告警", showinfo.call_args.args[1])
 
     def test_review_training_action_feedback_summarizes_quality_delta(self) -> None:
         feedback = build_statsbomb_review_training_action_feedback(
@@ -966,10 +1059,18 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
             ],
             [
                 {
-                    "occurred_at": "2026-05-17 09:05:00",
-                    "trigger": "build_statsbomb_review_samples",
+                    "occurred_at": "2026-05-17 09:10:00",
+                    "trigger": "quality_report_export",
                     "gate_mode": "report_only",
                     "gate_enabled": False,
+                    "quality_status": "attention",
+                },
+                {
+                    "occurred_at": "2026-05-17 09:05:00",
+                    "trigger": "build_statsbomb_review_samples",
+                    "gate_mode": "active",
+                    "gate_enabled": True,
+                    "quality_status": "healthy",
                 }
             ],
         )
@@ -979,13 +1080,16 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertEqual(summary["sample_count"], 18)
         self.assertEqual(summary["issue_count"], 2)
         self.assertEqual(summary["repair_count"], 1)
-        self.assertEqual(summary["gate_audit_count"], 1)
+        self.assertEqual(summary["gate_audit_count"], 2)
+        self.assertEqual(summary["gate_alert_count"], 3)
         self.assertEqual(summary["gate_trend"]["status"], "report_only")
+        self.assertEqual(summary["gate_alert_status"], "attention")
         self.assertIn("事件代理质量", summary["title"])
         self.assertIn("样本 18", summary["body"])
         self.assertIn("2026-05-17 09:00:00", summary["body"])
-        self.assertIn("2026-05-17 09:05:00", summary["body"])
+        self.assertIn("2026-05-17 09:10:00", summary["body"])
         self.assertIn("Gate趋势", summary["body"])
+        self.assertIn("Gate告警", summary["body"])
 
     def test_review_training_closure_summary_tracks_pending_and_resolved_matches(self) -> None:
         review_samples = {

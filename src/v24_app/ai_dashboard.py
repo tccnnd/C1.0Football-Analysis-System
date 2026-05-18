@@ -1549,6 +1549,227 @@ def build_statsbomb_review_training_weight_gate_trend_summary(
     }
 
 
+def build_statsbomb_review_training_weight_gate_alert_summary(
+    records: list[dict] | object,
+    limit: int = 8,
+    consecutive_threshold: int = 3,
+) -> dict[str, object]:
+    if not isinstance(records, list):
+        records = []
+    items = [item for item in records if isinstance(item, dict)][: max(0, int(limit))]
+    if not items:
+        return {
+            "status": "empty",
+            "tone": "neutral",
+            "alert_count": 0,
+            "blocking_count": 0,
+            "warning_count": 0,
+            "non_active_streak": 0,
+            "regression_count": 0,
+            "alerts": [],
+            "title": "Gate告警 | 暂无审计",
+            "body": "还没有 StatsBomb 权重Gate审计记录；暂无告警规则可判断。",
+            "card_rows": [],
+            "top_alert": {},
+        }
+
+    chronological = list(reversed(items))
+    latest = items[0]
+    latest_mode = str(latest.get("gate_mode") or "-")
+    latest_quality = str(latest.get("quality_status") or "-")
+    latest_enabled = bool(latest.get("gate_enabled"))
+    modes = [str(item.get("gate_mode") or "-") for item in items]
+
+    non_active_streak = 0
+    for mode in modes:
+        if mode == "active":
+            break
+        non_active_streak += 1
+
+    regressions: list[dict[str, object]] = []
+    for previous, current in zip(chronological, chronological[1:]):
+        previous_mode = str(previous.get("gate_mode") or "-")
+        current_mode = str(current.get("gate_mode") or "-")
+        if previous_mode == "active" and current_mode in {"report_only", "disabled"}:
+            regressions.append(
+                {
+                    "occurred_at": str(current.get("occurred_at") or "-"),
+                    "from_mode": previous_mode,
+                    "to_mode": current_mode,
+                    "trigger": str(current.get("trigger") or "-"),
+                }
+            )
+
+    alerts: list[dict[str, object]] = []
+
+    def _append_alert(
+        code: str,
+        severity: str,
+        message: str,
+        recommendation: str,
+        evidence: str,
+    ) -> None:
+        alerts.append(
+            {
+                "code": code,
+                "severity": severity,
+                "message": message,
+                "recommendation": recommendation,
+                "evidence": evidence,
+            }
+        )
+
+    latest_evidence = f"{latest.get('occurred_at', '-')} | {latest.get('trigger', '-')}"
+    if latest_mode == "disabled":
+        _append_alert(
+            "gate_disabled_now",
+            "blocking",
+            "最近一次权重Gate已禁用。",
+            "优先补样本/补标签，恢复到 active 后再导出报告。",
+            latest_evidence,
+        )
+    elif latest_mode == "report_only":
+        _append_alert(
+            "gate_report_only_now",
+            "warning",
+            "最近一次权重Gate处于 report_only。",
+            "继续补样本或补标签，观察是否恢复 active。",
+            latest_evidence,
+        )
+    elif latest_mode != "active":
+        _append_alert(
+            "gate_unknown_mode",
+            "warning",
+            f"最近一次权重Gate模式为 {latest_mode}。",
+            "检查审计记录和样本质量是否完整。",
+            latest_evidence,
+        )
+
+    if non_active_streak >= consecutive_threshold:
+        _append_alert(
+            "gate_non_active_streak",
+            "blocking" if latest_mode in {"disabled", "report_only"} else "warning",
+            f"最近 {non_active_streak} 次 gate 都不是 active。",
+            "优先补样本/补标签，恢复 active 后再复用该模型权重。",
+            f"{latest.get('occurred_at', '-')} | streak={non_active_streak}",
+        )
+    elif non_active_streak > 0 and latest_mode != "active":
+        _append_alert(
+            "gate_non_active_streak",
+            "warning",
+            f"最近 {non_active_streak} 次 gate 都不是 active。",
+            "继续补样本或补标签，观察 gate 是否恢复 active。",
+            f"{latest.get('occurred_at', '-')} | streak={non_active_streak}",
+        )
+
+    if regressions:
+        severity = "blocking" if latest_mode == "disabled" else "warning"
+        first = regressions[0]
+        _append_alert(
+            "gate_active_regression",
+            severity,
+            f"发现 {len(regressions)} 次 active -> report_only/disabled 回退。",
+            "检查最近的样本补数、标签回收与导出动作。",
+            f"{first.get('occurred_at', '-')} | {first.get('from_mode', '-')}->{first.get('to_mode', '-')}",
+        )
+
+    blocking_count = sum(1 for item in alerts if str(item.get("severity") or "") == "blocking")
+    warning_count = sum(1 for item in alerts if str(item.get("severity") or "") == "warning")
+    if blocking_count:
+        status = "blocked"
+        tone = "bad"
+    elif warning_count:
+        status = "attention"
+        tone = "warning"
+    else:
+        status = "healthy"
+        tone = "good" if latest_enabled and latest_mode == "active" else "neutral"
+
+    top_alert = alerts[0] if alerts else {}
+    card_rows = [
+        {
+            "label": "最新模式",
+            "value": latest_mode,
+            "tone": tone,
+            "detail": f"quality={latest_quality} | trigger={latest.get('trigger', '-')}",
+        },
+        {
+            "label": "连续非active",
+            "value": str(non_active_streak),
+            "tone": "bad" if non_active_streak >= consecutive_threshold else "warning" if non_active_streak else "good",
+            "detail": f"阈值 {consecutive_threshold} | 最近时间 {latest.get('occurred_at', '-')}",
+        },
+        {
+            "label": "告警/回退",
+            "value": f"{len(alerts)}/{len(regressions)}",
+            "tone": "bad" if blocking_count else "warning" if warning_count else "good",
+            "detail": "告警数 / active回退数",
+        },
+    ]
+    top_recommendation = str(top_alert.get("recommendation") or "-") if top_alert else "-"
+    alert_messages = " | ".join(str(item.get("message") or "-") for item in alerts[:3]) or "-"
+    return {
+        "status": status,
+        "tone": tone,
+        "alert_count": len(alerts),
+        "blocking_count": blocking_count,
+        "warning_count": warning_count,
+        "non_active_streak": non_active_streak,
+        "regression_count": len(regressions),
+        "latest_mode": latest_mode,
+        "latest_quality_status": latest_quality,
+        "alerts": alerts,
+        "title": f"Gate告警 | {status}",
+        "body": (
+            f"最近模式: {latest_mode} | 连续非active: {non_active_streak} | "
+            f"告警数: {len(alerts)} | 回退数: {len(regressions)}\n"
+            f"alert_messages: {alert_messages}\n"
+            f"top_recommendation: {top_recommendation}"
+        ),
+        "card_rows": card_rows,
+        "top_alert": top_alert,
+    }
+
+
+def build_statsbomb_review_training_weight_gate_alert_lines(
+    alert_summary: dict | object,
+) -> list[str]:
+    payload = alert_summary if isinstance(alert_summary, dict) else {}
+    alerts = payload.get("alerts") if isinstance(payload.get("alerts"), list) else []
+    lines = [
+        "",
+        "## 权重Gate告警（gate_alerts）",
+        "",
+        f"- alert_count: {int(payload.get('alert_count', 0) or 0)}",
+        f"- blocking_count: {int(payload.get('blocking_count', 0) or 0)}",
+        f"- warning_count: {int(payload.get('warning_count', 0) or 0)}",
+        f"- latest_mode: {payload.get('latest_mode') or '-'}",
+        f"- non_active_streak: {int(payload.get('non_active_streak', 0) or 0)}",
+        f"- regression_count: {int(payload.get('regression_count', 0) or 0)}",
+        "",
+        "| 代码 | 严重级别 | 说明 | 建议 | 证据 |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    if not alerts:
+        lines.append("| - | - | - | - | - |")
+        return lines
+    for item in alerts[:20]:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    _md_cell(item.get("code")),
+                    _md_cell(item.get("severity")),
+                    _md_cell(item.get("message")),
+                    _md_cell(item.get("recommendation")),
+                    _md_cell(item.get("evidence")),
+                ]
+            )
+            + " |"
+        )
+    return lines
+
+
 def build_statsbomb_review_training_action_feedback(
     action_key: str,
     before_quality: dict,
@@ -1681,6 +1902,7 @@ def build_statsbomb_review_training_center_summary(
     repair_records = [item for item in records if isinstance(item, dict)] if isinstance(records, list) else []
     audit_records = [item for item in gate_audit_records if isinstance(item, dict)] if isinstance(gate_audit_records, list) else []
     gate_trend = build_statsbomb_review_training_weight_gate_trend_summary(audit_records)
+    gate_alert_summary = build_statsbomb_review_training_weight_gate_alert_summary(audit_records)
     status = str(payload.get("status") or "blocked")
     sample_count = int(payload.get("sample_count", 0) or 0)
     issue_count = int(payload.get("issue_count", 0) or 0)
@@ -1699,6 +1921,12 @@ def build_statsbomb_review_training_center_summary(
         if latest_audit
         else "-"
     )
+    top_alert = gate_alert_summary.get("top_alert") if isinstance(gate_alert_summary.get("top_alert"), dict) else {}
+    latest_alert_text = (
+        f"{top_alert.get('code', '-')} | {top_alert.get('message', '-')}"
+        if top_alert
+        else "-"
+    )
     return {
         "status": status,
         "tone": tone,
@@ -1707,16 +1935,21 @@ def build_statsbomb_review_training_center_summary(
         "action_count": action_count,
         "repair_count": len(repair_records),
         "gate_audit_count": len(audit_records),
+        "gate_alert_count": int(gate_alert_summary.get("alert_count", 0) or 0),
+        "gate_alert_status": str(gate_alert_summary.get("status") or "empty"),
+        "gate_alert_tone": str(gate_alert_summary.get("tone") or "neutral"),
         "latest_repair": latest_text,
         "latest_gate_audit": latest_audit_text,
         "gate_trend": gate_trend,
+        "gate_alert_summary": gate_alert_summary,
         "title": f"事件代理质量 | {status}",
         "body": (
             f"样本 {sample_count} | 问题 {issue_count} | 可执行动作 {action_count} | "
             f"修复记录 {len(repair_records)} | Gate审计 {len(audit_records)}\n"
             f"最近修复: {latest_text}\n"
             f"最近Gate审计: {latest_audit_text}\n"
-            f"Gate趋势: {gate_trend.get('trend_text', '-')}"
+            f"Gate趋势: {gate_trend.get('trend_text', '-')}\n"
+            f"Gate告警: {gate_alert_summary.get('alert_count', 0)} | 最近告警: {latest_alert_text}"
         ),
     }
 
@@ -2165,6 +2398,7 @@ def build_statsbomb_review_training_quality_export_message(
     record_count: int,
     *,
     gate_audit_count: int | None = None,
+    gate_alert_count: int | None = None,
 ) -> str:
     signal = quality.get("signal") if isinstance(quality.get("signal"), dict) else {}
     weight_gate = quality.get("weight_gate") if isinstance(quality.get("weight_gate"), dict) else signal.get("weight_gate") if isinstance(signal.get("weight_gate"), dict) else {}
@@ -2180,6 +2414,8 @@ def build_statsbomb_review_training_quality_export_message(
     ]
     if gate_audit_count is not None:
         lines.append(f"Gate审计记录: {gate_audit_count}")
+    if gate_alert_count is not None:
+        lines.append(f"Gate告警: {gate_alert_count}")
     lines.extend(
         [
             "",
@@ -8005,6 +8241,7 @@ class SmartMatchDashboard:
             ("问题数", str(summary.get("issue_count", 0)), RED if int(summary.get("issue_count", 0) or 0) else GREEN),
             ("修复记录", str(summary.get("repair_count", 0)), "#7aa2ff"),
             ("Gate审计", str(summary.get("gate_audit_count", 0)), "#7aa2ff"),
+            ("Gate告警", str(summary.get("gate_alert_count", 0)), RED if int(summary.get("gate_alert_count", 0) or 0) else GREEN),
         ]:
             self._detail_metric(top, label, value, color)
 
@@ -8092,6 +8329,24 @@ class SmartMatchDashboard:
                 f"{row.get('label', '-')}: {row.get('value', '-')}",
                 str(row.get("detail") or "-"),
             )
+
+        gate_alert_summary = build_statsbomb_review_training_weight_gate_alert_summary(gate_audit_records)
+        self._strategy_section_title(right, "Gate告警", first=False)
+        self._strategy_row(
+            right,
+            str(gate_alert_summary.get("title") or "-"),
+            str(gate_alert_summary.get("body") or "-"),
+        )
+        gate_alert_rows = gate_alert_summary.get("alerts") if isinstance(gate_alert_summary.get("alerts"), list) else []
+        if gate_alert_rows:
+            for row in [item for item in gate_alert_rows if isinstance(item, dict)][:5]:
+                self._strategy_row(
+                    right,
+                    f"{row.get('severity', '-')}: {row.get('code', '-')}",
+                    f"{row.get('message', '-')}\n建议: {row.get('recommendation', '-')}\n证据: {row.get('evidence', '-')}",
+                )
+        else:
+            self._strategy_row(right, "暂无Gate告警", "当前 gate 审计记录没有触发连续非 active 或 active 回退告警。")
 
         self._strategy_section_title(right, "Gate审计", first=False)
         audit_rows = build_statsbomb_review_training_weight_gate_audit_rows(gate_audit_records, limit=5)
@@ -8561,16 +8816,14 @@ class SmartMatchDashboard:
             report_path=path,
         )
         report_gate_audit_records = [audit, *existing_gate_audit_records]
-        path.write_text(
-            "\n".join(
-                build_statsbomb_review_training_quality_report_lines(
-                    quality,
-                    repair_records,
-                    gate_audit_records=report_gate_audit_records,
-                )
-            ),
-            encoding="utf-8",
+        report_lines = build_statsbomb_review_training_quality_report_lines(
+            quality,
+            repair_records,
+            gate_audit_records=report_gate_audit_records,
         )
+        gate_alert_summary = build_statsbomb_review_training_weight_gate_alert_summary(report_gate_audit_records)
+        report_lines.extend(build_statsbomb_review_training_weight_gate_alert_lines(gate_alert_summary))
+        path.write_text("\n".join(report_lines), encoding="utf-8")
         gate_audit_count: int | None = len(report_gate_audit_records)
         try:
             _append_statsbomb_review_training_weight_gate_audit_log(audit)
@@ -8585,6 +8838,7 @@ class SmartMatchDashboard:
                 quality,
                 len(repair_records),
                 gate_audit_count=gate_audit_count,
+                gate_alert_count=int(gate_alert_summary.get("alert_count", 0) or 0),
             ),
         )
         return path
