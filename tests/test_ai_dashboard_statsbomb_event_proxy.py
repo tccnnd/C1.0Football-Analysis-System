@@ -33,6 +33,8 @@ from v24_app.ai_dashboard import (
     build_statsbomb_review_training_weight_gate_alert_lines,
     build_statsbomb_review_training_weight_gate_alert_action_rows,
     build_statsbomb_review_training_weight_gate_trend_summary,
+    build_statsbomb_review_training_weight_gate_followup_record,
+    build_statsbomb_review_training_weight_gate_followup_rows,
     build_statsbomb_review_training_closure_summary,
     build_video_review_evidence_gap_batch_id,
     build_video_review_evidence_gap_batch_record,
@@ -644,6 +646,8 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
             },
             3,
             gate_audit_count=4,
+            gate_alert_count=2,
+            gate_followup_count=1,
         )
 
         self.assertIn("StatsBomb/Event Proxy 样本质量报告已导出", text)
@@ -654,6 +658,7 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertIn("修复记录: 3", text)
         self.assertIn("Gate", text)
         self.assertIn("4", text)
+        self.assertIn("1", text)
 
     def test_review_training_weight_gate_audit_record_extracts_gate_state(self) -> None:
         record = build_statsbomb_review_training_weight_gate_audit_record(
@@ -924,6 +929,138 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertIn("先回收已完场赛果", rows[0]["body"])
         self.assertIn("重建 StatsBomb/Event Proxy", rows[1]["body"])
 
+    def test_review_training_weight_gate_followup_record_captures_recovery(self) -> None:
+        record = build_statsbomb_review_training_weight_gate_followup_record(
+            {
+                "action_key": "build_statsbomb_review_samples",
+                "outcome": "improved",
+                "summary_text": "build_statsbomb_review_samples: improved",
+            },
+            [
+                {
+                    "occurred_at": "2026-05-14 12:00:00",
+                    "trigger": "refresh_review_center",
+                    "quality_status": "blocked",
+                    "gate_mode": "disabled",
+                    "gate_enabled": False,
+                }
+            ],
+            [
+                {
+                    "occurred_at": "2026-05-14 12:05:00",
+                    "trigger": "build_statsbomb_review_samples",
+                    "quality_status": "healthy",
+                    "gate_mode": "active",
+                    "gate_enabled": True,
+                }
+            ],
+            occurred_at=datetime(2026, 5, 14, 12, 6, 0),
+        )
+
+        self.assertEqual(record["action_key"], "build_statsbomb_review_samples")
+        self.assertEqual(record["before_alert_status"], "blocked")
+        self.assertEqual(record["after_alert_status"], "healthy")
+        self.assertEqual(record["followup_outcome"], "recovered")
+        self.assertEqual(record["tone"], "good")
+        self.assertIn("Gate 已恢复 active", record["next_recommendation"])
+        self.assertIn("alert 2->0", record["summary_text"])
+
+    def test_review_training_weight_gate_followup_rows_render_history(self) -> None:
+        rows = build_statsbomb_review_training_weight_gate_followup_rows(
+            [
+                {
+                    "occurred_at": "2026-05-14 12:06:00",
+                    "action_key": "build_statsbomb_review_samples",
+                    "followup_outcome": "recovered",
+                    "before_alert_status": "blocked",
+                    "after_alert_status": "healthy",
+                    "before_alert_count": 2,
+                    "after_alert_count": 0,
+                    "before_blocking_count": 1,
+                    "after_blocking_count": 0,
+                    "before_latest_mode": "disabled",
+                    "after_latest_mode": "active",
+                    "before_alert_codes": ["gate_disabled_now"],
+                    "after_alert_codes": [],
+                    "tone": "good",
+                    "next_recommendation": "Gate 已恢复 active，可继续回测或训练稳定性验证。",
+                }
+            ]
+        )
+
+        self.assertEqual(rows[0]["tone"], "good")
+        self.assertIn("recovered", rows[0]["title"])
+        self.assertIn("status blocked->healthy", rows[0]["body"])
+        self.assertIn("Gate 已恢复 active", rows[0]["body"])
+
+    def test_record_review_training_action_feedback_appends_gate_followup_log(self) -> None:
+        dashboard = object.__new__(SmartMatchDashboard)
+        dashboard._log_event = lambda *args, **kwargs: None
+        feedback = build_statsbomb_review_training_action_feedback(
+            "build_statsbomb_review_samples",
+            {
+                "status": "attention",
+                "sample_count": 18,
+                "issue_count": 2,
+                "weight_gate": {"mode": "report_only", "enabled": False},
+            },
+            {
+                "status": "healthy",
+                "sample_count": 49,
+                "issue_count": 0,
+                "weight_gate": {"mode": "active", "enabled": True},
+            },
+            {"ok": True},
+        )
+
+        with patch(
+            "v24_app.ai_dashboard._load_statsbomb_review_training_weight_gate_audit_log",
+            side_effect=[
+                [
+                    {
+                        "occurred_at": "2026-05-14 12:00:00",
+                        "trigger": "refresh_review_center",
+                        "gate_mode": "report_only",
+                        "gate_enabled": False,
+                        "quality_status": "attention",
+                    }
+                ],
+                [
+                    {
+                        "occurred_at": "2026-05-14 12:05:00",
+                        "trigger": "build_statsbomb_review_samples",
+                        "gate_mode": "active",
+                        "gate_enabled": True,
+                        "quality_status": "healthy",
+                    },
+                    {
+                        "occurred_at": "2026-05-14 12:00:00",
+                        "trigger": "refresh_review_center",
+                        "gate_mode": "report_only",
+                        "gate_enabled": False,
+                        "quality_status": "attention",
+                    },
+                ],
+            ],
+        ), patch(
+            "v24_app.ai_dashboard._append_statsbomb_review_training_action_feedback_log"
+        ) as append_feedback, patch(
+            "v24_app.ai_dashboard._append_statsbomb_review_training_weight_gate_audit_log"
+        ) as append_audit, patch(
+            "v24_app.ai_dashboard._append_statsbomb_review_training_weight_gate_followup_log"
+        ) as append_followup:
+            dashboard._record_statsbomb_review_training_action_feedback(feedback)
+
+        append_feedback.assert_called_once()
+        append_audit.assert_called_once()
+        append_followup.assert_called_once()
+        followup = append_followup.call_args.args[0]
+        self.assertEqual(followup["action_key"], "build_statsbomb_review_samples")
+        self.assertEqual(followup["before_alert_status"], "attention")
+        self.assertEqual(followup["after_alert_status"], "healthy")
+        self.assertEqual(followup["followup_outcome"], "recovered")
+        self.assertEqual(followup["tone"], "good")
+
     def test_review_training_weight_gate_audit_log_appends_newest_and_caps(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "statsbomb_review_weight_gate_audit.json"
@@ -980,6 +1117,7 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertTrue(path.name.startswith("statsbomb_review_training_quality_"))
         self.assertIn("权重Gate趋势", report_payload)
         self.assertIn("权重Gate处置动作", report_payload)
+        self.assertIn("权重Gate复检", report_payload)
         self.assertIn("权重Gate告警", report_payload)
         self.assertIn("quality_report_export", report_payload)
         append_audit.assert_called_once()
@@ -990,6 +1128,7 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertIn("quality report exported", audit["message"])
         self.assertIn("Gate", showinfo.call_args.args[1])
         self.assertIn("Gate告警", showinfo.call_args.args[1])
+        self.assertIn("Gate复检", showinfo.call_args.args[1])
 
     def test_review_training_action_feedback_summarizes_quality_delta(self) -> None:
         feedback = build_statsbomb_review_training_action_feedback(
@@ -1108,6 +1247,23 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
                     "quality_status": "healthy",
                 }
             ],
+            [
+                {
+                    "occurred_at": "2026-05-17 09:12:00",
+                    "action_key": "build_statsbomb_review_samples",
+                    "followup_outcome": "recovered",
+                    "before_alert_status": "blocked",
+                    "after_alert_status": "healthy",
+                    "before_alert_count": 2,
+                    "after_alert_count": 0,
+                    "before_blocking_count": 1,
+                    "after_blocking_count": 0,
+                    "before_latest_mode": "disabled",
+                    "after_latest_mode": "active",
+                    "tone": "good",
+                    "next_recommendation": "Gate 已恢复 active，可继续回测或训练稳定性验证。",
+                }
+            ],
         )
 
         self.assertEqual(summary["status"], "attention")
@@ -1117,12 +1273,15 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertEqual(summary["repair_count"], 1)
         self.assertEqual(summary["gate_audit_count"], 2)
         self.assertEqual(summary["gate_alert_count"], 3)
+        self.assertEqual(summary["gate_followup_count"], 1)
         self.assertEqual(summary["gate_trend"]["status"], "report_only")
         self.assertEqual(summary["gate_alert_status"], "attention")
+        self.assertIn("09:12:00", summary["latest_gate_followup"])
         self.assertIn("事件代理质量", summary["title"])
         self.assertIn("样本 18", summary["body"])
         self.assertIn("2026-05-17 09:00:00", summary["body"])
         self.assertIn("2026-05-17 09:10:00", summary["body"])
+        self.assertIn("Gate复检", summary["body"])
         self.assertIn("Gate趋势", summary["body"])
         self.assertIn("Gate告警", summary["body"])
 

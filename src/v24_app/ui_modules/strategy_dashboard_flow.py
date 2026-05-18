@@ -907,6 +907,7 @@ def build_statsbomb_review_training_quality_report_lines(
     repair_feedback_records: Sequence[Mapping[str, object] | object] | None = None,
     gate_audit_records: Sequence[Mapping[str, object] | object] | None = None,
     gate_alert_action_rows: Sequence[Mapping[str, object] | object] | None = None,
+    gate_followup_records: Sequence[Mapping[str, object] | object] | None = None,
 ) -> list[str]:
     resolved = _as_mapping(quality)
     label_rows = [row for row in _as_list(resolved.get("label_rows")) if isinstance(row, Mapping)]
@@ -915,6 +916,7 @@ def build_statsbomb_review_training_quality_report_lines(
     feedback_rows = [row for row in _as_list(repair_feedback_records) if isinstance(row, Mapping)]
     audit_rows = [row for row in _as_list(gate_audit_records) if isinstance(row, Mapping)]
     alert_action_rows = [row for row in _as_list(gate_alert_action_rows) if isinstance(row, Mapping)]
+    followup_rows = [row for row in _as_list(gate_followup_records) if isinstance(row, Mapping)]
     signal = _as_mapping(resolved.get("signal"))
     weight_gate = _as_mapping(resolved.get("weight_gate") or signal.get("weight_gate"))
     active_codes = ", ".join(str(code) for code in _as_list(signal.get("active_codes"))) or "-"
@@ -989,6 +991,29 @@ def build_statsbomb_review_training_quality_report_lines(
             + " | ".join(
                 [
                     _md_cell(row.get("action_key")),
+                    _md_cell(row.get("title")),
+                    _md_cell(row.get("body")),
+                    _md_cell(row.get("tone")),
+                ]
+            )
+            + " |"
+        )
+    lines.extend(
+        [
+            "",
+            "## 权重Gate复检（gate_followup_records）",
+            "",
+            "| title | body | tone |",
+            "| --- | --- | --- |",
+        ]
+    )
+    if not followup_rows:
+        lines.append("| - | - | - |")
+    for row in followup_rows[:20]:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
                     _md_cell(row.get("title")),
                     _md_cell(row.get("body")),
                     _md_cell(row.get("tone")),

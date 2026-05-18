@@ -3407,6 +3407,13 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
                         "tone": "warning",
                     },
                 ],
+                gate_followup_records=[
+                    {
+                        "title": "2026-05-14 12:06:00 | build_statsbomb_review_samples | recovered",
+                        "body": "status blocked->healthy | alerts 2->0 | blocking 1->0\n下一步: Gate 已恢复 active，可继续回测或训练稳定性验证。",
+                        "tone": "good",
+                    }
+                ],
             )
         )
 
@@ -3416,6 +3423,8 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("active/report_only/disabled: 1/1/1", payload)
         self.assertIn("quality_report_export", payload)
         self.assertIn("权重Gate处置动作", payload)
+        self.assertIn("权重Gate复检", payload)
+        self.assertIn("Gate 已恢复 active", payload)
         self.assertIn("recover_results", payload)
         self.assertIn("build_statsbomb_review_samples", payload)
 

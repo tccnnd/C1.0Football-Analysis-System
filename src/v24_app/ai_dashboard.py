@@ -233,6 +233,7 @@ REPORT_DIR = PROJECT_ROOT / "reports"
 SETTINGS_PATH = PROJECT_ROOT / "data" / "state" / "ai_dashboard_settings.json"
 STATSBOMB_REVIEW_REPAIR_ACTION_LOG = PROJECT_ROOT / "data" / "state" / "statsbomb_review_repair_action_log.json"
 STATSBOMB_REVIEW_WEIGHT_GATE_AUDIT_LOG = PROJECT_ROOT / "data" / "state" / "statsbomb_review_weight_gate_audit.json"
+STATSBOMB_REVIEW_WEIGHT_GATE_FOLLOWUP_LOG = PROJECT_ROOT / "data" / "state" / "statsbomb_review_weight_gate_followup_log.json"
 VIDEO_REVIEW_EVIDENCE_GAP_ACTION_LOG = PROJECT_ROOT / "data" / "state" / "video_review_evidence_gap_action_log.json"
 VIDEO_REVIEW_EVIDENCE_GAP_BATCH_STATE = PROJECT_ROOT / "data" / "state" / "video_review_evidence_gap_batches.json"
 
@@ -1770,6 +1771,99 @@ def build_statsbomb_review_training_weight_gate_alert_lines(
     return lines
 
 
+def build_statsbomb_review_training_weight_gate_followup_record(
+    feedback: dict | object,
+    before_audit_records: list[dict] | object,
+    after_audit_records: list[dict] | object,
+    *,
+    occurred_at: datetime | None = None,
+) -> dict[str, object]:
+    feedback_payload = feedback if isinstance(feedback, dict) else {}
+    before_summary = build_statsbomb_review_training_weight_gate_alert_summary(before_audit_records)
+    after_summary = build_statsbomb_review_training_weight_gate_alert_summary(after_audit_records)
+    before_alert_count = int(before_summary.get("alert_count", 0) or 0)
+    after_alert_count = int(after_summary.get("alert_count", 0) or 0)
+    before_blocking_count = int(before_summary.get("blocking_count", 0) or 0)
+    after_blocking_count = int(after_summary.get("blocking_count", 0) or 0)
+    before_status = str(before_summary.get("status") or "empty")
+    after_status = str(after_summary.get("status") or "empty")
+    before_mode = str(before_summary.get("latest_mode") or "-")
+    after_mode = str(after_summary.get("latest_mode") or "-")
+    before_codes = [str(item.get("code") or "-") for item in before_summary.get("alerts", []) if isinstance(item, dict)]
+    after_codes = [str(item.get("code") or "-") for item in after_summary.get("alerts", []) if isinstance(item, dict)]
+    if after_status == "healthy" and before_status != "healthy":
+        outcome = "recovered"
+    elif after_alert_count < before_alert_count or after_blocking_count < before_blocking_count:
+        outcome = "improved"
+    elif after_alert_count > before_alert_count or after_blocking_count > before_blocking_count:
+        outcome = "worsened"
+    else:
+        outcome = "steady"
+    tone = "good" if outcome in {"recovered", "improved"} and after_status == "healthy" else "warning" if after_status == "attention" else "bad" if after_status == "blocked" else "neutral"
+    after_top_alert = after_summary.get("top_alert") if isinstance(after_summary.get("top_alert"), dict) else {}
+    next_recommendation = str(after_top_alert.get("recommendation") or "-") if after_top_alert else "-"
+    if outcome == "recovered" and after_status == "healthy":
+        next_recommendation = "Gate 已恢复 active，可继续回测或训练稳定性验证。"
+    elif outcome == "steady" and after_alert_count > 0 and next_recommendation == "-":
+        next_recommendation = "继续补样本或补标签，观察 gate 是否恢复 active。"
+    return {
+        "occurred_at": (occurred_at or datetime.now()).strftime("%Y-%m-%d %H:%M:%S"),
+        "action_key": str(feedback_payload.get("action_key") or "-"),
+        "action_outcome": str(feedback_payload.get("outcome") or "-"),
+        "before_alert_status": before_status,
+        "after_alert_status": after_status,
+        "before_alert_count": before_alert_count,
+        "after_alert_count": after_alert_count,
+        "before_blocking_count": before_blocking_count,
+        "after_blocking_count": after_blocking_count,
+        "before_latest_mode": before_mode,
+        "after_latest_mode": after_mode,
+        "before_alert_codes": before_codes,
+        "after_alert_codes": after_codes,
+        "followup_outcome": outcome,
+        "tone": tone,
+        "next_recommendation": next_recommendation,
+        "summary_text": (
+            f"{str(feedback_payload.get('action_key') or '-')}: {outcome} | "
+            f"alert {before_alert_count}->{after_alert_count} | "
+            f"blocking {before_blocking_count}->{after_blocking_count} | "
+            f"status {before_status}->{after_status}"
+        ),
+        "message": str(feedback_payload.get("summary_text") or feedback_payload.get("message") or ""),
+    }
+
+
+def build_statsbomb_review_training_weight_gate_followup_rows(
+    records: list[dict] | object,
+    limit: int = 5,
+) -> list[dict[str, object]]:
+    if not isinstance(records, list):
+        return []
+    rows: list[dict[str, object]] = []
+    for record in [item for item in records if isinstance(item, dict)][: max(0, int(limit))]:
+        before_status = str(record.get("before_alert_status") or "-")
+        after_status = str(record.get("after_alert_status") or "-")
+        followup_outcome = str(record.get("followup_outcome") or "-")
+        before_codes = record.get("before_alert_codes") if isinstance(record.get("before_alert_codes"), list) else []
+        after_codes = record.get("after_alert_codes") if isinstance(record.get("after_alert_codes"), list) else []
+        rows.append(
+            {
+                "title": f"{record.get('occurred_at', '-')} | {record.get('action_key', '-')} | {followup_outcome}",
+                "body": (
+                    f"status {before_status}->{after_status} | "
+                    f"alerts {record.get('before_alert_count', 0)}->{record.get('after_alert_count', 0)} | "
+                    f"blocking {record.get('before_blocking_count', 0)}->{record.get('after_blocking_count', 0)}\n"
+                    f"before_modes {record.get('before_latest_mode', '-')} | after_modes {record.get('after_latest_mode', '-')}\n"
+                    f"before_alerts: {', '.join(str(item) for item in before_codes[:3]) or '-'}\n"
+                    f"after_alerts: {', '.join(str(item) for item in after_codes[:3]) or '-'}\n"
+                    f"下一步: {record.get('next_recommendation', '-')}"
+                ),
+                "tone": str(record.get("tone") or "neutral"),
+            }
+        )
+    return rows
+
+
 def build_statsbomb_review_training_weight_gate_alert_action_rows(
     alert_summary: dict | object,
     limit: int = 4,
@@ -1991,12 +2085,15 @@ def build_statsbomb_review_training_center_summary(
     quality: dict | object,
     records: list[dict] | object,
     gate_audit_records: list[dict] | object | None = None,
+    gate_followup_records: list[dict] | object | None = None,
 ) -> dict[str, object]:
     payload = quality if isinstance(quality, dict) else {}
     repair_records = [item for item in records if isinstance(item, dict)] if isinstance(records, list) else []
     audit_records = [item for item in gate_audit_records if isinstance(item, dict)] if isinstance(gate_audit_records, list) else []
+    followup_records = [item for item in gate_followup_records if isinstance(item, dict)] if isinstance(gate_followup_records, list) else []
     gate_trend = build_statsbomb_review_training_weight_gate_trend_summary(audit_records)
     gate_alert_summary = build_statsbomb_review_training_weight_gate_alert_summary(audit_records)
+    gate_followup_rows = build_statsbomb_review_training_weight_gate_followup_rows(followup_records)
     status = str(payload.get("status") or "blocked")
     sample_count = int(payload.get("sample_count", 0) or 0)
     issue_count = int(payload.get("issue_count", 0) or 0)
@@ -2013,6 +2110,13 @@ def build_statsbomb_review_training_center_summary(
         f"{latest_audit.get('occurred_at', '-')} | {latest_audit.get('trigger', '-')} | "
         f"{latest_audit.get('gate_mode', '-')} | enabled={bool(latest_audit.get('gate_enabled'))}"
         if latest_audit
+        else "-"
+    )
+    latest_followup = followup_records[0] if followup_records else {}
+    latest_followup_text = (
+        f"{latest_followup.get('occurred_at', '-')} | {latest_followup.get('action_key', '-')} | "
+        f"{latest_followup.get('followup_outcome', '-')} | {latest_followup.get('after_alert_status', '-')}"
+        if latest_followup
         else "-"
     )
     top_alert = gate_alert_summary.get("top_alert") if isinstance(gate_alert_summary.get("top_alert"), dict) else {}
@@ -2032,16 +2136,20 @@ def build_statsbomb_review_training_center_summary(
         "gate_alert_count": int(gate_alert_summary.get("alert_count", 0) or 0),
         "gate_alert_status": str(gate_alert_summary.get("status") or "empty"),
         "gate_alert_tone": str(gate_alert_summary.get("tone") or "neutral"),
+        "gate_followup_count": len(followup_records),
         "latest_repair": latest_text,
         "latest_gate_audit": latest_audit_text,
+        "latest_gate_followup": latest_followup_text,
         "gate_trend": gate_trend,
         "gate_alert_summary": gate_alert_summary,
+        "gate_followup_rows": gate_followup_rows,
         "title": f"事件代理质量 | {status}",
         "body": (
             f"样本 {sample_count} | 问题 {issue_count} | 可执行动作 {action_count} | "
-            f"修复记录 {len(repair_records)} | Gate审计 {len(audit_records)}\n"
+            f"修复记录 {len(repair_records)} | Gate审计 {len(audit_records)} | Gate复检 {len(followup_records)}\n"
             f"最近修复: {latest_text}\n"
             f"最近Gate审计: {latest_audit_text}\n"
+            f"最近Gate复检: {latest_followup_text}\n"
             f"Gate趋势: {gate_trend.get('trend_text', '-')}\n"
             f"Gate告警: {gate_alert_summary.get('alert_count', 0)} | 最近告警: {latest_alert_text}"
         ),
@@ -2493,6 +2601,7 @@ def build_statsbomb_review_training_quality_export_message(
     *,
     gate_audit_count: int | None = None,
     gate_alert_count: int | None = None,
+    gate_followup_count: int | None = None,
 ) -> str:
     signal = quality.get("signal") if isinstance(quality.get("signal"), dict) else {}
     weight_gate = quality.get("weight_gate") if isinstance(quality.get("weight_gate"), dict) else signal.get("weight_gate") if isinstance(signal.get("weight_gate"), dict) else {}
@@ -2510,6 +2619,8 @@ def build_statsbomb_review_training_quality_export_message(
         lines.append(f"Gate审计记录: {gate_audit_count}")
     if gate_alert_count is not None:
         lines.append(f"Gate告警: {gate_alert_count}")
+    if gate_followup_count is not None:
+        lines.append(f"Gate复检: {gate_followup_count}")
     lines.extend(
         [
             "",
@@ -3613,6 +3724,34 @@ def _append_statsbomb_review_training_weight_gate_audit_log(
     limit: int = 100,
 ) -> None:
     records = [dict(record), *_load_statsbomb_review_training_weight_gate_audit_log(path)]
+    records = records[: max(1, int(limit))]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps({"records": records}, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def _load_statsbomb_review_training_weight_gate_followup_log(
+    path: Path = STATSBOMB_REVIEW_WEIGHT_GATE_FOLLOWUP_LOG,
+) -> list[dict]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if isinstance(payload, dict):
+        payload = payload.get("records")
+    if not isinstance(payload, list):
+        return []
+    return [item for item in payload if isinstance(item, dict)]
+
+
+def _append_statsbomb_review_training_weight_gate_followup_log(
+    record: dict,
+    path: Path = STATSBOMB_REVIEW_WEIGHT_GATE_FOLLOWUP_LOG,
+    *,
+    limit: int = 100,
+) -> None:
+    records = [dict(record), *_load_statsbomb_review_training_weight_gate_followup_log(path)]
     records = records[: max(1, int(limit))]
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(".tmp")
@@ -6989,9 +7128,13 @@ class SmartMatchDashboard:
         evidence_gap_batch_state = _load_video_review_evidence_gap_batch_state()
         evidence_gap_batch_status = build_video_review_evidence_gap_batch_status(evidence_gap_batch_state)
         statsbomb_repair_records = _load_statsbomb_review_training_action_feedback_log()
+        statsbomb_gate_audit_records = _load_statsbomb_review_training_weight_gate_audit_log()
+        statsbomb_gate_followup_records = _load_statsbomb_review_training_weight_gate_followup_log()
         statsbomb_review_center_summary = build_statsbomb_review_training_center_summary(
             statsbomb_review_quality,
             statsbomb_repair_records,
+            statsbomb_gate_audit_records,
+            statsbomb_gate_followup_records,
         )
         statsbomb_review_closure_summary = build_statsbomb_review_training_closure_summary(
             get_statsbomb_review_training_samples(),
@@ -7522,6 +7665,7 @@ class SmartMatchDashboard:
         return build_statsbomb_review_training_quality_summary(get_statsbomb_review_training_samples())
 
     def _record_statsbomb_review_training_action_feedback(self, feedback: dict) -> None:
+        before_audit_records = _load_statsbomb_review_training_weight_gate_audit_log()
         try:
             _append_statsbomb_review_training_action_feedback_log(feedback)
         except Exception as exc:
@@ -7530,6 +7674,13 @@ class SmartMatchDashboard:
         try:
             audit = build_statsbomb_review_training_weight_gate_audit_record_from_feedback(feedback)
             _append_statsbomb_review_training_weight_gate_audit_log(audit)
+            after_audit_records = _load_statsbomb_review_training_weight_gate_audit_log()
+            followup = build_statsbomb_review_training_weight_gate_followup_record(
+                feedback,
+                before_audit_records,
+                after_audit_records,
+            )
+            _append_statsbomb_review_training_weight_gate_followup_log(followup)
         except Exception as exc:
             self._log_event("ERROR", f"StatsBomb gate审计记录写入失败: {exc}")
         self._log_event("OK", str(feedback.get("summary_text") or "事件代理修复闭环已记录"))
@@ -8259,7 +8410,13 @@ class SmartMatchDashboard:
         quality = self._current_statsbomb_review_training_quality()
         repair_records = _load_statsbomb_review_training_action_feedback_log()
         gate_audit_records = _load_statsbomb_review_training_weight_gate_audit_log()
-        summary = build_statsbomb_review_training_center_summary(quality, repair_records, gate_audit_records)
+        gate_followup_records = _load_statsbomb_review_training_weight_gate_followup_log()
+        summary = build_statsbomb_review_training_center_summary(
+            quality,
+            repair_records,
+            gate_audit_records,
+            gate_followup_records,
+        )
         _label_queue_rows, label_queue_summary = build_statsbomb_review_label_queue(list(reversed(get_recent_settlements(limit=0))), limit=500)
 
         window = tk.Toplevel(self.root)
@@ -8336,6 +8493,7 @@ class SmartMatchDashboard:
             ("修复记录", str(summary.get("repair_count", 0)), "#7aa2ff"),
             ("Gate审计", str(summary.get("gate_audit_count", 0)), "#7aa2ff"),
             ("Gate告警", str(summary.get("gate_alert_count", 0)), RED if int(summary.get("gate_alert_count", 0) or 0) else GREEN),
+            ("Gate复检", str(summary.get("gate_followup_count", 0)), "#7aa2ff"),
         ]:
             self._detail_metric(top, label, value, color)
 
@@ -8454,6 +8612,18 @@ class SmartMatchDashboard:
                 )
         else:
             self._strategy_row(right, "暂无Gate处置动作", "当前没有需要一键执行的补样/补标签动作。")
+
+        self._strategy_section_title(right, "Gate复检", first=False)
+        gate_followup_rows = build_statsbomb_review_training_weight_gate_followup_rows(gate_followup_records, limit=5)
+        if gate_followup_rows:
+            for row in gate_followup_rows:
+                self._strategy_row(
+                    right,
+                    str(row.get("title") or "-"),
+                    str(row.get("body") or "-"),
+                )
+        else:
+            self._strategy_row(right, "暂无Gate复检", "执行补样/补标签动作后会自动记录动作前后的告警变化。")
 
         self._strategy_section_title(right, "Gate审计", first=False)
         audit_rows = build_statsbomb_review_training_weight_gate_audit_rows(gate_audit_records, limit=5)
@@ -8914,6 +9084,7 @@ class SmartMatchDashboard:
         quality = self._current_statsbomb_review_training_quality()
         repair_records = _load_statsbomb_review_training_action_feedback_log()
         existing_gate_audit_records = _load_statsbomb_review_training_weight_gate_audit_log()
+        existing_gate_followup_records = _load_statsbomb_review_training_weight_gate_followup_log()
         REPORT_DIR.mkdir(parents=True, exist_ok=True)
         path = REPORT_DIR / build_statsbomb_review_training_quality_report_filename(datetime.now())
         audit = build_statsbomb_review_training_weight_gate_audit_record(
@@ -8925,11 +9096,13 @@ class SmartMatchDashboard:
         report_gate_audit_records = [audit, *existing_gate_audit_records]
         gate_alert_summary = build_statsbomb_review_training_weight_gate_alert_summary(report_gate_audit_records)
         gate_alert_action_rows = build_statsbomb_review_training_weight_gate_alert_action_rows(gate_alert_summary)
+        gate_followup_rows = build_statsbomb_review_training_weight_gate_followup_rows(existing_gate_followup_records)
         report_lines = build_statsbomb_review_training_quality_report_lines(
             quality,
             repair_records,
             gate_audit_records=report_gate_audit_records,
             gate_alert_action_rows=gate_alert_action_rows,
+            gate_followup_records=gate_followup_rows,
         )
         report_lines.extend(build_statsbomb_review_training_weight_gate_alert_lines(gate_alert_summary))
         path.write_text("\n".join(report_lines), encoding="utf-8")
@@ -8948,6 +9121,7 @@ class SmartMatchDashboard:
                 len(repair_records),
                 gate_audit_count=gate_audit_count,
                 gate_alert_count=int(gate_alert_summary.get("alert_count", 0) or 0),
+                gate_followup_count=len(gate_followup_rows),
             ),
         )
         return path
