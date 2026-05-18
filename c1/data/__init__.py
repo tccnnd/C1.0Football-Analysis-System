@@ -6,7 +6,18 @@ from .availability_templates import (
     build_availability_template_rows,
     export_availability_template_csv,
 )
-from .contracts import CanonicalMatch, MatchContext, OddsSnapshot, TeamAvailability
+from .contracts import (
+    CanonicalMatch,
+    MatchContext,
+    OddsSnapshot,
+    PlayModelTakeoverGateAuditEntry,
+    PlayModelTakeoverGateAuditReport,
+    PlayModelTakeoverGateAuditSummary,
+    TeamAvailability,
+    build_play_model_takeover_gate_audit_entry,
+    build_play_model_takeover_gate_audit_report,
+    build_play_model_takeover_gate_audit_summary,
+)
 from .fact_contracts import (
     ACTION_FACT_SCHEMA_VERSION,
     MATCH_FACT_SCHEMA_VERSION,
@@ -47,6 +58,9 @@ __all__ = [
     "MatchContext",
     "MatchFact",
     "OddsSnapshot",
+    "PlayModelTakeoverGateAuditEntry",
+    "PlayModelTakeoverGateAuditReport",
+    "PlayModelTakeoverGateAuditSummary",
     "SOURCE_PROVENANCE_SCHEMA_VERSION",
     "SourceProvenance",
     "StoredAvailabilityProvider",
@@ -59,6 +73,9 @@ __all__ = [
     "build_availability_template_rows",
     "build_match_context",
     "build_match_fact",
+    "build_play_model_takeover_gate_audit_entry",
+    "build_play_model_takeover_gate_audit_report",
+    "build_play_model_takeover_gate_audit_summary",
     "build_source_provenance",
     "build_team_availability",
     "export_availability_template_csv",
