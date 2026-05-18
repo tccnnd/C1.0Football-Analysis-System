@@ -3349,6 +3349,59 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         self.assertIn("blocking->warning", payload)
         self.assertIn("continue import recent settlements", payload)
 
+    def test_statsbomb_review_training_quality_report_lines_include_gate_audit_trend(self) -> None:
+        quality = build_statsbomb_review_training_quality_summary(
+            {
+                "summary": {
+                    "sample_count": 60,
+                    "feature_order": ["xg_diff", "shot_diff", "event_count"],
+                    "label_counts": {
+                        "prediction_miss": {"0": 30, "1": 30},
+                        "handicap_miss": {"0": 32, "1": 28},
+                        "ou_miss": {"0": 31, "1": 29},
+                    },
+                },
+                "items": [{} for _ in range(60)],
+            }
+        )
+        payload = "\n".join(
+            build_statsbomb_review_training_quality_report_lines(
+                quality,
+                gate_audit_records=[
+                    {
+                        "occurred_at": "2026-05-14 12:10:00",
+                        "trigger": "quality_report_export",
+                        "gate_mode": "active",
+                        "gate_enabled": True,
+                        "quality_status": "healthy",
+                        "gate_reason": "statsbomb_review_quality_healthy",
+                    },
+                    {
+                        "occurred_at": "2026-05-14 12:05:00",
+                        "trigger": "build_statsbomb_review_samples",
+                        "gate_mode": "report_only",
+                        "gate_enabled": False,
+                        "quality_status": "attention",
+                        "gate_reason": "statsbomb_review_quality_not_healthy",
+                    },
+                    {
+                        "occurred_at": "2026-05-14 12:00:00",
+                        "trigger": "refresh_review_center",
+                        "gate_mode": "disabled",
+                        "gate_enabled": False,
+                        "quality_status": "blocked",
+                        "gate_reason": "statsbomb_review_quality_not_healthy",
+                    },
+                ],
+            )
+        )
+
+        self.assertIn("权重Gate趋势", payload)
+        self.assertIn("disabled -> report_only -> active", payload)
+        self.assertIn("transition_count: 2", payload)
+        self.assertIn("active/report_only/disabled: 1/1/1", payload)
+        self.assertIn("quality_report_export", payload)
+
     def test_dashboard_exposes_statsbomb_review_training_weight_signal(self) -> None:
         settlements = [
             {

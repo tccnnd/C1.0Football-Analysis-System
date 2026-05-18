@@ -1474,6 +1474,81 @@ def build_statsbomb_review_training_weight_gate_audit_rows(
     return rows
 
 
+def build_statsbomb_review_training_weight_gate_trend_summary(
+    records: list[dict] | object,
+    limit: int = 8,
+) -> dict[str, object]:
+    if not isinstance(records, list):
+        records = []
+    items = [item for item in records if isinstance(item, dict)][: max(0, int(limit))]
+    if not items:
+        return {
+            "status": "empty",
+            "tone": "neutral",
+            "count": 0,
+            "transition_count": 0,
+            "trend_text": "-",
+            "title": "Gate趋势 | 暂无审计",
+            "body": "还没有 StatsBomb 权重Gate审计记录；导出质量报告或执行修复动作后开始形成趋势。",
+            "card_rows": [],
+        }
+
+    modes = [str(item.get("gate_mode") or "-") for item in items]
+    chronological_modes = list(reversed(modes))
+    transition_count = sum(
+        1 for index in range(1, len(chronological_modes)) if chronological_modes[index] != chronological_modes[index - 1]
+    )
+    mode_counts = Counter(modes)
+    latest = items[0]
+    latest_mode = str(latest.get("gate_mode") or "-")
+    latest_enabled = bool(latest.get("gate_enabled"))
+    tone = "good" if latest_enabled else "warning" if latest_mode == "report_only" else "bad" if latest_mode == "disabled" else "neutral"
+    trend_text = " -> ".join(chronological_modes)
+    active_count = int(mode_counts.get("active", 0))
+    report_only_count = int(mode_counts.get("report_only", 0))
+    disabled_count = int(mode_counts.get("disabled", 0))
+    card_rows = [
+        {
+            "label": "最新Gate",
+            "value": latest_mode,
+            "tone": tone,
+            "detail": (
+                f"enabled={latest_enabled} | quality={latest.get('quality_status', '-')} | "
+                f"trigger={latest.get('trigger', '-')}"
+            ),
+        },
+        {
+            "label": "最近审计",
+            "value": str(len(items)),
+            "tone": "neutral",
+            "detail": f"状态切换 {transition_count} 次 | 最新时间 {latest.get('occurred_at', '-')}",
+        },
+        {
+            "label": "模式分布",
+            "value": f"A{active_count}/R{report_only_count}/D{disabled_count}",
+            "tone": "good" if active_count >= report_only_count + disabled_count else "warning",
+            "detail": "active/report_only/disabled 最近记录分布",
+        },
+    ]
+    return {
+        "status": latest_mode,
+        "tone": tone,
+        "count": len(items),
+        "transition_count": transition_count,
+        "active_count": active_count,
+        "report_only_count": report_only_count,
+        "disabled_count": disabled_count,
+        "trend_text": trend_text,
+        "title": f"Gate趋势 | {latest_mode}",
+        "body": (
+            f"最近 {len(items)} 次（旧->新）: {trend_text}\n"
+            f"active={active_count} | report_only={report_only_count} | "
+            f"disabled={disabled_count} | transitions={transition_count}"
+        ),
+        "card_rows": card_rows,
+    }
+
+
 def build_statsbomb_review_training_action_feedback(
     action_key: str,
     before_quality: dict,
@@ -1605,6 +1680,7 @@ def build_statsbomb_review_training_center_summary(
     payload = quality if isinstance(quality, dict) else {}
     repair_records = [item for item in records if isinstance(item, dict)] if isinstance(records, list) else []
     audit_records = [item for item in gate_audit_records if isinstance(item, dict)] if isinstance(gate_audit_records, list) else []
+    gate_trend = build_statsbomb_review_training_weight_gate_trend_summary(audit_records)
     status = str(payload.get("status") or "blocked")
     sample_count = int(payload.get("sample_count", 0) or 0)
     issue_count = int(payload.get("issue_count", 0) or 0)
@@ -1633,12 +1709,14 @@ def build_statsbomb_review_training_center_summary(
         "gate_audit_count": len(audit_records),
         "latest_repair": latest_text,
         "latest_gate_audit": latest_audit_text,
+        "gate_trend": gate_trend,
         "title": f"事件代理质量 | {status}",
         "body": (
             f"样本 {sample_count} | 问题 {issue_count} | 可执行动作 {action_count} | "
             f"修复记录 {len(repair_records)} | Gate审计 {len(audit_records)}\n"
             f"最近修复: {latest_text}\n"
-            f"最近Gate审计: {latest_audit_text}"
+            f"最近Gate审计: {latest_audit_text}\n"
+            f"Gate趋势: {gate_trend.get('trend_text', '-')}"
         ),
     }
 
@@ -8001,6 +8079,20 @@ class SmartMatchDashboard:
         else:
             self._strategy_row(right, "暂无修复记录", "点击修复动作后，会记录动作前后的质量变化。")
 
+        gate_trend = build_statsbomb_review_training_weight_gate_trend_summary(gate_audit_records)
+        self._strategy_section_title(right, "Gate趋势", first=False)
+        self._strategy_row(
+            right,
+            str(gate_trend.get("title") or "-"),
+            str(gate_trend.get("body") or "-"),
+        )
+        for row in [item for item in gate_trend.get("card_rows", []) if isinstance(item, dict)][:3]:
+            self._strategy_row(
+                right,
+                f"{row.get('label', '-')}: {row.get('value', '-')}",
+                str(row.get("detail") or "-"),
+            )
+
         self._strategy_section_title(right, "Gate审计", first=False)
         audit_rows = build_statsbomb_review_training_weight_gate_audit_rows(gate_audit_records, limit=5)
         if audit_rows:
@@ -8459,20 +8551,28 @@ class SmartMatchDashboard:
     def export_statsbomb_review_training_quality_report(self) -> Path:
         quality = self._current_statsbomb_review_training_quality()
         repair_records = _load_statsbomb_review_training_action_feedback_log()
+        existing_gate_audit_records = _load_statsbomb_review_training_weight_gate_audit_log()
         REPORT_DIR.mkdir(parents=True, exist_ok=True)
         path = REPORT_DIR / build_statsbomb_review_training_quality_report_filename(datetime.now())
+        audit = build_statsbomb_review_training_weight_gate_audit_record(
+            "quality_report_export",
+            quality,
+            {"message": "quality report exported"},
+            report_path=path,
+        )
+        report_gate_audit_records = [audit, *existing_gate_audit_records]
         path.write_text(
-            "\n".join(build_statsbomb_review_training_quality_report_lines(quality, repair_records)),
+            "\n".join(
+                build_statsbomb_review_training_quality_report_lines(
+                    quality,
+                    repair_records,
+                    gate_audit_records=report_gate_audit_records,
+                )
+            ),
             encoding="utf-8",
         )
-        gate_audit_count: int | None = None
+        gate_audit_count: int | None = len(report_gate_audit_records)
         try:
-            audit = build_statsbomb_review_training_weight_gate_audit_record(
-                "quality_report_export",
-                quality,
-                {"message": "quality report exported"},
-                report_path=path,
-            )
             _append_statsbomb_review_training_weight_gate_audit_log(audit)
             gate_audit_count = len(_load_statsbomb_review_training_weight_gate_audit_log())
         except Exception as exc:

@@ -29,6 +29,7 @@ from v24_app.ai_dashboard import (
     build_statsbomb_review_training_weight_gate_audit_record,
     build_statsbomb_review_training_weight_gate_audit_record_from_feedback,
     build_statsbomb_review_training_weight_gate_audit_rows,
+    build_statsbomb_review_training_weight_gate_trend_summary,
     build_statsbomb_review_training_closure_summary,
     build_video_review_evidence_gap_batch_id,
     build_video_review_evidence_gap_batch_record,
@@ -762,6 +763,42 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertIn("quality=healthy", rows[0]["body"])
         self.assertIn("statsbomb_xg_against_pick", rows[0]["body"])
 
+    def test_review_training_weight_gate_trend_summary_counts_modes(self) -> None:
+        summary = build_statsbomb_review_training_weight_gate_trend_summary(
+            [
+                {
+                    "occurred_at": "2026-05-14 12:10:00",
+                    "trigger": "quality_report_export",
+                    "quality_status": "healthy",
+                    "gate_mode": "active",
+                    "gate_enabled": True,
+                },
+                {
+                    "occurred_at": "2026-05-14 12:05:00",
+                    "trigger": "build_statsbomb_review_samples",
+                    "quality_status": "attention",
+                    "gate_mode": "report_only",
+                    "gate_enabled": False,
+                },
+                {
+                    "occurred_at": "2026-05-14 12:00:00",
+                    "trigger": "refresh_review_center",
+                    "quality_status": "blocked",
+                    "gate_mode": "disabled",
+                    "gate_enabled": False,
+                },
+            ]
+        )
+
+        self.assertEqual(summary["status"], "active")
+        self.assertEqual(summary["tone"], "good")
+        self.assertEqual(summary["active_count"], 1)
+        self.assertEqual(summary["report_only_count"], 1)
+        self.assertEqual(summary["disabled_count"], 1)
+        self.assertEqual(summary["transition_count"], 2)
+        self.assertIn("disabled -> report_only -> active", summary["trend_text"])
+        self.assertIn("A1/R1/D1", summary["card_rows"][2]["value"])
+
     def test_review_training_weight_gate_audit_log_appends_newest_and_caps(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "statsbomb_review_weight_gate_audit.json"
@@ -813,8 +850,11 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
                 return_value=[{"gate_mode": "active"}],
             ), patch("v24_app.ai_dashboard.messagebox.showinfo") as showinfo:
                 path = dashboard.export_statsbomb_review_training_quality_report()
+                report_payload = path.read_text(encoding="utf-8")
 
         self.assertTrue(path.name.startswith("statsbomb_review_training_quality_"))
+        self.assertIn("权重Gate趋势", report_payload)
+        self.assertIn("quality_report_export", report_payload)
         append_audit.assert_called_once()
         audit = append_audit.call_args.args[0]
         self.assertEqual(audit["trigger"], "quality_report_export")
@@ -940,10 +980,12 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertEqual(summary["issue_count"], 2)
         self.assertEqual(summary["repair_count"], 1)
         self.assertEqual(summary["gate_audit_count"], 1)
+        self.assertEqual(summary["gate_trend"]["status"], "report_only")
         self.assertIn("事件代理质量", summary["title"])
         self.assertIn("样本 18", summary["body"])
         self.assertIn("2026-05-17 09:00:00", summary["body"])
         self.assertIn("2026-05-17 09:05:00", summary["body"])
+        self.assertIn("Gate趋势", summary["body"])
 
     def test_review_training_closure_summary_tracks_pending_and_resolved_matches(self) -> None:
         review_samples = {

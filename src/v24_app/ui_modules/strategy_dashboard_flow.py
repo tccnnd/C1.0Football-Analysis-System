@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
+from collections import Counter
 from datetime import date, datetime
 from typing import Mapping, Sequence
 
@@ -904,16 +905,25 @@ def build_statsbomb_review_training_quality_report_filename(now: datetime | None
 def build_statsbomb_review_training_quality_report_lines(
     quality: Mapping[str, object] | object,
     repair_feedback_records: Sequence[Mapping[str, object] | object] | None = None,
+    gate_audit_records: Sequence[Mapping[str, object] | object] | None = None,
 ) -> list[str]:
     resolved = _as_mapping(quality)
     label_rows = [row for row in _as_list(resolved.get("label_rows")) if isinstance(row, Mapping)]
     weight_rows = [row for row in _as_list(resolved.get("weight_rows")) if isinstance(row, Mapping)]
     issues = [row for row in _as_list(resolved.get("issues")) if isinstance(row, Mapping)]
     feedback_rows = [row for row in _as_list(repair_feedback_records) if isinstance(row, Mapping)]
+    audit_rows = [row for row in _as_list(gate_audit_records) if isinstance(row, Mapping)]
     signal = _as_mapping(resolved.get("signal"))
     weight_gate = _as_mapping(resolved.get("weight_gate") or signal.get("weight_gate"))
     active_codes = ", ".join(str(code) for code in _as_list(signal.get("active_codes"))) or "-"
     memory_tags = ", ".join(str(tag) for tag in _as_list(signal.get("memory_tags"))) or "-"
+    audit_modes = [str(row.get("gate_mode") or "-") for row in audit_rows[:8]]
+    chronological_modes = list(reversed(audit_modes))
+    gate_trend_text = " -> ".join(chronological_modes) or "-"
+    gate_transition_count = sum(
+        1 for index in range(1, len(chronological_modes)) if chronological_modes[index] != chronological_modes[index - 1]
+    )
+    gate_mode_counts = Counter(str(row.get("gate_mode") or "-") for row in audit_rows)
     lines = [
         "# StatsBomb/Event Proxy 样本质量报告",
         "",
@@ -933,11 +943,42 @@ def build_statsbomb_review_training_quality_report_lines(
         f"- active_codes: {active_codes}",
         f"- memory_tags: {memory_tags}",
         "",
+        "## 权重Gate趋势（gate_audit_records）",
+        "",
+        f"- audit_count: {len(audit_rows)}",
+        f"- recent_modes_old_to_new: {gate_trend_text}",
+        f"- transition_count: {gate_transition_count}",
+        f"- active/report_only/disabled: {gate_mode_counts.get('active', 0)}/{gate_mode_counts.get('report_only', 0)}/{gate_mode_counts.get('disabled', 0)}",
+        "",
+        "| occurred_at | trigger | mode | enabled | quality | reason |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    if not audit_rows:
+        lines.append("| - | - | - | - | - | - |")
+    for row in audit_rows[:20]:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    _md_cell(row.get("occurred_at")),
+                    _md_cell(row.get("trigger")),
+                    _md_cell(row.get("gate_mode")),
+                    _md_cell(bool(row.get("gate_enabled"))),
+                    _md_cell(row.get("quality_status")),
+                    _md_cell(row.get("gate_reason")),
+                ]
+            )
+            + " |"
+        )
+    lines.extend(
+        [
+        "",
         "## 标签分布（label_rows）",
         "",
         "| 标签 | 值 | 已知样本 | hit | miss | miss_rate |",
         "| --- | --- | ---: | ---: | ---: | --- |",
-    ]
+        ]
+    )
     if not label_rows:
         lines.append("| - | - | 0 | 0 | 0 | - |")
     for row in label_rows:
