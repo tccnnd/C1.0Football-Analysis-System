@@ -2141,6 +2141,135 @@ def build_statsbomb_review_training_execution_queue_export_message(
     )
 
 
+def _statsbomb_review_parse_timestamp(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(text[:19], fmt)
+        except ValueError:
+            pass
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone().replace(tzinfo=None)
+    return parsed
+
+
+def _statsbomb_review_queue_action_keys(record: dict | object) -> list[str]:
+    payload = record if isinstance(record, dict) else {}
+    action_keys = payload.get("action_keys") if isinstance(payload.get("action_keys"), list) else []
+    keys = [str(item) for item in action_keys if str(item or "").strip()]
+    if keys:
+        return keys
+    rows = payload.get("rows") if isinstance(payload.get("rows"), list) else []
+    return [str(row.get("action_key") or "") for row in rows if isinstance(row, dict) and str(row.get("action_key") or "").strip()]
+
+
+def _statsbomb_review_action_feedback_aliases(action_key: str) -> set[str]:
+    if action_key == "recover_results":
+        return {"recover_results", "recover_results_rebuild_samples"}
+    if action_key == "build_statsbomb_review_samples":
+        return {"build_statsbomb_review_samples", "recover_results_rebuild_samples"}
+    return {action_key}
+
+
+def build_statsbomb_review_training_execution_queue_staleness_summary(
+    queue_records: list[dict] | object,
+    feedback_records: list[dict] | object,
+    *,
+    consecutive_threshold: int = 2,
+    limit: int = 6,
+) -> dict[str, object]:
+    snapshots = [item for item in queue_records if isinstance(item, dict)] if isinstance(queue_records, list) else []
+    feedback_items = [item for item in feedback_records if isinstance(item, dict)] if isinstance(feedback_records, list) else []
+    snapshots.sort(
+        key=lambda item: _statsbomb_review_parse_timestamp(item.get("generated_at")) or datetime.min,
+        reverse=True,
+    )
+    feedback_by_action: dict[str, datetime] = {}
+    for item in feedback_items:
+        action_key = str(item.get("action_key") or "")
+        occurred_at = _statsbomb_review_parse_timestamp(item.get("occurred_at"))
+        if not action_key or occurred_at is None:
+            continue
+        current = feedback_by_action.get(action_key)
+        if current is None or occurred_at > current:
+            feedback_by_action[action_key] = occurred_at
+
+    latest = snapshots[0] if snapshots else {}
+    latest_generated_at = str(latest.get("generated_at") or "-") if latest else "-"
+    latest_actions = _statsbomb_review_queue_action_keys(latest)
+    rows: list[dict[str, object]] = []
+    for action_key in latest_actions:
+        aliases = _statsbomb_review_action_feedback_aliases(action_key)
+        latest_feedback_at = max(
+            (feedback_by_action.get(alias) for alias in aliases if feedback_by_action.get(alias) is not None),
+            default=None,
+        )
+        consecutive_count = 0
+        first_seen_at = ""
+        latest_seen_at = ""
+        for snapshot in snapshots:
+            generated_at = _statsbomb_review_parse_timestamp(snapshot.get("generated_at"))
+            if latest_feedback_at is not None and generated_at is not None and generated_at <= latest_feedback_at:
+                break
+            keys = set(_statsbomb_review_queue_action_keys(snapshot))
+            if action_key not in keys:
+                break
+            consecutive_count += 1
+            seen_text = str(snapshot.get("generated_at") or "-")
+            if not latest_seen_at:
+                latest_seen_at = seen_text
+            first_seen_at = seen_text
+        queue_status = "stale" if consecutive_count >= max(1, int(consecutive_threshold)) else "pending"
+        tone = "danger" if queue_status == "stale" else "warning" if consecutive_count > 1 else "neutral"
+        latest_feedback_text = latest_feedback_at.strftime("%Y-%m-%d %H:%M:%S") if latest_feedback_at else "-"
+        rows.append(
+            {
+                "action_key": action_key,
+                "queue_status": queue_status,
+                "tone": tone,
+                "consecutive_count": consecutive_count,
+                "first_seen_at": first_seen_at or "-",
+                "latest_seen_at": latest_seen_at or "-",
+                "latest_feedback_at": latest_feedback_text,
+                "recommendation": (
+                    "该待办已连续滞留，建议优先执行或确认是否需要关闭。"
+                    if queue_status == "stale"
+                    else "继续观察；若下次导出仍存在再升级为滞留。"
+                ),
+            }
+        )
+    stale_rows = [row for row in rows if row.get("queue_status") == "stale"]
+    rows.sort(
+        key=lambda row: (
+            0 if row.get("queue_status") == "stale" else 1,
+            -int(row.get("consecutive_count", 0) or 0),
+            str(row.get("action_key") or ""),
+        )
+    )
+    status = "stale" if stale_rows else "watch" if rows else "empty"
+    tone = "danger" if stale_rows else "warning" if rows else "neutral"
+    return {
+        "status": status,
+        "tone": tone,
+        "snapshot_count": len(snapshots),
+        "latest_generated_at": latest_generated_at,
+        "latest_action_count": len(latest_actions),
+        "stale_count": len(stale_rows),
+        "rows": rows[: max(0, int(limit))],
+        "title": f"执行待办滞留 | {status}",
+        "body": (
+            f"快照 {len(snapshots)} | 最新 {latest_generated_at} | "
+            f"当前动作 {len(latest_actions)} | 滞留 {len(stale_rows)}"
+        ),
+    }
+
+
 def build_statsbomb_review_training_action_feedback(
     action_key: str,
     before_quality: dict,
@@ -2269,15 +2398,18 @@ def build_statsbomb_review_training_center_summary(
     records: list[dict] | object,
     gate_audit_records: list[dict] | object | None = None,
     gate_followup_records: list[dict] | object | None = None,
+    execution_queue_records: list[dict] | object | None = None,
 ) -> dict[str, object]:
     payload = quality if isinstance(quality, dict) else {}
     repair_records = [item for item in records if isinstance(item, dict)] if isinstance(records, list) else []
     audit_records = [item for item in gate_audit_records if isinstance(item, dict)] if isinstance(gate_audit_records, list) else []
     followup_records = [item for item in gate_followup_records if isinstance(item, dict)] if isinstance(gate_followup_records, list) else []
+    queue_records = [item for item in execution_queue_records if isinstance(item, dict)] if isinstance(execution_queue_records, list) else []
     gate_trend = build_statsbomb_review_training_weight_gate_trend_summary(audit_records)
     gate_alert_summary = build_statsbomb_review_training_weight_gate_alert_summary(audit_records)
     gate_followup_rows = build_statsbomb_review_training_weight_gate_followup_rows(followup_records)
     execution_queue_rows = build_statsbomb_review_training_execution_queue_rows(payload, gate_alert_summary, followup_records)
+    execution_staleness = build_statsbomb_review_training_execution_queue_staleness_summary(queue_records, repair_records)
     status = str(payload.get("status") or "blocked")
     sample_count = int(payload.get("sample_count", 0) or 0)
     issue_count = int(payload.get("issue_count", 0) or 0)
@@ -2329,6 +2461,8 @@ def build_statsbomb_review_training_center_summary(
         "gate_followup_rows": gate_followup_rows,
         "execution_queue_rows": execution_queue_rows,
         "execution_queue_count": len(execution_queue_rows),
+        "execution_queue_staleness": execution_staleness,
+        "execution_queue_stale_count": int(execution_staleness.get("stale_count", 0) or 0),
         "title": f"事件代理质量 | {status}",
         "body": (
             f"样本 {sample_count} | 问题 {issue_count} | 可执行动作 {action_count} | "
@@ -2337,7 +2471,8 @@ def build_statsbomb_review_training_center_summary(
             f"最近Gate审计: {latest_audit_text}\n"
             f"最近Gate复检: {latest_followup_text}\n"
             f"Gate趋势: {gate_trend.get('trend_text', '-')}\n"
-            f"Gate告警: {gate_alert_summary.get('alert_count', 0)} | 最近告警: {latest_alert_text}"
+            f"Gate告警: {gate_alert_summary.get('alert_count', 0)} | 最近告警: {latest_alert_text}\n"
+            f"待办滞留: {execution_staleness.get('stale_count', 0)} | 最新快照: {execution_staleness.get('latest_generated_at', '-')}"
         ),
     }
 
@@ -7344,11 +7479,13 @@ class SmartMatchDashboard:
         statsbomb_repair_records = _load_statsbomb_review_training_action_feedback_log()
         statsbomb_gate_audit_records = _load_statsbomb_review_training_weight_gate_audit_log()
         statsbomb_gate_followup_records = _load_statsbomb_review_training_weight_gate_followup_log()
+        statsbomb_execution_queue_records = _load_statsbomb_review_training_execution_queue_log()
         statsbomb_review_center_summary = build_statsbomb_review_training_center_summary(
             statsbomb_review_quality,
             statsbomb_repair_records,
             statsbomb_gate_audit_records,
             statsbomb_gate_followup_records,
+            statsbomb_execution_queue_records,
         )
         statsbomb_review_closure_summary = build_statsbomb_review_training_closure_summary(
             get_statsbomb_review_training_samples(),
@@ -8625,11 +8762,13 @@ class SmartMatchDashboard:
         repair_records = _load_statsbomb_review_training_action_feedback_log()
         gate_audit_records = _load_statsbomb_review_training_weight_gate_audit_log()
         gate_followup_records = _load_statsbomb_review_training_weight_gate_followup_log()
+        execution_queue_records = _load_statsbomb_review_training_execution_queue_log()
         summary = build_statsbomb_review_training_center_summary(
             quality,
             repair_records,
             gate_audit_records,
             gate_followup_records,
+            execution_queue_records,
         )
         _label_queue_rows, label_queue_summary = build_statsbomb_review_label_queue(list(reversed(get_recent_settlements(limit=0))), limit=500)
 
@@ -8718,6 +8857,7 @@ class SmartMatchDashboard:
             ("标注队列", str(label_queue_summary.get("queue_count", 0)), YELLOW if int(label_queue_summary.get("queue_count", 0) or 0) else GREEN),
             ("问题数", str(summary.get("issue_count", 0)), RED if int(summary.get("issue_count", 0) or 0) else GREEN),
             ("执行待办", str(summary.get("execution_queue_count", 0)), YELLOW if int(summary.get("execution_queue_count", 0) or 0) else GREEN),
+            ("滞留待办", str(summary.get("execution_queue_stale_count", 0)), RED if int(summary.get("execution_queue_stale_count", 0) or 0) else GREEN),
             ("修复记录", str(summary.get("repair_count", 0)), "#7aa2ff"),
             ("Gate审计", str(summary.get("gate_audit_count", 0)), "#7aa2ff"),
             ("Gate告警", str(summary.get("gate_alert_count", 0)), RED if int(summary.get("gate_alert_count", 0) or 0) else GREEN),
@@ -8787,6 +8927,29 @@ class SmartMatchDashboard:
                 )
         else:
             self._strategy_row(right, "暂无执行待办", "当前没有待处理的 Gate 或质量修复动作。")
+
+        staleness = summary.get("execution_queue_staleness") if isinstance(summary.get("execution_queue_staleness"), dict) else {}
+        self._strategy_section_title(right, "待办滞留", first=False)
+        self._strategy_row(
+            right,
+            str(staleness.get("title") or "执行待办滞留 | empty"),
+            str(staleness.get("body") or "暂无导出快照；导出待办后开始统计滞留。"),
+        )
+        staleness_rows = staleness.get("rows") if isinstance(staleness.get("rows"), list) else []
+        if staleness_rows:
+            for row in [item for item in staleness_rows if isinstance(item, dict)][:4]:
+                self._strategy_row(
+                    right,
+                    f"{row.get('queue_status', '-')} | {row.get('action_key', '-')}",
+                    (
+                        f"连续 {row.get('consecutive_count', 0)} 次 | "
+                        f"{row.get('first_seen_at', '-')} -> {row.get('latest_seen_at', '-')}\n"
+                        f"最近执行: {row.get('latest_feedback_at', '-')}\n"
+                        f"建议: {row.get('recommendation', '-')}"
+                    ),
+                )
+        else:
+            self._strategy_row(right, "暂无滞留动作", "当前没有连续滞留的接管执行待办。")
 
         for row in build_statsbomb_review_training_action_rows(quality):
             if isinstance(row, dict):

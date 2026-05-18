@@ -39,6 +39,7 @@ from v24_app.ai_dashboard import (
     build_statsbomb_review_training_execution_queue_report_filename,
     build_statsbomb_review_training_execution_queue_report_lines,
     build_statsbomb_review_training_execution_queue_snapshot,
+    build_statsbomb_review_training_execution_queue_staleness_summary,
     build_statsbomb_review_training_weight_gate_trend_summary,
     build_statsbomb_review_training_weight_gate_followup_record,
     build_statsbomb_review_training_weight_gate_followup_rows,
@@ -1051,6 +1052,59 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
 
         self.assertEqual([record["queue_signature"] for record in records], ["action-2", "action-1"])
 
+    def test_review_training_execution_queue_staleness_flags_repeated_unexecuted_actions(self) -> None:
+        snapshots = [
+            {
+                "generated_at": "2026-05-14 12:20:00",
+                "action_keys": ["recover_results", "build_statsbomb_review_samples"],
+            },
+            {
+                "generated_at": "2026-05-14 12:10:00",
+                "action_keys": ["recover_results", "build_statsbomb_review_samples"],
+            },
+            {
+                "generated_at": "2026-05-14 12:00:00",
+                "action_keys": ["build_statsbomb_review_samples"],
+            },
+        ]
+
+        summary = build_statsbomb_review_training_execution_queue_staleness_summary(snapshots, [])
+
+        self.assertEqual(summary["status"], "stale")
+        self.assertEqual(summary["stale_count"], 2)
+        self.assertEqual(summary["rows"][0]["queue_status"], "stale")
+        self.assertEqual(summary["rows"][0]["consecutive_count"], 3)
+        self.assertIn("滞留", summary["rows"][0]["recommendation"])
+
+    def test_review_training_execution_queue_staleness_uses_feedback_to_reset_count(self) -> None:
+        snapshots = [
+            {
+                "generated_at": "2026-05-14 12:20:00",
+                "action_keys": ["recover_results", "build_statsbomb_review_samples"],
+            },
+            {
+                "generated_at": "2026-05-14 12:10:00",
+                "action_keys": ["recover_results", "build_statsbomb_review_samples"],
+            },
+            {
+                "generated_at": "2026-05-14 12:00:00",
+                "action_keys": ["recover_results", "build_statsbomb_review_samples"],
+            },
+        ]
+        feedback = [
+            {
+                "occurred_at": "2026-05-14 12:15:00",
+                "action_key": "recover_results_rebuild_samples",
+            }
+        ]
+
+        summary = build_statsbomb_review_training_execution_queue_staleness_summary(snapshots, feedback)
+
+        self.assertEqual(summary["status"], "watch")
+        self.assertEqual(summary["stale_count"], 0)
+        self.assertEqual(summary["rows"][0]["consecutive_count"], 1)
+        self.assertEqual(summary["rows"][0]["latest_feedback_at"], "2026-05-14 12:15:00")
+
     def test_review_training_weight_gate_followup_record_captures_recovery(self) -> None:
         record = build_statsbomb_review_training_weight_gate_followup_record(
             {
@@ -1438,6 +1492,16 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
                     "next_recommendation": "Gate 已恢复 active，可继续回测或训练稳定性验证。",
                 }
             ],
+            [
+                {
+                    "generated_at": "2026-05-17 09:20:00",
+                    "action_keys": ["recover_results", "build_statsbomb_review_samples", "refresh_review_center"],
+                },
+                {
+                    "generated_at": "2026-05-17 09:15:00",
+                    "action_keys": ["recover_results", "build_statsbomb_review_samples", "refresh_review_center"],
+                },
+            ],
         )
 
         self.assertEqual(summary["status"], "attention")
@@ -1449,9 +1513,11 @@ class AIDashboardStatsBombEventProxyTests(unittest.TestCase):
         self.assertEqual(summary["gate_alert_count"], 3)
         self.assertEqual(summary["gate_followup_count"], 1)
         self.assertEqual(summary["execution_queue_count"], 3)
+        self.assertEqual(summary["execution_queue_stale_count"], 3)
         self.assertEqual(summary["gate_trend"]["status"], "report_only")
         self.assertEqual(summary["gate_alert_status"], "attention")
         self.assertEqual(summary["execution_queue_rows"][0]["action_key"], "recover_results")
+        self.assertEqual(summary["execution_queue_staleness"]["status"], "stale")
         self.assertIn("09:12:00", summary["latest_gate_followup"])
         self.assertIn("事件代理质量", summary["title"])
         self.assertIn("样本 18", summary["body"])
