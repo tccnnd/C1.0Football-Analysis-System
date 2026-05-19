@@ -221,6 +221,11 @@ from .ui_modules import (
     build_daily_parlay_repair_audit_detail,
     build_daily_parlay_repair_audit_rows,
     build_daily_parlay_repair_audit_summary,
+    build_daily_parlay_repair_loop_csv_filename,
+    build_daily_parlay_repair_loop_csv_text,
+    build_daily_parlay_repair_loop_export_message,
+    build_daily_parlay_repair_loop_report_filename,
+    build_daily_parlay_repair_loop_report_lines,
     build_daily_parlay_source_health_summary,
     build_daily_parlay_summary,
     build_daily_parlay_ticket_rows,
@@ -10232,6 +10237,20 @@ class SmartMatchDashboard:
             pady=7,
         )
         repair_audit_button.pack(side=tk.RIGHT, padx=(0, 10))
+        repair_export_button = tk.Button(
+            header,
+            text="\u5bfc\u51fa\u4fee\u590d\u95ed\u73af",
+            command=self.export_daily_parlay_repair_loop_report,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=18,
+            pady=7,
+        )
+        repair_export_button.pack(side=tk.RIGHT, padx=(0, 10))
         tk.Button(
             header,
             text="\u5237\u65b0\u8bb0\u5f55",
@@ -13513,6 +13532,34 @@ class SmartMatchDashboard:
             "rows": rows,
         }
 
+    def _daily_parlay_repair_loop_export_snapshot(self) -> dict[str, object]:
+        queue = self._daily_parlay_repair_queue_snapshot()
+        audit = self._daily_parlay_repair_audit_snapshot()
+        return {
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "repair_queue_summary": queue.get("summary") if isinstance(queue.get("summary"), dict) else {},
+            "repair_queue_rows": queue.get("rows") if isinstance(queue.get("rows"), list) else [],
+            "repair_audit_summary": audit.get("summary") if isinstance(audit.get("summary"), dict) else {},
+            "repair_audit_rows": audit.get("rows") if isinstance(audit.get("rows"), list) else [],
+            "repair_audit_records": audit.get("records") if isinstance(audit.get("records"), list) else [],
+        }
+
+    def export_daily_parlay_repair_loop_report(self) -> tuple[Path, Path] | None:
+        now = datetime.now()
+        snapshot = self._daily_parlay_repair_loop_export_snapshot()
+        REPORT_DIR.mkdir(parents=True, exist_ok=True)
+        md_path = REPORT_DIR / build_daily_parlay_repair_loop_report_filename(now)
+        csv_path = REPORT_DIR / build_daily_parlay_repair_loop_csv_filename(now)
+        md_path.write_text(
+            "\n".join(build_daily_parlay_repair_loop_report_lines(snapshot, generated_at=now)),
+            encoding="utf-8",
+        )
+        csv_path.write_text(build_daily_parlay_repair_loop_csv_text(snapshot), encoding="utf-8-sig")
+        message = build_daily_parlay_repair_loop_export_message(md_path, csv_path, snapshot)
+        self.status_var.set(f"二串一修复闭环报告已导出: {md_path.name} / {csv_path.name}")
+        messagebox.showinfo("二串一修复闭环报告", message)
+        return md_path, csv_path
+
     def open_daily_parlay_repair_audit_window(self) -> None:
         self.current_view = "daily_parlay_repair_audit"
         snapshot = self._daily_parlay_repair_audit_snapshot()
@@ -13547,6 +13594,7 @@ class SmartMatchDashboard:
             ).pack(side=tk.RIGHT, padx=(8, 0))
 
         _header_button("刷新", lambda: (window.destroy(), self.open_daily_parlay_repair_audit_window()), color=BLUE)
+        _header_button("导出闭环报告", self.export_daily_parlay_repair_loop_report, color=BLUE)
         _header_button("修复队列", lambda: (window.destroy(), self.open_daily_parlay_repair_queue_window()))
         _header_button("回收中心", lambda: (window.destroy(), self.open_recovery_run_center()))
         _header_button("关闭", window.destroy)
@@ -13670,6 +13718,7 @@ class SmartMatchDashboard:
             ).pack(side=tk.RIGHT, padx=(8, 0))
 
         _header_button("刷新", self.open_daily_parlay_repair_queue_window, color=BLUE)
+        _header_button("导出闭环报告", self.export_daily_parlay_repair_loop_report, color=BLUE)
         _header_button("修复审计", self.open_daily_parlay_repair_audit_window)
         _header_button("二串一窗口", self.open_daily_parlay_window)
         _header_button("回收中心", self.open_recovery_run_center)

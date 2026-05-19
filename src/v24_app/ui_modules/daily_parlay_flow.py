@@ -50,6 +50,13 @@ def _md_cell(value: Any) -> str:
     return str(value if value is not None else "-").replace("|", "/").replace("\n", " ")
 
 
+def _csv_cell(value: Any) -> str:
+    text = str(value if value is not None else "")
+    if any(char in text for char in [",", '"', "\n", "\r"]):
+        return '"' + text.replace('"', '""') + '"'
+    return text
+
+
 def _pct_text(value: Any) -> str:
     return f"{_safe_float(value) * 100:.1f}%"
 
@@ -764,6 +771,207 @@ def build_daily_parlay_repair_audit_detail(record: Mapping[str, Any] | object) -
         lines.extend(["", f"错误: {item.get('error')}"])
     lines.extend(["", "原始记录", str(_safe_json(item))])
     return "\n".join(lines)
+
+
+def build_daily_parlay_repair_loop_report_filename(now: datetime | None = None) -> str:
+    current = now or datetime.now()
+    return f"daily_parlay_repair_loop_{current.strftime('%Y%m%d_%H%M%S')}.md"
+
+
+def build_daily_parlay_repair_loop_csv_filename(now: datetime | None = None) -> str:
+    current = now or datetime.now()
+    return f"daily_parlay_repair_loop_{current.strftime('%Y%m%d_%H%M%S')}.csv"
+
+
+def build_daily_parlay_repair_loop_report_lines(
+    snapshot: Mapping[str, Any] | object,
+    *,
+    generated_at: datetime | None = None,
+) -> list[str]:
+    payload = snapshot if isinstance(snapshot, Mapping) else {}
+    queue_summary = payload.get("repair_queue_summary") if isinstance(payload.get("repair_queue_summary"), Mapping) else {}
+    queue_rows = [item for item in _as_items(payload.get("repair_queue_rows")) if isinstance(item, Mapping)]
+    audit_summary = payload.get("repair_audit_summary") if isinstance(payload.get("repair_audit_summary"), Mapping) else {}
+    audit_rows = [item for item in _as_items(payload.get("repair_audit_rows")) if isinstance(item, Mapping)]
+    audit_card_rows = build_daily_parlay_repair_audit_card_rows(payload.get("repair_audit_records"))
+    current = generated_at or datetime.now()
+    lines = [
+        "# 二串一修复闭环报告",
+        "",
+        f"- 生成时间: {current.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- 修复队列: 待检查 {queue_summary.get('pending_count', 0)} | 待修复 {queue_summary.get('blocked_count', 0)} | 可自动回收 {queue_summary.get('ready_count', 0)}",
+        f"- 审计摘要: {audit_summary.get('summary_text') or '-'}",
+        "",
+        "## 审计健康卡片",
+        "",
+        "| 指标 | 数值 | 说明 |",
+        "| --- | ---: | --- |",
+    ]
+    if not audit_card_rows:
+        lines.append("| - | - | - |")
+    for row in audit_card_rows:
+        if isinstance(row, Mapping):
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        _md_cell(row.get("label")),
+                        _md_cell(row.get("value")),
+                        _md_cell(row.get("detail")),
+                    ]
+                )
+                + " |"
+            )
+    lines.extend(
+        [
+            "",
+            "## 最近修复审计",
+            "",
+            "| # | 时间 | 状态 | 动作 | 票据 | 摘要 |",
+            "| ---: | --- | --- | --- | --- | --- |",
+        ]
+    )
+    if not audit_rows:
+        lines.append("| - | - | - | - | - | 暂无修复审计记录 |")
+    for index, row in enumerate(audit_rows[:20], start=1):
+        record = row.get("record") if isinstance(row.get("record"), Mapping) else {}
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    str(index),
+                    _md_cell(row.get("generated_at") or record.get("generated_at")),
+                    _md_cell(row.get("status") or record.get("status")),
+                    _md_cell(record.get("action") or "-"),
+                    _md_cell(row.get("target_ticket_id") or record.get("target_ticket_id")),
+                    _md_cell(row.get("body") or record.get("repair_summary_text") or "-"),
+                ]
+            )
+            + " |"
+        )
+    lines.extend(
+        [
+            "",
+            "## 当前待人工修复队列",
+            "",
+            "| # | ticket_id | 状态 | 代码 | 来源 | source_id | 建议 |",
+            "| ---: | --- | --- | --- | --- | --- | --- |",
+        ]
+    )
+    if not queue_rows:
+        lines.append("| - | - | - | - | - | - | 当前没有待人工修复的二串一票据 |")
+    for index, row in enumerate(queue_rows[:50], start=1):
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    str(index),
+                    _md_cell(row.get("ticket_id")),
+                    _md_cell(row.get("status")),
+                    _md_cell(row.get("code")),
+                    _md_cell(row.get("source")),
+                    _md_cell(row.get("source_id")),
+                    _md_cell(row.get("recommendation")),
+                ]
+            )
+            + " |"
+        )
+    lines.extend(
+        [
+            "",
+            "## 复盘关注点",
+            "",
+            f"- 来源缺口票据: {queue_summary.get('source_issue_count', 0)}",
+            f"- 混源票据: {queue_summary.get('mixed_source_count', 0)}",
+            f"- 最新待人工: {audit_summary.get('latest_blocked_count', 0)}",
+            f"- 累计复跑新结算: {audit_summary.get('recovery_new_settled', 0)}",
+            "",
+            "## 边界",
+            "",
+            "- 本报告只汇总二串一修复闭环，不改写预测样本或赛前特征。",
+            "- CSV 附件用于筛选反复出现的来源缺口、混源和复跑失败问题。",
+        ]
+    )
+    return lines
+
+
+def build_daily_parlay_repair_loop_csv_text(snapshot: Mapping[str, Any] | object) -> str:
+    payload = snapshot if isinstance(snapshot, Mapping) else {}
+    audit_rows = [item for item in _as_items(payload.get("repair_audit_rows")) if isinstance(item, Mapping)]
+    queue_rows = [item for item in _as_items(payload.get("repair_queue_rows")) if isinstance(item, Mapping)]
+    headers = [
+        "record_type",
+        "generated_at",
+        "status",
+        "action",
+        "ticket_id",
+        "code",
+        "updated_ticket_count",
+        "updated_leg_count",
+        "recovery_new_settled",
+        "recovery_gate_status",
+        "queue_blocked_after_repair",
+        "message",
+        "recommendation",
+    ]
+    lines = [",".join(headers)]
+    for row in audit_rows:
+        record = row.get("record") if isinstance(row.get("record"), Mapping) else {}
+        values = [
+            "audit",
+            record.get("generated_at") or row.get("generated_at") or "",
+            record.get("status") or row.get("status") or "",
+            record.get("action") or "",
+            record.get("target_ticket_id") or row.get("target_ticket_id") or "",
+            "",
+            record.get("updated_ticket_count", 0),
+            record.get("updated_leg_count", 0),
+            record.get("recovery_new_settled", 0),
+            record.get("recovery_gate_status") or "",
+            record.get("queue_blocked_after_repair", 0),
+            record.get("repair_summary_text") or row.get("body") or "",
+            record.get("recovery_summary_text") or "",
+        ]
+        lines.append(",".join(_csv_cell(value) for value in values))
+    for row in queue_rows:
+        values = [
+            "queue",
+            row.get("created_at") or "",
+            row.get("status") or "",
+            "",
+            row.get("ticket_id") or "",
+            row.get("code") or "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            row.get("message") or "",
+            row.get("recommendation") or "",
+        ]
+        lines.append(",".join(_csv_cell(value) for value in values))
+    return "\n".join(lines) + "\n"
+
+
+def build_daily_parlay_repair_loop_export_message(
+    md_path: Path | str,
+    csv_path: Path | str,
+    snapshot: Mapping[str, Any] | object,
+) -> str:
+    payload = snapshot if isinstance(snapshot, Mapping) else {}
+    queue_summary = payload.get("repair_queue_summary") if isinstance(payload.get("repair_queue_summary"), Mapping) else {}
+    audit_summary = payload.get("repair_audit_summary") if isinstance(payload.get("repair_audit_summary"), Mapping) else {}
+    return "\n".join(
+        [
+            "二串一修复闭环报告已导出",
+            "",
+            f"Markdown: {md_path}",
+            f"CSV: {csv_path}",
+            f"待修复: {queue_summary.get('blocked_count', 0)}",
+            f"审计记录: {audit_summary.get('total', 0)}",
+            f"累计复跑新结算: {audit_summary.get('recovery_new_settled', 0)}",
+        ]
+    )
 
 
 def build_daily_parlay_empty_state(summary: Mapping[str, Any] | object) -> str:

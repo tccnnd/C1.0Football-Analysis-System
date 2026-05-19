@@ -25,6 +25,11 @@ from v24_app.ui_modules import (
     build_daily_parlay_repair_audit_detail,
     build_daily_parlay_repair_audit_rows,
     build_daily_parlay_repair_audit_summary,
+    build_daily_parlay_repair_loop_csv_filename,
+    build_daily_parlay_repair_loop_csv_text,
+    build_daily_parlay_repair_loop_export_message,
+    build_daily_parlay_repair_loop_report_filename,
+    build_daily_parlay_repair_loop_report_lines,
     build_daily_parlay_settlement_rows,
     build_daily_parlay_repair_queue_rows,
     build_daily_parlay_repair_queue_summary,
@@ -419,6 +424,83 @@ class UIDailyParlayFlowModuleTests(unittest.TestCase):
         self.assertEqual(rows[1]["tone"], "danger")
         self.assertIn("recovery_new_settled", detail)
         self.assertIn("source backfill checked 1 ticket(s)", detail)
+
+    def test_repair_loop_report_and_csv_export_payload(self) -> None:
+        snapshot = {
+            "repair_queue_summary": {
+                "pending_count": 2,
+                "blocked_count": 1,
+                "ready_count": 1,
+                "source_issue_count": 1,
+                "mixed_source_count": 0,
+            },
+            "repair_queue_rows": [
+                {
+                    "ticket_id": "ticket-blocked",
+                    "status": "blocked",
+                    "code": "parlay_source_traceability_missing",
+                    "source": "live:titan",
+                    "source_id": "-",
+                    "message": "Missing source_id",
+                    "recommendation": "Backfill source_id",
+                }
+            ],
+            "repair_audit_summary": {
+                "summary_text": "二串一修复审计 1 条",
+                "total": 1,
+                "latest_blocked_count": 0,
+                "recovery_new_settled": 1,
+            },
+            "repair_audit_records": [
+                {
+                    "generated_at": "2026-05-18 12:01:00",
+                    "status": "settled",
+                    "action": "source_backfill",
+                    "target_ticket_id": "ticket-blocked",
+                    "updated_ticket_count": 1,
+                    "updated_leg_count": 1,
+                    "recovery_new_settled": 1,
+                    "recovery_gate_status": "healthy",
+                    "queue_blocked_after_repair": 0,
+                    "repair_summary_text": "source backfill checked 1 ticket(s)",
+                    "recovery_summary_text": "parlay settlement gate healthy",
+                }
+            ],
+            "repair_audit_rows": [
+                {
+                    "generated_at": "2026-05-18 12:01:00",
+                    "status": "settled",
+                    "target_ticket_id": "ticket-blocked",
+                    "body": "action=source_backfill | settled=1",
+                    "record": {
+                        "generated_at": "2026-05-18 12:01:00",
+                        "status": "settled",
+                        "action": "source_backfill",
+                        "target_ticket_id": "ticket-blocked",
+                        "updated_ticket_count": 1,
+                        "updated_leg_count": 1,
+                        "recovery_new_settled": 1,
+                        "recovery_gate_status": "healthy",
+                        "queue_blocked_after_repair": 0,
+                        "repair_summary_text": "source backfill checked 1 ticket(s)",
+                        "recovery_summary_text": "parlay settlement gate healthy",
+                    },
+                }
+            ],
+        }
+
+        lines = build_daily_parlay_repair_loop_report_lines(snapshot, generated_at=datetime(2026, 5, 18, 13, 0, 0))
+        csv_text = build_daily_parlay_repair_loop_csv_text(snapshot)
+        message = build_daily_parlay_repair_loop_export_message("report.md", "report.csv", snapshot)
+
+        self.assertEqual(build_daily_parlay_repair_loop_report_filename(datetime(2026, 5, 18, 13, 0, 0)), "daily_parlay_repair_loop_20260518_130000.md")
+        self.assertEqual(build_daily_parlay_repair_loop_csv_filename(datetime(2026, 5, 18, 13, 0, 0)), "daily_parlay_repair_loop_20260518_130000.csv")
+        self.assertIn("# 二串一修复闭环报告", "\n".join(lines))
+        self.assertIn("ticket-blocked", "\n".join(lines))
+        self.assertIn("record_type,generated_at,status", csv_text)
+        self.assertIn("audit,2026-05-18 12:01:00,settled", csv_text)
+        self.assertIn("queue,", csv_text)
+        self.assertIn("Markdown: report.md", message)
 
     def test_mark_split_required_keeps_mixed_ticket_in_manual_queue(self) -> None:
         tickets = [

@@ -322,6 +322,92 @@ class AIDashboardDailyParlayTests(unittest.TestCase):
         self.assertIn("source_backfill", snapshot["rows"][0]["body"])
         self.assertEqual(loaded[0]["target_ticket_id"], "ticket-1")
 
+    def test_export_daily_parlay_repair_loop_report_writes_md_and_csv(self) -> None:
+        dashboard = object.__new__(SmartMatchDashboard)
+        dashboard.status_var = self._StatusVar()
+        dashboard._log_event = lambda *args, **kwargs: None
+        dashboard._daily_parlay_repair_queue_snapshot = lambda: {
+            "summary": {
+                "pending_count": 1,
+                "blocked_count": 1,
+                "ready_count": 0,
+                "source_issue_count": 1,
+                "mixed_source_count": 0,
+            },
+            "rows": [
+                {
+                    "ticket_id": "ticket-blocked",
+                    "status": "blocked",
+                    "code": "parlay_source_traceability_missing",
+                    "source": "live:titan",
+                    "source_id": "-",
+                    "message": "Missing source_id",
+                    "recommendation": "Backfill source_id",
+                }
+            ],
+        }
+        dashboard._daily_parlay_repair_audit_snapshot = lambda: {
+            "summary": {
+                "summary_text": "二串一修复审计 1 条",
+                "total": 1,
+                "latest_blocked_count": 0,
+                "recovery_new_settled": 1,
+            },
+            "records": [
+                {
+                    "generated_at": "2026-05-18 12:01:00",
+                    "status": "settled",
+                    "action": "source_backfill",
+                    "target_ticket_id": "ticket-blocked",
+                    "updated_ticket_count": 1,
+                    "updated_leg_count": 1,
+                    "recovery_new_settled": 1,
+                    "recovery_gate_status": "healthy",
+                    "queue_blocked_after_repair": 0,
+                    "repair_summary_text": "source backfill checked 1 ticket(s)",
+                    "recovery_summary_text": "parlay settlement gate healthy",
+                }
+            ],
+            "rows": [
+                {
+                    "generated_at": "2026-05-18 12:01:00",
+                    "status": "settled",
+                    "target_ticket_id": "ticket-blocked",
+                    "body": "action=source_backfill | settled=1",
+                    "record": {
+                        "generated_at": "2026-05-18 12:01:00",
+                        "status": "settled",
+                        "action": "source_backfill",
+                        "target_ticket_id": "ticket-blocked",
+                        "updated_ticket_count": 1,
+                        "updated_leg_count": 1,
+                        "recovery_new_settled": 1,
+                        "recovery_gate_status": "healthy",
+                        "queue_blocked_after_repair": 0,
+                        "repair_summary_text": "source backfill checked 1 ticket(s)",
+                        "recovery_summary_text": "parlay settlement gate healthy",
+                    },
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report_dir = Path(tmp) / "reports"
+            with patch("v24_app.ai_dashboard.REPORT_DIR", report_dir), patch("v24_app.ai_dashboard.messagebox.showinfo") as showinfo:
+                result = dashboard.export_daily_parlay_repair_loop_report()
+            md_path, csv_path = result
+            md_text = md_path.read_text(encoding="utf-8")
+            csv_text = csv_path.read_text(encoding="utf-8-sig")
+
+        self.assertTrue(md_path.name.startswith("daily_parlay_repair_loop_"))
+        self.assertTrue(csv_path.name.startswith("daily_parlay_repair_loop_"))
+        self.assertIn("二串一修复闭环报告", md_text)
+        self.assertIn("ticket-blocked", md_text)
+        self.assertIn("record_type,generated_at,status", csv_text)
+        self.assertIn("audit,2026-05-18 12:01:00,settled", csv_text)
+        self.assertIn("二串一修复闭环报告已导出", dashboard.status_var.value)
+        showinfo.assert_called_once()
+
     def test_export_daily_parlay_report_writes_report_and_snapshot_log(self) -> None:
         dashboard = object.__new__(SmartMatchDashboard)
         dashboard.status_var = self._StatusVar()
