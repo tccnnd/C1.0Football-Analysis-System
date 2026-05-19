@@ -20,6 +20,7 @@ from v24_app.ui_modules import (
     build_dashboard_report_preview_summary,
     build_daily_parlay_repair_loop_trend,
     build_daily_parlay_repair_loop_trend_alert,
+    build_daily_parlay_repair_loop_trend_routes,
     build_daily_parlay_repair_loop_trend_text,
     build_export_message_text,
     build_export_status_text,
@@ -248,8 +249,43 @@ class UIReportExportFlowModuleTests(unittest.TestCase):
         self.assertEqual(trend["metrics"][0]["queue_blocked"], 1)
         self.assertEqual(trend["metrics"][0]["recovery_new_settled"], 2)
         self.assertIn("improving", trend["summary"])
+        self.assertEqual(trend["routes"]["primary_route"], "source_backfill")
+        self.assertIn("来源回填", trend["routes"]["route_summary"])
         self.assertIn("improving", text)
+        self.assertIn("分流", text)
         self.assertIn("复跑 2", text)
+
+    def test_daily_parlay_repair_loop_routes_prioritize_mixed_and_recovery(self) -> None:
+        mixed_routes = build_daily_parlay_repair_loop_trend_routes(
+            {
+                "metrics": [
+                    {
+                        "queue_blocked": 5,
+                        "source_issue_count": 1,
+                        "mixed_source_count": 4,
+                        "recovery_error_count": 0,
+                        "recovery_new_settled": 0,
+                    }
+                ]
+            }
+        )
+        recovery_routes = build_daily_parlay_repair_loop_trend_routes(
+            {
+                "metrics": [
+                    {
+                        "queue_blocked": 2,
+                        "source_issue_count": 0,
+                        "mixed_source_count": 0,
+                        "recovery_error_count": 2,
+                        "recovery_new_settled": 0,
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(mixed_routes["primary_route"], "mixed_source_split")
+        self.assertEqual(recovery_routes["primary_route"], "recovery_failure")
+        self.assertEqual(recovery_routes["route_rows"][0]["target"], "recovery_center")
 
     def test_daily_parlay_repair_loop_trend_alert_only_shows_regression(self) -> None:
         quiet_alert = build_daily_parlay_repair_loop_trend_alert(
@@ -274,6 +310,8 @@ class UIReportExportFlowModuleTests(unittest.TestCase):
         self.assertEqual(regression_alert["tone"], "danger")
         self.assertIn("4", regression_alert["message"])
         self.assertEqual(regression_alert["recommendation"], "fix source")
+        self.assertEqual(regression_alert["primary_route"], "source_backfill")
+        self.assertTrue(regression_alert["route_rows"])
 
 
 if __name__ == "__main__":

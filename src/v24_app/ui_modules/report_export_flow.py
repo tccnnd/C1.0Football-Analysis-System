@@ -172,7 +172,10 @@ def _daily_parlay_repair_loop_csv_metrics(row: Mapping[str, object]) -> dict[str
     queue_blocked = sum(1 for item in queue_rows if str(item.get("status") or "").strip().lower() == "blocked")
     source_issue_count = sum(1 for item in queue_rows if "source" in str(item.get("code") or "").lower())
     mixed_source_count = sum(1 for item in queue_rows if "mixed" in str(item.get("code") or "").lower())
+    recovery_error_count = sum(1 for item in audit_rows if str(item.get("status") or "").strip().lower() == "error")
     recovery_new_settled = sum(_safe_int(item.get("recovery_new_settled")) for item in audit_rows)
+    recovery_rechecked_count = sum(1 for item in audit_rows if str(item.get("status") or "").strip().lower() == "rechecked")
+    recovery_no_change_count = sum(1 for item in audit_rows if str(item.get("status") or "").strip().lower() == "no_change")
     ticket_ids = {str(item.get("ticket_id") or "").strip() for item in records if str(item.get("ticket_id") or "").strip()}
     return {
         "name": row.get("name") or path.name,
@@ -183,8 +186,67 @@ def _daily_parlay_repair_loop_csv_metrics(row: Mapping[str, object]) -> dict[str
         "queue_blocked": queue_blocked,
         "source_issue_count": source_issue_count,
         "mixed_source_count": mixed_source_count,
+        "recovery_error_count": recovery_error_count,
         "recovery_new_settled": recovery_new_settled,
+        "recovery_rechecked_count": recovery_rechecked_count,
+        "recovery_no_change_count": recovery_no_change_count,
         "ticket_count": len(ticket_ids),
+    }
+
+
+def build_daily_parlay_repair_loop_trend_routes(trend: Mapping[str, object] | object) -> dict[str, object]:
+    if isinstance(trend, list):
+        metrics = [item for item in trend if isinstance(item, Mapping)]
+    else:
+        resolved = trend if isinstance(trend, Mapping) else {}
+        metrics = [item for item in resolved.get("metrics", []) if isinstance(item, Mapping)] if isinstance(resolved.get("metrics"), list) else []
+    latest = metrics[0] if metrics else {}
+    latest_blocked = _safe_int(latest.get("queue_blocked"))
+    latest_source = _safe_int(latest.get("source_issue_count"))
+    latest_mixed = _safe_int(latest.get("mixed_source_count"))
+    latest_error = _safe_int(latest.get("recovery_error_count"))
+    latest_recovery = _safe_int(latest.get("recovery_new_settled"))
+
+    if latest_error <= 0 and latest_blocked > 0 and latest_source <= 0 and latest_mixed <= 0 and latest_recovery <= 0:
+        latest_error = latest_blocked
+
+    route_rows = [
+        {
+            "key": "source_backfill",
+            "label": "来源回填",
+            "count": latest_source,
+            "detail": "补 source / source_id 后再回收",
+            "tone": "danger" if latest_source >= max(latest_mixed, latest_error) and latest_source > 0 else "neutral",
+            "action": "打开修复队列，优先回填缺失来源。",
+            "target": "repair_queue",
+        },
+        {
+            "key": "mixed_source_split",
+            "label": "混源拆票",
+            "count": latest_mixed,
+            "detail": "优先标记拆票或重建票据",
+            "tone": "danger" if latest_mixed > latest_source and latest_mixed >= latest_error and latest_mixed > 0 else "neutral",
+            "action": "打开修复队列，优先处理混源票据。",
+            "target": "repair_queue",
+        },
+        {
+            "key": "recovery_failure",
+            "label": "复跑失败",
+            "count": latest_error,
+            "detail": "优先检查复跑链路和回收中心",
+            "tone": "danger" if latest_error > 0 else "neutral",
+            "action": "打开回收中心，优先复查复跑链路。",
+            "target": "recovery_center",
+        },
+    ]
+    route_rows.sort(key=lambda item: (-_safe_int(item.get("count")), {"source_backfill": 0, "mixed_source_split": 1, "recovery_failure": 2}.get(str(item.get("key") or ""), 9)))
+    primary = route_rows[0] if route_rows and _safe_int(route_rows[0].get("count")) > 0 else {}
+    route_summary = " | ".join(f"{item.get('label') or '-'} {_safe_int(item.get('count'))}" for item in route_rows)
+    return {
+        "primary_route": str(primary.get("key") or "watch"),
+        "primary_label": str(primary.get("label") or "观察"),
+        "route_rows": route_rows,
+        "route_summary": route_summary,
     }
 
 
@@ -219,6 +281,7 @@ def build_daily_parlay_repair_loop_trend(
     latest_blocked = _safe_int(latest.get("queue_blocked"))
     latest_source = _safe_int(latest.get("source_issue_count"))
     latest_recovery = _safe_int(latest.get("recovery_new_settled"))
+    routes = build_daily_parlay_repair_loop_trend_routes(metrics)
     if latest_blocked == 0 and latest_source == 0:
         status = "healthy"
         recommendation = "当前修复闭环没有阻塞票据，继续保持导出和回收节奏。"
@@ -246,17 +309,22 @@ def build_daily_parlay_repair_loop_trend(
         "summary": summary,
         "metrics": metrics,
         "recommendation": recommendation,
+        "routes": routes,
     }
 
 
 def build_daily_parlay_repair_loop_trend_text(trend: Mapping[str, object] | object) -> str:
     resolved = trend if isinstance(trend, Mapping) else {}
     metrics = [item for item in resolved.get("metrics", []) if isinstance(item, Mapping)] if isinstance(resolved.get("metrics"), list) else []
+    routes = resolved.get("routes") if isinstance(resolved.get("routes"), Mapping) else {}
+    route_summary = str(routes.get("route_summary") or "").strip() if isinstance(routes, Mapping) else ""
     lines = [
         "二串一修复闭环健康趋势",
         f"- 摘要: {resolved.get('summary') or '-'}",
         f"- 建议: {resolved.get('recommendation') or '-'}",
     ]
+    if route_summary:
+        lines.append(f"- 分流: {route_summary}")
     if metrics:
         lines.append("- 最近记录:")
         for item in metrics[:5]:
@@ -276,6 +344,10 @@ def build_daily_parlay_repair_loop_trend_alert(trend: Mapping[str, object] | obj
     status = str(resolved.get("status") or "empty").strip().lower()
     metrics = [item for item in resolved.get("metrics", []) if isinstance(item, Mapping)] if isinstance(resolved.get("metrics"), list) else []
     latest = metrics[0] if metrics else {}
+    routes = resolved.get("routes") if isinstance(resolved.get("routes"), Mapping) else {}
+    if not routes:
+        routes = build_daily_parlay_repair_loop_trend_routes(resolved)
+    route_rows = [item for item in routes.get("route_rows", []) if isinstance(item, Mapping)] if isinstance(routes, Mapping) else []
     visible = status == "regressing"
     return {
         "visible": visible,
@@ -292,6 +364,10 @@ def build_daily_parlay_repair_loop_trend_alert(trend: Mapping[str, object] | obj
         ),
         "recommendation": resolved.get("recommendation") or "继续观察下一轮闭环导出结果。",
         "summary": resolved.get("summary") or "-",
+        "primary_route": str(routes.get("primary_route") or "watch") if isinstance(routes, Mapping) else "watch",
+        "primary_label": str(routes.get("primary_label") or "观察") if isinstance(routes, Mapping) else "观察",
+        "route_summary": str(routes.get("route_summary") or "") if isinstance(routes, Mapping) else "",
+        "route_rows": route_rows,
     }
 
 

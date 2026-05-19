@@ -13721,6 +13721,40 @@ class SmartMatchDashboard:
             wraplength=1040,
             font=("Microsoft YaHei UI", 10),
         ).pack(anchor=tk.W, padx=14, pady=(0, 12))
+        route_rows = [item for item in alert.get("route_rows", []) if isinstance(item, dict)] if isinstance(alert.get("route_rows"), list) else []
+        if route_rows:
+            route_box = tk.Frame(frame, bg="#2a1216")
+            route_box.pack(fill=tk.X, padx=14, pady=(0, 12))
+            tk.Label(
+                route_box,
+                text=f"自动分流: {alert.get('primary_label') or '-'}",
+                bg="#2a1216",
+                fg=TEXT,
+                font=("Microsoft YaHei UI", 10, "bold"),
+            ).pack(side=tk.LEFT, padx=(0, 10))
+
+            def _route_command(route_key: str):
+                if route_key == "recovery_failure":
+                    return self.open_recovery_run_center
+                return self.open_daily_parlay_repair_queue_window
+
+            for route in route_rows[:3]:
+                route_key = str(route.get("key") or "")
+                count = int(route.get("count", 0) or 0)
+                button_bg = RED if route_key == str(alert.get("primary_route") or "") and count > 0 else PANEL_2
+                tk.Button(
+                    route_box,
+                    text=f"{route.get('label') or '-'} {count}",
+                    command=_route_command(route_key),
+                    bg=button_bg,
+                    fg="white" if button_bg == RED else TEXT,
+                    activebackground="#d94743" if button_bg == RED else "#172638",
+                    activeforeground="white",
+                    relief=tk.FLAT,
+                    font=("Microsoft YaHei UI", 10, "bold"),
+                    padx=12,
+                    pady=5,
+                ).pack(side=tk.LEFT, padx=(0, 8))
 
     def open_daily_parlay_repair_audit_window(self) -> None:
         self.current_view = "daily_parlay_repair_audit"
