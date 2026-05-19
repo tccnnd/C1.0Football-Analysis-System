@@ -105,19 +105,25 @@ class UIReportExportFlowModuleTests(unittest.TestCase):
             report_dir = Path(tmp)
             match_report = report_dir / "ai_match_report_20260510_120000_a_vs_b.md"
             loop_report = report_dir / "strategy_release_recovery_loop_20260510_121000.md"
+            repair_loop_report = report_dir / "daily_parlay_repair_loop_20260510_122000.md"
             ignored = report_dir / "strategy_release_recovery_loop_20260510_121000.json"
             match_report.write_text("match", encoding="utf-8")
             loop_report.write_text("loop", encoding="utf-8")
+            repair_loop_report.write_text("repair loop", encoding="utf-8")
             ignored.write_text("{}", encoding="utf-8")
             os.utime(match_report, (1000, 1000))
             os.utime(loop_report, (2000, 2000))
+            os.utime(repair_loop_report, (1500, 1500))
 
             rows = list_dashboard_report_files(report_dir)
 
-        self.assertEqual(len(rows), 2)
+        self.assertEqual(len(rows), 3)
         self.assertEqual(rows[0]["name"], loop_report.name)
         self.assertEqual(rows[0]["label"], "\u653e\u884c\u95ed\u73af")
-        self.assertEqual(rows[1]["label"], "\u5355\u573a\u5206\u6790")
+        self.assertEqual(rows[1]["name"], repair_loop_report.name)
+        self.assertEqual(rows[1]["label"], "二串一修复闭环")
+        self.assertEqual(rows[2]["label"], "\u5355\u573a\u5206\u6790")
+        self.assertEqual(classify_dashboard_report_file(Path("daily_parlay_repair_loop_20260514_120000.md")), "二串一修复闭环")
         self.assertEqual(classify_dashboard_report_file(Path("video_review_fewshot_memory_audit_20260514_120000.md")), "AI\u89c6\u9891\u5ba1\u8ba1")
         self.assertEqual(classify_dashboard_report_file(Path("unknown_report.md")), "\u5176\u4ed6\u62a5\u544a")
 
@@ -125,6 +131,7 @@ class UIReportExportFlowModuleTests(unittest.TestCase):
         rows = [
             {"name": "ai_match_report_a.md", "label": "\u5355\u573a\u5206\u6790", "path": Path("reports/ai_match_report_a.md")},
             {"name": "strategy_release_recovery_loop_b.md", "label": "\u653e\u884c\u95ed\u73af", "path": Path("reports/strategy_release_recovery_loop_b.md")},
+            {"name": "daily_parlay_repair_loop_c.md", "label": "二串一修复闭环", "path": Path("reports/daily_parlay_repair_loop_c.md")},
             {"name": "strategy_release_recovery_loop_c.md", "label": "\u653e\u884c\u95ed\u73af", "path": Path("reports/strategy_release_recovery_loop_c.md")},
         ]
 
@@ -135,6 +142,7 @@ class UIReportExportFlowModuleTests(unittest.TestCase):
         self.assertEqual(summary["\u653e\u884c\u95ed\u73af"], 2)
         self.assertEqual(options[0], "\u5168\u90e8")
         self.assertEqual(options[1], "\u653e\u884c\u95ed\u73af")
+        self.assertIn("二串一修复闭环", options)
         self.assertEqual(len(filtered), 1)
         self.assertEqual(filtered[0]["name"], "strategy_release_recovery_loop_c.md")
 

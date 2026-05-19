@@ -6232,14 +6232,21 @@ class SmartMatchDashboard:
         refresh_filter_buttons()
         refresh_issue_list()
 
-    def open_history_reports(self) -> None:
+    def open_history_reports(self, selected_type: str = "全部", query: str = "") -> None:
         self.current_nav_index = 3
         self.current_view = "history"
         self._refresh_nav_highlight()
         REPORT_DIR.mkdir(parents=True, exist_ok=True)
         report_rows = list_dashboard_report_files(REPORT_DIR, limit=200)
+        type_options = dashboard_report_type_options(report_rows)
+        initial_type = str(selected_type or "全部").strip() or "全部"
+        if initial_type not in type_options:
+            initial_type = "全部"
 
-        shell = self._page_shell("\u5386\u53f2\u62a5\u544a", f"\u62a5\u544a\u76ee\u5f55: {REPORT_DIR}")
+        subtitle = f"\u62a5\u544a\u76ee\u5f55: {REPORT_DIR}"
+        if initial_type != "\u5168\u90e8":
+            subtitle += f" | \u5f53\u524d\u7b5b\u9009: {initial_type}"
+        shell = self._page_shell("\u5386\u53f2\u62a5\u544a", subtitle)
 
         body = tk.Frame(shell, bg=BG)
         body.pack(fill=tk.BOTH, expand=True)
@@ -6250,9 +6257,8 @@ class SmartMatchDashboard:
 
         filter_box = tk.Frame(left, bg=PANEL)
         filter_box.pack(fill=tk.X, padx=10, pady=(10, 0))
-        type_var = tk.StringVar(value="\u5168\u90e8")
-        search_var = tk.StringVar(value="")
-        type_options = dashboard_report_type_options(report_rows)
+        type_var = tk.StringVar(value=initial_type)
+        search_var = tk.StringVar(value=str(query or ""))
         ttk.Combobox(
             filter_box,
             state="readonly",
@@ -6350,6 +6356,9 @@ class SmartMatchDashboard:
         listbox.bind("<<ListboxSelect>>", lambda _event: show_file(listbox.curselection()[0] if listbox.curselection() else -1))
         type_var.trace_add("write", lambda *_args: refresh_report_list())
         search_var.trace_add("write", lambda *_args: refresh_report_list())
+
+    def open_daily_parlay_repair_loop_history(self) -> None:
+        self.open_history_reports(selected_type="二串一修复闭环")
 
     def open_data_center(self) -> None:
         self.current_nav_index = 5
@@ -13595,6 +13604,7 @@ class SmartMatchDashboard:
 
         _header_button("刷新", lambda: (window.destroy(), self.open_daily_parlay_repair_audit_window()), color=BLUE)
         _header_button("导出闭环报告", self.export_daily_parlay_repair_loop_report, color=BLUE)
+        _header_button("历史报告", self.open_daily_parlay_repair_loop_history)
         _header_button("修复队列", lambda: (window.destroy(), self.open_daily_parlay_repair_queue_window()))
         _header_button("回收中心", lambda: (window.destroy(), self.open_recovery_run_center()))
         _header_button("关闭", window.destroy)
@@ -13719,6 +13729,7 @@ class SmartMatchDashboard:
 
         _header_button("刷新", self.open_daily_parlay_repair_queue_window, color=BLUE)
         _header_button("导出闭环报告", self.export_daily_parlay_repair_loop_report, color=BLUE)
+        _header_button("历史报告", self.open_daily_parlay_repair_loop_history)
         _header_button("修复审计", self.open_daily_parlay_repair_audit_window)
         _header_button("二串一窗口", self.open_daily_parlay_window)
         _header_button("回收中心", self.open_recovery_run_center)

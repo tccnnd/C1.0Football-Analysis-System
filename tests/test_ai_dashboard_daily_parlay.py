@@ -408,6 +408,15 @@ class AIDashboardDailyParlayTests(unittest.TestCase):
         self.assertIn("二串一修复闭环报告已导出", dashboard.status_var.value)
         showinfo.assert_called_once()
 
+    def test_open_daily_parlay_repair_loop_history_prefilters_history_view(self) -> None:
+        dashboard = object.__new__(SmartMatchDashboard)
+        called: dict[str, object] = {}
+        dashboard.open_history_reports = lambda **kwargs: called.update(kwargs)
+
+        dashboard.open_daily_parlay_repair_loop_history()
+
+        self.assertEqual(called.get("selected_type"), "二串一修复闭环")
+
     def test_export_daily_parlay_report_writes_report_and_snapshot_log(self) -> None:
         dashboard = object.__new__(SmartMatchDashboard)
         dashboard.status_var = self._StatusVar()

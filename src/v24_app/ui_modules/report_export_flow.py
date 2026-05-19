@@ -8,6 +8,7 @@ from typing import Any, Mapping
 REPORT_TYPE_PREFIXES: tuple[tuple[str, str], ...] = (
     ("ai_match_report_", "\u5355\u573a\u5206\u6790"),
     ("strategy_release_recovery_loop_", "\u653e\u884c\u95ed\u73af"),
+    ("daily_parlay_repair_loop_", "二串一修复闭环"),
     ("strategy_allowlist_", "\u653e\u884c\u6e05\u5355"),
     ("strategy_policy_audit_", "\u8c03\u53c2\u5ba1\u8ba1"),
     ("statsbomb_event_sandbox_", "StatsBomb\u590d\u76d8"),
