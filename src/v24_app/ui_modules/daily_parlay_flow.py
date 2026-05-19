@@ -248,6 +248,7 @@ def build_daily_parlay_snapshot(
     settled = _as_items(settled_tickets)
     metrics = selector_metrics if isinstance(selector_metrics, Mapping) else {}
     summary = build_daily_parlay_summary(active, settled)
+    source_health = build_daily_parlay_source_health_summary(active, settled)
     current = generated_at or datetime.now()
     ticket_rows = build_daily_parlay_ticket_rows(active, limit=20)
     settlement_rows = build_daily_parlay_settlement_rows(settled, limit=20)
@@ -262,12 +263,19 @@ def build_daily_parlay_snapshot(
     summary["source"] = " / ".join(source_names) if source_names else "-"
     summary["source_id"] = " / ".join(source_ids) if source_ids else "-"
     summary["source_summary_text"] = f"{summary['source']} | {summary['source_id']}"
+    summary["source_health_status"] = str(source_health.get("status") or "healthy")
+    summary["source_health_issue_count"] = int(_safe_float(source_health.get("issue_count"), 0.0))
+    summary["source_health_tone"] = str(source_health.get("tone") or "neutral")
+    summary["source_health_summary_text"] = str(source_health.get("summary_text") or "-")
     return {
         "schema_version": 1,
         "generated_at": current.strftime("%Y-%m-%d %H:%M:%S"),
         "report_path": str(report_path) if report_path else "",
         "source": str(source or "-"),
         "summary": summary,
+        "source_health": _safe_json(source_health),
+        "source_health_card_rows": _safe_json(build_daily_parlay_source_health_card_rows(source_health)),
+        "source_health_issue_rows": _safe_json(build_daily_parlay_source_health_issue_rows(source_health)),
         "selector_metrics": _safe_json(metrics),
         "active_tickets": _safe_json(active),
         "settled_tickets": _safe_json(settled),
@@ -311,6 +319,367 @@ def _ticket_source_summary(ticket: Mapping[str, Any] | object) -> tuple[str, str
         if source_id and source_id not in source_ids:
             source_ids.append(source_id)
     return (" / ".join(sources) if sources else "-", " / ".join(source_ids) if source_ids else "-")
+
+
+def _source_issue_tone(severity: str) -> str:
+    normalized = str(severity or "").strip().lower()
+    if normalized in {"blocking", "high"}:
+        return "bad"
+    if normalized in {"warning", "medium"}:
+        return "warning"
+    if normalized in {"info", "low"}:
+        return "info"
+    return "neutral"
+
+
+def _source_issue_sort_key(issue: Mapping[str, Any]) -> tuple[int, str, str]:
+    severity = str(issue.get("severity") or "").strip().lower()
+    order = {"blocking": 0, "high": 0, "warning": 1, "medium": 1, "info": 2, "low": 2}
+    return (order.get(severity, 3), str(issue.get("code") or ""), str(issue.get("target") or ""))
+
+
+def build_daily_parlay_source_health_summary(
+    active_tickets: Sequence[Any] | object,
+    settled_tickets: Sequence[Any] | object,
+) -> dict[str, Any]:
+    active = _as_items(active_tickets)
+    settled = _as_items(settled_tickets)
+    tickets = [*active, *settled]
+    issue_map: dict[str, dict[str, Any]] = {}
+    ticket_count = len(tickets)
+    leg_count = 0
+    traceable_leg_count = 0
+    source_id_leg_count = 0
+    missing_traceability_leg_count = 0
+    mixed_ticket_count = 0
+    full_traceable_ticket_count = 0
+    partial_traceable_ticket_count = 0
+    untraceable_ticket_count = 0
+    source_family_names: list[str] = []
+    traceable_ticket_ids: list[str] = []
+    trace_gap_ticket_ids: list[str] = []
+    mixed_ticket_ids: list[str] = []
+    untraceable_ticket_ids: list[str] = []
+    missing_source_id_ticket_ids: list[str] = []
+
+    for ticket in tickets:
+        ticket_id = str(ticket.get("ticket_id") or "").strip()
+        ticket_source = str(ticket.get("source") or "").strip()
+        ticket_source_id = str(ticket.get("source_id") or "").strip()
+        legs = ticket.get("legs", [])
+        if not isinstance(legs, Sequence) or isinstance(legs, (str, bytes, bytearray)):
+            legs = []
+
+        resolved_sources: list[str] = []
+        ticket_leg_count = 0
+        ticket_traceable_leg_count = 0
+        ticket_source_id_count = 0
+        ticket_missing_traceability_count = 0
+        ticket_missing_source_id_count = 0
+        ticket_mixed_sources = False
+
+        for leg in legs:
+            if not isinstance(leg, Mapping):
+                continue
+            leg_count += 1
+            ticket_leg_count += 1
+            leg_source = str(leg.get("source") or ticket_source or "").strip()
+            leg_source_id = str(leg.get("source_id") or ticket_source_id or "").strip()
+            if leg_source or leg_source_id:
+                traceable_leg_count += 1
+                ticket_traceable_leg_count += 1
+            if leg_source:
+                if leg_source not in resolved_sources:
+                    resolved_sources.append(leg_source)
+                if leg_source not in source_family_names:
+                    source_family_names.append(leg_source)
+            if leg_source_id:
+                source_id_leg_count += 1
+                ticket_source_id_count += 1
+            else:
+                ticket_missing_source_id_count += 1
+            if not leg_source and not leg_source_id:
+                missing_traceability_leg_count += 1
+                ticket_missing_traceability_count += 1
+
+        if ticket_leg_count <= 0:
+            ticket_missing_traceability_count += 1
+            missing_traceability_leg_count += 1
+
+        if len(resolved_sources) > 1:
+            mixed_ticket_count += 1
+            ticket_mixed_sources = True
+            if ticket_id and ticket_id not in mixed_ticket_ids:
+                mixed_ticket_ids.append(ticket_id)
+
+        if ticket_leg_count > 0 and ticket_traceable_leg_count == ticket_leg_count:
+            full_traceable_ticket_count += 1
+            if ticket_id and ticket_id not in traceable_ticket_ids:
+                traceable_ticket_ids.append(ticket_id)
+        elif ticket_traceable_leg_count > 0:
+            partial_traceable_ticket_count += 1
+            if ticket_id and ticket_id not in traceable_ticket_ids:
+                traceable_ticket_ids.append(ticket_id)
+        else:
+            untraceable_ticket_count += 1
+            if ticket_id and ticket_id not in untraceable_ticket_ids:
+                untraceable_ticket_ids.append(ticket_id)
+
+        if ticket_missing_source_id_count > 0:
+            if ticket_id and ticket_id not in missing_source_id_ticket_ids:
+                missing_source_id_ticket_ids.append(ticket_id)
+            issue = issue_map.setdefault(
+                "parlay_source_id_missing",
+                {
+                    "code": "parlay_source_id_missing",
+                    "severity": "warning",
+                    "message": "",
+                    "recommendation": "回填 source_id 并在导出前重新生成快照，确保回收闭环能按场次回溯。",
+                    "target": "",
+                },
+            )
+            issue["message"] = (
+                f"{ticket_missing_source_id_count}/{ticket_leg_count or 1} 条腿缺少 source_id"
+                if ticket_missing_source_id_count > 0
+                else "串关腿缺少 source_id"
+            )
+            issue["target"] = ticket_id or issue.get("target") or "-"
+
+        if ticket_missing_traceability_count > 0:
+            if ticket_id and ticket_id not in trace_gap_ticket_ids:
+                trace_gap_ticket_ids.append(ticket_id)
+            issue = issue_map.setdefault(
+                "parlay_traceability_gap",
+                {
+                    "code": "parlay_traceability_gap",
+                    "severity": "warning",
+                    "message": "",
+                    "recommendation": "补齐 source/source_id 后再生成串关快照，避免后续回收和复盘无法对账。",
+                    "target": "",
+                },
+            )
+            issue["message"] = "串关票据存在 source/source_id 追溯缺口"
+            issue["target"] = " / ".join(trace_gap_ticket_ids[:5]) or "-"
+
+        if ticket_mixed_sources:
+            issue = issue_map.setdefault(
+                "parlay_mixed_sources",
+                {
+                    "code": "parlay_mixed_sources",
+                    "severity": "warning",
+                    "message": "",
+                    "recommendation": "尽量让同一串关票据的腿保持同源，若必须混源则拆分为单源票据后再导出。",
+                    "target": "",
+                },
+            )
+            issue["message"] = f"{mixed_ticket_count} 张票据含多来源腿"
+            issue["target"] = " / ".join(mixed_ticket_ids[:5]) or "-"
+
+    if ticket_count > 0 and traceable_leg_count <= 0:
+        blocked_targets = [
+            str(item.get("ticket_id") or "").strip()
+            for item in tickets[:3]
+            if isinstance(item, Mapping) and str(item.get("ticket_id") or "").strip()
+        ]
+        issue_map["parlay_traceability_blocked"] = {
+            "code": "parlay_traceability_blocked",
+            "severity": "blocking",
+            "message": "当前串关票据没有任何可追溯来源腿",
+            "recommendation": "先补齐 source/source_id，再生成或导出串关快照，否则回收闭环无法对账。",
+            "target": " / ".join(blocked_targets) or "-",
+        }
+
+    if "parlay_source_id_missing" in issue_map:
+        issue_map["parlay_source_id_missing"]["message"] = (
+            f"{len(missing_source_id_ticket_ids)} 张票据存在 source_id 缺口 | "
+            f"source_id {source_id_leg_count}/{leg_count or 0}"
+        )
+        issue_map["parlay_source_id_missing"]["target"] = " / ".join(missing_source_id_ticket_ids[:5]) or "-"
+    if "parlay_traceability_gap" in issue_map:
+        issue_map["parlay_traceability_gap"]["target"] = " / ".join(trace_gap_ticket_ids[:5]) or "-"
+    if "parlay_mixed_sources" in issue_map:
+        issue_map["parlay_mixed_sources"]["message"] = f"{mixed_ticket_count} 张票据含多来源腿"
+        issue_map["parlay_mixed_sources"]["target"] = " / ".join(mixed_ticket_ids[:5]) or "-"
+
+    issues = sorted(issue_map.values(), key=_source_issue_sort_key)
+    blocking_count = sum(1 for item in issues if str(item.get("severity") or "").strip().lower() in {"blocking", "high"})
+    warning_count = sum(1 for item in issues if str(item.get("severity") or "").strip().lower() in {"warning", "medium"})
+    if blocking_count:
+        status = "blocked"
+    elif issues:
+        status = "attention"
+    else:
+        status = "healthy"
+    tone = "bad" if status == "blocked" else "warning" if status == "attention" else "good"
+    source_coverage = round(traceable_leg_count / leg_count, 4) if leg_count else 1.0
+    source_id_coverage = round(source_id_leg_count / leg_count, 4) if leg_count else 1.0
+    ticket_traceability_ratio = round((full_traceable_ticket_count + partial_traceable_ticket_count) / ticket_count, 4) if ticket_count else 1.0
+    issue_rows = [
+        {
+            "code": str(issue.get("code") or "-"),
+            "severity": str(issue.get("severity") or "-"),
+            "message": str(issue.get("message") or "-"),
+            "recommendation": str(issue.get("recommendation") or "-"),
+            "target": str(issue.get("target") or "-"),
+            "tone": _source_issue_tone(str(issue.get("severity") or "")),
+            "title": f"{str(issue.get('code') or '-')} | {str(issue.get('severity') or '-')}",
+            "body": (
+                f"{str(issue.get('message') or '-')}\n"
+                f"建议: {str(issue.get('recommendation') or '-')}"
+                + (f"\n范围: {str(issue.get('target') or '-')}" if str(issue.get("target") or "-") != "-" else "")
+            ),
+        }
+        for issue in issues
+    ]
+    card_rows = [
+        {
+            "label": "整体状态",
+            "value": status,
+            "tone": tone,
+            "detail": f"issues={len(issues)} | blocking={blocking_count} | warning={warning_count}",
+        },
+        {
+            "label": "完整追溯票据",
+            "value": f"{full_traceable_ticket_count}/{ticket_count}" if ticket_count else "0/0",
+            "tone": "neutral" if ticket_count <= 0 else "good" if full_traceable_ticket_count == ticket_count else "warning" if full_traceable_ticket_count > 0 else "bad",
+            "detail": f"partial={partial_traceable_ticket_count} | missing={untraceable_ticket_count}",
+        },
+        {
+            "label": "来源腿覆盖",
+            "value": f"{traceable_leg_count}/{leg_count}" if leg_count else "0/0",
+            "tone": "neutral" if leg_count <= 0 else "good" if traceable_leg_count == leg_count else "warning" if traceable_leg_count > 0 else "bad",
+            "detail": f"traceable_ratio={traceable_leg_count}/{leg_count or 1}",
+        },
+        {
+            "label": "source_id覆盖",
+            "value": f"{source_id_leg_count}/{leg_count}" if leg_count else "0/0",
+            "tone": "neutral" if leg_count <= 0 else "good" if source_id_leg_count == leg_count else "warning" if source_id_leg_count > 0 else "bad",
+            "detail": f"missing={max(0, leg_count - source_id_leg_count)}",
+        },
+        {
+            "label": "混合来源票据",
+            "value": str(mixed_ticket_count),
+            "tone": "warning" if mixed_ticket_count > 0 else "good",
+            "detail": f"ticket_ids={', '.join(mixed_ticket_ids[:3]) or '-'}",
+        },
+        {
+            "label": "问题数",
+            "value": str(len(issues)),
+            "tone": "bad" if status == "blocked" else "warning" if status == "attention" else "good",
+            "detail": f"traceability_ratio={ticket_traceability_ratio:.2f} | source_families={len(source_family_names)}",
+        },
+    ]
+    return {
+        "status": status,
+        "tone": tone,
+        "issue_count": len(issues),
+        "issues": issues,
+        "issue_rows": issue_rows,
+        "card_rows": card_rows,
+        "metrics": {
+            "ticket_count": ticket_count,
+            "leg_count": leg_count,
+            "full_traceable_ticket_count": full_traceable_ticket_count,
+            "partial_traceable_ticket_count": partial_traceable_ticket_count,
+            "untraceable_ticket_count": untraceable_ticket_count,
+            "traceable_leg_count": traceable_leg_count,
+            "source_id_leg_count": source_id_leg_count,
+            "missing_traceability_leg_count": missing_traceability_leg_count,
+            "mixed_ticket_count": mixed_ticket_count,
+            "traceable_ticket_ratio": ticket_traceability_ratio,
+            "source_coverage": source_coverage,
+            "source_id_coverage": source_id_coverage,
+        },
+        "source_family_count": len(source_family_names),
+        "source_families": source_family_names,
+        "traceable_ticket_ids": traceable_ticket_ids,
+        "mixed_ticket_ids": mixed_ticket_ids,
+        "untraceable_ticket_ids": untraceable_ticket_ids,
+        "missing_source_id_ticket_ids": missing_source_id_ticket_ids,
+        "summary_text": (
+            f"来源健康 {status} | 完整票据 {full_traceable_ticket_count}/{ticket_count or 0} | "
+            f"来源腿 {traceable_leg_count}/{leg_count or 0} | source_id {source_id_leg_count}/{leg_count or 0} | "
+            f"问题 {len(issues)}"
+        ),
+    }
+
+
+def build_daily_parlay_source_health_card_rows(source_health: Mapping[str, Any] | object) -> list[dict[str, Any]]:
+    resolved = source_health if isinstance(source_health, Mapping) else {}
+    rows = resolved.get("card_rows")
+    if isinstance(rows, Sequence) and not isinstance(rows, (str, bytes, bytearray)):
+        return [row for row in rows if isinstance(row, Mapping)]
+    metrics = resolved.get("metrics") if isinstance(resolved.get("metrics"), Mapping) else {}
+    status = str(resolved.get("status") or "healthy")
+    tone = str(resolved.get("tone") or "neutral")
+    ticket_count = _safe_float(metrics.get("ticket_count"), 0.0)
+    leg_count = _safe_float(metrics.get("leg_count"), 0.0)
+    traceable_leg_count = _safe_float(metrics.get("traceable_leg_count"), 0.0)
+    source_id_leg_count = _safe_float(metrics.get("source_id_leg_count"), 0.0)
+    mixed_ticket_count = _safe_float(metrics.get("mixed_ticket_count"), 0.0)
+    return [
+        {
+            "label": "整体状态",
+            "value": status,
+            "tone": tone,
+            "detail": str(resolved.get("summary_text") or "-"),
+        },
+        {
+            "label": "完整追溯票据",
+            "value": f"{int(_safe_float(metrics.get('full_traceable_ticket_count'), 0.0))}/{int(ticket_count)}",
+            "tone": "neutral" if ticket_count <= 0 else "good" if _safe_float(metrics.get("full_traceable_ticket_count"), 0.0) >= ticket_count else "warning" if _safe_float(metrics.get("full_traceable_ticket_count"), 0.0) > 0 else "bad",
+            "detail": f"partial={int(_safe_float(metrics.get('partial_traceable_ticket_count'), 0.0))} | missing={int(_safe_float(metrics.get('untraceable_ticket_count'), 0.0))}",
+        },
+        {
+            "label": "来源腿覆盖",
+            "value": f"{int(traceable_leg_count)}/{int(leg_count)}",
+            "tone": "neutral" if leg_count <= 0 else "good" if traceable_leg_count >= leg_count else "warning" if traceable_leg_count > 0 else "bad",
+            "detail": f"source_coverage={_safe_float(metrics.get('source_coverage'), 0.0):.2f}",
+        },
+        {
+            "label": "source_id覆盖",
+            "value": f"{int(source_id_leg_count)}/{int(leg_count)}",
+            "tone": "neutral" if leg_count <= 0 else "good" if source_id_leg_count >= leg_count else "warning" if source_id_leg_count > 0 else "bad",
+            "detail": f"source_id_ratio={_safe_float(metrics.get('source_id_coverage'), 0.0):.2f}",
+        },
+        {
+            "label": "混合来源票据",
+            "value": str(int(mixed_ticket_count)),
+            "tone": "warning" if mixed_ticket_count > 0 else "good",
+            "detail": f"source_families={int(_safe_float(resolved.get('source_family_count'), 0.0))}",
+        },
+        {
+            "label": "问题数",
+            "value": str(int(_safe_float(resolved.get("issue_count"), 0.0))),
+            "tone": "bad" if status == "blocked" else "warning" if status == "attention" else "good",
+            "detail": f"blocking={sum(1 for item in _as_items(resolved.get('issues')) if str(item.get('severity') or '').lower() in {'blocking', 'high'})}",
+        },
+    ]
+
+
+def build_daily_parlay_source_health_issue_rows(source_health: Mapping[str, Any] | object, limit: int = 5) -> list[dict[str, Any]]:
+    resolved = source_health if isinstance(source_health, Mapping) else {}
+    issues = [item for item in _as_items(resolved.get("issues")) if isinstance(item, Mapping)]
+    ordered = sorted(issues, key=_source_issue_sort_key)
+    rows: list[dict[str, Any]] = []
+    for issue in ordered[: _safe_limit(limit)]:
+        rows.append(
+            {
+                "code": str(issue.get("code") or "-"),
+                "severity": str(issue.get("severity") or "-"),
+                "message": str(issue.get("message") or "-"),
+                "recommendation": str(issue.get("recommendation") or "-"),
+                "target": str(issue.get("target") or "-"),
+                "tone": _source_issue_tone(str(issue.get("severity") or "")),
+                "title": f"{str(issue.get('code') or '-')} | {str(issue.get('severity') or '-')}",
+                "body": (
+                    f"{str(issue.get('message') or '-')}\n"
+                    f"建议: {str(issue.get('recommendation') or '-')}"
+                    + (f"\n范围: {str(issue.get('target') or '-')}" if str(issue.get("target") or "-") != "-" else "")
+                ),
+            }
+        )
+    return rows
 
 
 def build_daily_parlay_snapshot_settlement_closure(
@@ -450,6 +819,9 @@ def build_daily_parlay_snapshot_settlement_closure(
 def build_daily_parlay_report_lines(snapshot: Mapping[str, Any] | object) -> list[str]:
     payload = snapshot if isinstance(snapshot, Mapping) else {}
     summary = payload.get("summary") if isinstance(payload.get("summary"), Mapping) else {}
+    source_health = payload.get("source_health") if isinstance(payload.get("source_health"), Mapping) else {}
+    source_health_card_rows = payload.get("source_health_card_rows") if isinstance(payload.get("source_health_card_rows"), list) else []
+    source_health_issue_rows = payload.get("source_health_issue_rows") if isinstance(payload.get("source_health_issue_rows"), list) else []
     metrics = payload.get("selector_metrics") if isinstance(payload.get("selector_metrics"), Mapping) else {}
     ticket_rows = payload.get("ticket_rows") if isinstance(payload.get("ticket_rows"), list) else []
     settlement_rows = payload.get("settlement_rows") if isinstance(payload.get("settlement_rows"), list) else []
@@ -465,23 +837,76 @@ def build_daily_parlay_report_lines(snapshot: Mapping[str, Any] | object) -> lis
         f"- 近期命中: {_pct_text(summary.get('hit_rate'))}",
         f"- 票据来源: {summary.get('source') or '-'} | {summary.get('source_id') or '-'}",
         "",
-        "## 组合健康",
+        "## 来源健康审计",
         "",
-        "| 指标 | 数值 |",
-        "| --- | ---: |",
-        f"| 当前票据 | {_md_cell(metrics.get('ticket_count', summary.get('active_count', 0)))} |",
-        f"| 唯一场次 | {_md_cell(metrics.get('unique_match_count', 0))} |",
-        f"| 最大场次暴露 | {_md_cell(metrics.get('max_match_exposure', 0))} |",
-        f"| 混合比例 | {_pct_text(metrics.get('mixed_ratio', 0))} |",
-        f"| 最高组合命中 | {_pct_text(metrics.get('max_expected_hit', 0))} |",
-        f"| 低折扣组合 | {_md_cell(metrics.get('low_discount_count', 0))} |",
-        f"| 高爆冷腿 | {_md_cell(metrics.get('high_upset_leg_count', 0))} |",
+        f"- 状态: {source_health.get('status') or '-'} | 问题数: {source_health.get('issue_count', 0)} | 来源家族: {source_health.get('source_family_count', 0)}",
+        f"- 摘要: {source_health.get('summary_text') or '-'}",
         "",
-        "## 今日推荐组合",
-        "",
-        "| # | ticket_id | 来源 | 来源ID | 类型 | 预期命中 | 状态 | 创建时间 | 组合腿 |",
-        "| ---: | --- | --- | --- | --- | ---: | --- | --- | --- |",
+        "| 指标 | 数值 | 说明 |",
+        "| --- | ---: | --- |",
     ]
+    visible_source_cards = [item for item in source_health_card_rows if isinstance(item, Mapping)]
+    if not visible_source_cards:
+        lines.append("| - | - | - |")
+    for row in visible_source_cards[:8]:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    _md_cell(row.get("label")),
+                    _md_cell(row.get("value")),
+                    _md_cell(row.get("detail")),
+                ]
+            )
+            + " |"
+        )
+    lines.extend(
+        [
+            "",
+            "## 来源问题与建议",
+            "",
+            "| 问题代码 | 严重级别 | 说明 | 建议 | 范围 |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+    )
+    visible_source_issues = [item for item in source_health_issue_rows if isinstance(item, Mapping)]
+    if not visible_source_issues:
+        lines.append("| - | - | - | - | - |")
+    for row in visible_source_issues[:5]:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    _md_cell(row.get("code")),
+                    _md_cell(row.get("severity")),
+                    _md_cell(row.get("message")),
+                    _md_cell(row.get("recommendation")),
+                    _md_cell(row.get("target")),
+                ]
+            )
+            + " |"
+        )
+    lines.extend(
+        [
+            "",
+            "## 组合健康",
+            "",
+            "| 指标 | 数值 |",
+            "| --- | ---: |",
+            f"| 当前票据 | {_md_cell(metrics.get('ticket_count', summary.get('active_count', 0)))} |",
+            f"| 唯一场次 | {_md_cell(metrics.get('unique_match_count', 0))} |",
+            f"| 最大场次暴露 | {_md_cell(metrics.get('max_match_exposure', 0))} |",
+            f"| 混合比例 | {_pct_text(metrics.get('mixed_ratio', 0))} |",
+            f"| 最高组合命中 | {_pct_text(metrics.get('max_expected_hit', 0))} |",
+            f"| 低折扣组合 | {_md_cell(metrics.get('low_discount_count', 0))} |",
+            f"| 高爆冷腿 | {_md_cell(metrics.get('high_upset_leg_count', 0))} |",
+            "",
+            "## 今日推荐组合",
+            "",
+            "| # | ticket_id | 来源 | 来源ID | 类型 | 预期命中 | 状态 | 创建时间 | 组合腿 |",
+            "| ---: | --- | --- | --- | --- | ---: | --- | --- | --- |",
+        ]
+    )
     visible_tickets = [item for item in ticket_rows if isinstance(item, Mapping)]
     if not visible_tickets:
         lines.append(f"| - | - | - | - | - | - | {_md_cell(payload.get('empty_state') or '当前没有可展示的二串一组合。')} |")

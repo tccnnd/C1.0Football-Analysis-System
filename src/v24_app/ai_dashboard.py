@@ -207,6 +207,9 @@ from .ui_modules import (
     build_daily_parlay_settlement_rows,
     build_daily_parlay_snapshot,
     build_daily_parlay_snapshot_settlement_closure,
+    build_daily_parlay_source_health_card_rows,
+    build_daily_parlay_source_health_issue_rows,
+    build_daily_parlay_source_health_summary,
     build_daily_parlay_summary,
     build_daily_parlay_ticket_rows,
     refresh_parlay_recommendations,
@@ -13086,10 +13089,18 @@ class SmartMatchDashboard:
             selector_metrics = {}
             self._log_event("WARN", f"二串一健康指标读取失败: {exc}")
         summary = build_daily_parlay_summary(active_tickets, settled_tickets)
+        source_health = build_daily_parlay_source_health_summary(active_tickets, settled_tickets)
+        summary["source_health_status"] = str(source_health.get("status") or "healthy")
+        summary["source_health_issue_count"] = int(source_health.get("issue_count", 0) or 0)
+        summary["source_health_tone"] = str(source_health.get("tone") or "neutral")
+        summary["source_health_summary_text"] = str(source_health.get("summary_text") or "-")
         return {
             "active_tickets": active_tickets,
             "settled_tickets": settled_tickets,
             "summary": summary,
+            "source_health": source_health,
+            "source_health_card_rows": build_daily_parlay_source_health_card_rows(source_health),
+            "source_health_issue_rows": build_daily_parlay_source_health_issue_rows(source_health),
             "selector_metrics": selector_metrics,
             "ticket_rows": build_daily_parlay_ticket_rows(active_tickets, limit=8),
             "settlement_rows": build_daily_parlay_settlement_rows(settled_tickets, limit=8),
@@ -13162,6 +13173,9 @@ class SmartMatchDashboard:
         snapshot = self._daily_parlay_snapshot()
         summary = snapshot.get("summary") if isinstance(snapshot.get("summary"), dict) else {}
         metrics = snapshot.get("selector_metrics") if isinstance(snapshot.get("selector_metrics"), dict) else {}
+        source_health = snapshot.get("source_health") if isinstance(snapshot.get("source_health"), dict) else {}
+        source_health_card_rows = snapshot.get("source_health_card_rows") if isinstance(snapshot.get("source_health_card_rows"), list) else []
+        source_health_issue_rows = snapshot.get("source_health_issue_rows") if isinstance(snapshot.get("source_health_issue_rows"), list) else []
         ticket_rows = snapshot.get("ticket_rows") if isinstance(snapshot.get("ticket_rows"), list) else []
         settlement_rows = snapshot.get("settlement_rows") if isinstance(snapshot.get("settlement_rows"), list) else []
         hit_rate_text = _pct1(summary.get("hit_rate")) if int(summary.get("settled_count", 0) or 0) else "-"
@@ -13192,6 +13206,11 @@ class SmartMatchDashboard:
             ("平均命中", _pct1(summary.get("avg_expected_hit")), "#7aa2ff"),
             ("历史二串一", str(summary.get("settled_count", 0)), TEXT),
             ("近期命中", hit_rate_text, GREEN if float(summary.get("hit_rate", 0) or 0) >= 0.5 else YELLOW),
+            (
+                "来源健康",
+                str(source_health.get("status") or summary.get("source_health_status") or "-"),
+                self._tone_color(str(source_health.get("tone") or summary.get("source_health_tone") or "neutral")),
+            ),
         ]:
             self._detail_metric(metric_bar, label, value, color)
 
@@ -13251,6 +13270,24 @@ class SmartMatchDashboard:
             ),
         ]:
             self._kv_row(right, label, value)
+
+        self._strategy_section_title(right, "来源健康审计", first=False)
+        if source_health_card_rows:
+            for row in [item for item in source_health_card_rows if isinstance(item, dict)][:5]:
+                value = str(row.get("value") or "-")
+                detail = str(row.get("detail") or "-")
+                self._kv_row(right, str(row.get("label") or "-"), f"{value} | {detail}")
+        else:
+            self._kv_row(right, "整体状态", str(source_health.get("summary_text") or "-"))
+        if source_health_issue_rows:
+            for row in [item for item in source_health_issue_rows if isinstance(item, dict)][:5]:
+                self._strategy_row(
+                    right,
+                    f"{row.get('severity', '-')}: {row.get('code', '-')}",
+                    f"{row.get('message', '-')}\n建议: {row.get('recommendation', '-')}",
+                )
+        else:
+            self._strategy_row(right, "来源可追溯", "当前二串一票据具备来源与 source_id 留痕，可进入导出和赛果回收闭环。")
 
         self._strategy_section_title(right, "近期结算", first=False)
         if settlement_rows:

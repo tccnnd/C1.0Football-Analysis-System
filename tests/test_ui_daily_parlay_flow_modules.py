@@ -21,6 +21,9 @@ from v24_app.ui_modules import (
     build_daily_parlay_settlement_rows,
     build_daily_parlay_snapshot,
     build_daily_parlay_snapshot_settlement_closure,
+    build_daily_parlay_source_health_card_rows,
+    build_daily_parlay_source_health_issue_rows,
+    build_daily_parlay_source_health_summary,
     build_daily_parlay_summary,
     build_daily_parlay_ticket_rows,
 )
@@ -132,6 +135,65 @@ class UIDailyParlayFlowModuleTests(unittest.TestCase):
             "daily_parlay_recommendations_20260518_123005.md",
         )
 
+    def test_source_health_is_healthy_when_legs_are_traceable(self) -> None:
+        active = [
+            {
+                "ticket_id": "ticket-1",
+                "legs": [
+                    {"match_id": "m1", "source": "live:titan", "source_id": "titan-1"},
+                    {"match_id": "m2", "source": "live:titan", "source_id": "titan-2"},
+                ],
+            }
+        ]
+
+        health = build_daily_parlay_source_health_summary(active, [])
+        cards = build_daily_parlay_source_health_card_rows(health)
+        issues = build_daily_parlay_source_health_issue_rows(health)
+
+        self.assertEqual(health["status"], "healthy")
+        self.assertEqual(health["tone"], "good")
+        self.assertEqual(health["issue_count"], 0)
+        self.assertEqual(health["metrics"]["source_id_leg_count"], 2)
+        self.assertEqual(cards[0]["value"], "healthy")
+        self.assertEqual(issues, [])
+
+    def test_source_health_attention_for_missing_source_id_and_mixed_sources(self) -> None:
+        active = [
+            {
+                "ticket_id": "ticket-1",
+                "legs": [
+                    {"match_id": "m1", "source": "live:titan", "source_id": "titan-1"},
+                    {"match_id": "m2", "source": "cache"},
+                ],
+            }
+        ]
+
+        health = build_daily_parlay_source_health_summary(active, [])
+        issue_codes = {issue["code"] for issue in health["issues"]}
+        issue_rows = build_daily_parlay_source_health_issue_rows(health)
+
+        self.assertEqual(health["status"], "attention")
+        self.assertEqual(health["tone"], "warning")
+        self.assertIn("parlay_source_id_missing", issue_codes)
+        self.assertIn("parlay_mixed_sources", issue_codes)
+        self.assertEqual(health["metrics"]["mixed_ticket_count"], 1)
+        self.assertTrue(any("source_id" in row["message"] for row in issue_rows))
+
+    def test_source_health_blocked_when_no_leg_is_traceable(self) -> None:
+        active = [
+            {"ticket_id": "ticket-1", "legs": [{"match_id": "m1"}, {"match_id": "m2"}]},
+            {"ticket_id": "ticket-2", "legs": []},
+        ]
+
+        health = build_daily_parlay_source_health_summary(active, [])
+        issue_codes = {issue["code"] for issue in health["issues"]}
+
+        self.assertEqual(health["status"], "blocked")
+        self.assertEqual(health["tone"], "bad")
+        self.assertIn("parlay_traceability_blocked", issue_codes)
+        self.assertIn("parlay_traceability_gap", issue_codes)
+        self.assertGreaterEqual(health["metrics"]["missing_traceability_leg_count"], 1)
+
     def test_snapshot_and_report_lines_include_export_context(self) -> None:
         active = [
             {
@@ -188,12 +250,18 @@ class UIDailyParlayFlowModuleTests(unittest.TestCase):
         self.assertEqual(snapshot["selector_metrics"]["unique_match_count"], 2)
         self.assertEqual(snapshot["summary"]["source"], "live:titan")
         self.assertEqual(snapshot["summary"]["source_id"], "titan-123")
+        self.assertEqual(snapshot["summary"]["source_health_status"], "healthy")
+        self.assertEqual(snapshot["source_health"]["status"], "healthy")
+        self.assertEqual(snapshot["source_health"]["issue_count"], 0)
         self.assertEqual(snapshot["ticket_rows"][0]["ticket_id"], "ticket-1")
         self.assertEqual(snapshot["ticket_rows"][0]["source"], "live:titan")
         self.assertEqual(snapshot["ticket_rows"][0]["source_id"], "titan-123")
         self.assertEqual(snapshot["settlement_rows"][0]["source"], "live:titan")
         self.assertEqual(snapshot["settlement_rows"][0]["source_id"], "titan-123")
         self.assertIn("# 每日二串一推荐报告", payload)
+        self.assertIn("## 来源健康审计", payload)
+        self.assertIn("## 来源问题与建议", payload)
+        self.assertIn("healthy", payload)
         self.assertIn("## 今日推荐组合", payload)
         self.assertIn("## 近期二串一结算", payload)
         self.assertIn("## 边界", payload)
