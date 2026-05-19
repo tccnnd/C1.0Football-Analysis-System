@@ -20,6 +20,7 @@ from v24_app.ui_modules import (
     build_daily_parlay_export_guard_text,
     build_daily_parlay_report_filename,
     build_daily_parlay_report_lines,
+    build_daily_parlay_repair_audit_record,
     build_daily_parlay_settlement_rows,
     build_daily_parlay_repair_queue_rows,
     build_daily_parlay_repair_queue_summary,
@@ -341,6 +342,34 @@ class UIDailyParlayFlowModuleTests(unittest.TestCase):
         self.assertEqual(updated["legs"][1]["source_id"], "titan-2")
         self.assertNotIn("settlement_recovery_gate", updated)
         self.assertEqual(result["queue_summary"]["blocked_count"], 0)
+
+    def test_repair_audit_record_tracks_recovery_result(self) -> None:
+        repair_result = {
+            "action": "source_backfill",
+            "changed": True,
+            "target_ticket_id": "ticket-blocked",
+            "updated_ticket_count": 1,
+            "updated_leg_count": 1,
+            "missing_ref_count": 0,
+            "summary_text": "source backfill checked 1 ticket(s), updated 1 ticket(s) / 1 leg(s), remaining blocked 0",
+            "queue_summary": {"status": "healthy", "blocked_count": 0, "ready_count": 1},
+        }
+        recovery_result = {
+            "new_settled": 1,
+            "won": 1,
+            "lost": 0,
+            "skipped_source_health": 0,
+            "manual_review_items": [],
+            "gate": {"status": "healthy", "manual_review_count": 0, "summary_text": "parlay settlement gate healthy"},
+        }
+
+        audit = build_daily_parlay_repair_audit_record(repair_result, recovery_result)
+
+        self.assertEqual(audit["status"], "settled")
+        self.assertEqual(audit["action"], "source_backfill")
+        self.assertEqual(audit["recovery_new_settled"], 1)
+        self.assertEqual(audit["queue_blocked_after_repair"], 0)
+        self.assertEqual(audit["recovery_gate_status"], "healthy")
 
     def test_mark_split_required_keeps_mixed_ticket_in_manual_queue(self) -> None:
         tickets = [

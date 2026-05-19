@@ -20,6 +20,7 @@ from .core import (
     apply_draw_release_guard_policy_update,
     apply_strategy_admission_policy_update,
     auto_settle_finished_matches,
+    auto_settle_pending_parlays,
     build_result_recovery_snapshot_audit,
     add_video_review_annotation,
     create_video_review,
@@ -215,6 +216,7 @@ from .ui_modules import (
     mark_daily_parlay_split_required,
     build_daily_parlay_repair_queue_rows,
     build_daily_parlay_repair_queue_summary,
+    build_daily_parlay_repair_audit_record,
     build_daily_parlay_source_health_summary,
     build_daily_parlay_summary,
     build_daily_parlay_ticket_rows,
@@ -259,6 +261,7 @@ STATSBOMB_REVIEW_WEIGHT_GATE_AUDIT_LOG = PROJECT_ROOT / "data" / "state" / "stat
 STATSBOMB_REVIEW_WEIGHT_GATE_FOLLOWUP_LOG = PROJECT_ROOT / "data" / "state" / "statsbomb_review_weight_gate_followup_log.json"
 STATSBOMB_REVIEW_EXECUTION_QUEUE_LOG = PROJECT_ROOT / "data" / "state" / "statsbomb_review_execution_queue_log.json"
 DAILY_PARLAY_SNAPSHOT_LOG = PROJECT_ROOT / "data" / "state" / "daily_parlay_snapshot_log.json"
+DAILY_PARLAY_REPAIR_AUDIT_LOG = PROJECT_ROOT / "data" / "state" / "daily_parlay_repair_audit_log.json"
 VIDEO_REVIEW_EVIDENCE_GAP_ACTION_LOG = PROJECT_ROOT / "data" / "state" / "video_review_evidence_gap_action_log.json"
 VIDEO_REVIEW_EVIDENCE_GAP_BATCH_STATE = PROJECT_ROOT / "data" / "state" / "video_review_evidence_gap_batches.json"
 
@@ -4272,6 +4275,34 @@ def _save_daily_parlay_snapshot_log(
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(".tmp")
     tmp_path.write_text(json.dumps({"records": normalized}, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def _load_daily_parlay_repair_audit_log(
+    path: Path = DAILY_PARLAY_REPAIR_AUDIT_LOG,
+) -> list[dict]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if isinstance(payload, dict):
+        payload = payload.get("records")
+    if not isinstance(payload, list):
+        return []
+    return [item for item in payload if isinstance(item, dict)]
+
+
+def _append_daily_parlay_repair_audit_log(
+    record: dict,
+    path: Path = DAILY_PARLAY_REPAIR_AUDIT_LOG,
+    *,
+    limit: int = 200,
+) -> None:
+    records = [dict(record), *_load_daily_parlay_repair_audit_log(path)]
+    records = records[: max(1, int(limit))]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps({"records": records}, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp_path.replace(path)
 
 
@@ -13341,9 +13372,24 @@ class SmartMatchDashboard:
                 self._log_event("WARN", f"二串一修复队列保存失败: {exc}")
                 messagebox.showwarning("二串一修复队列", f"保存修复结果失败: {exc}")
                 return {**result, "saved": False, "error": str(exc)}
-        self.status_var.set(str(result.get("summary_text") or "二串一修复队列已检查"))
-        messagebox.showinfo("二串一修复队列", str(result.get("summary_text") or "二串一修复队列已检查"))
-        return {**result, "saved": bool(result.get("changed"))}
+        recovery_result: dict[str, object] = {}
+        if bool(result.get("changed")):
+            try:
+                recovery_result = auto_settle_pending_parlays()
+            except Exception as exc:
+                recovery_result = {"status": "error", "error": str(exc)}
+                self._log_event("WARN", f"二串一修复后复跑失败: {exc}")
+        audit = self._record_daily_parlay_repair_audit(result, recovery_result or None)
+        message = str(result.get("summary_text") or "二串一修复队列已检查")
+        if recovery_result:
+            gate = recovery_result.get("gate") if isinstance(recovery_result.get("gate"), dict) else {}
+            message = (
+                f"{message} | 复跑 新结算 {int(recovery_result.get('new_settled', 0) or 0)}"
+                f" | 待人工 {int(gate.get('manual_review_count', 0) or 0)}"
+            )
+        self.status_var.set(message)
+        messagebox.showinfo("二串一修复队列", message)
+        return {**result, "saved": bool(result.get("changed")), "recovery_result": recovery_result, "repair_audit": audit}
 
     def mark_daily_parlay_repair_split_required(self, ticket_id: str | None) -> dict[str, object]:
         target_ticket_id = str(ticket_id or "").strip()
@@ -13369,9 +13415,23 @@ class SmartMatchDashboard:
                 self._log_event("WARN", f"二串一修复队列保存失败: {exc}")
                 messagebox.showwarning("二串一修复队列", f"保存修复结果失败: {exc}")
                 return {**result, "saved": False, "error": str(exc)}
-        self.status_var.set(str(result.get("summary_text") or "二串一修复队列已标记"))
-        messagebox.showinfo("二串一修复队列", str(result.get("summary_text") or "二串一修复队列已标记"))
-        return {**result, "saved": bool(result.get("changed"))}
+        audit = self._record_daily_parlay_repair_audit(result, None)
+        message = str(result.get("summary_text") or "二串一修复队列已标记")
+        self.status_var.set(message)
+        messagebox.showinfo("二串一修复队列", message)
+        return {**result, "saved": bool(result.get("changed")), "repair_audit": audit}
+
+    def _record_daily_parlay_repair_audit(
+        self,
+        repair_result: dict[str, object],
+        recovery_result: dict[str, object] | None,
+    ) -> dict[str, object]:
+        audit = build_daily_parlay_repair_audit_record(repair_result, recovery_result, generated_at=datetime.now())
+        try:
+            _append_daily_parlay_repair_audit_log(audit, DAILY_PARLAY_REPAIR_AUDIT_LOG)
+        except Exception as exc:
+            self._log_event("WARN", f"二串一修复审计写入失败: {exc}")
+        return audit
 
     def open_daily_parlay_repair_queue_window(self) -> None:
         self.current_view = "daily_parlay_repair_queue"

@@ -563,6 +563,56 @@ def mark_daily_parlay_split_required(
     }
 
 
+def build_daily_parlay_repair_audit_record(
+    repair_result: Mapping[str, Any] | object,
+    recovery_result: Mapping[str, Any] | object | None = None,
+    *,
+    generated_at: datetime | None = None,
+) -> dict[str, Any]:
+    repair = repair_result if isinstance(repair_result, Mapping) else {}
+    recovery = recovery_result if isinstance(recovery_result, Mapping) else {}
+    queue_summary = repair.get("queue_summary") if isinstance(repair.get("queue_summary"), Mapping) else {}
+    gate = recovery.get("gate") if isinstance(recovery.get("gate"), Mapping) else {}
+    manual_review = recovery.get("manual_review_items") if isinstance(recovery.get("manual_review_items"), list) else []
+    recovery_error = str(recovery.get("error") or "").strip()
+    changed = bool(repair.get("changed"))
+    new_settled = int(_safe_float(recovery.get("new_settled"), 0.0))
+    if recovery_error:
+        status = "error"
+    elif new_settled > 0:
+        status = "settled"
+    elif changed:
+        status = "rechecked"
+    else:
+        status = "no_change"
+    return {
+        "schema_version": 1,
+        "generated_at": (generated_at or datetime.now()).strftime("%Y-%m-%d %H:%M:%S"),
+        "status": status,
+        "action": str(repair.get("action") or "-"),
+        "target_ticket_id": str(repair.get("target_ticket_id") or "-"),
+        "changed": changed,
+        "updated_ticket_count": int(_safe_float(repair.get("updated_ticket_count"), 0.0)),
+        "updated_leg_count": int(_safe_float(repair.get("updated_leg_count"), 0.0)),
+        "missing_ref_count": int(_safe_float(repair.get("missing_ref_count"), 0.0)),
+        "queue_status_after_repair": str(queue_summary.get("status") or "-"),
+        "queue_blocked_after_repair": int(_safe_float(queue_summary.get("blocked_count"), 0.0)),
+        "queue_ready_after_repair": int(_safe_float(queue_summary.get("ready_count"), 0.0)),
+        "recovery_status": "error" if recovery_error else "ok" if recovery else "not_run",
+        "recovery_new_settled": new_settled,
+        "recovery_won": int(_safe_float(recovery.get("won"), 0.0)),
+        "recovery_lost": int(_safe_float(recovery.get("lost"), 0.0)),
+        "recovery_skipped_source_health": int(_safe_float(recovery.get("skipped_source_health"), 0.0)),
+        "recovery_manual_review_count": len(manual_review),
+        "recovery_gate_status": str(gate.get("status") or "-"),
+        "recovery_gate_ready": int(_safe_float(gate.get("ready_ticket_count"), 0.0)),
+        "recovery_gate_blocked": int(_safe_float(gate.get("blocked_ticket_count"), 0.0)),
+        "error": recovery_error,
+        "repair_summary_text": str(repair.get("summary_text") or "-"),
+        "recovery_summary_text": str(gate.get("summary_text") or "-"),
+    }
+
+
 def build_daily_parlay_empty_state(summary: Mapping[str, Any] | object) -> str:
     resolved = summary if isinstance(summary, Mapping) else {}
     active_count = int(_safe_float(resolved.get("active_count"), 0.0))

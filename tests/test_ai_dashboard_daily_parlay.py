@@ -19,8 +19,10 @@ from v24_app.ai_dashboard import (
     SmartMatchDashboard,
     _append_daily_parlay_snapshot_log,
     _daily_parlay_toolbar_state,
+    _load_daily_parlay_repair_audit_log,
     _load_daily_parlay_snapshot_log,
     _save_daily_parlay_snapshot_log,
+    DAILY_PARLAY_REPAIR_AUDIT_LOG,
 )
 from v24_app.core import AppMatch
 
@@ -241,14 +243,29 @@ class AIDashboardDailyParlayTests(unittest.TestCase):
             },
         )
 
-        with patch("v24_app.ai_dashboard.STATE_STORE", store), patch("v24_app.ai_dashboard.messagebox.showinfo"):
-            result = dashboard.apply_daily_parlay_repair_source_backfill("blocked-1")
+        with tempfile.TemporaryDirectory() as tmp:
+            audit_log = Path(tmp) / "daily_parlay_repair_audit_log.json"
+            with patch("v24_app.ai_dashboard.STATE_STORE", store), patch(
+                "v24_app.ai_dashboard.DAILY_PARLAY_REPAIR_AUDIT_LOG",
+                audit_log,
+            ), patch(
+                "v24_app.ai_dashboard.auto_settle_pending_parlays",
+                return_value={"new_settled": 1, "won": 1, "lost": 0, "skipped_source_health": 0, "manual_review_items": [], "gate": {"manual_review_count": 0, "status": "healthy"}},
+            ) as settle_mock, patch("v24_app.ai_dashboard.messagebox.showinfo"):
+                result = dashboard.apply_daily_parlay_repair_source_backfill("blocked-1")
+
+            records = _load_daily_parlay_repair_audit_log(audit_log)
+
+        settle_mock.assert_called_once()
 
         self.assertTrue(result["changed"])
         self.assertIsNotNone(store.saved_tickets)
         self.assertEqual(store.saved_tickets[0]["legs"][1]["source_id"], "s2")
         self.assertNotIn("settlement_recovery_gate", store.saved_tickets[0])
         self.assertIn("updated 1 ticket", dashboard.status_var.value)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["recovery_new_settled"], 1)
+        self.assertEqual(records[0]["status"], "settled")
 
     def test_daily_parlay_split_required_action_saves_manual_mark(self) -> None:
         dashboard = object.__new__(SmartMatchDashboard)
