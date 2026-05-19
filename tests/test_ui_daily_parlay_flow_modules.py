@@ -32,6 +32,7 @@ from v24_app.ui_modules import (
     build_daily_parlay_repair_loop_report_lines,
     build_daily_parlay_settlement_rows,
     build_daily_parlay_repair_queue_rows,
+    build_daily_parlay_repair_queue_route_counts,
     build_daily_parlay_repair_queue_summary,
     build_daily_parlay_snapshot,
     build_daily_parlay_snapshot_settlement_closure,
@@ -41,6 +42,8 @@ from v24_app.ui_modules import (
     build_daily_parlay_source_backfill_index,
     build_daily_parlay_summary,
     build_daily_parlay_ticket_rows,
+    daily_parlay_repair_queue_route_label,
+    filter_daily_parlay_repair_queue_rows,
     mark_daily_parlay_split_required,
 )
 
@@ -271,6 +274,45 @@ class UIDailyParlayFlowModuleTests(unittest.TestCase):
         self.assertIn("Backfill source and source_id", rows[0]["body"])
         self.assertEqual(rows[0]["tone"], "danger")
         self.assertEqual(rows[0]["gate"]["status"], "blocked")
+
+    def test_daily_parlay_repair_queue_route_counts_and_filters(self) -> None:
+        rows = [
+            {
+                "ticket_id": "source-1",
+                "code": "parlay_source_traceability_missing",
+                "missing_source_count": 1,
+                "missing_source_id_count": 0,
+                "mixed_source_count": 0,
+            },
+            {
+                "ticket_id": "mixed-1",
+                "code": "parlay_mixed_sources",
+                "missing_source_count": 0,
+                "missing_source_id_count": 0,
+                "mixed_source_count": 1,
+            },
+            {
+                "ticket_id": "manual-1",
+                "code": "other",
+                "missing_source_count": 0,
+                "missing_source_id_count": 0,
+                "mixed_source_count": 0,
+            },
+        ]
+
+        counts = build_daily_parlay_repair_queue_route_counts(rows)
+        source_rows = filter_daily_parlay_repair_queue_rows(rows, "source_backfill")
+        mixed_rows = filter_daily_parlay_repair_queue_rows(rows, "mixed_source_split")
+        all_rows = filter_daily_parlay_repair_queue_rows(rows, "recovery_failure")
+
+        self.assertEqual(counts["all"], 3)
+        self.assertEqual(counts["source_backfill"], 1)
+        self.assertEqual(counts["mixed_source_split"], 1)
+        self.assertEqual(counts["manual_review"], 1)
+        self.assertEqual(source_rows[0]["ticket_id"], "source-1")
+        self.assertEqual(mixed_rows[0]["ticket_id"], "mixed-1")
+        self.assertEqual([row["ticket_id"] for row in all_rows], ["source-1", "mixed-1", "manual-1"])
+        self.assertEqual(daily_parlay_repair_queue_route_label("mixed_source_split"), "混源拆票")
 
     def test_daily_parlay_repair_queue_summary_is_healthy_when_no_blocked_tickets_remain(self) -> None:
         tickets = [

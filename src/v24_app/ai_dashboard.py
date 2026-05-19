@@ -215,7 +215,10 @@ from .ui_modules import (
     apply_daily_parlay_source_backfill,
     mark_daily_parlay_split_required,
     build_daily_parlay_repair_queue_rows,
+    build_daily_parlay_repair_queue_route_counts,
     build_daily_parlay_repair_queue_summary,
+    daily_parlay_repair_queue_route_label,
+    filter_daily_parlay_repair_queue_rows,
     build_daily_parlay_repair_audit_record,
     build_daily_parlay_repair_audit_card_rows,
     build_daily_parlay_repair_audit_detail,
@@ -13736,7 +13739,7 @@ class SmartMatchDashboard:
             def _route_command(route_key: str):
                 if route_key == "recovery_failure":
                     return self.open_recovery_run_center
-                return self.open_daily_parlay_repair_queue_window
+                return lambda key=route_key: self.open_daily_parlay_repair_queue_window(key)
 
             for route in route_rows[:3]:
                 route_key = str(route.get("key") or "")
@@ -13883,11 +13886,18 @@ class SmartMatchDashboard:
         listbox.bind("<<ListboxSelect>>", on_select)
         self.status_var.set(str(summary.get("summary_text") or "二串一修复审计"))
 
-    def open_daily_parlay_repair_queue_window(self) -> None:
+    def open_daily_parlay_repair_queue_window(self, route_filter: str | None = None) -> None:
         self.current_view = "daily_parlay_repair_queue"
         snapshot = self._daily_parlay_repair_queue_snapshot()
         summary = snapshot.get("summary") if isinstance(snapshot.get("summary"), dict) else {}
         rows = snapshot.get("rows") if isinstance(snapshot.get("rows"), list) else []
+        active_route = str(route_filter or "").strip().lower()
+        if active_route not in {"source_backfill", "mixed_source_split"}:
+            active_route = ""
+        full_queue_rows = [item for item in rows if isinstance(item, dict)]
+        route_counts = build_daily_parlay_repair_queue_route_counts(full_queue_rows)
+        filtered_queue_rows = filter_daily_parlay_repair_queue_rows(full_queue_rows, active_route)
+        active_route_label = daily_parlay_repair_queue_route_label(active_route)
 
         window = tk.Toplevel(self.root)
         window.title("二串一人工修复队列")
@@ -13916,7 +13926,7 @@ class SmartMatchDashboard:
                 pady=6,
             ).pack(side=tk.RIGHT, padx=(8, 0))
 
-        _header_button("刷新", self.open_daily_parlay_repair_queue_window, color=BLUE)
+        _header_button("刷新", lambda: (window.destroy(), self.open_daily_parlay_repair_queue_window(active_route or None)), color=BLUE)
         _header_button("导出闭环报告", self.export_daily_parlay_repair_loop_report, color=BLUE)
         _header_button("历史报告", self.open_daily_parlay_repair_loop_history)
         _header_button("修复审计", self.open_daily_parlay_repair_audit_window)
@@ -13938,6 +13948,38 @@ class SmartMatchDashboard:
             ("最近审计", str(repair_audit_summary.get("total", 0)), "#7aa2ff"),
         ]:
             self._detail_metric(top, label, value, color)
+
+        filter_bar = tk.Frame(shell, bg=BG)
+        filter_bar.pack(fill=tk.X, pady=(0, 12))
+        tk.Label(
+            filter_bar,
+            text=f"当前分流: {active_route_label}",
+            bg=BG,
+            fg=TEXT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+        ).pack(side=tk.LEFT, padx=(0, 10))
+
+        def _filter_button(route_key: str, label: str, count: int) -> None:
+            selected = (not active_route and route_key == "all") or active_route == route_key
+            color = BLUE if selected else PANEL_2
+            target_route = None if route_key == "all" else route_key
+            tk.Button(
+                filter_bar,
+                text=f"{label} {count}",
+                command=lambda target=target_route: (window.destroy(), self.open_daily_parlay_repair_queue_window(target)),
+                bg=color,
+                fg="white" if selected else TEXT,
+                activebackground="#3d5ee7" if selected else "#172638",
+                activeforeground="white",
+                relief=tk.FLAT,
+                font=("Microsoft YaHei UI", 10, "bold"),
+                padx=12,
+                pady=5,
+            ).pack(side=tk.LEFT, padx=(0, 8))
+
+        _filter_button("all", "全部", int(route_counts.get("all", 0) or 0))
+        _filter_button("source_backfill", "来源回填", int(route_counts.get("source_backfill", 0) or 0))
+        _filter_button("mixed_source_split", "混源拆票", int(route_counts.get("mixed_source_split", 0) or 0))
 
         selected_queue_row: dict[str, object] = {}
 
@@ -14001,7 +14043,7 @@ class SmartMatchDashboard:
         right = self._card(body, PANEL)
         right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        self._strategy_section_title(left, "待修复票据", first=True)
+        self._strategy_section_title(left, f"待修复票据 - {active_route_label}", first=True)
         queue_wrap = tk.Frame(left, bg=PANEL)
         queue_wrap.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
         listbox = tk.Listbox(
@@ -14037,7 +14079,7 @@ class SmartMatchDashboard:
         detail.configure(yscrollcommand=detail_scrollbar.set)
         detail_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-        queue_rows_cache = [item for item in rows if isinstance(item, dict)]
+        queue_rows_cache = [item for item in filtered_queue_rows if isinstance(item, dict)]
 
         def _render_detail(index: int | None = None) -> None:
             detail.configure(state=tk.NORMAL)
@@ -14046,7 +14088,7 @@ class SmartMatchDashboard:
             if not queue_rows_cache:
                 detail.insert(
                     tk.END,
-                    "当前没有需要人工修复的二串一票据。\n\n"
+                    f"当前分流没有需要人工修复的二串一票据: {active_route_label}\n\n"
                     f"{str(summary.get('summary_text') or '-')}\n",
                 )
             else:
@@ -14095,7 +14137,7 @@ class SmartMatchDashboard:
 
         listbox.bind("<<ListboxSelect>>", on_select)
         self.status_var.set(
-            f"二串一人工修复队列: 待检查 {summary.get('pending_count', 0)} | 待修复 {summary.get('blocked_count', 0)} | 可自动回收 {summary.get('ready_count', 0)}"
+            f"二串一人工修复队列: {active_route_label} {len(queue_rows_cache)}/{len(full_queue_rows)} | 待检查 {summary.get('pending_count', 0)} | 待修复 {summary.get('blocked_count', 0)} | 可自动回收 {summary.get('ready_count', 0)}"
         )
 
     def open_daily_parlay_window(self) -> None:

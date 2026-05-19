@@ -377,6 +377,51 @@ def build_daily_parlay_repair_queue_rows(parlay_tickets: Sequence[Any] | object,
     return [dict(item) for item in items[: _safe_limit(limit)]]
 
 
+def daily_parlay_repair_queue_route_label(route_key: str | None) -> str:
+    normalized = str(route_key or "").strip().lower()
+    return {
+        "source_backfill": "来源回填",
+        "mixed_source_split": "混源拆票",
+        "recovery_failure": "复跑失败",
+    }.get(normalized, "全部")
+
+
+def _daily_parlay_repair_queue_row_route(row: Mapping[str, Any]) -> str:
+    code = str(row.get("code") or "").strip()
+    mixed_source_count = _safe_limit(row.get("mixed_source_count", 0))
+    missing_source_count = _safe_limit(row.get("missing_source_count", 0))
+    missing_source_id_count = _safe_limit(row.get("missing_source_id_count", 0))
+    invalid_leg_count = _safe_limit(row.get("invalid_leg_count", 0))
+    if code == "parlay_mixed_sources" or mixed_source_count > 0:
+        return "mixed_source_split"
+    if code in {"parlay_source_traceability_missing", "parlay_invalid_legs"}:
+        return "source_backfill"
+    if missing_source_count > 0 or missing_source_id_count > 0 or invalid_leg_count > 0:
+        return "source_backfill"
+    return "manual_review"
+
+
+def build_daily_parlay_repair_queue_route_counts(rows: Sequence[Any] | object) -> dict[str, int]:
+    items = _as_items(rows)
+    source_count = sum(1 for row in items if _daily_parlay_repair_queue_row_route(row) == "source_backfill")
+    mixed_count = sum(1 for row in items if _daily_parlay_repair_queue_row_route(row) == "mixed_source_split")
+    manual_count = sum(1 for row in items if _daily_parlay_repair_queue_row_route(row) == "manual_review")
+    return {
+        "all": len(items),
+        "source_backfill": source_count,
+        "mixed_source_split": mixed_count,
+        "manual_review": manual_count,
+    }
+
+
+def filter_daily_parlay_repair_queue_rows(rows: Sequence[Any] | object, route_key: str | None = None) -> list[dict[str, Any]]:
+    items = [dict(item) for item in _as_items(rows)]
+    normalized = str(route_key or "").strip().lower()
+    if normalized in {"", "all", "watch", "recovery_failure"}:
+        return items
+    return [item for item in items if _daily_parlay_repair_queue_row_route(item) == normalized]
+
+
 def _source_ref_match_id(ref: Mapping[str, Any]) -> str:
     match_id = str(ref.get("match_id") or "").strip()
     if match_id:
