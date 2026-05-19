@@ -21,6 +21,7 @@ from v24_app.ui_modules import (
     build_daily_parlay_report_filename,
     build_daily_parlay_report_lines,
     build_daily_parlay_repair_audit_record,
+    build_daily_parlay_repair_audit_card_rows,
     build_daily_parlay_repair_audit_detail,
     build_daily_parlay_repair_audit_rows,
     build_daily_parlay_repair_audit_summary,
@@ -404,12 +405,16 @@ class UIDailyParlayFlowModuleTests(unittest.TestCase):
         ]
 
         summary = build_daily_parlay_repair_audit_summary(records)
+        card_rows = build_daily_parlay_repair_audit_card_rows(records)
         rows = build_daily_parlay_repair_audit_rows(records)
         detail = build_daily_parlay_repair_audit_detail(records[0])
 
         self.assertEqual(summary["total"], 2)
         self.assertEqual(summary["settled_count"], 1)
         self.assertEqual(summary["error_count"], 1)
+        self.assertEqual(card_rows[0]["label"], "最新修复状态")
+        self.assertEqual(card_rows[0]["tone"], "bad")
+        self.assertEqual(card_rows[1]["value"], "1")
         self.assertEqual(rows[0]["tone"], "success")
         self.assertEqual(rows[1]["tone"], "danger")
         self.assertIn("recovery_new_settled", detail)

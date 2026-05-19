@@ -217,6 +217,7 @@ from .ui_modules import (
     build_daily_parlay_repair_queue_rows,
     build_daily_parlay_repair_queue_summary,
     build_daily_parlay_repair_audit_record,
+    build_daily_parlay_repair_audit_card_rows,
     build_daily_parlay_repair_audit_detail,
     build_daily_parlay_repair_audit_rows,
     build_daily_parlay_repair_audit_summary,
@@ -10166,6 +10167,12 @@ class SmartMatchDashboard:
         snapshot_audit = self._result_recovery_snapshot_audit(lookback_days=lookback_days)
         repair_queue = self._daily_parlay_repair_queue_snapshot()
         repair_queue_summary = repair_queue.get("summary") if isinstance(repair_queue.get("summary"), dict) else {}
+        repair_audit = self._daily_parlay_repair_audit_snapshot()
+        repair_audit_summary = repair_audit.get("summary") if isinstance(repair_audit.get("summary"), dict) else {}
+        repair_audit_rows = repair_audit.get("rows") if isinstance(repair_audit.get("rows"), list) else []
+        repair_audit_card_rows = build_daily_parlay_repair_audit_card_rows(
+            repair_audit.get("records") if isinstance(repair_audit.get("records"), list) else []
+        )
 
         shell = self._page_shell(
             "\u56de\u6536\u8fd0\u884c\u8bb0\u5f55",
@@ -10275,7 +10282,6 @@ class SmartMatchDashboard:
 
         parlay_queue_frame = tk.Frame(shell, bg=BG)
         parlay_queue_frame.pack(fill=tk.X, pady=(0, 16))
-        repair_audit_summary = self._daily_parlay_repair_audit_snapshot().get("summary", {})
         for label, value, color in [
             ("二串一待修复", str(repair_queue_summary.get("blocked_count", 0)), RED if int(repair_queue_summary.get("blocked_count", 0) or 0) else GREEN),
             ("可自动回收", str(repair_queue_summary.get("ready_count", 0)), GREEN if int(repair_queue_summary.get("ready_count", 0) or 0) else MUTED),
@@ -10284,6 +10290,51 @@ class SmartMatchDashboard:
             ("修复审计", str(repair_audit_summary.get("total", 0)), "#7aa2ff"),
         ]:
             self._detail_metric(parlay_queue_frame, label, value, color)
+
+        repair_audit_card = self._card(shell, PANEL)
+        repair_audit_card.pack(fill=tk.X, pady=(0, 16))
+        tk.Label(
+            repair_audit_card,
+            text="二串一修复审计摘要",
+            bg=PANEL,
+            fg=TEXT,
+            font=("Microsoft YaHei UI", 13, "bold"),
+        ).pack(anchor=tk.W, padx=18, pady=(16, 6))
+        tk.Label(
+            repair_audit_card,
+            text=str(repair_audit_summary.get("summary_text") or "暂无二串一修复审计记录。"),
+            bg=PANEL,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 10),
+            wraplength=980,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, padx=18, pady=(0, 8))
+        repair_audit_metric_frame = tk.Frame(repair_audit_card, bg=PANEL)
+        repair_audit_metric_frame.pack(fill=tk.X, padx=12, pady=(0, 8))
+        for row in repair_audit_card_rows:
+            if isinstance(row, dict):
+                self._detail_metric(
+                    repair_audit_metric_frame,
+                    str(row.get("label") or "-"),
+                    str(row.get("value") or "-"),
+                    self._tone_color(str(row.get("tone") or "neutral")),
+                )
+        recent_audit_rows = [row for row in repair_audit_rows[:3] if isinstance(row, dict)]
+        if recent_audit_rows:
+            for row in recent_audit_rows:
+                self._strategy_row(
+                    repair_audit_card,
+                    str(row.get("title") or "-"),
+                    str(row.get("body") or "-"),
+                    command=self.open_daily_parlay_repair_audit_window,
+                )
+        else:
+            self._strategy_row(
+                repair_audit_card,
+                "暂无修复审计",
+                "执行二串一来源回填或拆票标记后，这里会展示最近 3 条修复与复跑结果。",
+                command=self.open_daily_parlay_repair_audit_window,
+            )
 
         trend_metrics = quality_trend.get("metrics", []) if isinstance(quality_trend.get("metrics"), list) else []
         trend_metric_frame = tk.Frame(shell, bg=BG)

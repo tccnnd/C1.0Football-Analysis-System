@@ -653,6 +653,42 @@ def build_daily_parlay_repair_audit_summary(records: Sequence[Any] | object) -> 
     }
 
 
+def build_daily_parlay_repair_audit_card_rows(records: Sequence[Any] | object) -> list[dict[str, Any]]:
+    summary = build_daily_parlay_repair_audit_summary(records)
+    total = int(_safe_float(summary.get("total"), 0.0))
+    latest_blocked = int(_safe_float(summary.get("latest_blocked_count"), 0.0))
+    error_count = int(_safe_float(summary.get("error_count"), 0.0))
+    updated_legs = int(_safe_float(summary.get("updated_leg_count"), 0.0))
+    recovery_new_settled = int(_safe_float(summary.get("recovery_new_settled"), 0.0))
+    latest_status = str(summary.get("latest_status") or "-")
+    return [
+        {
+            "label": "最新修复状态",
+            "value": latest_status if total else "-",
+            "tone": "bad" if error_count else "warning" if latest_blocked else "good" if total else "neutral",
+            "detail": f"latest_at={summary.get('latest_generated_at') or '-'} | records={total}",
+        },
+        {
+            "label": "复跑结算",
+            "value": str(recovery_new_settled),
+            "tone": "good" if recovery_new_settled > 0 else "neutral",
+            "detail": f"settled_records={summary.get('settled_count', 0)}",
+        },
+        {
+            "label": "已修复腿数",
+            "value": str(updated_legs),
+            "tone": "good" if updated_legs > 0 else "neutral",
+            "detail": f"tickets={summary.get('updated_ticket_count', 0)}",
+        },
+        {
+            "label": "最新待人工",
+            "value": str(latest_blocked),
+            "tone": "bad" if latest_blocked > 0 else "good" if total else "neutral",
+            "detail": f"errors={error_count} | no_change={summary.get('no_change_count', 0)}",
+        },
+    ]
+
+
 def _daily_parlay_repair_audit_tone(status: str, blocked_count: int) -> str:
     if status == "error":
         return "danger"
