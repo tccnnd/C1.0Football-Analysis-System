@@ -106,18 +106,26 @@ class UIReportExportFlowModuleTests(unittest.TestCase):
             match_report = report_dir / "ai_match_report_20260510_120000_a_vs_b.md"
             loop_report = report_dir / "strategy_release_recovery_loop_20260510_121000.md"
             repair_loop_report = report_dir / "daily_parlay_repair_loop_20260510_122000.md"
+            repair_loop_csv = report_dir / "daily_parlay_repair_loop_20260510_122000.csv"
             ignored = report_dir / "strategy_release_recovery_loop_20260510_121000.json"
             match_report.write_text("match", encoding="utf-8")
             loop_report.write_text("loop", encoding="utf-8")
             repair_loop_report.write_text("repair loop", encoding="utf-8")
+            repair_loop_csv.write_text("csv", encoding="utf-8-sig")
             ignored.write_text("{}", encoding="utf-8")
             os.utime(match_report, (1000, 1000))
             os.utime(loop_report, (2000, 2000))
             os.utime(repair_loop_report, (1500, 1500))
+            os.utime(repair_loop_csv, (1600, 1600))
 
             rows = list_dashboard_report_files(report_dir)
+            rows_with_csv = list_dashboard_report_files(report_dir, include_csv=True)
 
         self.assertEqual(len(rows), 3)
+        self.assertEqual(len(rows_with_csv), 4)
+        self.assertEqual(rows_with_csv[0]["name"], loop_report.name)
+        self.assertEqual(rows_with_csv[1]["name"], repair_loop_csv.name)
+        self.assertEqual(rows_with_csv[1]["label"], "二串一修复闭环")
         self.assertEqual(rows[0]["name"], loop_report.name)
         self.assertEqual(rows[0]["label"], "\u653e\u884c\u95ed\u73af")
         self.assertEqual(rows[1]["name"], repair_loop_report.name)

@@ -83,10 +83,17 @@ def classify_dashboard_report_file(path: Path) -> str:
     return "\u5176\u4ed6\u62a5\u544a"
 
 
-def list_dashboard_report_files(report_dir: Path, *, limit: int = 100) -> list[dict[str, object]]:
+def list_dashboard_report_files(
+    report_dir: Path,
+    *,
+    limit: int = 100,
+    include_csv: bool = False,
+) -> list[dict[str, object]]:
     if not report_dir.exists():
         return []
     files = [path for path in report_dir.glob("*.md") if path.is_file()]
+    if include_csv:
+        files.extend(path for path in report_dir.glob("*.csv") if path.is_file())
     files.sort(key=lambda path: path.stat().st_mtime, reverse=True)
     rows: list[dict[str, object]] = []
     for path in files[: max(0, int(limit))]:

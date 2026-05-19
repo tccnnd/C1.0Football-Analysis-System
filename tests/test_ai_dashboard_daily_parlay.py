@@ -416,6 +416,7 @@ class AIDashboardDailyParlayTests(unittest.TestCase):
         dashboard.open_daily_parlay_repair_loop_history()
 
         self.assertEqual(called.get("selected_type"), "二串一修复闭环")
+        self.assertTrue(called.get("include_csv"))
 
     def test_export_daily_parlay_report_writes_report_and_snapshot_log(self) -> None:
         dashboard = object.__new__(SmartMatchDashboard)

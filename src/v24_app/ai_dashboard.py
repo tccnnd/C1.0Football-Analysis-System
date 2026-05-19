@@ -6232,12 +6232,18 @@ class SmartMatchDashboard:
         refresh_filter_buttons()
         refresh_issue_list()
 
-    def open_history_reports(self, selected_type: str = "全部", query: str = "") -> None:
+    def open_history_reports(
+        self,
+        selected_type: str = "全部",
+        query: str = "",
+        *,
+        include_csv: bool = False,
+    ) -> None:
         self.current_nav_index = 3
         self.current_view = "history"
         self._refresh_nav_highlight()
         REPORT_DIR.mkdir(parents=True, exist_ok=True)
-        report_rows = list_dashboard_report_files(REPORT_DIR, limit=200)
+        report_rows = list_dashboard_report_files(REPORT_DIR, limit=200, include_csv=include_csv)
         type_options = dashboard_report_type_options(report_rows)
         initial_type = str(selected_type or "全部").strip() or "全部"
         if initial_type not in type_options:
@@ -6291,6 +6297,34 @@ class SmartMatchDashboard:
             activestyle="none",
         )
         listbox.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        file_actions = tk.Frame(left, bg=PANEL)
+        file_actions.pack(fill=tk.X, padx=10, pady=(0, 10))
+        tk.Button(
+            file_actions,
+            text="\u6253\u5f00\u9009\u4e2d\u6587\u4ef6",
+            command=lambda: open_selected_report(),
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=14,
+            pady=6,
+        ).pack(side=tk.LEFT)
+        tk.Button(
+            file_actions,
+            text="\u5237\u65b0\u5217\u8868",
+            command=lambda: self.open_history_reports(type_var.get(), search_var.get(), include_csv=include_csv),
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=14,
+            pady=6,
+        ).pack(side=tk.LEFT, padx=(10, 0))
 
         preview = tk.Text(
             right,
@@ -6320,6 +6354,19 @@ class SmartMatchDashboard:
             preview.delete("1.0", tk.END)
             preview.insert("1.0", content)
             preview.configure(state=tk.DISABLED)
+
+        def open_selected_report() -> None:
+            selection = listbox.curselection()
+            if not selection:
+                messagebox.showinfo("\u5386\u53f2\u62a5\u544a", "\u8bf7\u5148\u9009\u62e9\u4e00\u4e2a\u62a5\u544a\u6587\u4ef6\u3002")
+                return
+            path = filtered_rows[int(selection[0])].get("path")
+            if not isinstance(path, Path):
+                return
+            try:
+                os.startfile(str(path))
+            except Exception as exc:
+                messagebox.showwarning("\u5386\u53f2\u62a5\u544a", f"\u6253\u5f00\u5931\u8d25: {exc}")
 
         def refresh_report_list(_event=None) -> None:
             nonlocal filtered_rows
@@ -6358,7 +6405,7 @@ class SmartMatchDashboard:
         search_var.trace_add("write", lambda *_args: refresh_report_list())
 
     def open_daily_parlay_repair_loop_history(self) -> None:
-        self.open_history_reports(selected_type="二串一修复闭环")
+        self.open_history_reports(selected_type="二串一修复闭环", include_csv=True)
 
     def open_data_center(self) -> None:
         self.current_nav_index = 5
