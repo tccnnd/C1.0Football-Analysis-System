@@ -211,6 +211,8 @@ from .ui_modules import (
     build_daily_parlay_snapshot_settlement_closure,
     build_daily_parlay_source_health_card_rows,
     build_daily_parlay_source_health_issue_rows,
+    apply_daily_parlay_source_backfill,
+    mark_daily_parlay_split_required,
     build_daily_parlay_repair_queue_rows,
     build_daily_parlay_repair_queue_summary,
     build_daily_parlay_source_health_summary,
@@ -13275,6 +13277,102 @@ class SmartMatchDashboard:
             "rows": rows,
         }
 
+    def _daily_parlay_source_backfill_refs(self) -> list[dict[str, object]]:
+        refs: list[dict[str, object]] = []
+        for row in getattr(self, "rows", []):
+            if not isinstance(row, DashboardRow):
+                continue
+            match = row.match
+            refs.append(
+                {
+                    "match_id": match.match_id,
+                    "match_date": match.match_date,
+                    "league": match.league,
+                    "home_team": match.home_team,
+                    "away_team": match.away_team,
+                    "source": match.source,
+                    "source_id": match.source_id,
+                }
+            )
+        for label, loader_name in [
+            ("prediction snapshots", "load_prediction_snapshots"),
+            ("analysis history", "load_analysis_history"),
+        ]:
+            loader = getattr(STATE_STORE, loader_name, None)
+            if not callable(loader):
+                continue
+            try:
+                records = loader()
+            except Exception as exc:
+                self._log_event("WARN", f"二串一修复队列读取 {label} 失败: {exc}")
+                continue
+            if not isinstance(records, dict):
+                continue
+            for match_id, record in records.items():
+                if not isinstance(record, dict):
+                    continue
+                match_payload = record.get("match") if isinstance(record.get("match"), dict) else {}
+                refs.append(
+                    {
+                        "match_id": str(match_id),
+                        "match": dict(match_payload) if isinstance(match_payload, dict) else {},
+                    }
+                )
+        return refs
+
+    def apply_daily_parlay_repair_source_backfill(self, ticket_id: str | None = None) -> dict[str, object]:
+        try:
+            tickets = STATE_STORE.load_parlay_tickets()
+        except Exception as exc:
+            self._log_event("WARN", f"二串一修复队列读取失败: {exc}")
+            messagebox.showwarning("二串一修复队列", f"读取票据失败: {exc}")
+            return {"changed": False, "error": str(exc)}
+        result = apply_daily_parlay_source_backfill(
+            tickets,
+            self._daily_parlay_source_backfill_refs(),
+            ticket_id=ticket_id,
+            generated_at=datetime.now(),
+        )
+        if bool(result.get("changed")):
+            try:
+                updated_tickets = result.get("tickets") if isinstance(result.get("tickets"), list) else []
+                STATE_STORE.save_parlay_tickets(updated_tickets)
+            except Exception as exc:
+                self._log_event("WARN", f"二串一修复队列保存失败: {exc}")
+                messagebox.showwarning("二串一修复队列", f"保存修复结果失败: {exc}")
+                return {**result, "saved": False, "error": str(exc)}
+        self.status_var.set(str(result.get("summary_text") or "二串一修复队列已检查"))
+        messagebox.showinfo("二串一修复队列", str(result.get("summary_text") or "二串一修复队列已检查"))
+        return {**result, "saved": bool(result.get("changed"))}
+
+    def mark_daily_parlay_repair_split_required(self, ticket_id: str | None) -> dict[str, object]:
+        target_ticket_id = str(ticket_id or "").strip()
+        if not target_ticket_id:
+            messagebox.showwarning("二串一修复队列", "请先选择一张需要拆票的二串一票据。")
+            return {"changed": False, "error": "missing_ticket_id"}
+        try:
+            tickets = STATE_STORE.load_parlay_tickets()
+        except Exception as exc:
+            self._log_event("WARN", f"二串一修复队列读取失败: {exc}")
+            messagebox.showwarning("二串一修复队列", f"读取票据失败: {exc}")
+            return {"changed": False, "error": str(exc)}
+        result = mark_daily_parlay_split_required(
+            tickets,
+            target_ticket_id,
+            generated_at=datetime.now(),
+        )
+        if bool(result.get("changed")):
+            try:
+                updated_tickets = result.get("tickets") if isinstance(result.get("tickets"), list) else []
+                STATE_STORE.save_parlay_tickets(updated_tickets)
+            except Exception as exc:
+                self._log_event("WARN", f"二串一修复队列保存失败: {exc}")
+                messagebox.showwarning("二串一修复队列", f"保存修复结果失败: {exc}")
+                return {**result, "saved": False, "error": str(exc)}
+        self.status_var.set(str(result.get("summary_text") or "二串一修复队列已标记"))
+        messagebox.showinfo("二串一修复队列", str(result.get("summary_text") or "二串一修复队列已标记"))
+        return {**result, "saved": bool(result.get("changed"))}
+
     def open_daily_parlay_repair_queue_window(self) -> None:
         self.current_view = "daily_parlay_repair_queue"
         snapshot = self._daily_parlay_repair_queue_snapshot()
@@ -13323,6 +13421,61 @@ class SmartMatchDashboard:
         ]:
             self._detail_metric(top, label, value, color)
 
+        selected_queue_row: dict[str, object] = {}
+
+        action_bar = tk.Frame(shell, bg=BG)
+        action_bar.pack(fill=tk.X, pady=(0, 12))
+
+        def _selected_ticket_id() -> str:
+            return str(selected_queue_row.get("ticket_id") or "").strip()
+
+        def _refresh_queue_window() -> None:
+            window.destroy()
+            self.open_daily_parlay_repair_queue_window()
+
+        def _run_repair_action(action) -> None:
+            result = action()
+            if not isinstance(result, dict) or not result.get("error"):
+                _refresh_queue_window()
+
+        def _backfill_selected() -> dict[str, object]:
+            ticket_id = _selected_ticket_id()
+            if not ticket_id:
+                messagebox.showwarning("二串一修复队列", "请先选择一张需要回填的二串一票据。")
+                return {"changed": False, "error": "missing_ticket_id"}
+            return self.apply_daily_parlay_repair_source_backfill(ticket_id)
+
+        def _action_button(label: str, command, *, color: str = PANEL_2) -> None:
+            tk.Button(
+                action_bar,
+                text=label,
+                command=command,
+                bg=color,
+                fg="white" if color == BLUE else "#10141f" if color == YELLOW else TEXT,
+                activebackground="#3d5ee7" if color == BLUE else "#f7c948" if color == YELLOW else "#172638",
+                activeforeground="white" if color == BLUE else "#10141f",
+                relief=tk.FLAT,
+                font=("Microsoft YaHei UI", 10, "bold"),
+                padx=14,
+                pady=6,
+            ).pack(side=tk.LEFT, padx=(0, 8))
+
+        _action_button(
+            "从快照回填选中",
+            lambda: _run_repair_action(_backfill_selected),
+            color=BLUE,
+        )
+        _action_button(
+            "回填全部",
+            lambda: _run_repair_action(lambda: self.apply_daily_parlay_repair_source_backfill(None)),
+        )
+        _action_button(
+            "标记需拆票",
+            lambda: _run_repair_action(lambda: self.mark_daily_parlay_repair_split_required(_selected_ticket_id())),
+            color=YELLOW,
+        )
+        _action_button("重新生成票据", lambda: (window.destroy(), self.open_daily_parlay_window()))
+
         body = tk.Frame(shell, bg=BG)
         body.pack(fill=tk.BOTH, expand=True)
         left = self._card(body, PANEL)
@@ -13367,7 +13520,6 @@ class SmartMatchDashboard:
         detail_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
         queue_rows_cache = [item for item in rows if isinstance(item, dict)]
-        selected_queue_row: dict[str, object] = {}
 
         def _render_detail(index: int | None = None) -> None:
             detail.configure(state=tk.NORMAL)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
@@ -367,6 +368,199 @@ def build_daily_parlay_repair_queue_summary(parlay_tickets: Sequence[Any] | obje
 def build_daily_parlay_repair_queue_rows(parlay_tickets: Sequence[Any] | object, limit: int = 20) -> list[dict[str, Any]]:
     items = _parlay_manual_review_queue_items(parlay_tickets)
     return [dict(item) for item in items[: _safe_limit(limit)]]
+
+
+def _source_ref_match_id(ref: Mapping[str, Any]) -> str:
+    match_id = str(ref.get("match_id") or "").strip()
+    if match_id:
+        return match_id
+    match = ref.get("match") if isinstance(ref.get("match"), Mapping) else {}
+    if isinstance(match, Mapping):
+        match_id = str(match.get("match_id") or "").strip()
+        if match_id:
+            return match_id
+        pieces = [
+            str(match.get("match_date") or "").strip(),
+            str(match.get("league") or "").strip(),
+            str(match.get("home_team") or "").strip(),
+            str(match.get("away_team") or "").strip(),
+        ]
+        if all(pieces):
+            return "|".join(pieces)
+    pieces = [
+        str(ref.get("match_date") or "").strip(),
+        str(ref.get("league") or "").strip(),
+        str(ref.get("home_team") or "").strip(),
+        str(ref.get("away_team") or "").strip(),
+    ]
+    return "|".join(pieces) if all(pieces) else ""
+
+
+def _source_ref_value(ref: Mapping[str, Any], key: str) -> str:
+    value = str(ref.get(key) or "").strip()
+    if value:
+        return value
+    match = ref.get("match") if isinstance(ref.get("match"), Mapping) else {}
+    if isinstance(match, Mapping):
+        value = str(match.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def build_daily_parlay_source_backfill_index(source_refs: Sequence[Any] | object) -> dict[str, dict[str, str]]:
+    index: dict[str, dict[str, str]] = {}
+    for ref in _as_items(source_refs):
+        match_id = _source_ref_match_id(ref)
+        if not match_id:
+            continue
+        source = _source_ref_value(ref, "source")
+        source_id = _source_ref_value(ref, "source_id")
+        if not source and not source_id:
+            continue
+        current = index.setdefault(match_id, {"source": "", "source_id": ""})
+        if source and not current.get("source"):
+            current["source"] = source
+        if source_id and not current.get("source_id"):
+            current["source_id"] = source_id
+    return index
+
+
+def _fresh_parlay_gate(ticket: dict[str, Any], checked_at: datetime | None = None) -> dict[str, Any]:
+    temporary = dict(ticket)
+    temporary.pop("settlement_recovery_gate", None)
+    gate = _parlay_repair_gate(temporary)
+    gate["checked_at"] = (checked_at or datetime.now()).strftime("%Y-%m-%d %H:%M:%S")
+    return gate
+
+
+def apply_daily_parlay_source_backfill(
+    parlay_tickets: Sequence[Any] | object,
+    source_refs: Sequence[Any] | object,
+    *,
+    ticket_id: str | None = None,
+    generated_at: datetime | None = None,
+) -> dict[str, Any]:
+    source_index = build_daily_parlay_source_backfill_index(source_refs)
+    target_ticket_id = str(ticket_id or "").strip()
+    updated_tickets = [deepcopy(dict(item)) for item in _as_items(parlay_tickets)]
+    checked_at = generated_at or datetime.now()
+    updated_ticket_count = 0
+    updated_leg_count = 0
+    missing_ref_count = 0
+    checked_ticket_count = 0
+
+    for ticket in updated_tickets:
+        if target_ticket_id and str(ticket.get("ticket_id") or "").strip() != target_ticket_id:
+            continue
+        if _status(ticket, "pending") != "pending":
+            continue
+        checked_ticket_count += 1
+        legs = ticket.get("legs")
+        if not isinstance(legs, list):
+            continue
+        ticket_changed = False
+        ticket_updated_leg_count = 0
+        for leg in legs:
+            if not isinstance(leg, dict):
+                continue
+            match_id = str(leg.get("match_id") or "").strip()
+            if not match_id:
+                continue
+            ref = source_index.get(match_id, {})
+            source = str(leg.get("source") or ticket.get("source") or "").strip()
+            source_id = str(leg.get("source_id") or ticket.get("source_id") or "").strip()
+            if (source and source_id) or not ref:
+                if not source or not source_id:
+                    missing_ref_count += 1
+                continue
+            leg_changed = False
+            if not source and ref.get("source"):
+                leg["source"] = str(ref.get("source") or "")
+                leg_changed = True
+            if not source_id and ref.get("source_id"):
+                leg["source_id"] = str(ref.get("source_id") or "")
+                leg_changed = True
+            if leg_changed:
+                ticket_changed = True
+                ticket_updated_leg_count += 1
+                updated_leg_count += 1
+        if ticket_changed:
+            updated_ticket_count += 1
+            ticket["repair_queue_last_action"] = {
+                "action": "source_backfill",
+                "updated_at": checked_at.strftime("%Y-%m-%d %H:%M:%S"),
+                "updated_leg_count": ticket_updated_leg_count,
+            }
+            gate = _fresh_parlay_gate(ticket, checked_at)
+            if str(gate.get("status") or "") == "ready":
+                ticket.pop("settlement_recovery_gate", None)
+            else:
+                ticket["settlement_recovery_gate"] = gate
+
+    summary = build_daily_parlay_repair_queue_summary(updated_tickets)
+    return {
+        "action": "source_backfill",
+        "changed": updated_ticket_count > 0,
+        "tickets": updated_tickets,
+        "checked_ticket_count": checked_ticket_count,
+        "updated_ticket_count": updated_ticket_count,
+        "updated_leg_count": updated_leg_count,
+        "missing_ref_count": missing_ref_count,
+        "source_ref_count": len(source_index),
+        "target_ticket_id": target_ticket_id or "-",
+        "queue_summary": summary,
+        "summary_text": (
+            f"source backfill checked {checked_ticket_count} ticket(s), "
+            f"updated {updated_ticket_count} ticket(s) / {updated_leg_count} leg(s), "
+            f"remaining blocked {summary.get('blocked_count', 0)}"
+        ),
+    }
+
+
+def mark_daily_parlay_split_required(
+    parlay_tickets: Sequence[Any] | object,
+    ticket_id: str,
+    *,
+    generated_at: datetime | None = None,
+) -> dict[str, Any]:
+    target_ticket_id = str(ticket_id or "").strip()
+    updated_tickets = [deepcopy(dict(item)) for item in _as_items(parlay_tickets)]
+    checked_at = generated_at or datetime.now()
+    changed = False
+    for ticket in updated_tickets:
+        if str(ticket.get("ticket_id") or "").strip() != target_ticket_id:
+            continue
+        if _status(ticket, "pending") != "pending":
+            continue
+        gate = _fresh_parlay_gate(ticket, checked_at)
+        ticket["manual_review_status"] = "split_required"
+        ticket["manual_review_note"] = "Mixed-source or invalid parlay ticket should be split/regenerated before settlement recovery."
+        ticket["repair_queue_last_action"] = {
+            "action": "mark_split_required",
+            "updated_at": checked_at.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        ticket["settlement_recovery_gate"] = {
+            **gate,
+            "status": "blocked",
+            "code": str(gate.get("code") or "parlay_split_required"),
+            "message": str(gate.get("message") or "Parlay ticket requires manual split/regeneration."),
+            "recommendation": "Split or regenerate this ticket before rerunning result recovery.",
+        }
+        changed = True
+        break
+    summary = build_daily_parlay_repair_queue_summary(updated_tickets)
+    return {
+        "action": "mark_split_required",
+        "changed": changed,
+        "tickets": updated_tickets,
+        "target_ticket_id": target_ticket_id or "-",
+        "queue_summary": summary,
+        "summary_text": (
+            f"split mark {'updated' if changed else 'not_found'} for {target_ticket_id or '-'} | "
+            f"remaining blocked {summary.get('blocked_count', 0)}"
+        ),
+    }
 
 
 def build_daily_parlay_empty_state(summary: Mapping[str, Any] | object) -> str:

@@ -34,11 +34,23 @@ class AIDashboardDailyParlayTests(unittest.TestCase):
             self.value = value
 
     class _ParlayStore:
-        def __init__(self, tickets: list[dict]) -> None:
+        def __init__(self, tickets: list[dict], snapshots: dict[str, dict] | None = None) -> None:
             self._tickets = tickets
+            self._snapshots = snapshots or {}
+            self.saved_tickets: list[dict] | None = None
 
         def load_parlay_tickets(self) -> list[dict]:
             return self._tickets
+
+        def save_parlay_tickets(self, items: list[dict], limit: int = 1000) -> None:
+            self.saved_tickets = items
+            self._tickets = items
+
+        def load_prediction_snapshots(self) -> dict[str, dict]:
+            return self._snapshots
+
+        def load_analysis_history(self) -> dict[str, dict]:
+            return {}
 
     def _match(self, home: str, away: str) -> AppMatch:
         return AppMatch(
@@ -196,6 +208,71 @@ class AIDashboardDailyParlayTests(unittest.TestCase):
         self.assertEqual(snapshot["summary"]["ready_count"], 1)
         self.assertEqual(snapshot["rows"][0]["ticket_id"], "blocked-1")
         self.assertEqual(snapshot["rows"][0]["code"], "parlay_source_traceability_missing")
+
+    def test_daily_parlay_source_backfill_action_saves_repaired_ticket(self) -> None:
+        dashboard = object.__new__(SmartMatchDashboard)
+        dashboard._log_event = lambda *args, **kwargs: None
+        dashboard.status_var = self._StatusVar()
+        dashboard.rows = []
+        tickets = [
+            {
+                "ticket_id": "blocked-1",
+                "status": "pending",
+                "legs": [{"match_id": "m1", "source": "live:titan", "source_id": "s1"}, {"match_id": "m2"}],
+                "settlement_recovery_gate": {
+                    "status": "blocked",
+                    "code": "parlay_source_traceability_missing",
+                },
+            }
+        ]
+        store = self._ParlayStore(
+            tickets,
+            {
+                "m2": {
+                    "match": {
+                        "source": "live:titan",
+                        "source_id": "s2",
+                        "match_date": "2026-05-18",
+                        "league": "L1",
+                        "home_team": "C",
+                        "away_team": "D",
+                    }
+                }
+            },
+        )
+
+        with patch("v24_app.ai_dashboard.STATE_STORE", store), patch("v24_app.ai_dashboard.messagebox.showinfo"):
+            result = dashboard.apply_daily_parlay_repair_source_backfill("blocked-1")
+
+        self.assertTrue(result["changed"])
+        self.assertIsNotNone(store.saved_tickets)
+        self.assertEqual(store.saved_tickets[0]["legs"][1]["source_id"], "s2")
+        self.assertNotIn("settlement_recovery_gate", store.saved_tickets[0])
+        self.assertIn("updated 1 ticket", dashboard.status_var.value)
+
+    def test_daily_parlay_split_required_action_saves_manual_mark(self) -> None:
+        dashboard = object.__new__(SmartMatchDashboard)
+        dashboard._log_event = lambda *args, **kwargs: None
+        dashboard.status_var = self._StatusVar()
+        tickets = [
+            {
+                "ticket_id": "mixed-1",
+                "status": "pending",
+                "legs": [
+                    {"match_id": "m1", "source": "live:titan", "source_id": "s1"},
+                    {"match_id": "m2", "source": "cache", "source_id": "c2"},
+                ],
+            }
+        ]
+        store = self._ParlayStore(tickets)
+
+        with patch("v24_app.ai_dashboard.STATE_STORE", store), patch("v24_app.ai_dashboard.messagebox.showinfo"):
+            result = dashboard.mark_daily_parlay_repair_split_required("mixed-1")
+
+        self.assertTrue(result["changed"])
+        self.assertIsNotNone(store.saved_tickets)
+        self.assertEqual(store.saved_tickets[0]["manual_review_status"], "split_required")
+        self.assertEqual(store.saved_tickets[0]["settlement_recovery_gate"]["status"], "blocked")
 
     def test_export_daily_parlay_report_writes_report_and_snapshot_log(self) -> None:
         dashboard = object.__new__(SmartMatchDashboard)

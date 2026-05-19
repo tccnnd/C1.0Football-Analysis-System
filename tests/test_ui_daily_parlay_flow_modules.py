@@ -14,6 +14,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from v24_app.ui_modules import (
+    apply_daily_parlay_source_backfill,
     build_daily_parlay_empty_state,
     build_daily_parlay_export_message,
     build_daily_parlay_export_guard_text,
@@ -27,8 +28,10 @@ from v24_app.ui_modules import (
     build_daily_parlay_source_health_card_rows,
     build_daily_parlay_source_health_issue_rows,
     build_daily_parlay_source_health_summary,
+    build_daily_parlay_source_backfill_index,
     build_daily_parlay_summary,
     build_daily_parlay_ticket_rows,
+    mark_daily_parlay_split_required,
 )
 
 
@@ -287,6 +290,81 @@ class UIDailyParlayFlowModuleTests(unittest.TestCase):
         self.assertEqual(summary["blocked_count"], 0)
         self.assertEqual(summary["ready_count"], 1)
         self.assertEqual(rows, [])
+
+    def test_source_backfill_index_accepts_nested_snapshot_match_payloads(self) -> None:
+        refs = [
+            {
+                "match": {
+                    "match_date": "2026-05-18",
+                    "league": "L1",
+                    "home_team": "A",
+                    "away_team": "B",
+                    "source": "live:titan",
+                    "source_id": "titan-1",
+                }
+            }
+        ]
+
+        index = build_daily_parlay_source_backfill_index(refs)
+
+        self.assertEqual(index["2026-05-18|L1|A|B"]["source"], "live:titan")
+        self.assertEqual(index["2026-05-18|L1|A|B"]["source_id"], "titan-1")
+
+    def test_apply_source_backfill_repairs_missing_leg_traceability(self) -> None:
+        tickets = [
+            {
+                "ticket_id": "ticket-blocked",
+                "status": "pending",
+                "legs": [
+                    {"match_id": "m1", "source": "live:titan", "source_id": "titan-1"},
+                    {"match_id": "m2"},
+                ],
+                "settlement_recovery_gate": {
+                    "status": "blocked",
+                    "code": "parlay_source_traceability_missing",
+                },
+            }
+        ]
+        refs = [{"match_id": "m2", "source": "live:titan", "source_id": "titan-2"}]
+
+        result = apply_daily_parlay_source_backfill(
+            tickets,
+            refs,
+            generated_at=datetime(2026, 5, 18, 12, 0, 0),
+        )
+
+        self.assertTrue(result["changed"])
+        self.assertEqual(result["updated_ticket_count"], 1)
+        self.assertEqual(result["updated_leg_count"], 1)
+        updated = result["tickets"][0]
+        self.assertEqual(updated["legs"][1]["source"], "live:titan")
+        self.assertEqual(updated["legs"][1]["source_id"], "titan-2")
+        self.assertNotIn("settlement_recovery_gate", updated)
+        self.assertEqual(result["queue_summary"]["blocked_count"], 0)
+
+    def test_mark_split_required_keeps_mixed_ticket_in_manual_queue(self) -> None:
+        tickets = [
+            {
+                "ticket_id": "ticket-mixed",
+                "status": "pending",
+                "legs": [
+                    {"match_id": "m1", "source": "live:titan", "source_id": "titan-1"},
+                    {"match_id": "m2", "source": "cache", "source_id": "cache-2"},
+                ],
+            }
+        ]
+
+        result = mark_daily_parlay_split_required(
+            tickets,
+            "ticket-mixed",
+            generated_at=datetime(2026, 5, 18, 12, 0, 0),
+        )
+
+        self.assertTrue(result["changed"])
+        updated = result["tickets"][0]
+        self.assertEqual(updated["manual_review_status"], "split_required")
+        self.assertEqual(updated["settlement_recovery_gate"]["status"], "blocked")
+        self.assertEqual(result["queue_summary"]["blocked_count"], 1)
 
     def test_export_guard_text_reflects_source_health(self) -> None:
         snapshot = build_daily_parlay_snapshot(
