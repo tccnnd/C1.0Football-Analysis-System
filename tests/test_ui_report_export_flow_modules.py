@@ -19,6 +19,7 @@ from v24_app.core import AppMatch
 from v24_app.ui_modules import (
     build_dashboard_report_preview_summary,
     build_daily_parlay_repair_loop_trend,
+    build_daily_parlay_repair_loop_trend_alert,
     build_daily_parlay_repair_loop_trend_text,
     build_export_message_text,
     build_export_status_text,
@@ -249,6 +250,30 @@ class UIReportExportFlowModuleTests(unittest.TestCase):
         self.assertIn("improving", trend["summary"])
         self.assertIn("improving", text)
         self.assertIn("复跑 2", text)
+
+    def test_daily_parlay_repair_loop_trend_alert_only_shows_regression(self) -> None:
+        quiet_alert = build_daily_parlay_repair_loop_trend_alert(
+            {
+                "status": "improving",
+                "summary": "stable",
+                "metrics": [{"queue_blocked": 1, "source_issue_count": 1, "mixed_source_count": 0, "recovery_new_settled": 2}],
+                "recommendation": "keep going",
+            }
+        )
+        regression_alert = build_daily_parlay_repair_loop_trend_alert(
+            {
+                "status": "regressing",
+                "summary": "blocked up",
+                "metrics": [{"queue_blocked": 4, "source_issue_count": 3, "mixed_source_count": 1, "recovery_new_settled": 0}],
+                "recommendation": "fix source",
+            }
+        )
+
+        self.assertFalse(quiet_alert["visible"])
+        self.assertTrue(regression_alert["visible"])
+        self.assertEqual(regression_alert["tone"], "danger")
+        self.assertIn("4", regression_alert["message"])
+        self.assertEqual(regression_alert["recommendation"], "fix source")
 
 
 if __name__ == "__main__":

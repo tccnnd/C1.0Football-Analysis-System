@@ -271,6 +271,30 @@ def build_daily_parlay_repair_loop_trend_text(trend: Mapping[str, object] | obje
     return "\n".join(lines)
 
 
+def build_daily_parlay_repair_loop_trend_alert(trend: Mapping[str, object] | object) -> dict[str, object]:
+    resolved = trend if isinstance(trend, Mapping) else {}
+    status = str(resolved.get("status") or "empty").strip().lower()
+    metrics = [item for item in resolved.get("metrics", []) if isinstance(item, Mapping)] if isinstance(resolved.get("metrics"), list) else []
+    latest = metrics[0] if metrics else {}
+    visible = status == "regressing"
+    return {
+        "visible": visible,
+        "status": status,
+        "tone": "danger" if visible else "neutral",
+        "title": "二串一修复趋势异常" if visible else "二串一修复趋势正常",
+        "message": (
+            f"最新待修复 {_safe_int(latest.get('queue_blocked'))} | "
+            f"来源缺口 {_safe_int(latest.get('source_issue_count'))} | "
+            f"混源 {_safe_int(latest.get('mixed_source_count'))} | "
+            f"复跑新结算 {_safe_int(latest.get('recovery_new_settled'))}"
+            if latest
+            else "暂无可用趋势指标。"
+        ),
+        "recommendation": resolved.get("recommendation") or "继续观察下一轮闭环导出结果。",
+        "summary": resolved.get("summary") or "-",
+    }
+
+
 def _daily_parlay_repair_csv_summary(row: Mapping[str, object], content: str) -> list[str]:
     records = _csv_rows(content)
     audit_rows = [item for item in records if item.get("record_type") == "audit"]

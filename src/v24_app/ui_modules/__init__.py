@@ -61,6 +61,7 @@ from .c1_availability_flow import (
 from .report_export_flow import (
     build_dashboard_report_preview_summary,
     build_daily_parlay_repair_loop_trend,
+    build_daily_parlay_repair_loop_trend_alert,
     build_daily_parlay_repair_loop_trend_text,
     build_export_message_text,
     build_export_status_text,
@@ -436,6 +437,7 @@ __all__ = [
     "build_export_message_text",
     "build_dashboard_report_preview_summary",
     "build_daily_parlay_repair_loop_trend",
+    "build_daily_parlay_repair_loop_trend_alert",
     "build_daily_parlay_repair_loop_trend_text",
     "build_export_status_text",
     "build_report_filename",

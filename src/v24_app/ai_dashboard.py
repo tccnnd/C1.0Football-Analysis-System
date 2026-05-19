@@ -244,6 +244,7 @@ from .ui_modules import (
     format_strategy_admission_thresholds,
     build_dashboard_report_preview_summary,
     build_daily_parlay_repair_loop_trend,
+    build_daily_parlay_repair_loop_trend_alert,
     build_daily_parlay_repair_loop_trend_text,
     dashboard_report_type_options,
     filter_dashboard_report_rows,
@@ -13677,6 +13678,50 @@ class SmartMatchDashboard:
         messagebox.showinfo("二串一修复闭环报告", message)
         return md_path, csv_path
 
+    def _daily_parlay_repair_loop_trend_alert(self) -> dict[str, object]:
+        report_rows = list_dashboard_report_files(REPORT_DIR, limit=40, include_csv=True) if REPORT_DIR.exists() else []
+        trend = build_daily_parlay_repair_loop_trend(report_rows)
+        return build_daily_parlay_repair_loop_trend_alert(trend)
+
+    def _render_daily_parlay_repair_loop_alert(self, parent: tk.Widget) -> None:
+        alert = self._daily_parlay_repair_loop_trend_alert()
+        if not bool(alert.get("visible")):
+            return
+        frame = tk.Frame(parent, bg="#2a1216", highlightbackground=RED, highlightthickness=1)
+        frame.pack(fill=tk.X, pady=(0, 12))
+        header = tk.Frame(frame, bg="#2a1216")
+        header.pack(fill=tk.X, padx=14, pady=(10, 4))
+        tk.Label(
+            header,
+            text=str(alert.get("title") or "二串一修复趋势异常"),
+            bg="#2a1216",
+            fg=RED,
+            font=("Microsoft YaHei UI", 12, "bold"),
+        ).pack(side=tk.LEFT)
+        tk.Button(
+            header,
+            text="查看趋势",
+            command=self.open_daily_parlay_repair_loop_history,
+            bg=RED,
+            fg="white",
+            activebackground="#d94743",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=12,
+            pady=5,
+        ).pack(side=tk.RIGHT)
+        body_text = f"{alert.get('message') or '-'}\n{alert.get('recommendation') or '-'}"
+        tk.Label(
+            frame,
+            text=body_text,
+            bg="#2a1216",
+            fg=TEXT,
+            justify=tk.LEFT,
+            wraplength=1040,
+            font=("Microsoft YaHei UI", 10),
+        ).pack(anchor=tk.W, padx=14, pady=(0, 12))
+
     def open_daily_parlay_repair_audit_window(self) -> None:
         self.current_view = "daily_parlay_repair_audit"
         snapshot = self._daily_parlay_repair_audit_snapshot()
@@ -13716,6 +13761,8 @@ class SmartMatchDashboard:
         _header_button("修复队列", lambda: (window.destroy(), self.open_daily_parlay_repair_queue_window()))
         _header_button("回收中心", lambda: (window.destroy(), self.open_recovery_run_center()))
         _header_button("关闭", window.destroy)
+
+        self._render_daily_parlay_repair_loop_alert(shell)
 
         top = tk.Frame(shell, bg=BG)
         top.pack(fill=tk.X, pady=(0, 12))
@@ -13842,6 +13889,8 @@ class SmartMatchDashboard:
         _header_button("二串一窗口", self.open_daily_parlay_window)
         _header_button("回收中心", self.open_recovery_run_center)
         _header_button("关闭", window.destroy)
+
+        self._render_daily_parlay_repair_loop_alert(shell)
 
         top = tk.Frame(shell, bg=BG)
         top.pack(fill=tk.X, pady=(0, 12))
