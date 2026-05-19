@@ -50,6 +50,7 @@ from .core import (
     get_statsbomb_sandbox_fewshot_memory,
     get_strategy_admission_policy_status,
     get_strategy_admission_policy_history,
+    STATE_STORE,
     invalidate_statsbomb_state_cache,
     load_c1_comparison_marks_cache,
     mark_strategy_allowlist_snapshots,
@@ -210,6 +211,8 @@ from .ui_modules import (
     build_daily_parlay_snapshot_settlement_closure,
     build_daily_parlay_source_health_card_rows,
     build_daily_parlay_source_health_issue_rows,
+    build_daily_parlay_repair_queue_rows,
+    build_daily_parlay_repair_queue_summary,
     build_daily_parlay_source_health_summary,
     build_daily_parlay_summary,
     build_daily_parlay_ticket_rows,
@@ -10125,6 +10128,8 @@ class SmartMatchDashboard:
         latest_status = str(summary.get("latest_status") or "")
         lookback_days = self._recovery_lookback_days()
         snapshot_audit = self._result_recovery_snapshot_audit(lookback_days=lookback_days)
+        repair_queue = self._daily_parlay_repair_queue_snapshot()
+        repair_queue_summary = repair_queue.get("summary") if isinstance(repair_queue.get("summary"), dict) else {}
 
         shell = self._page_shell(
             "\u56de\u6536\u8fd0\u884c\u8bb0\u5f55",
@@ -10156,6 +10161,20 @@ class SmartMatchDashboard:
         )
         self._register_result_recovery_button(refresh_button)
         refresh_button.pack(side=tk.RIGHT)
+        repair_queue_button = tk.Button(
+            header,
+            text="\u4e8c\u4e32\u4e00\u4fee\u590d\u961f\u5217",
+            command=self.open_daily_parlay_repair_queue_window,
+            bg=YELLOW if int(repair_queue_summary.get("blocked_count", 0) or 0) > 0 else PANEL_2,
+            fg="#10141f" if int(repair_queue_summary.get("blocked_count", 0) or 0) > 0 else TEXT,
+            activebackground="#f7c948" if int(repair_queue_summary.get("blocked_count", 0) or 0) > 0 else "#172638",
+            activeforeground="#10141f" if int(repair_queue_summary.get("blocked_count", 0) or 0) > 0 else "white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=18,
+            pady=7,
+        )
+        repair_queue_button.pack(side=tk.RIGHT, padx=(0, 10))
         tk.Button(
             header,
             text="\u5237\u65b0\u8bb0\u5f55",
@@ -10203,6 +10222,16 @@ class SmartMatchDashboard:
         audit_frame.pack(fill=tk.X, pady=(0, 16))
         for label, value, color in self._snapshot_audit_metrics(snapshot_audit):
             self._detail_metric(audit_frame, label, value, color)
+
+        parlay_queue_frame = tk.Frame(shell, bg=BG)
+        parlay_queue_frame.pack(fill=tk.X, pady=(0, 16))
+        for label, value, color in [
+            ("二串一待修复", str(repair_queue_summary.get("blocked_count", 0)), RED if int(repair_queue_summary.get("blocked_count", 0) or 0) else GREEN),
+            ("可自动回收", str(repair_queue_summary.get("ready_count", 0)), GREEN if int(repair_queue_summary.get("ready_count", 0) or 0) else MUTED),
+            ("源问题", str(repair_queue_summary.get("source_issue_count", 0)), YELLOW if int(repair_queue_summary.get("source_issue_count", 0) or 0) else MUTED),
+            ("混源", str(repair_queue_summary.get("mixed_source_count", 0)), YELLOW if int(repair_queue_summary.get("mixed_source_count", 0) or 0) else MUTED),
+        ]:
+            self._detail_metric(parlay_queue_frame, label, value, color)
 
         trend_metrics = quality_trend.get("metrics", []) if isinstance(quality_trend.get("metrics"), list) else []
         trend_metric_frame = tk.Frame(shell, bg=BG)
@@ -13232,6 +13261,173 @@ class SmartMatchDashboard:
             )
         return dict(summary)
 
+    def _daily_parlay_repair_queue_snapshot(self) -> dict[str, object]:
+        try:
+            tickets = STATE_STORE.load_parlay_tickets()
+        except Exception as exc:
+            self._log_event("WARN", f"二串一修复队列读取失败: {exc}")
+            tickets = []
+        summary = build_daily_parlay_repair_queue_summary(tickets)
+        rows = build_daily_parlay_repair_queue_rows(tickets, limit=80)
+        return {
+            "tickets": tickets,
+            "summary": summary,
+            "rows": rows,
+        }
+
+    def open_daily_parlay_repair_queue_window(self) -> None:
+        self.current_view = "daily_parlay_repair_queue"
+        snapshot = self._daily_parlay_repair_queue_snapshot()
+        summary = snapshot.get("summary") if isinstance(snapshot.get("summary"), dict) else {}
+        rows = snapshot.get("rows") if isinstance(snapshot.get("rows"), list) else []
+
+        window = tk.Toplevel(self.root)
+        window.title("二串一人工修复队列")
+        window.geometry("1320x780")
+        window.configure(bg=BG)
+
+        shell = tk.Frame(window, bg=BG)
+        shell.pack(fill=tk.BOTH, expand=True, padx=16, pady=16)
+
+        header = tk.Frame(shell, bg=BG)
+        header.pack(fill=tk.X, pady=(0, 12))
+        tk.Label(header, text="二串一人工修复队列", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 15, "bold")).pack(side=tk.LEFT)
+
+        def _header_button(label: str, command, *, color: str = PANEL_2) -> None:
+            tk.Button(
+                header,
+                text=label,
+                command=command,
+                bg=color,
+                fg="white" if color == BLUE else "#10141f" if color == YELLOW else TEXT,
+                activebackground="#3d5ee7" if color == BLUE else "#f7c948" if color == YELLOW else "#172638",
+                activeforeground="white" if color == BLUE else "#10141f",
+                relief=tk.FLAT,
+                font=("Microsoft YaHei UI", 10, "bold"),
+                padx=14,
+                pady=6,
+            ).pack(side=tk.RIGHT, padx=(8, 0))
+
+        _header_button("刷新", self.open_daily_parlay_repair_queue_window, color=BLUE)
+        _header_button("二串一窗口", self.open_daily_parlay_window)
+        _header_button("回收中心", self.open_recovery_run_center)
+        _header_button("关闭", window.destroy)
+
+        top = tk.Frame(shell, bg=BG)
+        top.pack(fill=tk.X, pady=(0, 12))
+        for label, value, color in [
+            ("待检查", str(summary.get("pending_count", 0)), TEXT),
+            ("待修复", str(summary.get("blocked_count", 0)), RED if int(summary.get("blocked_count", 0) or 0) else GREEN),
+            ("可自动回收", str(summary.get("ready_count", 0)), GREEN if int(summary.get("ready_count", 0) or 0) else MUTED),
+            ("源问题", str(summary.get("source_issue_count", 0)), YELLOW if int(summary.get("source_issue_count", 0) or 0) else MUTED),
+        ]:
+            self._detail_metric(top, label, value, color)
+
+        body = tk.Frame(shell, bg=BG)
+        body.pack(fill=tk.BOTH, expand=True)
+        left = self._card(body, PANEL)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 12))
+        right = self._card(body, PANEL)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self._strategy_section_title(left, "待修复票据", first=True)
+        queue_wrap = tk.Frame(left, bg=PANEL)
+        queue_wrap.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
+        listbox = tk.Listbox(
+            queue_wrap,
+            bg=PANEL,
+            fg=TEXT,
+            selectbackground=BLUE,
+            selectforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10),
+            activestyle="none",
+        )
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        list_scrollbar = tk.Scrollbar(queue_wrap, orient=tk.VERTICAL, command=listbox.yview)
+        listbox.configure(yscrollcommand=list_scrollbar.set)
+        list_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self._strategy_section_title(right, "门禁详情", first=True)
+        detail_wrap = tk.Frame(right, bg=PANEL)
+        detail_wrap.pack(fill=tk.BOTH, expand=True, padx=18, pady=(0, 14))
+        detail = tk.Text(
+            detail_wrap,
+            bg=PANEL,
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief=tk.FLAT,
+            wrap=tk.WORD,
+            font=("Microsoft YaHei UI", 10),
+            height=18,
+        )
+        detail.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        detail_scrollbar = tk.Scrollbar(detail_wrap, orient=tk.VERTICAL, command=detail.yview)
+        detail.configure(yscrollcommand=detail_scrollbar.set)
+        detail_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        queue_rows_cache = [item for item in rows if isinstance(item, dict)]
+        selected_queue_row: dict[str, object] = {}
+
+        def _render_detail(index: int | None = None) -> None:
+            detail.configure(state=tk.NORMAL)
+            detail.delete("1.0", tk.END)
+            selected_queue_row.clear()
+            if not queue_rows_cache:
+                detail.insert(
+                    tk.END,
+                    "当前没有需要人工修复的二串一票据。\n\n"
+                    f"{str(summary.get('summary_text') or '-')}\n",
+                )
+            else:
+                target_index = 0 if index is None or index < 0 or index >= len(queue_rows_cache) else index
+                row = queue_rows_cache[target_index]
+                selected_queue_row.update(row)
+                listbox.selection_clear(0, tk.END)
+                listbox.selection_set(target_index)
+                listbox.see(target_index)
+                legs = row.get("legs") if isinstance(row.get("legs"), list) else []
+                legs_lines = [f"- {str(item)}" for item in legs] if legs else ["- 无"]
+                detail_lines = [
+                    f"票据: {row.get('ticket_id') or '-'}",
+                    f"状态: {row.get('status') or '-'} | 代码: {row.get('code') or '-'}",
+                    f"来源: {row.get('source') or '-'}",
+                    f"source_id: {row.get('source_id') or '-'}",
+                    f"腿数: {row.get('leg_count', 0)} | 缺 source: {row.get('missing_source_count', 0)} | 缺 source_id: {row.get('missing_source_id_count', 0)} | 混源: {row.get('mixed_source_count', 0)}",
+                    "",
+                    f"问题: {row.get('message') or '-'}",
+                    f"建议: {row.get('recommendation') or '-'}",
+                    "",
+                    "腿概览:",
+                    *legs_lines,
+                    "",
+                    "门禁原文:",
+                    json.dumps(row.get("gate") or {}, ensure_ascii=False, indent=2),
+                ]
+                detail.insert(tk.END, "\n".join(detail_lines))
+            detail.configure(state=tk.DISABLED)
+
+        for row in queue_rows_cache:
+            listbox.insert(
+                tk.END,
+                f"{row.get('ticket_id') or '-'} | {row.get('code') or '-'} | {row.get('source') or '-'}",
+            )
+        if queue_rows_cache:
+            _render_detail(0)
+        else:
+            listbox.insert(tk.END, "暂无需要人工修复的二串一票据")
+            _render_detail(None)
+
+        def on_select(_event: object | None = None) -> None:
+            selection = listbox.curselection()
+            if selection and queue_rows_cache:
+                _render_detail(int(selection[0]))
+
+        listbox.bind("<<ListboxSelect>>", on_select)
+        self.status_var.set(
+            f"二串一人工修复队列: 待检查 {summary.get('pending_count', 0)} | 待修复 {summary.get('blocked_count', 0)} | 可自动回收 {summary.get('ready_count', 0)}"
+        )
+
     def open_daily_parlay_window(self) -> None:
         self.current_nav_index = 4
         self.current_view = "daily_parlay"
@@ -13242,6 +13438,8 @@ class SmartMatchDashboard:
         source_health = snapshot.get("source_health") if isinstance(snapshot.get("source_health"), dict) else {}
         source_health_card_rows = snapshot.get("source_health_card_rows") if isinstance(snapshot.get("source_health_card_rows"), list) else []
         source_health_issue_rows = snapshot.get("source_health_issue_rows") if isinstance(snapshot.get("source_health_issue_rows"), list) else []
+        repair_queue = self._daily_parlay_repair_queue_snapshot()
+        repair_queue_summary = repair_queue.get("summary") if isinstance(repair_queue.get("summary"), dict) else {}
         toolbar_state = _daily_parlay_toolbar_state(source_health, summary)
         source_health_status = str(toolbar_state.get("status") or "healthy")
         source_health_issue_count = int(toolbar_state.get("issue_count", 0) or 0)
@@ -13277,6 +13475,14 @@ class SmartMatchDashboard:
             warning=export_button_style == "warning",
         )
         export_button.configure(state=toolbar_state.get("export_state", tk.NORMAL))
+        repair_button = self._strategy_toolbar_button(
+            toolbar,
+            "修复队列",
+            self.open_daily_parlay_repair_queue_window,
+            danger=int(repair_queue_summary.get("blocked_count", 0) or 0) > 0,
+            warning=int(repair_queue_summary.get("ready_count", 0) or 0) > 0,
+        )
+        repair_button.configure(state=tk.NORMAL)
         self._strategy_toolbar_button(toolbar, "赛事分析", lambda: self._select_nav(1, self._build_main))
         self._strategy_toolbar_button(toolbar, "策略看板", self.open_strategy_library)
 
@@ -13291,6 +13497,11 @@ class SmartMatchDashboard:
                 "来源健康",
                 source_health_status,
                 self._tone_color(str(toolbar_state.get("tone") or "neutral")),
+            ),
+            (
+                "待修复",
+                str(repair_queue_summary.get("blocked_count", 0)),
+                RED if int(repair_queue_summary.get("blocked_count", 0) or 0) else GREEN,
             ),
         ]:
             self._detail_metric(metric_bar, label, value, color)

@@ -219,6 +219,156 @@ def build_daily_parlay_settlement_rows(settled_tickets: Sequence[Any] | object, 
     return rows
 
 
+def _parlay_repair_gate(ticket: Mapping[str, Any]) -> dict[str, Any]:
+    gate = ticket.get("settlement_recovery_gate")
+    resolved_gate = dict(gate) if isinstance(gate, Mapping) else {}
+    legs = ticket.get("legs", [])
+    if not isinstance(legs, Sequence) or isinstance(legs, (str, bytes, bytearray)):
+        legs = []
+    source_names: list[str] = []
+    source_ids: list[str] = []
+    missing_source_count = 0
+    missing_source_id_count = 0
+    invalid_leg_count = 0
+    for leg in legs:
+        if not isinstance(leg, Mapping):
+            invalid_leg_count += 1
+            continue
+        source = str(leg.get("source") or ticket.get("source") or "").strip()
+        source_id = str(leg.get("source_id") or ticket.get("source_id") or "").strip()
+        if source:
+            if source not in source_names:
+                source_names.append(source)
+        else:
+            missing_source_count += 1
+        if source_id:
+            if source_id not in source_ids:
+                source_ids.append(source_id)
+        else:
+            missing_source_id_count += 1
+
+    resolved_gate.setdefault("status", "blocked" if invalid_leg_count or not legs or missing_source_count or missing_source_id_count or len(source_names) > 1 else "ready")
+    resolved_gate.setdefault(
+        "code",
+        "parlay_invalid_legs"
+        if invalid_leg_count or not legs
+        else "parlay_source_traceability_missing"
+        if missing_source_count or missing_source_id_count
+        else "parlay_mixed_sources"
+        if len(source_names) > 1
+        else "ready",
+    )
+    resolved_gate.setdefault(
+        "message",
+        "来源追溯完整" if str(resolved_gate.get("status") or "") == "ready" else "二串一票据仍需人工修复",
+    )
+    resolved_gate.setdefault(
+        "recommendation",
+        "可以进入自动回收" if str(resolved_gate.get("status") or "") == "ready" else "请补齐 source / source_id 后再回收",
+    )
+    resolved_gate["ticket_id"] = str(ticket.get("ticket_id") or "").strip() or "-"
+    resolved_gate["source"] = str(resolved_gate.get("source") or " / ".join(source_names) or "-")
+    resolved_gate["source_id"] = str(resolved_gate.get("source_id") or " / ".join(source_ids) or "-")
+    resolved_gate["leg_count"] = int(resolved_gate.get("leg_count", len(legs)) or len(legs))
+    resolved_gate["missing_source_count"] = int(resolved_gate.get("missing_source_count", missing_source_count) or missing_source_count)
+    resolved_gate["missing_source_id_count"] = int(resolved_gate.get("missing_source_id_count", missing_source_id_count) or missing_source_id_count)
+    resolved_gate["invalid_leg_count"] = int(resolved_gate.get("invalid_leg_count", invalid_leg_count) or invalid_leg_count)
+    resolved_gate["mixed_source_count"] = max(0, len(source_names) - 1)
+    resolved_gate["created_at"] = str(ticket.get("created_at") or "")
+    resolved_gate["settled_at"] = str(ticket.get("settled_at") or "")
+    resolved_gate["legs"] = _leg_labels(ticket)
+    return resolved_gate
+
+
+def _parlay_manual_review_queue_items(parlay_tickets: Sequence[Any] | object) -> list[dict[str, Any]]:
+    tickets = _as_items(parlay_tickets)
+    items: list[dict[str, Any]] = []
+    for ticket in tickets:
+        if _status(ticket, "pending") != "pending":
+            continue
+        gate = _parlay_repair_gate(ticket)
+        if str(gate.get("status") or "").strip().lower() == "ready":
+            continue
+        items.append(
+            {
+                "ticket_id": str(gate.get("ticket_id") or ticket.get("ticket_id") or "-"),
+                "status": str(gate.get("status") or "blocked"),
+                "code": str(gate.get("code") or "-"),
+                "message": str(gate.get("message") or "-"),
+                "recommendation": str(gate.get("recommendation") or "-"),
+                "source": str(gate.get("source") or "-"),
+                "source_id": str(gate.get("source_id") or "-"),
+                "leg_count": int(gate.get("leg_count", 0) or 0),
+                "missing_source_count": int(gate.get("missing_source_count", 0) or 0),
+                "missing_source_id_count": int(gate.get("missing_source_id_count", 0) or 0),
+                "invalid_leg_count": int(gate.get("invalid_leg_count", 0) or 0),
+                "mixed_source_count": int(gate.get("mixed_source_count", 0) or 0),
+                "created_at": str(gate.get("created_at") or ticket.get("created_at") or ""),
+                "settled_at": str(gate.get("settled_at") or ticket.get("settled_at") or ""),
+                "title": str(gate.get("ticket_id") or ticket.get("ticket_id") or ticket.get("created_at") or "parlay_review"),
+                "body": (
+                    f"{str(gate.get('code') or '-')} | {str(gate.get('message') or '-')}\n"
+                    f"建议: {str(gate.get('recommendation') or '-')}\n"
+                    f"来源: {str(gate.get('source') or '-')} | source_id: {str(gate.get('source_id') or '-')}"
+                ),
+                "tone": "danger" if str(gate.get("status") or "") == "blocked" else "warning",
+                "gate": _safe_json(gate),
+                "legs": list(gate.get("legs", [])) if isinstance(gate.get("legs"), Sequence) and not isinstance(gate.get("legs"), (str, bytes, bytearray)) else [],
+            }
+        )
+    items.sort(
+        key=lambda item: (
+            0 if str(item.get("status") or "") == "blocked" else 1,
+            str(item.get("code") or ""),
+            str(item.get("created_at") or ""),
+            str(item.get("ticket_id") or ""),
+        )
+    )
+    return items
+
+
+def build_daily_parlay_repair_queue_summary(parlay_tickets: Sequence[Any] | object) -> dict[str, Any]:
+    tickets = _as_items(parlay_tickets)
+    items = _parlay_manual_review_queue_items(tickets)
+    pending_count = sum(1 for ticket in tickets if _status(ticket, "pending") == "pending")
+    blocked_count = len(items)
+    ready_count = sum(
+        1
+        for ticket in tickets
+        if _status(ticket, "pending") == "pending" and str(_parlay_repair_gate(ticket).get("status") or "").strip().lower() == "ready"
+    )
+    source_issue_count = sum(1 for item in items if str(item.get("code") or "") in {"parlay_source_traceability_missing", "parlay_invalid_legs"})
+    mixed_source_count = sum(1 for item in items if str(item.get("code") or "") == "parlay_mixed_sources")
+    if pending_count <= 0:
+        status = "empty"
+    elif blocked_count <= 0:
+        status = "healthy"
+    elif ready_count > 0:
+        status = "attention"
+    else:
+        status = "blocked"
+    tone = "good" if status == "healthy" else "warning" if status == "attention" else "bad"
+    return {
+        "status": status,
+        "tone": tone,
+        "pending_count": pending_count,
+        "blocked_count": blocked_count,
+        "ready_count": ready_count,
+        "source_issue_count": source_issue_count,
+        "mixed_source_count": mixed_source_count,
+        "queue_items": items,
+        "summary_text": (
+            f"二串一修复队列 {status} | 待检查 {pending_count} | 待修复 {blocked_count} | "
+            f"可自动回收 {ready_count} | 源问题 {source_issue_count} | 混源 {mixed_source_count}"
+        ),
+    }
+
+
+def build_daily_parlay_repair_queue_rows(parlay_tickets: Sequence[Any] | object, limit: int = 20) -> list[dict[str, Any]]:
+    items = _parlay_manual_review_queue_items(parlay_tickets)
+    return [dict(item) for item in items[: _safe_limit(limit)]]
+
+
 def build_daily_parlay_empty_state(summary: Mapping[str, Any] | object) -> str:
     resolved = summary if isinstance(summary, Mapping) else {}
     active_count = int(_safe_float(resolved.get("active_count"), 0.0))

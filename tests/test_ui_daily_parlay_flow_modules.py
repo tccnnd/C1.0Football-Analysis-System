@@ -20,6 +20,8 @@ from v24_app.ui_modules import (
     build_daily_parlay_report_filename,
     build_daily_parlay_report_lines,
     build_daily_parlay_settlement_rows,
+    build_daily_parlay_repair_queue_rows,
+    build_daily_parlay_repair_queue_summary,
     build_daily_parlay_snapshot,
     build_daily_parlay_snapshot_settlement_closure,
     build_daily_parlay_source_health_card_rows,
@@ -194,6 +196,97 @@ class UIDailyParlayFlowModuleTests(unittest.TestCase):
         self.assertIn("parlay_traceability_blocked", issue_codes)
         self.assertIn("parlay_traceability_gap", issue_codes)
         self.assertGreaterEqual(health["metrics"]["missing_traceability_leg_count"], 1)
+
+    def test_daily_parlay_repair_queue_summary_and_rows(self) -> None:
+        tickets = [
+            {
+                "ticket_id": "ticket-blocked",
+                "status": "pending",
+                "created_at": "2026-05-18 08:00:00",
+                "legs": [
+                    {"match_id": "m1", "source": "live:titan", "source_id": "titan-1"},
+                    {"match_id": "m2"},
+                ],
+                "settlement_recovery_gate": {
+                    "status": "blocked",
+                    "code": "parlay_source_traceability_missing",
+                    "message": "Missing source/source_id on parlay legs.",
+                    "recommendation": "Backfill source and source_id before rerunning recovery.",
+                    "source": "live:titan",
+                    "source_id": "titan-1",
+                    "leg_count": 2,
+                    "missing_source_count": 1,
+                    "missing_source_id_count": 1,
+                    "mixed_source_count": 0,
+                },
+            },
+            {
+                "ticket_id": "ticket-ready",
+                "status": "pending",
+                "created_at": "2026-05-18 09:00:00",
+                "legs": [
+                    {"match_id": "m3", "source": "live:titan", "source_id": "titan-2"},
+                    {"match_id": "m4", "source": "live:titan", "source_id": "titan-3"},
+                ],
+                "settlement_recovery_gate": {
+                    "status": "ready",
+                    "code": "ready",
+                    "message": "Parlay ticket is traceable and eligible for automatic settlement.",
+                    "recommendation": "Proceed with automatic result recovery.",
+                    "source": "live:titan",
+                    "source_id": "titan-2 / titan-3",
+                    "leg_count": 2,
+                    "missing_source_count": 0,
+                    "missing_source_id_count": 0,
+                    "mixed_source_count": 0,
+                },
+            },
+            {"ticket_id": "ticket-settled", "status": "won"},
+        ]
+
+        summary = build_daily_parlay_repair_queue_summary(tickets)
+        rows = build_daily_parlay_repair_queue_rows(tickets)
+
+        self.assertEqual(summary["status"], "attention")
+        self.assertEqual(summary["pending_count"], 2)
+        self.assertEqual(summary["blocked_count"], 1)
+        self.assertEqual(summary["ready_count"], 1)
+        self.assertEqual(summary["source_issue_count"], 1)
+        self.assertEqual(summary["mixed_source_count"], 0)
+        self.assertEqual(rows[0]["ticket_id"], "ticket-blocked")
+        self.assertEqual(rows[0]["code"], "parlay_source_traceability_missing")
+        self.assertIn("Backfill source and source_id", rows[0]["body"])
+        self.assertEqual(rows[0]["tone"], "danger")
+        self.assertEqual(rows[0]["gate"]["status"], "blocked")
+
+    def test_daily_parlay_repair_queue_summary_is_healthy_when_no_blocked_tickets_remain(self) -> None:
+        tickets = [
+            {
+                "ticket_id": "ticket-ready",
+                "status": "pending",
+                "legs": [
+                    {"match_id": "m3", "source": "live:titan", "source_id": "titan-2"},
+                    {"match_id": "m4", "source": "live:titan", "source_id": "titan-3"},
+                ],
+                "settlement_recovery_gate": {
+                    "status": "ready",
+                    "code": "ready",
+                    "message": "Parlay ticket is traceable and eligible for automatic settlement.",
+                    "recommendation": "Proceed with automatic result recovery.",
+                    "source": "live:titan",
+                    "source_id": "titan-2 / titan-3",
+                    "leg_count": 2,
+                },
+            }
+        ]
+
+        summary = build_daily_parlay_repair_queue_summary(tickets)
+        rows = build_daily_parlay_repair_queue_rows(tickets)
+
+        self.assertEqual(summary["status"], "healthy")
+        self.assertEqual(summary["blocked_count"], 0)
+        self.assertEqual(summary["ready_count"], 1)
+        self.assertEqual(rows, [])
 
     def test_export_guard_text_reflects_source_health(self) -> None:
         snapshot = build_daily_parlay_snapshot(

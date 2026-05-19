@@ -33,6 +33,13 @@ class AIDashboardDailyParlayTests(unittest.TestCase):
         def set(self, value: str) -> None:
             self.value = value
 
+    class _ParlayStore:
+        def __init__(self, tickets: list[dict]) -> None:
+            self._tickets = tickets
+
+        def load_parlay_tickets(self) -> list[dict]:
+            return self._tickets
+
     def _match(self, home: str, away: str) -> AppMatch:
         return AppMatch(
             home_team=home,
@@ -140,6 +147,55 @@ class AIDashboardDailyParlayTests(unittest.TestCase):
         self.assertEqual(state["export_state"], "normal")
         self.assertEqual(state["button_style"], "normal")
         self.assertEqual(state["hint"], "导出可用")
+
+    def test_daily_parlay_repair_queue_snapshot_reads_state_store(self) -> None:
+        dashboard = object.__new__(SmartMatchDashboard)
+        dashboard._log_event = lambda *args, **kwargs: None
+        tickets = [
+            {
+                "ticket_id": "blocked-1",
+                "status": "pending",
+                "legs": [{"match_id": "m1", "source": "live:titan", "source_id": "s1"}, {"match_id": "m2"}],
+                "settlement_recovery_gate": {
+                    "status": "blocked",
+                    "code": "parlay_source_traceability_missing",
+                    "message": "Missing source/source_id on parlay legs.",
+                    "recommendation": "Backfill source and source_id before rerunning recovery.",
+                    "source": "live:titan",
+                    "source_id": "s1",
+                    "leg_count": 2,
+                    "missing_source_count": 1,
+                    "missing_source_id_count": 1,
+                },
+            },
+            {
+                "ticket_id": "ready-1",
+                "status": "pending",
+                "legs": [
+                    {"match_id": "m3", "source": "live:titan", "source_id": "s2"},
+                    {"match_id": "m4", "source": "live:titan", "source_id": "s3"},
+                ],
+                "settlement_recovery_gate": {
+                    "status": "ready",
+                    "code": "ready",
+                    "message": "Parlay ticket is traceable and eligible for automatic settlement.",
+                    "recommendation": "Proceed with automatic result recovery.",
+                    "source": "live:titan",
+                    "source_id": "s2 / s3",
+                    "leg_count": 2,
+                },
+            },
+        ]
+
+        with patch("v24_app.ai_dashboard.STATE_STORE", self._ParlayStore(tickets)):
+            snapshot = dashboard._daily_parlay_repair_queue_snapshot()
+
+        self.assertEqual(snapshot["summary"]["status"], "attention")
+        self.assertEqual(snapshot["summary"]["pending_count"], 2)
+        self.assertEqual(snapshot["summary"]["blocked_count"], 1)
+        self.assertEqual(snapshot["summary"]["ready_count"], 1)
+        self.assertEqual(snapshot["rows"][0]["ticket_id"], "blocked-1")
+        self.assertEqual(snapshot["rows"][0]["code"], "parlay_source_traceability_missing")
 
     def test_export_daily_parlay_report_writes_report_and_snapshot_log(self) -> None:
         dashboard = object.__new__(SmartMatchDashboard)
