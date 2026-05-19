@@ -452,6 +452,43 @@ def _source_health_summary(load_report: dict[str, object] | None) -> str:
     return source
 
 
+def _daily_parlay_toolbar_state(source_health: dict[str, object] | None, summary: dict[str, object] | None) -> dict[str, object]:
+    health = source_health if isinstance(source_health, dict) else {}
+    resolved_summary = summary if isinstance(summary, dict) else {}
+    status = str(health.get("status") or resolved_summary.get("source_health_status") or "healthy")
+    tone = str(health.get("tone") or resolved_summary.get("source_health_tone") or "neutral")
+    try:
+        issue_count = int(health.get("issue_count", resolved_summary.get("source_health_issue_count", 0)) or 0)
+    except Exception:
+        issue_count = 0
+    if status == "blocked":
+        return {
+            "status": status,
+            "tone": tone,
+            "issue_count": issue_count,
+            "export_state": tk.DISABLED,
+            "button_style": "danger",
+            "hint": "导出已禁用",
+        }
+    if status == "attention":
+        return {
+            "status": status,
+            "tone": tone,
+            "issue_count": issue_count,
+            "export_state": tk.NORMAL,
+            "button_style": "warning",
+            "hint": "导出需确认",
+        }
+    return {
+        "status": status,
+        "tone": tone,
+        "issue_count": issue_count,
+        "export_state": tk.NORMAL,
+        "button_style": "normal",
+        "hint": "导出可用",
+    }
+
+
 def _cache_status_summary(load_report: dict[str, object] | None) -> str:
     if not isinstance(load_report, dict):
         return "-"
@@ -11627,22 +11664,26 @@ class SmartMatchDashboard:
         *,
         primary: bool = False,
         danger: bool = False,
-    ) -> None:
-        bg = RED if danger else BLUE if primary else PANEL_2
-        active = "#d94743" if danger else "#3d5ee7" if primary else "#172638"
-        tk.Button(
+        warning: bool = False,
+    ) -> tk.Button:
+        bg = RED if danger else BLUE if primary else YELLOW if warning else PANEL_2
+        active = "#d94743" if danger else "#3d5ee7" if primary else "#c58c00" if warning else "#172638"
+        fg = "white" if primary or danger else BG if warning else TEXT
+        button = tk.Button(
             parent,
             text=text,
             command=command,
             bg=bg,
-            fg="white" if primary or danger else TEXT,
+            fg=fg,
             activebackground=active,
             activeforeground="white",
             relief=tk.FLAT,
             font=("Microsoft YaHei UI", 10, "bold"),
             padx=16,
             pady=7,
-        ).pack(side=tk.RIGHT, padx=(10, 0))
+        )
+        button.pack(side=tk.RIGHT, padx=(10, 0))
+        return button
 
     def _latest_statsbomb_artifact_path(self, patterns: list[str], *, root: Path | None = None) -> Path | None:
         base = root or REPORT_DIR
@@ -13194,6 +13235,11 @@ class SmartMatchDashboard:
         source_health = snapshot.get("source_health") if isinstance(snapshot.get("source_health"), dict) else {}
         source_health_card_rows = snapshot.get("source_health_card_rows") if isinstance(snapshot.get("source_health_card_rows"), list) else []
         source_health_issue_rows = snapshot.get("source_health_issue_rows") if isinstance(snapshot.get("source_health_issue_rows"), list) else []
+        toolbar_state = _daily_parlay_toolbar_state(source_health, summary)
+        source_health_status = str(toolbar_state.get("status") or "healthy")
+        source_health_issue_count = int(toolbar_state.get("issue_count", 0) or 0)
+        source_health_hint = str(toolbar_state.get("hint") or "")
+        export_button_style = str(toolbar_state.get("button_style") or "normal")
         ticket_rows = snapshot.get("ticket_rows") if isinstance(snapshot.get("ticket_rows"), list) else []
         settlement_rows = snapshot.get("settlement_rows") if isinstance(snapshot.get("settlement_rows"), list) else []
         hit_rate_text = _pct1(summary.get("hit_rate")) if int(summary.get("settled_count", 0) or 0) else "-"
@@ -13207,13 +13253,23 @@ class SmartMatchDashboard:
         toolbar.pack(fill=tk.X, pady=(0, 12))
         tk.Label(
             toolbar,
-            text=f"来源: {source_text} | 生成规则: 2串1 | 更新: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            text=(
+                f"来源: {source_text} | 生成规则: 2串1 | 来源健康: {source_health_status} | "
+                f"问题: {source_health_issue_count} | {source_health_hint} | 更新: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            ),
             bg=BG,
             fg=MUTED,
             font=("Microsoft YaHei UI", 10),
         ).pack(side=tk.LEFT, fill=tk.X, expand=True)
         self._strategy_toolbar_button(toolbar, "刷新二串一", self.open_daily_parlay_window, primary=True)
-        self._strategy_toolbar_button(toolbar, "导出报告", self.export_daily_parlay_report)
+        export_button = self._strategy_toolbar_button(
+            toolbar,
+            "导出报告",
+            self.export_daily_parlay_report,
+            danger=export_button_style == "danger",
+            warning=export_button_style == "warning",
+        )
+        export_button.configure(state=toolbar_state.get("export_state", tk.NORMAL))
         self._strategy_toolbar_button(toolbar, "赛事分析", lambda: self._select_nav(1, self._build_main))
         self._strategy_toolbar_button(toolbar, "策略看板", self.open_strategy_library)
 
@@ -13226,8 +13282,8 @@ class SmartMatchDashboard:
             ("近期命中", hit_rate_text, GREEN if float(summary.get("hit_rate", 0) or 0) >= 0.5 else YELLOW),
             (
                 "来源健康",
-                str(source_health.get("status") or summary.get("source_health_status") or "-"),
-                self._tone_color(str(source_health.get("tone") or summary.get("source_health_tone") or "neutral")),
+                source_health_status,
+                self._tone_color(str(toolbar_state.get("tone") or "neutral")),
             ),
         ]:
             self._detail_metric(metric_bar, label, value, color)
@@ -13325,7 +13381,8 @@ class SmartMatchDashboard:
             self._strategy_row(right, "暂无二串一结算", "完成赛果回收后，这里会显示二串一命中和未中记录。")
 
         self.status_var.set(
-            f"每日二串一: 当前 {summary.get('active_count', 0)} 组 | 历史 {summary.get('settled_count', 0)} 组 | 命中 {hit_rate_text}"
+            f"每日二串一: 当前 {summary.get('active_count', 0)} 组 | 历史 {summary.get('settled_count', 0)} 组 | "
+            f"命中 {hit_rate_text} | 来源健康 {source_health_status} | 问题 {source_health_issue_count} | {source_health_hint}"
         )
         self._bind_canvas_mousewheel(content, canvas)
 

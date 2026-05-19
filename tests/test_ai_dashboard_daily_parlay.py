@@ -18,6 +18,7 @@ from v24_app.ai_dashboard import (
     DashboardRow,
     SmartMatchDashboard,
     _append_daily_parlay_snapshot_log,
+    _daily_parlay_toolbar_state,
     _load_daily_parlay_snapshot_log,
     _save_daily_parlay_snapshot_log,
 )
@@ -113,6 +114,32 @@ class AIDashboardDailyParlayTests(unittest.TestCase):
 
         self.assertEqual([record["generated_at"] for record in records], ["third", "second"])
         self.assertEqual(records[0]["summary"]["active_count"], 3)
+
+    def test_daily_parlay_toolbar_state_blocks_export_when_source_health_is_blocked(self) -> None:
+        state = _daily_parlay_toolbar_state({"status": "blocked", "tone": "bad", "issue_count": 2}, {})
+
+        self.assertEqual(state["export_state"], "disabled")
+        self.assertEqual(state["button_style"], "danger")
+        self.assertEqual(state["hint"], "导出已禁用")
+        self.assertEqual(state["issue_count"], 2)
+
+    def test_daily_parlay_toolbar_state_keeps_attention_export_confirmable(self) -> None:
+        state = _daily_parlay_toolbar_state(
+            {},
+            {"source_health_status": "attention", "source_health_tone": "warning", "source_health_issue_count": "3"},
+        )
+
+        self.assertEqual(state["export_state"], "normal")
+        self.assertEqual(state["button_style"], "warning")
+        self.assertEqual(state["hint"], "导出需确认")
+        self.assertEqual(state["issue_count"], 3)
+
+    def test_daily_parlay_toolbar_state_marks_healthy_export_available(self) -> None:
+        state = _daily_parlay_toolbar_state({"status": "healthy", "tone": "good", "issue_count": 0}, {})
+
+        self.assertEqual(state["export_state"], "normal")
+        self.assertEqual(state["button_style"], "normal")
+        self.assertEqual(state["hint"], "导出可用")
 
     def test_export_daily_parlay_report_writes_report_and_snapshot_log(self) -> None:
         dashboard = object.__new__(SmartMatchDashboard)
