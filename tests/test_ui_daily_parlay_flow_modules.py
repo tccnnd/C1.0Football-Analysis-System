@@ -16,6 +16,7 @@ if str(SRC_ROOT) not in sys.path:
 from v24_app.ui_modules import (
     build_daily_parlay_empty_state,
     build_daily_parlay_export_message,
+    build_daily_parlay_export_guard_text,
     build_daily_parlay_report_filename,
     build_daily_parlay_report_lines,
     build_daily_parlay_settlement_rows,
@@ -193,6 +194,19 @@ class UIDailyParlayFlowModuleTests(unittest.TestCase):
         self.assertIn("parlay_traceability_blocked", issue_codes)
         self.assertIn("parlay_traceability_gap", issue_codes)
         self.assertGreaterEqual(health["metrics"]["missing_traceability_leg_count"], 1)
+
+    def test_export_guard_text_reflects_source_health(self) -> None:
+        snapshot = build_daily_parlay_snapshot(
+            [{"ticket_id": "ticket-1", "legs": [{"match_id": "m1"}]}],
+            [],
+            {},
+            generated_at=datetime(2026, 5, 18, 12, 30, 5),
+        )
+        guard_text = build_daily_parlay_export_guard_text(snapshot)
+
+        self.assertIn("来源健康", guard_text)
+        self.assertIn("blocked", guard_text)
+        self.assertIn("source_id", guard_text)
 
     def test_snapshot_and_report_lines_include_export_context(self) -> None:
         active = [

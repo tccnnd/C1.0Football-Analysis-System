@@ -202,6 +202,7 @@ from .ui_modules import (
     build_strategy_release_pool_rows,
     build_daily_parlay_empty_state,
     build_daily_parlay_export_message,
+    build_daily_parlay_export_guard_text,
     build_daily_parlay_report_filename,
     build_daily_parlay_report_lines,
     build_daily_parlay_settlement_rows,
@@ -13108,7 +13109,7 @@ class SmartMatchDashboard:
             "refreshed_from_current": refreshed_from_current,
         }
 
-    def export_daily_parlay_report(self) -> Path:
+    def export_daily_parlay_report(self) -> Path | None:
         base_snapshot = self._daily_parlay_snapshot()
         active_tickets = base_snapshot.get("active_tickets") if isinstance(base_snapshot.get("active_tickets"), list) else []
         settled_tickets = base_snapshot.get("settled_tickets") if isinstance(base_snapshot.get("settled_tickets"), list) else []
@@ -13125,12 +13126,29 @@ class SmartMatchDashboard:
             report_path=path,
             source=source_text,
         )
+        source_health = snapshot.get("source_health") if isinstance(snapshot.get("source_health"), dict) else {}
+        source_health_status = str(source_health.get("status") or snapshot.get("summary", {}).get("source_health_status") or "healthy")
+        source_health_issue_count = int(source_health.get("issue_count", snapshot.get("summary", {}).get("source_health_issue_count", 0)) or 0)
+        if source_health_status == "blocked":
+            guard_text = build_daily_parlay_export_guard_text(snapshot)
+            self.status_var.set(f"每日二串一报告导出被阻断: {path.name} | {source_health_status}")
+            messagebox.showwarning("每日二串一报告", guard_text)
+            return None
+        if source_health_status == "attention":
+            guard_text = build_daily_parlay_export_guard_text(snapshot)
+            confirmed = messagebox.askyesno(
+                "每日二串一报告",
+                f"{guard_text}\n\n是否仍然导出报告？",
+            )
+            if not confirmed:
+                self.status_var.set(f"每日二串一报告导出已取消: {path.name} | {source_health_status}")
+                return None
         path.write_text("\n".join(build_daily_parlay_report_lines(snapshot)), encoding="utf-8")
         try:
             _append_daily_parlay_snapshot_log(snapshot, DAILY_PARLAY_SNAPSHOT_LOG)
         except Exception as exc:
             self._log_event("ERROR", f"每日二串一快照留痕失败: {exc}")
-        self.status_var.set(f"每日二串一报告已导出: {path.name}")
+        self.status_var.set(f"每日二串一报告已导出: {path.name} | 来源健康 {source_health_status} | 问题 {source_health_issue_count}")
         messagebox.showinfo(
             "每日二串一报告",
             build_daily_parlay_export_message(path, snapshot),

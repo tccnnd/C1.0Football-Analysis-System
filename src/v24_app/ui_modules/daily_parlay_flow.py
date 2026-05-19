@@ -977,6 +977,7 @@ def build_daily_parlay_report_lines(snapshot: Mapping[str, Any] | object) -> lis
 def build_daily_parlay_export_message(path: Path | str, snapshot: Mapping[str, Any] | object) -> str:
     payload = snapshot if isinstance(snapshot, Mapping) else {}
     summary = payload.get("summary") if isinstance(payload.get("summary"), Mapping) else {}
+    source_health = payload.get("source_health") if isinstance(payload.get("source_health"), Mapping) else {}
     return "\n".join(
         [
             "每日二串一报告已导出",
@@ -985,7 +986,40 @@ def build_daily_parlay_export_message(path: Path | str, snapshot: Mapping[str, A
             f"当前组合: {summary.get('active_count', 0)}",
             f"近期结算: {summary.get('settled_count', 0)}",
             f"快照签名: {payload.get('snapshot_signature') or '-'}",
+            f"来源健康: {source_health.get('status') or summary.get('source_health_status') or '-'} | 问题 {source_health.get('issue_count', summary.get('source_health_issue_count', 0))}",
+            f"健康摘要: {source_health.get('summary_text') or summary.get('source_health_summary_text') or '-'}",
             "",
             "已同步写入快照留痕，便于后续赛果回收和复盘对照。",
         ]
     )
+
+
+def build_daily_parlay_export_guard_text(snapshot: Mapping[str, Any] | object) -> str:
+    payload = snapshot if isinstance(snapshot, Mapping) else {}
+    summary = payload.get("summary") if isinstance(payload.get("summary"), Mapping) else {}
+    source_health = payload.get("source_health") if isinstance(payload.get("source_health"), Mapping) else {}
+    source_health_issue_rows = payload.get("source_health_issue_rows") if isinstance(payload.get("source_health_issue_rows"), list) else []
+    issue_rows = [item for item in source_health_issue_rows if isinstance(item, Mapping)]
+    status = str(source_health.get("status") or summary.get("source_health_status") or "healthy")
+    issue_count = int(_safe_float(source_health.get("issue_count"), _safe_float(summary.get("source_health_issue_count"), 0.0)))
+    lines = [
+        "每日二串一导出前的来源健康审计",
+        "",
+        f"状态: {status}",
+        f"问题数: {issue_count}",
+        f"摘要: {source_health.get('summary_text') or summary.get('source_health_summary_text') or '-'}",
+    ]
+    for row in issue_rows[:3]:
+        lines.append(
+            f"- {str(row.get('code') or '-')}: {str(row.get('message') or '-')} | {str(row.get('recommendation') or '-')}"
+        )
+    if status == "blocked":
+        lines.append("")
+        lines.append("当前来源健康已阻断，建议先补齐 source_id / source 留痕后再导出。")
+    elif status == "attention":
+        lines.append("")
+        lines.append("当前来源健康需要关注，建议确认是否继续导出，并尽快补齐缺口。")
+    else:
+        lines.append("")
+        lines.append("当前来源健康可用，可以继续导出。")
+    return "\n".join(lines)

@@ -169,6 +169,82 @@ class AIDashboardDailyParlayTests(unittest.TestCase):
         self.assertIn("每日二串一报告已导出", dashboard.status_var.value)
         showinfo.assert_called_once()
 
+    def test_export_daily_parlay_report_blocks_when_source_health_is_blocked(self) -> None:
+        dashboard = object.__new__(SmartMatchDashboard)
+        dashboard.status_var = self._StatusVar()
+        dashboard._log_event = lambda *args, **kwargs: None
+        dashboard._daily_parlay_snapshot = lambda: {
+            "active_tickets": [
+                {
+                    "ticket_id": "blocked-1",
+                    "status": "pending",
+                    "legs": [{"match_id": "m1"}, {"match_id": "m2"}],
+                }
+            ],
+            "settled_tickets": [],
+            "selector_metrics": {"ticket_count": 1},
+            "refreshed_from_current": False,
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report_dir = Path(tmp) / "reports"
+            log_path = Path(tmp) / "daily_parlay_snapshot_log.json"
+            with patch("v24_app.ai_dashboard.REPORT_DIR", report_dir), patch(
+                "v24_app.ai_dashboard.DAILY_PARLAY_SNAPSHOT_LOG",
+                log_path,
+            ), patch("v24_app.ai_dashboard.messagebox.showwarning") as showwarning, patch(
+                "v24_app.ai_dashboard.messagebox.showinfo"
+            ) as showinfo:
+                result = dashboard.export_daily_parlay_report()
+            self.assertIsNone(result)
+            self.assertTrue(report_dir.exists())
+            self.assertFalse(any(report_dir.iterdir()))
+            self.assertFalse(log_path.exists())
+            self.assertIn("blocked", dashboard.status_var.value)
+            showwarning.assert_called_once()
+            showinfo.assert_not_called()
+
+    def test_export_daily_parlay_report_requires_confirmation_for_attention(self) -> None:
+        dashboard = object.__new__(SmartMatchDashboard)
+        dashboard.status_var = self._StatusVar()
+        dashboard._log_event = lambda *args, **kwargs: None
+        dashboard._daily_parlay_snapshot = lambda: {
+            "active_tickets": [
+                {
+                    "ticket_id": "attention-1",
+                    "status": "pending",
+                    "legs": [
+                        {"match_id": "m1", "source": "live:titan", "source_id": "titan-123"},
+                        {"match_id": "m2", "source": "cache"},
+                    ],
+                }
+            ],
+            "settled_tickets": [],
+            "selector_metrics": {"ticket_count": 1},
+            "refreshed_from_current": True,
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report_dir = Path(tmp) / "reports"
+            log_path = Path(tmp) / "daily_parlay_snapshot_log.json"
+            with patch("v24_app.ai_dashboard.REPORT_DIR", report_dir), patch(
+                "v24_app.ai_dashboard.DAILY_PARLAY_SNAPSHOT_LOG",
+                log_path,
+            ), patch("v24_app.ai_dashboard.messagebox.askyesno", return_value=True) as askyesno, patch(
+                "v24_app.ai_dashboard.messagebox.showinfo"
+            ) as showinfo:
+                result = dashboard.export_daily_parlay_report()
+            report_payload = result.read_text(encoding="utf-8")
+            records = _load_daily_parlay_snapshot_log(log_path)
+            self.assertIsNotNone(result)
+            self.assertTrue(result.exists())
+            self.assertTrue(report_dir.exists())
+            self.assertEqual(len(records), 1)
+            self.assertIn("来源健康", report_payload)
+            self.assertIn("attention", dashboard.status_var.value)
+            askyesno.assert_called_once()
+            showinfo.assert_called_once()
+
     def test_closes_daily_parlay_snapshots_after_result_recovery(self) -> None:
         dashboard = object.__new__(SmartMatchDashboard)
         dashboard._log_event = lambda *args, **kwargs: None
