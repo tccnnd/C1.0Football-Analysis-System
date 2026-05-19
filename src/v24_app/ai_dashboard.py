@@ -13954,8 +13954,7 @@ class SmartMatchDashboard:
         listbox.bind("<<ListboxSelect>>", on_select)
         self.status_var.set(str(summary.get("summary_text") or "二串一修复审计"))
 
-    def open_daily_parlay_repair_queue_window(self, route_filter: str | None = None) -> None:
-        self.current_view = "daily_parlay_repair_queue"
+    def _daily_parlay_repair_workbench_state(self, route_filter: str | None = None) -> dict[str, object]:
         snapshot = self._daily_parlay_repair_queue_snapshot()
         summary = snapshot.get("summary") if isinstance(snapshot.get("summary"), dict) else {}
         rows = snapshot.get("rows") if isinstance(snapshot.get("rows"), list) else []
@@ -13970,6 +13969,250 @@ class SmartMatchDashboard:
         route_counts = build_daily_parlay_repair_queue_route_counts(full_queue_rows)
         filtered_queue_rows = filter_daily_parlay_repair_queue_rows(full_queue_rows, active_route)
         active_route_label = daily_parlay_repair_queue_route_label(active_route)
+        priority_bucket_values = priority_batch_plan.get("priority_buckets") if isinstance(priority_batch_plan, dict) else []
+        allowed_priority_buckets = {
+            str(item).strip().lower()
+            for item in (priority_bucket_values if isinstance(priority_bucket_values, list) else [])
+            if str(item).strip()
+        } or {"critical", "high"}
+        priority_focus_rows = [
+            item
+            for item in full_queue_rows
+            if str(item.get("priority_bucket") or "").strip().lower() in allowed_priority_buckets
+        ]
+        return {
+            "snapshot": snapshot,
+            "summary": summary,
+            "rows": rows,
+            "queue_tickets": queue_tickets,
+            "priority_batch_plan": priority_batch_plan,
+            "priority_counts": priority_counts,
+            "priority_summary_text": priority_summary_text,
+            "active_route": active_route,
+            "active_route_label": active_route_label,
+            "full_queue_rows": full_queue_rows,
+            "route_counts": route_counts,
+            "filtered_queue_rows": filtered_queue_rows,
+            "priority_focus_rows": priority_focus_rows,
+        }
+
+    def open_daily_parlay_repair_priority_window(self, route_filter: str | None = None) -> None:
+        self.current_view = "daily_parlay_repair_priority"
+        state = self._daily_parlay_repair_workbench_state(route_filter)
+        summary = state.get("summary") if isinstance(state.get("summary"), dict) else {}
+        priority_batch_plan = state.get("priority_batch_plan") if isinstance(state.get("priority_batch_plan"), dict) else {}
+        priority_counts = state.get("priority_counts") if isinstance(state.get("priority_counts"), dict) else {}
+        priority_summary_text = str(state.get("priority_summary_text") or "-")
+        active_route = str(state.get("active_route") or "").strip().lower()
+        priority_focus_rows = [item for item in state.get("priority_focus_rows", []) if isinstance(item, dict)]
+
+        window = tk.Toplevel(self.root)
+        window.title("二串一批量修复专项")
+        window.geometry("1280x760")
+        window.configure(bg=BG)
+
+        shell = tk.Frame(window, bg=BG)
+        shell.pack(fill=tk.BOTH, expand=True, padx=16, pady=16)
+
+        header = tk.Frame(shell, bg=BG)
+        header.pack(fill=tk.X, pady=(0, 12))
+        tk.Label(header, text="二串一批量修复专项", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 15, "bold")).pack(side=tk.LEFT)
+
+        def _header_button(label: str, command, *, color: str = PANEL_2) -> None:
+            tk.Button(
+                header,
+                text=label,
+                command=command,
+                bg=color,
+                fg="white" if color == BLUE else "#10141f" if color == YELLOW else TEXT,
+                activebackground="#3d5ee7" if color == BLUE else "#f7c948" if color == YELLOW else "#172638",
+                activeforeground="white" if color == BLUE else "#10141f",
+                relief=tk.FLAT,
+                font=("Microsoft YaHei UI", 10, "bold"),
+                padx=14,
+                pady=6,
+            ).pack(side=tk.RIGHT, padx=(8, 0))
+
+        _header_button("刷新", lambda: (window.destroy(), self.open_daily_parlay_repair_priority_window(active_route or None)), color=BLUE)
+        _header_button("修复队列", lambda: (window.destroy(), self.open_daily_parlay_repair_queue_window(active_route or None)))
+        _header_button("修复审计", self.open_daily_parlay_repair_audit_window)
+        _header_button("导出闭环报告", self.export_daily_parlay_repair_loop_report, color=BLUE)
+        _header_button("关闭", window.destroy)
+
+        top = tk.Frame(shell, bg=BG)
+        top.pack(fill=tk.X, pady=(0, 12))
+        for label, value, color in [
+            ("高优先级", str(len(priority_focus_rows)), YELLOW if len(priority_focus_rows) else MUTED),
+            ("待修复", str(summary.get("blocked_count", 0)), RED if int(summary.get("blocked_count", 0) or 0) else GREEN),
+            ("来源回填", str(priority_batch_plan.get("source_backfill_count", 0)), BLUE if int(priority_batch_plan.get("source_backfill_count", 0) or 0) else MUTED),
+            ("混源拆票", str(priority_batch_plan.get("mixed_source_split_count", 0)), YELLOW if int(priority_batch_plan.get("mixed_source_split_count", 0) or 0) else MUTED),
+            ("人工复核", str(priority_batch_plan.get("manual_review_count", 0)), MUTED),
+            ("自动回收", str(priority_counts.get("auto_recoverable", 0)), GREEN if int(priority_counts.get("auto_recoverable", 0) or 0) else MUTED),
+        ]:
+            self._detail_metric(top, label, value, color)
+
+        summary_bar = tk.Frame(shell, bg=BG)
+        summary_bar.pack(fill=tk.X, pady=(0, 10))
+        tk.Label(
+            summary_bar,
+            text=f"优先级概览: {priority_summary_text} | 批量计划: {str(priority_batch_plan.get('summary_text') or '-')}",
+            bg=BG,
+            fg=TEXT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+        ).pack(side=tk.LEFT)
+
+        action_bar = tk.Frame(shell, bg=BG)
+        action_bar.pack(fill=tk.X, pady=(0, 12))
+
+        def _refresh_window() -> None:
+            window.destroy()
+            self.open_daily_parlay_repair_priority_window(active_route or None)
+
+        def _run_batch_action(action) -> None:
+            result = action()
+            if not isinstance(result, dict) or not result.get("error"):
+                _refresh_window()
+
+        def _action_button(label: str, command, *, color: str = PANEL_2, state: str = tk.NORMAL) -> None:
+            tk.Button(
+                action_bar,
+                text=label,
+                command=command,
+                bg=color,
+                fg="white" if color == BLUE else "#10141f" if color == YELLOW else TEXT,
+                activebackground="#3d5ee7" if color == BLUE else "#f7c948" if color == YELLOW else "#172638",
+                activeforeground="white" if color == BLUE else "#10141f",
+                relief=tk.FLAT,
+                font=("Microsoft YaHei UI", 10, "bold"),
+                padx=14,
+                pady=6,
+                state=state,
+            ).pack(side=tk.LEFT, padx=(0, 8))
+
+        _action_button(
+            f"批量回填高优先级 {int(priority_batch_plan.get('source_backfill_count', 0) or 0)}",
+            lambda: _run_batch_action(self.apply_daily_parlay_repair_priority_source_backfill),
+            color=BLUE,
+            state=tk.NORMAL if int(priority_batch_plan.get("source_backfill_count", 0) or 0) > 0 else tk.DISABLED,
+        )
+        _action_button(
+            f"批量拆票高优先级 {int(priority_batch_plan.get('mixed_source_split_count', 0) or 0)}",
+            lambda: _run_batch_action(self.mark_daily_parlay_repair_priority_split_required),
+            color=YELLOW,
+            state=tk.NORMAL if int(priority_batch_plan.get("mixed_source_split_count", 0) or 0) > 0 else tk.DISABLED,
+        )
+        _action_button("打开队列", lambda: (window.destroy(), self.open_daily_parlay_repair_queue_window(active_route or None)))
+
+        body = tk.Frame(shell, bg=BG)
+        body.pack(fill=tk.BOTH, expand=True)
+        left = self._card(body, PANEL)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 12))
+        right = self._card(body, PANEL)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self._strategy_section_title(left, "高优先级票据", first=True)
+        queue_wrap = tk.Frame(left, bg=PANEL)
+        queue_wrap.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
+        listbox = tk.Listbox(
+            queue_wrap,
+            bg=PANEL,
+            fg=TEXT,
+            selectbackground=BLUE,
+            selectforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10),
+            activestyle="none",
+        )
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        list_scrollbar = tk.Scrollbar(queue_wrap, orient=tk.VERTICAL, command=listbox.yview)
+        listbox.configure(yscrollcommand=list_scrollbar.set)
+        list_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self._strategy_section_title(right, "专项详情", first=True)
+        detail_wrap = tk.Frame(right, bg=PANEL)
+        detail_wrap.pack(fill=tk.BOTH, expand=True, padx=18, pady=(0, 14))
+        detail = tk.Text(
+            detail_wrap,
+            bg=PANEL,
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief=tk.FLAT,
+            wrap=tk.WORD,
+            font=("Microsoft YaHei UI", 10),
+        )
+        detail.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        detail_scrollbar = tk.Scrollbar(detail_wrap, orient=tk.VERTICAL, command=detail.yview)
+        detail.configure(yscrollcommand=detail_scrollbar.set)
+        detail_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        row_cache = priority_focus_rows
+
+        def show_detail(index: int | None = None) -> None:
+            detail.configure(state=tk.NORMAL)
+            detail.delete("1.0", tk.END)
+            if not row_cache:
+                detail.insert(
+                    tk.END,
+                    "当前没有需要批量处理的高优先级二串一票据。\n\n"
+                    f"{priority_summary_text}\n"
+                    f"{str(priority_batch_plan.get('summary_text') or '-')}\n",
+                )
+            else:
+                target_index = 0 if index is None or index < 0 or index >= len(row_cache) else index
+                row = row_cache[target_index]
+                action_hint = build_daily_parlay_repair_queue_action_hint(row)
+                listbox.selection_clear(0, tk.END)
+                listbox.selection_set(target_index)
+                listbox.see(target_index)
+                legs = row.get("legs") if isinstance(row.get("legs"), list) else []
+                legs_lines = [f"- {str(item)}" for item in legs] if legs else ["- 无"]
+                detail_lines = [
+                    f"票据: {row.get('ticket_id', '-') or '-'}",
+                    f"优先级: {row.get('priority_label') or '-'} | 分数: {row.get('priority_score', 0)}",
+                    f"分流: {action_hint.get('route_label') or '-'} | 推荐动作: {action_hint.get('primary_action') or '-'}",
+                    f"原因: {row.get('priority_reason') or '-'}",
+                    f"门禁: {row.get('message') or '-'}",
+                    f"建议: {row.get('recommendation') or '-'}",
+                    f"来源: {row.get('source') or '-'} | source_id: {row.get('source_id') or '-'}",
+                    f"创建时间: {row.get('created_at') or '-'}",
+                    "legs:",
+                    *legs_lines,
+                ]
+                detail.insert(tk.END, "\n".join(detail_lines))
+            detail.configure(state=tk.DISABLED)
+
+        for row in row_cache:
+            listbox.insert(
+                tk.END,
+                f"{row.get('priority_label') or '-'} {row.get('priority_score', 0)} | {row.get('route_type') or '-'} | {row.get('ticket_id') or '-'}",
+            )
+        if row_cache:
+            show_detail(0)
+        else:
+            listbox.insert(tk.END, "暂无高优先级二串一票据")
+            show_detail(None)
+
+        def on_select(_event: object | None = None) -> None:
+            selection = listbox.curselection()
+            if selection and row_cache:
+                show_detail(int(selection[0]))
+
+        listbox.bind("<<ListboxSelect>>", on_select)
+        self.status_var.set(
+            f"二串一批量修复专项: 高优先级 {len(row_cache)} | {priority_summary_text} | {str(priority_batch_plan.get('summary_text') or '-')}"
+        )
+
+    def open_daily_parlay_repair_queue_window(self, route_filter: str | None = None) -> None:
+        self.current_view = "daily_parlay_repair_queue"
+        state = self._daily_parlay_repair_workbench_state(route_filter)
+        summary = state.get("summary") if isinstance(state.get("summary"), dict) else {}
+        rows = [item for item in state.get("rows", []) if isinstance(item, dict)]
+        full_queue_rows = [item for item in state.get("full_queue_rows", rows) if isinstance(item, dict)]
+        active_route = str(state.get("active_route") or "").strip().lower()
+        route_counts = state.get("route_counts") if isinstance(state.get("route_counts"), dict) else {}
+        filtered_queue_rows = [item for item in state.get("filtered_queue_rows", []) if isinstance(item, dict)]
+        active_route_label = str(state.get("active_route_label") or "全部")
+        priority_summary_text = str(state.get("priority_summary_text") or "-")
 
         window = tk.Toplevel(self.root)
         window.title("二串一人工修复队列")
@@ -14001,6 +14244,7 @@ class SmartMatchDashboard:
         _header_button("刷新", lambda: (window.destroy(), self.open_daily_parlay_repair_queue_window(active_route or None)), color=BLUE)
         _header_button("导出闭环报告", self.export_daily_parlay_repair_loop_report, color=BLUE)
         _header_button("历史报告", self.open_daily_parlay_repair_loop_history)
+        _header_button("批量专项", lambda: (window.destroy(), self.open_daily_parlay_repair_priority_window(active_route or None)))
         _header_button("修复审计", self.open_daily_parlay_repair_audit_window)
         _header_button("二串一窗口", self.open_daily_parlay_window)
         _header_button("回收中心", self.open_recovery_run_center)
@@ -14020,16 +14264,6 @@ class SmartMatchDashboard:
             ("最近审计", str(repair_audit_summary.get("total", 0)), "#7aa2ff"),
         ]:
             self._detail_metric(top, label, value, color)
-
-        priority_strip = tk.Frame(shell, bg=BG)
-        priority_strip.pack(fill=tk.X, pady=(0, 10))
-        tk.Label(
-            priority_strip,
-            text=f"优先级队列: {priority_summary_text}",
-            bg=BG,
-            fg=YELLOW if int(priority_counts.get("critical", 0) or 0) else TEXT,
-            font=("Microsoft YaHei UI", 10, "bold"),
-        ).pack(side=tk.LEFT)
 
         filter_bar = tk.Frame(shell, bg=BG)
         filter_bar.pack(fill=tk.X, pady=(0, 12))
@@ -14128,19 +14362,6 @@ class SmartMatchDashboard:
             color=YELLOW,
         )
         _action_button("重新生成票据", lambda: (window.destroy(), self.open_daily_parlay_window()))
-
-        _action_button(
-            f"批量回填高优先级 {int(priority_batch_plan.get('source_backfill_count', 0) or 0)}",
-            lambda: _run_repair_action(self.apply_daily_parlay_repair_priority_source_backfill),
-            color=BLUE,
-            state=tk.NORMAL if int(priority_batch_plan.get('source_backfill_count', 0) or 0) > 0 else tk.DISABLED,
-        )
-        _action_button(
-            f"批量拆票高优先级 {int(priority_batch_plan.get('mixed_source_split_count', 0) or 0)}",
-            lambda: _run_repair_action(self.mark_daily_parlay_repair_priority_split_required),
-            color=YELLOW,
-            state=tk.NORMAL if int(priority_batch_plan.get('mixed_source_split_count', 0) or 0) > 0 else tk.DISABLED,
-        )
 
         route_action_button = tk.Button(
             action_bar,

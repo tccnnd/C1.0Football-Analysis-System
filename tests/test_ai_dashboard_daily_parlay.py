@@ -26,6 +26,7 @@ from v24_app.ai_dashboard import (
     DAILY_PARLAY_REPAIR_AUDIT_LOG,
 )
 from v24_app.core import AppMatch
+from v24_app.ui_modules import build_daily_parlay_repair_queue_rows, build_daily_parlay_repair_queue_summary
 
 
 class AIDashboardDailyParlayTests(unittest.TestCase):
@@ -55,6 +56,92 @@ class AIDashboardDailyParlayTests(unittest.TestCase):
         def load_analysis_history(self) -> dict[str, dict]:
             return {}
 
+    class _FakeWidget:
+        def __init__(self, *args, **kwargs) -> None:
+            self.args = args
+            self.kwargs = dict(kwargs)
+            self.text = kwargs.get("text")
+            self.items: list[str] = []
+            self.selection: tuple[int, ...] = ()
+            self.destroyed = False
+
+        def pack(self, *args, **kwargs):
+            return self
+
+        def bind(self, *args, **kwargs):
+            self.kwargs.setdefault("bindings", []).append((args, kwargs))
+            return self
+
+        def configure(self, **kwargs):
+            self.kwargs.update(kwargs)
+            return self
+
+        config = configure
+
+        def insert(self, *args, **kwargs):
+            if len(args) >= 2:
+                self.items.append(str(args[1]))
+            elif "text" in kwargs:
+                self.items.append(str(kwargs["text"]))
+            return self
+
+        def delete(self, *args, **kwargs):
+            self.items.clear()
+            return self
+
+        def selection_clear(self, *args, **kwargs):
+            self.selection = ()
+            return self
+
+        def selection_set(self, *args, **kwargs):
+            if args:
+                self.selection = (int(args[0]),)
+            return self
+
+        def see(self, *args, **kwargs):
+            return self
+
+        def curselection(self):
+            return self.selection
+
+        def yview(self, *args, **kwargs):
+            return None
+
+        def set(self, *args, **kwargs):
+            return None
+
+        def destroy(self):
+            self.destroyed = True
+            return None
+
+        def title(self, *args, **kwargs):
+            self.kwargs["title"] = args[0] if args else kwargs.get("text")
+            return None
+
+        def geometry(self, *args, **kwargs):
+            self.kwargs["geometry"] = args[0] if args else kwargs.get("geometry")
+            return None
+
+        def transient(self, *args, **kwargs):
+            return None
+
+        def minsize(self, *args, **kwargs):
+            return None
+
+        def protocol(self, *args, **kwargs):
+            self.kwargs.setdefault("protocols", []).append((args, kwargs))
+            return None
+
+        def winfo_exists(self):
+            return not self.destroyed
+
+    class _FakeButton(_FakeWidget):
+        created_texts: list[str] = []
+
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.__class__.created_texts.append(str(kwargs.get("text") or ""))
+
     def _match(self, home: str, away: str) -> AppMatch:
         return AppMatch(
             home_team=home,
@@ -66,6 +153,80 @@ class AIDashboardDailyParlayTests(unittest.TestCase):
             odds_draw=3.2,
             odds_away=3.4,
         )
+
+    def _daily_parlay_repair_window_state(self) -> dict:
+        mixed_row = {
+            "ticket_id": "mixed-high",
+            "status": "blocked",
+            "code": "parlay_mixed_sources",
+            "route_type": "mixed_source_split",
+            "priority_bucket": "critical",
+            "priority_label": "最高",
+            "priority_score": 354,
+            "priority_reason": "混源票据优先拆票。",
+            "message": "Mixed sources on parlay legs.",
+            "recommendation": "Split the ticket before recovery.",
+            "source": "live:titan / cache",
+            "source_id": "s1 / c2",
+            "created_at": "2026-05-18 09:30:00",
+            "mixed_source_count": 1,
+            "missing_source_count": 0,
+            "missing_source_id_count": 0,
+            "auto_recoverable": False,
+            "legs": ["A vs B", "C vs D"],
+            "gate": {"status": "blocked", "code": "parlay_mixed_sources"},
+        }
+        source_row = {
+            "ticket_id": "source-high",
+            "status": "blocked",
+            "code": "parlay_source_traceability_missing",
+            "route_type": "source_backfill",
+            "priority_bucket": "high",
+            "priority_label": "高",
+            "priority_score": 286,
+            "priority_reason": "缺 source_id，可从快照回填。",
+            "message": "Missing source/source_id.",
+            "recommendation": "Backfill source/source_id before recovery.",
+            "source": "live:titan",
+            "source_id": "-",
+            "created_at": "2026-05-18 09:00:00",
+            "mixed_source_count": 0,
+            "missing_source_count": 1,
+            "missing_source_id_count": 1,
+            "auto_recoverable": True,
+            "legs": ["E vs F", "G vs H"],
+            "gate": {"status": "blocked", "code": "parlay_source_traceability_missing"},
+        }
+        rows = [mixed_row, source_row]
+        return {
+            "summary": {
+                "pending_count": 2,
+                "blocked_count": 2,
+                "ready_count": 0,
+                "source_issue_count": 1,
+                "mixed_source_count": 1,
+                "priority_counts": {"critical": 1, "high": 1, "medium": 0, "low": 0, "auto_recoverable": 1},
+            },
+            "rows": rows,
+            "full_queue_rows": rows,
+            "filtered_queue_rows": rows,
+            "priority_focus_rows": rows,
+            "route_counts": {"all": 2, "source_backfill": 1, "mixed_source_split": 1, "manual_review": 0},
+            "priority_batch_plan": {
+                "priority_buckets": ["critical", "high"],
+                "source_backfill_ticket_ids": ["source-high"],
+                "mixed_source_split_ticket_ids": ["mixed-high"],
+                "manual_review_ticket_ids": [],
+                "source_backfill_count": 1,
+                "mixed_source_split_count": 1,
+                "manual_review_count": 0,
+                "summary_text": "priority batch | source_backfill 1 | mixed_source_split 1 | manual_review 0",
+            },
+            "priority_counts": {"critical": 1, "high": 1, "medium": 0, "low": 0, "auto_recoverable": 1},
+            "priority_summary_text": "最高 1 | 高 1 | 可自动回填 1",
+            "active_route": "",
+            "active_route_label": "全部",
+        }
 
     def test_daily_parlay_snapshot_refreshes_from_current_rows(self) -> None:
         dashboard = object.__new__(SmartMatchDashboard)
@@ -378,6 +539,113 @@ class AIDashboardDailyParlayTests(unittest.TestCase):
         self.assertIsNotNone(store.saved_tickets)
         self.assertEqual(store.saved_tickets[0]["manual_review_status"], "split_required")
         self.assertNotIn("manual_review_status", store.saved_tickets[1])
+
+    def test_daily_parlay_repair_workbench_state_focuses_high_priority_rows(self) -> None:
+        tickets = [
+            {
+                "ticket_id": "source-high",
+                "status": "pending",
+                "created_at": "2026-05-18 09:00:00",
+                "settlement_recovery_gate": {
+                    "status": "blocked",
+                    "code": "parlay_source_traceability_missing",
+                    "missing_source_count": 1,
+                    "missing_source_id_count": 1,
+                },
+            },
+            {
+                "ticket_id": "mixed-high",
+                "status": "pending",
+                "created_at": "2026-05-18 10:00:00",
+                "settlement_recovery_gate": {
+                    "status": "blocked",
+                    "code": "parlay_mixed_sources",
+                    "mixed_source_count": 1,
+                },
+            },
+            {
+                "ticket_id": "manual-medium",
+                "status": "pending",
+                "created_at": "2026-05-18 07:00:00",
+                "settlement_recovery_gate": {
+                    "status": "blocked",
+                    "code": "other",
+                },
+            },
+        ]
+        dashboard = object.__new__(SmartMatchDashboard)
+        dashboard._daily_parlay_repair_queue_snapshot = lambda: {
+            "summary": build_daily_parlay_repair_queue_summary(tickets),
+            "rows": build_daily_parlay_repair_queue_rows(tickets),
+            "tickets": tickets,
+        }
+
+        state = dashboard._daily_parlay_repair_workbench_state("source_backfill")
+
+        self.assertEqual(state["active_route"], "source_backfill")
+        self.assertEqual(state["priority_batch_plan"]["priority_buckets"], ["critical", "high"])
+        self.assertEqual(state["priority_batch_plan"]["source_backfill_ticket_ids"], ["source-high"])
+        self.assertEqual(state["priority_batch_plan"]["mixed_source_split_ticket_ids"], ["mixed-high"])
+        self.assertEqual([row["ticket_id"] for row in state["priority_focus_rows"]], ["mixed-high", "source-high"])
+        self.assertEqual([row["ticket_id"] for row in state["filtered_queue_rows"]], ["source-high"])
+
+    def test_daily_parlay_repair_queue_window_moves_batch_actions_to_special_window(self) -> None:
+        dashboard = object.__new__(SmartMatchDashboard)
+        dashboard.root = self._FakeWidget()
+        dashboard.status_var = self._StatusVar()
+        dashboard._daily_parlay_repair_workbench_state = lambda route_filter=None: self._daily_parlay_repair_window_state()
+        dashboard._daily_parlay_repair_audit_snapshot = lambda: {"summary": {"total": 0}}
+        dashboard._render_daily_parlay_repair_loop_alert = lambda parent: None
+        self._FakeButton.created_texts = []
+
+        with patch("v24_app.ai_dashboard.tk.Toplevel", self._FakeWidget), patch(
+            "v24_app.ai_dashboard.tk.Frame",
+            self._FakeWidget,
+        ), patch("v24_app.ai_dashboard.tk.Label", self._FakeWidget), patch(
+            "v24_app.ai_dashboard.tk.Button",
+            self._FakeButton,
+        ), patch(
+            "v24_app.ai_dashboard.tk.Listbox",
+            self._FakeWidget,
+        ), patch(
+            "v24_app.ai_dashboard.tk.Scrollbar",
+            self._FakeWidget,
+        ), patch("v24_app.ai_dashboard.tk.Text", self._FakeWidget):
+            dashboard.open_daily_parlay_repair_queue_window()
+
+        labels = self._FakeButton.created_texts
+        self.assertIn("批量专项", labels)
+        self.assertNotIn("批量回填高优先级 1", labels)
+        self.assertNotIn("批量拆票高优先级 1", labels)
+        self.assertIn("从快照回填选中", labels)
+
+    def test_daily_parlay_repair_priority_window_exposes_batch_actions(self) -> None:
+        dashboard = object.__new__(SmartMatchDashboard)
+        dashboard.root = self._FakeWidget()
+        dashboard.status_var = self._StatusVar()
+        dashboard._daily_parlay_repair_workbench_state = lambda route_filter=None: self._daily_parlay_repair_window_state()
+        self._FakeButton.created_texts = []
+
+        with patch("v24_app.ai_dashboard.tk.Toplevel", self._FakeWidget), patch(
+            "v24_app.ai_dashboard.tk.Frame",
+            self._FakeWidget,
+        ), patch("v24_app.ai_dashboard.tk.Label", self._FakeWidget), patch(
+            "v24_app.ai_dashboard.tk.Button",
+            self._FakeButton,
+        ), patch(
+            "v24_app.ai_dashboard.tk.Listbox",
+            self._FakeWidget,
+        ), patch(
+            "v24_app.ai_dashboard.tk.Scrollbar",
+            self._FakeWidget,
+        ), patch("v24_app.ai_dashboard.tk.Text", self._FakeWidget):
+            dashboard.open_daily_parlay_repair_priority_window()
+
+        labels = self._FakeButton.created_texts
+        self.assertIn("批量回填高优先级 1", labels)
+        self.assertIn("批量拆票高优先级 1", labels)
+        self.assertIn("打开队列", labels)
+        self.assertIn("修复队列", labels)
 
     def test_daily_parlay_repair_audit_snapshot_reads_state_store(self) -> None:
         dashboard = object.__new__(SmartMatchDashboard)
