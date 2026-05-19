@@ -243,6 +243,8 @@ from .ui_modules import (
     format_strategy_admission_replay_guard,
     format_strategy_admission_thresholds,
     build_dashboard_report_preview_summary,
+    build_daily_parlay_repair_loop_trend,
+    build_daily_parlay_repair_loop_trend_text,
     dashboard_report_type_options,
     filter_dashboard_report_rows,
     list_dashboard_report_files,
@@ -6254,6 +6256,38 @@ class SmartMatchDashboard:
         if initial_type != "\u5168\u90e8":
             subtitle += f" | \u5f53\u524d\u7b5b\u9009: {initial_type}"
         shell = self._page_shell("\u5386\u53f2\u62a5\u544a", subtitle)
+
+        show_repair_trend = include_csv and any(
+            str(row.get("name") or "").startswith("daily_parlay_repair_loop_")
+            for row in report_rows
+            if isinstance(row, dict)
+        )
+        if show_repair_trend:
+            trend = build_daily_parlay_repair_loop_trend(report_rows)
+            trend_box = tk.Frame(shell, bg=PANEL, highlightbackground="#172638", highlightthickness=1)
+            trend_box.pack(fill=tk.X, pady=(0, 12))
+            tk.Label(
+                trend_box,
+                text="\u95ed\u73af\u5065\u5eb7\u8d8b\u52bf",
+                bg=PANEL,
+                fg=TEXT,
+                font=("Microsoft YaHei UI", 13, "bold"),
+            ).pack(anchor=tk.W, padx=16, pady=(12, 4))
+            trend_text = tk.Text(
+                trend_box,
+                wrap=tk.WORD,
+                bg=PANEL,
+                fg=TEXT,
+                insertbackground=TEXT,
+                relief=tk.FLAT,
+                font=("Microsoft YaHei UI", 10),
+                height=8,
+                padx=14,
+                pady=8,
+            )
+            trend_text.pack(fill=tk.X, padx=12, pady=(0, 12))
+            trend_text.insert("1.0", build_daily_parlay_repair_loop_trend_text(trend))
+            trend_text.configure(state=tk.DISABLED)
 
         body = tk.Frame(shell, bg=BG)
         body.pack(fill=tk.BOTH, expand=True)

@@ -18,6 +18,8 @@ if str(SRC_ROOT) not in sys.path:
 from v24_app.core import AppMatch
 from v24_app.ui_modules import (
     build_dashboard_report_preview_summary,
+    build_daily_parlay_repair_loop_trend,
+    build_daily_parlay_repair_loop_trend_text,
     build_export_message_text,
     build_export_status_text,
     build_report_filename,
@@ -203,6 +205,50 @@ class UIReportExportFlowModuleTests(unittest.TestCase):
         self.assertIn("队列记录: 1", summary)
         self.assertIn("当前待修复: 1", summary)
         self.assertIn("累计复跑新结算: 2", summary)
+
+    def test_daily_parlay_repair_loop_trend_detects_improvement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            report_dir = Path(tmp)
+            older = report_dir / "daily_parlay_repair_loop_20260518_120000.csv"
+            newer = report_dir / "daily_parlay_repair_loop_20260518_130000.csv"
+            header = (
+                "record_type,generated_at,status,action,ticket_id,code,updated_ticket_count,"
+                "updated_leg_count,recovery_new_settled,recovery_gate_status,queue_blocked_after_repair,message,recommendation"
+            )
+            older.write_text(
+                "\n".join(
+                    [
+                        header,
+                        "audit,2026-05-18 12:00:00,blocked,source_backfill,ticket-a,,0,0,0,blocked,3,checked,ok",
+                        "queue,,blocked,,ticket-a,parlay_source_traceability_missing,,,,,,Missing source_id,Backfill source_id",
+                        "queue,,blocked,,ticket-b,parlay_source_traceability_missing,,,,,,Missing source_id,Backfill source_id",
+                        "queue,,blocked,,ticket-c,parlay_mixed_source_ticket,,,,,,Mixed source,Split ticket",
+                    ]
+                ),
+                encoding="utf-8-sig",
+            )
+            newer.write_text(
+                "\n".join(
+                    [
+                        header,
+                        "audit,2026-05-18 13:00:00,settled,source_backfill,ticket-a,,1,1,2,healthy,0,checked,ok",
+                        "queue,,blocked,,ticket-b,parlay_source_traceability_missing,,,,,,Missing source_id,Backfill source_id",
+                    ]
+                ),
+                encoding="utf-8-sig",
+            )
+            os.utime(older, (1000, 1000))
+            os.utime(newer, (2000, 2000))
+            rows = list_dashboard_report_files(report_dir, include_csv=True)
+            trend = build_daily_parlay_repair_loop_trend(rows)
+            text = build_daily_parlay_repair_loop_trend_text(trend)
+
+        self.assertEqual(trend["status"], "improving")
+        self.assertEqual(trend["metrics"][0]["queue_blocked"], 1)
+        self.assertEqual(trend["metrics"][0]["recovery_new_settled"], 2)
+        self.assertIn("improving", trend["summary"])
+        self.assertIn("improving", text)
+        self.assertIn("复跑 2", text)
 
 
 if __name__ == "__main__":

@@ -156,6 +156,121 @@ def _safe_int(value: object) -> int:
         return 0
 
 
+def _daily_parlay_repair_loop_csv_metrics(row: Mapping[str, object]) -> dict[str, object] | None:
+    path = row.get("path")
+    if not isinstance(path, Path) or path.suffix.lower() != ".csv" or not path.name.startswith("daily_parlay_repair_loop_"):
+        return None
+    try:
+        content = path.read_text(encoding="utf-8-sig")
+    except Exception:
+        return None
+    records = _csv_rows(content)
+    if not records:
+        return None
+    audit_rows = [item for item in records if item.get("record_type") == "audit"]
+    queue_rows = [item for item in records if item.get("record_type") == "queue"]
+    queue_blocked = sum(1 for item in queue_rows if str(item.get("status") or "").strip().lower() == "blocked")
+    source_issue_count = sum(1 for item in queue_rows if "source" in str(item.get("code") or "").lower())
+    mixed_source_count = sum(1 for item in queue_rows if "mixed" in str(item.get("code") or "").lower())
+    recovery_new_settled = sum(_safe_int(item.get("recovery_new_settled")) for item in audit_rows)
+    ticket_ids = {str(item.get("ticket_id") or "").strip() for item in records if str(item.get("ticket_id") or "").strip()}
+    return {
+        "name": row.get("name") or path.name,
+        "updated_at": row.get("updated_at") or "-",
+        "mtime": float(row.get("mtime") or 0.0),
+        "audit_count": len(audit_rows),
+        "queue_count": len(queue_rows),
+        "queue_blocked": queue_blocked,
+        "source_issue_count": source_issue_count,
+        "mixed_source_count": mixed_source_count,
+        "recovery_new_settled": recovery_new_settled,
+        "ticket_count": len(ticket_ids),
+    }
+
+
+def build_daily_parlay_repair_loop_trend(
+    rows: list[Mapping[str, object]] | object,
+    *,
+    limit: int = 8,
+) -> dict[str, object]:
+    if not isinstance(rows, list):
+        return {
+            "status": "empty",
+            "summary": "暂无二串一修复闭环趋势数据。",
+            "metrics": [],
+            "recommendation": "先导出至少 2 份二串一修复闭环 CSV 报告。",
+        }
+    metrics = [
+        item
+        for item in (_daily_parlay_repair_loop_csv_metrics(row) for row in rows if isinstance(row, Mapping))
+        if isinstance(item, dict)
+    ]
+    metrics.sort(key=lambda item: float(item.get("mtime") or 0.0), reverse=True)
+    metrics = metrics[: max(1, int(limit))]
+    if not metrics:
+        return {
+            "status": "empty",
+            "summary": "暂无二串一修复闭环趋势数据。",
+            "metrics": [],
+            "recommendation": "先导出至少 1 份带 CSV 的二串一修复闭环报告。",
+        }
+    latest = metrics[0]
+    previous = metrics[1] if len(metrics) > 1 else None
+    latest_blocked = _safe_int(latest.get("queue_blocked"))
+    latest_source = _safe_int(latest.get("source_issue_count"))
+    latest_recovery = _safe_int(latest.get("recovery_new_settled"))
+    if latest_blocked == 0 and latest_source == 0:
+        status = "healthy"
+        recommendation = "当前修复闭环没有阻塞票据，继续保持导出和回收节奏。"
+    elif previous is None:
+        status = "watch"
+        recommendation = "样本不足，至少保留 2 份历史 CSV 后再判断趋势。"
+    else:
+        previous_blocked = _safe_int(previous.get("queue_blocked"))
+        previous_source = _safe_int(previous.get("source_issue_count"))
+        if latest_blocked < previous_blocked and latest_source <= previous_source:
+            status = "improving"
+            recommendation = "待修复票据正在减少，继续优先处理来源缺口和复跑结算。"
+        elif latest_blocked > previous_blocked or latest_source > previous_source:
+            status = "regressing"
+            recommendation = "修复问题在反复出现，优先排查来源回填和混源票据生成链路。"
+        else:
+            status = "watch"
+            recommendation = "趋势暂未明显改善，继续观察下一轮导出后的阻塞变化。"
+    summary = (
+        f"最近 {len(metrics)} 份 | 最新待修复 {latest_blocked} | 来源缺口 {latest_source} | "
+        f"复跑新结算 {latest_recovery} | 状态 {status}"
+    )
+    return {
+        "status": status,
+        "summary": summary,
+        "metrics": metrics,
+        "recommendation": recommendation,
+    }
+
+
+def build_daily_parlay_repair_loop_trend_text(trend: Mapping[str, object] | object) -> str:
+    resolved = trend if isinstance(trend, Mapping) else {}
+    metrics = [item for item in resolved.get("metrics", []) if isinstance(item, Mapping)] if isinstance(resolved.get("metrics"), list) else []
+    lines = [
+        "二串一修复闭环健康趋势",
+        f"- 摘要: {resolved.get('summary') or '-'}",
+        f"- 建议: {resolved.get('recommendation') or '-'}",
+    ]
+    if metrics:
+        lines.append("- 最近记录:")
+        for item in metrics[:5]:
+            lines.append(
+                "  "
+                + f"{item.get('updated_at') or '-'} | 待修复 {_safe_int(item.get('queue_blocked'))} | "
+                + f"来源 {_safe_int(item.get('source_issue_count'))} | 混源 {_safe_int(item.get('mixed_source_count'))} | "
+                + f"复跑 {_safe_int(item.get('recovery_new_settled'))}"
+            )
+    else:
+        lines.append("- 最近记录: 暂无")
+    return "\n".join(lines)
+
+
 def _daily_parlay_repair_csv_summary(row: Mapping[str, object], content: str) -> list[str]:
     records = _csv_rows(content)
     audit_rows = [item for item in records if item.get("record_type") == "audit"]
