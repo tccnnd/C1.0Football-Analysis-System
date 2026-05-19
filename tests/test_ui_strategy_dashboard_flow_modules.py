@@ -14,6 +14,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from v24_app.core import AppMatch
+from v24_app.ui_modules.strategy_dashboard_flow import build_strategy_formal_release_settlement_summary
 from v24_app.ui_modules import (
     build_high_accuracy_strategy_dashboard,
     build_high_accuracy_live_feedback_summary,
@@ -1902,6 +1903,58 @@ class UIStrategyDashboardFlowModuleTests(unittest.TestCase):
         metrics = {item["label"]: item["value"] for item in dashboard["metrics"]}
         self.assertEqual(metrics["\u7b56\u7565\u6c60"], "0")
         self.assertIn("\u672a\u542f\u7528", dashboard["guidance_rows"][0]["title"])
+
+    def test_strategy_formal_release_settlement_summary_tracks_admission_allow(self) -> None:
+        settlements = [
+            {
+                "strategy_admission_decision": "allow",
+                "is_correct": True,
+                "prediction_confidence": 0.72,
+                "handicap_is_correct": True,
+                "ou_is_correct": False,
+                "high_accuracy_strategy_active_count": 2,
+                "high_accuracy_strategy_hit_count": 2,
+            },
+            {
+                "strategy_admission_decision": "allow",
+                "is_correct": False,
+                "prediction_confidence": 0.68,
+                "handicap_is_correct": False,
+                "ou_is_correct": True,
+                "high_accuracy_strategy_active_count": 1,
+                "high_accuracy_strategy_hit_count": 0,
+            },
+            {"strategy_admission_decision": "observe", "is_correct": False},
+        ]
+
+        summary = build_strategy_formal_release_settlement_summary(settlements)
+
+        self.assertEqual(summary["sample_count"], 2)
+        self.assertEqual(summary["known_count"], 2)
+        self.assertEqual(summary["hit_rate_text"], "50.0%")
+        self.assertEqual(summary["high_strategy_summary"], "2/3")
+        self.assertIn("1X2", summary["top_failure"])
+        self.assertEqual(len(summary["settlements"]), 2)
+
+    def test_strategy_dashboard_uses_formal_release_replay_by_default(self) -> None:
+        settlements = [
+            {
+                "strategy_admission_decision": "allow",
+                "is_correct": False,
+                "prediction_confidence": 0.66,
+                "handicap_is_correct": True,
+                "ou_is_correct": False,
+                "high_accuracy_strategy_active_count": 1,
+                "high_accuracy_strategy_hit_count": 1,
+            }
+        ]
+
+        dashboard = build_high_accuracy_strategy_dashboard({"enabled": True, "strategy_pool": []}, settlements)
+
+        metrics = {item["label"]: item["value"] for item in dashboard["metrics"]}
+        self.assertEqual(metrics["\u6b63\u5f0f\u653e\u884c\u56de\u653e"], "1 | 0.0%")
+        self.assertEqual(dashboard["historical_strategy_replay"]["sample_count"], 1)
+        self.assertEqual(dashboard["formal_release_replay"]["sample_count"], 1)
 
     def test_strategy_pool_rows_show_jc_bucket_evidence(self) -> None:
         rows = build_high_accuracy_strategy_pool_rows(

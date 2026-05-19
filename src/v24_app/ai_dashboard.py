@@ -13209,6 +13209,7 @@ class SmartMatchDashboard:
             "\u56de\u6d4b\u8bb0\u5f55",
             "\u771f\u5b9e\u547d\u4e2d",
             "\u7b56\u7565\u9519\u56e0",
+            "\u6b63\u5f0f\u653e\u884c\u56de\u653e",
             "Replay Guard",
         }
         strategy_metrics = [

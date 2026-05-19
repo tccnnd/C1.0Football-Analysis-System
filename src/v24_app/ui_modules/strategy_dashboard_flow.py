@@ -7466,14 +7466,28 @@ def _hit_rate(values: Sequence[bool]) -> float | None:
     return sum(1 for value in values if value) / len(values)
 
 
-def _strategy_allowlist_settlements(settlements: Sequence[Mapping[str, object]] | object) -> list[Mapping[str, object]]:
+def _strategy_decision_settlements(
+    settlements: Sequence[Mapping[str, object]] | object,
+    *,
+    decision_field: str,
+    decision_value: str = "allow",
+) -> list[Mapping[str, object]]:
     if not isinstance(settlements, Sequence):
         return []
+    target = str(decision_value or "").strip().lower()
     return [
         item
         for item in settlements
-        if isinstance(item, Mapping) and str(item.get("strategy_allowlist_decision") or "") == "allow"
+        if isinstance(item, Mapping) and str(item.get(decision_field) or "").strip().lower() == target
     ]
+
+
+def _strategy_allowlist_settlements(settlements: Sequence[Mapping[str, object]] | object) -> list[Mapping[str, object]]:
+    return _strategy_decision_settlements(settlements, decision_field="strategy_allowlist_decision")
+
+
+def _strategy_formal_release_settlements(settlements: Sequence[Mapping[str, object]] | object) -> list[Mapping[str, object]]:
+    return _strategy_decision_settlements(settlements, decision_field="strategy_admission_decision")
 
 
 def _allowlist_failure_reasons(item: Mapping[str, object]) -> list[str]:
@@ -7495,8 +7509,7 @@ def _allowlist_failure_reasons(item: Mapping[str, object]) -> list[str]:
     return reasons
 
 
-def build_strategy_allowlist_settlement_summary(settlements: Sequence[Mapping[str, object]] | object) -> dict[str, object]:
-    rows = _strategy_allowlist_settlements(settlements)
+def _strategy_settlement_summary(rows: Sequence[Mapping[str, object]]) -> dict[str, object]:
     official_values = _known_values(rows, "is_correct")
     handicap_values = _known_values(rows, "handicap_is_correct")
     ou_values = _known_values(rows, "ou_is_correct")
@@ -7524,6 +7537,7 @@ def build_strategy_allowlist_settlement_summary(settlements: Sequence[Mapping[st
     high_strategy_rate = active_hits / active_total if active_total else None
     return {
         "settled_count": len(rows),
+        "sample_count": len(rows),
         "known_count": len(official_values),
         "hit_count": sum(1 for value in official_values if value),
         "miss_count": sum(1 for value in official_values if not value),
@@ -7538,7 +7552,16 @@ def build_strategy_allowlist_settlement_summary(settlements: Sequence[Mapping[st
         "high_conf_misses": high_conf_misses,
         "top_failure": top_failure,
         "failure_counts": reason_counter,
+        "settlements": list(rows),
     }
+
+
+def build_strategy_allowlist_settlement_summary(settlements: Sequence[Mapping[str, object]] | object) -> dict[str, object]:
+    return _strategy_settlement_summary(_strategy_allowlist_settlements(settlements))
+
+
+def build_strategy_formal_release_settlement_summary(settlements: Sequence[Mapping[str, object]] | object) -> dict[str, object]:
+    return _strategy_settlement_summary(_strategy_formal_release_settlements(settlements))
 
 
 def build_strategy_allowlist_settlement_rows(
@@ -9615,9 +9638,16 @@ def build_high_accuracy_strategy_dashboard(
         error_weight_overrides=_as_mapping(statsbomb_review_training_signal.get("attribution_weights")),
     )
     historical_replay_summary = _as_mapping(historical_replay)
+    formal_release_replay_summary = build_strategy_formal_release_settlement_summary(settlement_items)
+    historical_replay_effective = (
+        historical_replay_summary
+        if _safe_int(historical_replay_summary.get("sample_count"))
+        else formal_release_replay_summary
+    )
+    historical_replay_label = "历史回放" if _safe_int(historical_replay_summary.get("sample_count")) else "正式放行回放"
     historical_replay_settlements = [
         item
-        for item in _as_list(historical_replay_summary.get("settlements"))
+        for item in _as_list(historical_replay_effective.get("settlements"))
         if isinstance(item, Mapping)
     ]
     historical_error_attribution = build_strategy_error_attribution_summary(historical_replay_settlements)
@@ -9628,7 +9658,7 @@ def build_high_accuracy_strategy_dashboard(
     allowlist_tuning = build_strategy_allowlist_tuning_recommendation(
         settlement_items,
         historical_error_attribution=historical_error_attribution,
-        historical_replay=historical_replay_summary,
+        historical_replay=historical_replay_effective,
     )
     policy_effect_review = build_strategy_policy_effect_review(policy_history or [], settlement_items)
     policy_stability_monitor = _as_mapping(policy_effect_review.get("stability_monitor"))
@@ -9775,16 +9805,16 @@ def build_high_accuracy_strategy_dashboard(
             else "neutral",
         },
         {
-            "label": "\u5386\u53f2\u56de\u653e",
+            "label": historical_replay_label,
             "value": (
-                f"{_safe_int(historical_replay_summary.get('sample_count'))} | {historical_replay_summary.get('hit_rate_text') or '-'}"
-                if _safe_int(historical_replay_summary.get("sample_count"))
+                f"{_safe_int(historical_replay_effective.get('sample_count'))} | {historical_replay_effective.get('hit_rate_text') or '-'}"
+                if _safe_int(historical_replay_effective.get("sample_count"))
                 else "-"
             ),
             "tone": "warning"
             if _safe_int(historical_error_attribution.get("miss_count"))
             else "good"
-            if _safe_int(historical_replay_summary.get("sample_count"))
+            if _safe_int(historical_replay_effective.get("sample_count"))
             else "neutral",
         },
         {
@@ -9991,10 +10021,10 @@ def build_high_accuracy_strategy_dashboard(
         ),
         ("\u65f6\u95f4\u8303\u56f4", f"{validation.get('date_start') or '-'} -> {validation.get('date_end') or '-'}"),
         (
-            "\u5386\u53f2\u56de\u653e\u6837\u672c",
+            f"{historical_replay_label}\u6837\u672c",
             (
-                f"{_safe_int(historical_replay_summary.get('sample_count'))} | "
-                f"\u547d\u4e2d {historical_replay_summary.get('hit_rate_text') or '-'} | "
+                f"{_safe_int(historical_replay_effective.get('sample_count'))} | "
+                f"\u547d\u4e2d {historical_replay_effective.get('hit_rate_text') or '-'} | "
                 f"\u4e3b\u56e0 {historical_error_attribution.get('top_reason') or '-'}"
             ),
         ),
@@ -10038,7 +10068,8 @@ def build_high_accuracy_strategy_dashboard(
         "live_feedback_loop": live_feedback_loop,
         "settlement_rows": build_high_accuracy_strategy_settlement_rows(settlement_items),
         "error_attribution": error_attribution,
-        "historical_strategy_replay": dict(historical_replay_summary),
+        "historical_strategy_replay": dict(historical_replay_effective),
+        "formal_release_replay": dict(formal_release_replay_summary),
         "historical_error_attribution": historical_error_attribution,
         "agent_trace_replay": agent_trace_replay,
         "agent_replay_downgrade": agent_replay_downgrade,
