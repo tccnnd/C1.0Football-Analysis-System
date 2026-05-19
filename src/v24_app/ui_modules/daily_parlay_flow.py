@@ -431,6 +431,46 @@ def _daily_parlay_repair_queue_route_summary_text(rows: Sequence[Any] | object) 
     )
 
 
+def build_daily_parlay_repair_queue_action_hint(row: Mapping[str, Any] | object) -> dict[str, Any]:
+    item = row if isinstance(row, Mapping) else {}
+    route_key = str(item.get("route_type") or _daily_parlay_repair_queue_row_route(item)).strip().lower()
+    if route_key == "source_backfill":
+        return {
+            "route_key": "source_backfill",
+            "route_label": daily_parlay_repair_queue_route_label("source_backfill"),
+            "tone": "warning",
+            "action_key": "source_backfill",
+            "primary_action": "从快照回填选中",
+            "secondary_action": "回填全部",
+            "message": "该票据存在 source/source_id 或腿信息缺口，优先用赛前快照索引补齐来源。",
+            "recommendation": "先执行“从快照回填选中”；若同类票据很多，再执行“回填全部”。",
+            "done_when": "回填后该票据不再进入来源回填分流，并在修复审计中产生记录。",
+        }
+    if route_key == "mixed_source_split":
+        return {
+            "route_key": "mixed_source_split",
+            "route_label": daily_parlay_repair_queue_route_label("mixed_source_split"),
+            "tone": "danger",
+            "action_key": "mixed_source_split",
+            "primary_action": "标记需拆票",
+            "secondary_action": "重新生成票据",
+            "message": "该票据包含多个来源，直接回收容易造成赛果错配。",
+            "recommendation": "先执行“标记需拆票”，再回到二串一窗口重建单源票据。",
+            "done_when": "票据被标记为 split_required，后续回收不再把混源票据当作可自动处理对象。",
+        }
+    return {
+        "route_key": "manual_review",
+        "route_label": "人工复查",
+        "tone": "neutral",
+        "action_key": "manual_review",
+        "primary_action": "查看门禁原文",
+        "secondary_action": "导出闭环报告",
+        "message": "该票据不属于来源回填或混源拆票，需要按门禁原文人工判断。",
+        "recommendation": "先查看门禁原文和腿概览，再决定是否重建票据或补充来源快照。",
+        "done_when": "人工确认后通过回填、拆票或重新生成票据消除阻塞。",
+    }
+
+
 def _source_ref_match_id(ref: Mapping[str, Any]) -> str:
     match_id = str(ref.get("match_id") or "").strip()
     if match_id:

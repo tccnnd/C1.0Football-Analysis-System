@@ -31,6 +31,7 @@ from v24_app.ui_modules import (
     build_daily_parlay_repair_loop_report_filename,
     build_daily_parlay_repair_loop_report_lines,
     build_daily_parlay_settlement_rows,
+    build_daily_parlay_repair_queue_action_hint,
     build_daily_parlay_repair_queue_rows,
     build_daily_parlay_repair_queue_route_counts,
     build_daily_parlay_repair_queue_summary,
@@ -313,6 +314,34 @@ class UIDailyParlayFlowModuleTests(unittest.TestCase):
         self.assertEqual(mixed_rows[0]["ticket_id"], "mixed-1")
         self.assertEqual([row["ticket_id"] for row in all_rows], ["source-1", "mixed-1", "manual-1"])
         self.assertEqual(daily_parlay_repair_queue_route_label("mixed_source_split"), "混源拆票")
+
+    def test_daily_parlay_repair_queue_action_hints_match_route(self) -> None:
+        source_hint = build_daily_parlay_repair_queue_action_hint(
+            {
+                "code": "parlay_source_traceability_missing",
+                "missing_source_count": 1,
+                "missing_source_id_count": 1,
+                "mixed_source_count": 0,
+            }
+        )
+        mixed_hint = build_daily_parlay_repair_queue_action_hint(
+            {
+                "code": "parlay_mixed_sources",
+                "missing_source_count": 0,
+                "missing_source_id_count": 0,
+                "mixed_source_count": 1,
+            }
+        )
+        manual_hint = build_daily_parlay_repair_queue_action_hint({"code": "other"})
+
+        self.assertEqual(source_hint["action_key"], "source_backfill")
+        self.assertEqual(source_hint["primary_action"], "从快照回填选中")
+        self.assertIn("source/source_id", source_hint["message"])
+        self.assertEqual(mixed_hint["action_key"], "mixed_source_split")
+        self.assertEqual(mixed_hint["primary_action"], "标记需拆票")
+        self.assertIn("混源", mixed_hint["route_label"])
+        self.assertEqual(manual_hint["action_key"], "manual_review")
+        self.assertIn("门禁原文", manual_hint["primary_action"])
 
     def test_daily_parlay_repair_queue_summary_is_healthy_when_no_blocked_tickets_remain(self) -> None:
         tickets = [

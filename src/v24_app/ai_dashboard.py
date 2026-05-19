@@ -214,6 +214,7 @@ from .ui_modules import (
     build_daily_parlay_source_health_issue_rows,
     apply_daily_parlay_source_backfill,
     mark_daily_parlay_split_required,
+    build_daily_parlay_repair_queue_action_hint,
     build_daily_parlay_repair_queue_rows,
     build_daily_parlay_repair_queue_route_counts,
     build_daily_parlay_repair_queue_summary,
@@ -13991,7 +13992,7 @@ class SmartMatchDashboard:
 
         def _refresh_queue_window() -> None:
             window.destroy()
-            self.open_daily_parlay_repair_queue_window()
+            self.open_daily_parlay_repair_queue_window(active_route or None)
 
         def _run_repair_action(action) -> None:
             result = action()
@@ -14004,6 +14005,16 @@ class SmartMatchDashboard:
                 messagebox.showwarning("二串一修复队列", "请先选择一张需要回填的二串一票据。")
                 return {"changed": False, "error": "missing_ticket_id"}
             return self.apply_daily_parlay_repair_source_backfill(ticket_id)
+
+        def _run_selected_route_action() -> dict[str, object]:
+            hint = build_daily_parlay_repair_queue_action_hint(selected_queue_row)
+            action_key = str(hint.get("action_key") or "")
+            if action_key == "source_backfill":
+                return _backfill_selected()
+            if action_key == "mixed_source_split":
+                return self.mark_daily_parlay_repair_split_required(_selected_ticket_id())
+            messagebox.showinfo("二串一修复队列", str(hint.get("recommendation") or "请先查看门禁原文后人工处理。"))
+            return {"changed": False}
 
         def _action_button(label: str, command, *, color: str = PANEL_2) -> None:
             tk.Button(
@@ -14035,6 +14046,22 @@ class SmartMatchDashboard:
             color=YELLOW,
         )
         _action_button("重新生成票据", lambda: (window.destroy(), self.open_daily_parlay_window()))
+
+        route_action_button = tk.Button(
+            action_bar,
+            text="推荐动作",
+            command=lambda: _run_repair_action(_run_selected_route_action),
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=14,
+            pady=6,
+            state=tk.DISABLED,
+        )
+        route_action_button.pack(side=tk.LEFT, padx=(0, 8))
 
         body = tk.Frame(shell, bg=BG)
         body.pack(fill=tk.BOTH, expand=True)
@@ -14086,6 +14113,7 @@ class SmartMatchDashboard:
             detail.delete("1.0", tk.END)
             selected_queue_row.clear()
             if not queue_rows_cache:
+                route_action_button.configure(text="推荐动作", bg=PANEL_2, fg=TEXT, state=tk.DISABLED)
                 detail.insert(
                     tk.END,
                     f"当前分流没有需要人工修复的二串一票据: {active_route_label}\n\n"
@@ -14095,12 +14123,28 @@ class SmartMatchDashboard:
                 target_index = 0 if index is None or index < 0 or index >= len(queue_rows_cache) else index
                 row = queue_rows_cache[target_index]
                 selected_queue_row.update(row)
+                action_hint = build_daily_parlay_repair_queue_action_hint(row)
+                action_key = str(action_hint.get("action_key") or "")
+                action_color = BLUE if action_key == "source_backfill" else YELLOW if action_key == "mixed_source_split" else PANEL_2
+                route_action_button.configure(
+                    text=f"推荐: {action_hint.get('primary_action') or '-'}",
+                    bg=action_color,
+                    fg="white" if action_color == BLUE else "#10141f" if action_color == YELLOW else TEXT,
+                    activebackground="#3d5ee7" if action_color == BLUE else "#f7c948" if action_color == YELLOW else "#172638",
+                    activeforeground="white" if action_color == BLUE else "#10141f",
+                    state=tk.NORMAL if action_key in {"source_backfill", "mixed_source_split"} else tk.DISABLED,
+                )
                 listbox.selection_clear(0, tk.END)
                 listbox.selection_set(target_index)
                 listbox.see(target_index)
                 legs = row.get("legs") if isinstance(row.get("legs"), list) else []
                 legs_lines = [f"- {str(item)}" for item in legs] if legs else ["- 无"]
                 detail_lines = [
+                    f"分流: {action_hint.get('route_label') or '-'} | 推荐动作: {action_hint.get('primary_action') or '-'}",
+                    f"处理提示: {action_hint.get('message') or '-'}",
+                    f"操作建议: {action_hint.get('recommendation') or '-'}",
+                    f"完成标准: {action_hint.get('done_when') or '-'}",
+                    "",
                     f"票据: {row.get('ticket_id') or '-'}",
                     f"状态: {row.get('status') or '-'} | 代码: {row.get('code') or '-'}",
                     f"来源: {row.get('source') or '-'}",
