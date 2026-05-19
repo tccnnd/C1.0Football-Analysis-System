@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import io
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
@@ -125,6 +127,105 @@ def summarize_dashboard_report_types(rows: list[Mapping[str, object]] | object) 
 
 def dashboard_report_type_options(rows: list[Mapping[str, object]] | object) -> list[str]:
     return ["\u5168\u90e8", *summarize_dashboard_report_types(rows).keys()]
+
+
+def _size_text(value: object) -> str:
+    try:
+        size = int(value or 0)
+    except (TypeError, ValueError):
+        return "-"
+    if size >= 1024 * 1024:
+        return f"{size / (1024 * 1024):.1f} MB"
+    if size >= 1024:
+        return f"{size / 1024:.1f} KB"
+    return f"{size} B"
+
+
+def _csv_rows(content: str) -> list[dict[str, str]]:
+    try:
+        reader = csv.DictReader(io.StringIO(content.lstrip("\ufeff")))
+        return [dict(row) for row in reader]
+    except csv.Error:
+        return []
+
+
+def _safe_int(value: object) -> int:
+    try:
+        return int(float(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _daily_parlay_repair_csv_summary(row: Mapping[str, object], content: str) -> list[str]:
+    records = _csv_rows(content)
+    audit_rows = [item for item in records if item.get("record_type") == "audit"]
+    queue_rows = [item for item in records if item.get("record_type") == "queue"]
+    ticket_ids = {str(item.get("ticket_id") or "").strip() for item in records if str(item.get("ticket_id") or "").strip()}
+    queue_blocked = sum(1 for item in queue_rows if str(item.get("status") or "").strip().lower() == "blocked")
+    recovery_new_settled = sum(_safe_int(item.get("recovery_new_settled")) for item in audit_rows)
+    latest_queue_blocked_after = max([_safe_int(item.get("queue_blocked_after_repair")) for item in audit_rows] or [0])
+    actions = sorted({str(item.get("action") or "").strip() for item in audit_rows if str(item.get("action") or "").strip()})
+    action_text = " / ".join(actions[:3]) if actions else "-"
+    if len(actions) > 3:
+        action_text += f" / +{len(actions) - 3}"
+    focus = "优先处理 queue 记录中的 blocked 票据" if queue_blocked else "优先复核最近 audit 记录和复跑结果"
+    return [
+        "报告摘要",
+        f"- 文件: {row.get('name') or '-'}",
+        f"- 类型: {row.get('label') or '-'} / CSV",
+        f"- 审计记录: {len(audit_rows)} | 队列记录: {len(queue_rows)} | 涉及票据: {len(ticket_ids)}",
+        f"- 当前待修复: {queue_blocked} | 最新复跑后待人工: {latest_queue_blocked_after}",
+        f"- 累计复跑新结算: {recovery_new_settled} | 动作: {action_text}",
+        f"- 建议: {focus}",
+    ]
+
+
+def _daily_parlay_repair_md_summary(row: Mapping[str, object], content: str) -> list[str]:
+    extracted: dict[str, str] = {}
+    for line in content.splitlines():
+        text = line.strip()
+        if not text.startswith("- ") or ":" not in text:
+            continue
+        label, value = text[2:].split(":", 1)
+        extracted[label.strip()] = value.strip()
+    queue_text = extracted.get("修复队列") or "-"
+    audit_text = extracted.get("审计摘要") or "-"
+    source_text = extracted.get("来源缺口票据") or "-"
+    mixed_text = extracted.get("混源票据") or "-"
+    latest_text = extracted.get("最新待人工") or "-"
+    recovery_text = extracted.get("累计复跑新结算") or "-"
+    return [
+        "报告摘要",
+        f"- 文件: {row.get('name') or '-'}",
+        f"- 类型: {row.get('label') or '-'} / Markdown",
+        f"- 修复队列: {queue_text}",
+        f"- 审计摘要: {audit_text}",
+        f"- 缺口/混源: {source_text} / {mixed_text}",
+        f"- 待人工/复跑: {latest_text} / {recovery_text}",
+    ]
+
+
+def build_dashboard_report_preview_summary(row: Mapping[str, object] | object, content: str) -> str:
+    resolved = row if isinstance(row, Mapping) else {}
+    name = str(resolved.get("name") or "")
+    suffix = Path(name).suffix.lower()
+    line_count = len(content.splitlines())
+    if name.startswith("daily_parlay_repair_loop_"):
+        lines = (
+            _daily_parlay_repair_csv_summary(resolved, content)
+            if suffix == ".csv"
+            else _daily_parlay_repair_md_summary(resolved, content)
+        )
+    else:
+        lines = [
+            "报告摘要",
+            f"- 文件: {resolved.get('name') or '-'}",
+            f"- 类型: {resolved.get('label') or '-'} / {suffix.lstrip('.').upper() or '-'}",
+            f"- 更新时间: {resolved.get('updated_at') or '-'}",
+            f"- 大小: {_size_text(resolved.get('size_bytes'))} | 行数: {line_count}",
+            "- 建议: 查看下方原文确认细节。",
+        ]
+    return "\n".join(lines)
 
 
 def filter_dashboard_report_rows(

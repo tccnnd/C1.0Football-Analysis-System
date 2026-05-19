@@ -59,6 +59,7 @@ from .c1_availability_flow import (
     sync_c1_availability_sources,
 )
 from .report_export_flow import (
+    build_dashboard_report_preview_summary,
     build_export_message_text,
     build_export_status_text,
     build_report_filename,
@@ -431,6 +432,7 @@ __all__ = [
     "should_auto_rerun_shadow_after_sync",
     "sync_c1_availability_sources",
     "build_export_message_text",
+    "build_dashboard_report_preview_summary",
     "build_export_status_text",
     "build_report_filename",
     "classify_dashboard_report_file",

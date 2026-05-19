@@ -242,6 +242,7 @@ from .ui_modules import (
     format_strategy_admission_reasons,
     format_strategy_admission_replay_guard,
     format_strategy_admission_thresholds,
+    build_dashboard_report_preview_summary,
     dashboard_report_type_options,
     filter_dashboard_report_rows,
     list_dashboard_report_files,
@@ -6326,6 +6327,21 @@ class SmartMatchDashboard:
             pady=6,
         ).pack(side=tk.LEFT, padx=(10, 0))
 
+        tk.Label(right, text="\u62a5\u544a\u6458\u8981", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(14, 6))
+        summary_preview = tk.Text(
+            right,
+            wrap=tk.WORD,
+            bg=PANEL_2,
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10),
+            padx=14,
+            pady=10,
+            height=7,
+        )
+        summary_preview.pack(fill=tk.X, padx=12, pady=(0, 12))
+        tk.Label(right, text="\u539f\u6587\u9884\u89c8", bg=PANEL, fg=TEXT, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor=tk.W, padx=18, pady=(0, 6))
         preview = tk.Text(
             right,
             wrap=tk.WORD,
@@ -6347,9 +6363,14 @@ class SmartMatchDashboard:
             if not isinstance(path, Path):
                 return
             try:
-                content = path.read_text(encoding="utf-8")
+                encoding = "utf-8-sig" if path.suffix.lower() == ".csv" else "utf-8"
+                content = path.read_text(encoding=encoding)
             except Exception as exc:
                 content = f"\u8bfb\u53d6\u5931\u8d25: {exc}"
+            summary_preview.configure(state=tk.NORMAL)
+            summary_preview.delete("1.0", tk.END)
+            summary_preview.insert("1.0", build_dashboard_report_preview_summary(filtered_rows[index], content))
+            summary_preview.configure(state=tk.DISABLED)
             preview.configure(state=tk.NORMAL)
             preview.delete("1.0", tk.END)
             preview.insert("1.0", content)
@@ -6376,6 +6397,8 @@ class SmartMatchDashboard:
                 query=search_var.get(),
             )
             listbox.delete(0, tk.END)
+            summary_preview.configure(state=tk.NORMAL)
+            summary_preview.delete("1.0", tk.END)
             preview.configure(state=tk.NORMAL)
             preview.delete("1.0", tk.END)
             counts = summarize_dashboard_report_types(filtered_rows)
@@ -6390,6 +6413,8 @@ class SmartMatchDashboard:
                 listbox.selection_set(0)
                 show_file(0)
             else:
+                summary_preview.insert("1.0", "\u6682\u65e0\u53ef\u6458\u8981\u7684\u5386\u53f2\u62a5\u544a\u3002")
+                summary_preview.configure(state=tk.DISABLED)
                 preview.insert("1.0", "\u6682\u65e0\u5339\u914d\u7684\u5386\u53f2\u62a5\u544a\u3002")
                 preview.configure(state=tk.DISABLED)
 
@@ -6397,6 +6422,8 @@ class SmartMatchDashboard:
             refresh_report_list()
         else:
             summary_text.set("\u5339\u914d 0/0 | -")
+            summary_preview.insert("1.0", "\u6682\u65e0\u53ef\u6458\u8981\u7684\u5386\u53f2\u62a5\u544a\u3002")
+            summary_preview.configure(state=tk.DISABLED)
             preview.insert("1.0", "\u6682\u65e0\u5386\u53f2\u62a5\u544a\u3002")
             preview.configure(state=tk.DISABLED)
 

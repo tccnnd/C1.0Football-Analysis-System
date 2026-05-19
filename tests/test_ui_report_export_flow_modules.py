@@ -17,6 +17,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from v24_app.core import AppMatch
 from v24_app.ui_modules import (
+    build_dashboard_report_preview_summary,
     build_export_message_text,
     build_export_status_text,
     build_report_filename,
@@ -153,6 +154,55 @@ class UIReportExportFlowModuleTests(unittest.TestCase):
         self.assertIn("二串一修复闭环", options)
         self.assertEqual(len(filtered), 1)
         self.assertEqual(filtered[0]["name"], "strategy_release_recovery_loop_c.md")
+
+    def test_daily_parlay_repair_report_preview_summary_extracts_md_metrics(self) -> None:
+        row = {
+            "name": "daily_parlay_repair_loop_20260518_130000.md",
+            "label": "二串一修复闭环",
+            "updated_at": "2026-05-18 13:00",
+            "size_bytes": 1200,
+        }
+        content = "\n".join(
+            [
+                "# 二串一修复闭环报告",
+                "- 生成时间: 2026-05-18 13:00:00",
+                "- 修复队列: 待检查 2 | 待修复 1 | 可自动回收 1",
+                "- 审计摘要: 二串一修复审计 3 条",
+                "- 来源缺口票据: 1",
+                "- 混源票据: 0",
+                "- 最新待人工: 1",
+                "- 累计复跑新结算: 2",
+            ]
+        )
+
+        summary = build_dashboard_report_preview_summary(row, content)
+
+        self.assertIn("报告摘要", summary)
+        self.assertIn("二串一修复闭环", summary)
+        self.assertIn("待修复 1", summary)
+        self.assertIn("待人工/复跑: 1 / 2", summary)
+
+    def test_daily_parlay_repair_report_preview_summary_extracts_csv_metrics(self) -> None:
+        row = {
+            "name": "daily_parlay_repair_loop_20260518_130000.csv",
+            "label": "二串一修复闭环",
+            "updated_at": "2026-05-18 13:00",
+            "size_bytes": 900,
+        }
+        content = "\n".join(
+            [
+                "record_type,generated_at,status,action,ticket_id,code,updated_ticket_count,updated_leg_count,recovery_new_settled,recovery_gate_status,queue_blocked_after_repair,message,recommendation",
+                "audit,2026-05-18 12:01:00,settled,source_backfill,ticket-1,,1,1,2,healthy,0,checked,ok",
+                "queue,,blocked,,ticket-2,parlay_source_traceability_missing,,,,,,Missing source_id,Backfill source_id",
+            ]
+        )
+
+        summary = build_dashboard_report_preview_summary(row, content)
+
+        self.assertIn("审计记录: 1", summary)
+        self.assertIn("队列记录: 1", summary)
+        self.assertIn("当前待修复: 1", summary)
+        self.assertIn("累计复跑新结算: 2", summary)
 
 
 if __name__ == "__main__":
