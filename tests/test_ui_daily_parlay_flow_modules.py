@@ -21,6 +21,9 @@ from v24_app.ui_modules import (
     build_daily_parlay_report_filename,
     build_daily_parlay_report_lines,
     build_daily_parlay_repair_audit_record,
+    build_daily_parlay_repair_audit_detail,
+    build_daily_parlay_repair_audit_rows,
+    build_daily_parlay_repair_audit_summary,
     build_daily_parlay_settlement_rows,
     build_daily_parlay_repair_queue_rows,
     build_daily_parlay_repair_queue_summary,
@@ -370,6 +373,47 @@ class UIDailyParlayFlowModuleTests(unittest.TestCase):
         self.assertEqual(audit["recovery_new_settled"], 1)
         self.assertEqual(audit["queue_blocked_after_repair"], 0)
         self.assertEqual(audit["recovery_gate_status"], "healthy")
+
+    def test_repair_audit_summary_rows_and_detail(self) -> None:
+        records = [
+            {
+                "generated_at": "2026-05-18 12:01:00",
+                "status": "settled",
+                "action": "source_backfill",
+                "target_ticket_id": "ticket-1",
+                "updated_ticket_count": 1,
+                "updated_leg_count": 1,
+                "recovery_new_settled": 1,
+                "recovery_gate_status": "healthy",
+                "queue_blocked_after_repair": 0,
+                "repair_summary_text": "source backfill checked 1 ticket(s)",
+                "recovery_summary_text": "parlay settlement gate healthy",
+            },
+            {
+                "generated_at": "2026-05-18 12:10:00",
+                "status": "error",
+                "action": "mark_split_required",
+                "target_ticket_id": "ticket-2",
+                "updated_ticket_count": 0,
+                "updated_leg_count": 0,
+                "recovery_new_settled": 0,
+                "recovery_gate_status": "blocked",
+                "queue_blocked_after_repair": 1,
+                "error": "boom",
+            },
+        ]
+
+        summary = build_daily_parlay_repair_audit_summary(records)
+        rows = build_daily_parlay_repair_audit_rows(records)
+        detail = build_daily_parlay_repair_audit_detail(records[0])
+
+        self.assertEqual(summary["total"], 2)
+        self.assertEqual(summary["settled_count"], 1)
+        self.assertEqual(summary["error_count"], 1)
+        self.assertEqual(rows[0]["tone"], "success")
+        self.assertEqual(rows[1]["tone"], "danger")
+        self.assertIn("recovery_new_settled", detail)
+        self.assertIn("source backfill checked 1 ticket(s)", detail)
 
     def test_mark_split_required_keeps_mixed_ticket_in_manual_queue(self) -> None:
         tickets = [

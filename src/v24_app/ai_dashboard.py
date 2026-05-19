@@ -217,6 +217,9 @@ from .ui_modules import (
     build_daily_parlay_repair_queue_rows,
     build_daily_parlay_repair_queue_summary,
     build_daily_parlay_repair_audit_record,
+    build_daily_parlay_repair_audit_detail,
+    build_daily_parlay_repair_audit_rows,
+    build_daily_parlay_repair_audit_summary,
     build_daily_parlay_source_health_summary,
     build_daily_parlay_summary,
     build_daily_parlay_ticket_rows,
@@ -10208,6 +10211,20 @@ class SmartMatchDashboard:
             pady=7,
         )
         repair_queue_button.pack(side=tk.RIGHT, padx=(0, 10))
+        repair_audit_button = tk.Button(
+            header,
+            text="\u4fee\u590d\u5ba1\u8ba1",
+            command=self.open_daily_parlay_repair_audit_window,
+            bg=PANEL_2,
+            fg=TEXT,
+            activebackground="#172638",
+            activeforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=18,
+            pady=7,
+        )
+        repair_audit_button.pack(side=tk.RIGHT, padx=(0, 10))
         tk.Button(
             header,
             text="\u5237\u65b0\u8bb0\u5f55",
@@ -10258,11 +10275,13 @@ class SmartMatchDashboard:
 
         parlay_queue_frame = tk.Frame(shell, bg=BG)
         parlay_queue_frame.pack(fill=tk.X, pady=(0, 16))
+        repair_audit_summary = self._daily_parlay_repair_audit_snapshot().get("summary", {})
         for label, value, color in [
             ("二串一待修复", str(repair_queue_summary.get("blocked_count", 0)), RED if int(repair_queue_summary.get("blocked_count", 0) or 0) else GREEN),
             ("可自动回收", str(repair_queue_summary.get("ready_count", 0)), GREEN if int(repair_queue_summary.get("ready_count", 0) or 0) else MUTED),
             ("源问题", str(repair_queue_summary.get("source_issue_count", 0)), YELLOW if int(repair_queue_summary.get("source_issue_count", 0) or 0) else MUTED),
             ("混源", str(repair_queue_summary.get("mixed_source_count", 0)), YELLOW if int(repair_queue_summary.get("mixed_source_count", 0) or 0) else MUTED),
+            ("修复审计", str(repair_audit_summary.get("total", 0)), "#7aa2ff"),
         ]:
             self._detail_metric(parlay_queue_frame, label, value, color)
 
@@ -13433,6 +13452,139 @@ class SmartMatchDashboard:
             self._log_event("WARN", f"二串一修复审计写入失败: {exc}")
         return audit
 
+    def _daily_parlay_repair_audit_snapshot(self) -> dict[str, object]:
+        records = _load_daily_parlay_repair_audit_log(DAILY_PARLAY_REPAIR_AUDIT_LOG)
+        summary = build_daily_parlay_repair_audit_summary(records)
+        rows = build_daily_parlay_repair_audit_rows(records, limit=100)
+        return {
+            "records": records,
+            "summary": summary,
+            "rows": rows,
+        }
+
+    def open_daily_parlay_repair_audit_window(self) -> None:
+        self.current_view = "daily_parlay_repair_audit"
+        snapshot = self._daily_parlay_repair_audit_snapshot()
+        summary = snapshot.get("summary") if isinstance(snapshot.get("summary"), dict) else {}
+        rows = snapshot.get("rows") if isinstance(snapshot.get("rows"), list) else []
+
+        window = tk.Toplevel(self.root)
+        window.title("二串一修复审计")
+        window.geometry("1280x760")
+        window.configure(bg=BG)
+
+        shell = tk.Frame(window, bg=BG)
+        shell.pack(fill=tk.BOTH, expand=True, padx=16, pady=16)
+
+        header = tk.Frame(shell, bg=BG)
+        header.pack(fill=tk.X, pady=(0, 12))
+        tk.Label(header, text="二串一修复审计", bg=BG, fg=TEXT, font=("Microsoft YaHei UI", 15, "bold")).pack(side=tk.LEFT)
+
+        def _header_button(label: str, command, *, color: str = PANEL_2) -> None:
+            tk.Button(
+                header,
+                text=label,
+                command=command,
+                bg=color,
+                fg="white" if color == BLUE else TEXT,
+                activebackground="#3d5ee7" if color == BLUE else "#172638",
+                activeforeground="white",
+                relief=tk.FLAT,
+                font=("Microsoft YaHei UI", 10, "bold"),
+                padx=14,
+                pady=6,
+            ).pack(side=tk.RIGHT, padx=(8, 0))
+
+        _header_button("刷新", lambda: (window.destroy(), self.open_daily_parlay_repair_audit_window()), color=BLUE)
+        _header_button("修复队列", lambda: (window.destroy(), self.open_daily_parlay_repair_queue_window()))
+        _header_button("回收中心", lambda: (window.destroy(), self.open_recovery_run_center()))
+        _header_button("关闭", window.destroy)
+
+        top = tk.Frame(shell, bg=BG)
+        top.pack(fill=tk.X, pady=(0, 12))
+        for label, value, color in [
+            ("审计记录", str(summary.get("total", 0)), TEXT),
+            ("复跑结算", str(summary.get("recovery_new_settled", 0)), GREEN if int(summary.get("recovery_new_settled", 0) or 0) else MUTED),
+            ("已修复票据", str(summary.get("updated_ticket_count", 0)), GREEN if int(summary.get("updated_ticket_count", 0) or 0) else MUTED),
+            ("最新待人工", str(summary.get("latest_blocked_count", 0)), RED if int(summary.get("latest_blocked_count", 0) or 0) else GREEN),
+            ("错误", str(summary.get("error_count", 0)), RED if int(summary.get("error_count", 0) or 0) else GREEN),
+        ]:
+            self._detail_metric(top, label, value, color)
+
+        body = tk.Frame(shell, bg=BG)
+        body.pack(fill=tk.BOTH, expand=True)
+        left = self._card(body, PANEL)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 12))
+        right = self._card(body, PANEL)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self._strategy_section_title(left, "最近审计", first=True)
+        list_wrap = tk.Frame(left, bg=PANEL)
+        list_wrap.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
+        listbox = tk.Listbox(
+            list_wrap,
+            bg=PANEL,
+            fg=TEXT,
+            selectbackground=BLUE,
+            selectforeground="white",
+            relief=tk.FLAT,
+            font=("Microsoft YaHei UI", 10),
+            activestyle="none",
+        )
+        listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        list_scrollbar = tk.Scrollbar(list_wrap, orient=tk.VERTICAL, command=listbox.yview)
+        listbox.configure(yscrollcommand=list_scrollbar.set)
+        list_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self._strategy_section_title(right, "审计详情", first=True)
+        detail_wrap = tk.Frame(right, bg=PANEL)
+        detail_wrap.pack(fill=tk.BOTH, expand=True, padx=18, pady=(0, 14))
+        detail = tk.Text(
+            detail_wrap,
+            bg=PANEL,
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief=tk.FLAT,
+            wrap=tk.WORD,
+            font=("Microsoft YaHei UI", 10),
+        )
+        detail.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        detail_scrollbar = tk.Scrollbar(detail_wrap, orient=tk.VERTICAL, command=detail.yview)
+        detail.configure(yscrollcommand=detail_scrollbar.set)
+        detail_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        row_cache = [item for item in rows if isinstance(item, dict)]
+
+        def show_detail(index: int | None = None) -> None:
+            detail.configure(state=tk.NORMAL)
+            detail.delete("1.0", tk.END)
+            if not row_cache:
+                detail.insert(tk.END, str(summary.get("summary_text") or "暂无二串一修复审计记录。"))
+            else:
+                target_index = 0 if index is None or index < 0 or index >= len(row_cache) else index
+                record = row_cache[target_index].get("record")
+                detail.insert(tk.END, build_daily_parlay_repair_audit_detail(record if isinstance(record, dict) else {}))
+                listbox.selection_clear(0, tk.END)
+                listbox.selection_set(target_index)
+                listbox.see(target_index)
+            detail.configure(state=tk.DISABLED)
+
+        for row in row_cache:
+            listbox.insert(tk.END, str(row.get("title") or "-"))
+        if row_cache:
+            show_detail(0)
+        else:
+            listbox.insert(tk.END, "暂无二串一修复审计记录")
+            show_detail(None)
+
+        def on_select(_event: object | None = None) -> None:
+            selection = listbox.curselection()
+            if selection and row_cache:
+                show_detail(int(selection[0]))
+
+        listbox.bind("<<ListboxSelect>>", on_select)
+        self.status_var.set(str(summary.get("summary_text") or "二串一修复审计"))
+
     def open_daily_parlay_repair_queue_window(self) -> None:
         self.current_view = "daily_parlay_repair_queue"
         snapshot = self._daily_parlay_repair_queue_snapshot()
@@ -13467,17 +13619,21 @@ class SmartMatchDashboard:
             ).pack(side=tk.RIGHT, padx=(8, 0))
 
         _header_button("刷新", self.open_daily_parlay_repair_queue_window, color=BLUE)
+        _header_button("修复审计", self.open_daily_parlay_repair_audit_window)
         _header_button("二串一窗口", self.open_daily_parlay_window)
         _header_button("回收中心", self.open_recovery_run_center)
         _header_button("关闭", window.destroy)
 
         top = tk.Frame(shell, bg=BG)
         top.pack(fill=tk.X, pady=(0, 12))
+        repair_audit_snapshot = self._daily_parlay_repair_audit_snapshot()
+        repair_audit_summary = repair_audit_snapshot.get("summary") if isinstance(repair_audit_snapshot.get("summary"), dict) else {}
         for label, value, color in [
             ("待检查", str(summary.get("pending_count", 0)), TEXT),
             ("待修复", str(summary.get("blocked_count", 0)), RED if int(summary.get("blocked_count", 0) or 0) else GREEN),
             ("可自动回收", str(summary.get("ready_count", 0)), GREEN if int(summary.get("ready_count", 0) or 0) else MUTED),
             ("源问题", str(summary.get("source_issue_count", 0)), YELLOW if int(summary.get("source_issue_count", 0) or 0) else MUTED),
+            ("最近审计", str(repair_audit_summary.get("total", 0)), "#7aa2ff"),
         ]:
             self._detail_metric(top, label, value, color)
 

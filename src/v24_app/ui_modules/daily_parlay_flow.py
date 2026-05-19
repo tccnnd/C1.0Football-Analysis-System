@@ -613,6 +613,123 @@ def build_daily_parlay_repair_audit_record(
     }
 
 
+def build_daily_parlay_repair_audit_summary(records: Sequence[Any] | object) -> dict[str, Any]:
+    items = _as_items(records)
+    total = len(items)
+    status_counts: dict[str, int] = {}
+    recovery_settled = 0
+    updated_tickets = 0
+    updated_legs = 0
+    latest = items[0] if items else {}
+    for item in items:
+        status = str(item.get("status") or "unknown").strip() or "unknown"
+        status_counts[status] = status_counts.get(status, 0) + 1
+        recovery_settled += int(_safe_float(item.get("recovery_new_settled"), 0.0))
+        updated_tickets += int(_safe_float(item.get("updated_ticket_count"), 0.0))
+        updated_legs += int(_safe_float(item.get("updated_leg_count"), 0.0))
+    latest_blocked = int(_safe_float(latest.get("queue_blocked_after_repair"), 0.0)) if isinstance(latest, Mapping) else 0
+    latest_status = str(latest.get("status") or "-") if isinstance(latest, Mapping) else "-"
+    tone = "bad" if status_counts.get("error", 0) else "warning" if latest_blocked > 0 else "good" if total else "neutral"
+    return {
+        "total": total,
+        "status": "empty" if total <= 0 else "attention" if latest_blocked > 0 or status_counts.get("error", 0) else "healthy",
+        "tone": tone,
+        "status_counts": status_counts,
+        "settled_count": int(status_counts.get("settled", 0)),
+        "rechecked_count": int(status_counts.get("rechecked", 0)),
+        "error_count": int(status_counts.get("error", 0)),
+        "no_change_count": int(status_counts.get("no_change", 0)),
+        "recovery_new_settled": recovery_settled,
+        "updated_ticket_count": updated_tickets,
+        "updated_leg_count": updated_legs,
+        "latest_status": latest_status,
+        "latest_generated_at": str(latest.get("generated_at") or "-") if isinstance(latest, Mapping) else "-",
+        "latest_blocked_count": latest_blocked,
+        "summary_text": (
+            f"二串一修复审计 {total} 条 | settled {status_counts.get('settled', 0)} | "
+            f"rechecked {status_counts.get('rechecked', 0)} | error {status_counts.get('error', 0)} | "
+            f"累计新结算 {recovery_settled} | 最新待人工 {latest_blocked}"
+        ),
+    }
+
+
+def _daily_parlay_repair_audit_tone(status: str, blocked_count: int) -> str:
+    if status == "error":
+        return "danger"
+    if blocked_count > 0:
+        return "warning"
+    if status == "settled":
+        return "success"
+    if status == "rechecked":
+        return "info"
+    return "muted"
+
+
+def build_daily_parlay_repair_audit_rows(records: Sequence[Any] | object, limit: int = 50) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for item in _as_items(records)[: _safe_limit(limit)]:
+        status = str(item.get("status") or "-")
+        blocked = int(_safe_float(item.get("queue_blocked_after_repair"), 0.0))
+        generated_at = str(item.get("generated_at") or "-")
+        target = str(item.get("target_ticket_id") or "-")
+        title = f"{generated_at} | {status} | {target}"
+        body = (
+            f"action={item.get('action') or '-'} | updated={int(_safe_float(item.get('updated_ticket_count'), 0.0))}/"
+            f"{int(_safe_float(item.get('updated_leg_count'), 0.0))} | "
+            f"settled={int(_safe_float(item.get('recovery_new_settled'), 0.0))} | "
+            f"gate={item.get('recovery_gate_status') or '-'} | blocked={blocked}"
+        )
+        rows.append(
+            {
+                "title": title,
+                "body": body,
+                "tone": _daily_parlay_repair_audit_tone(status, blocked),
+                "record": _safe_json(item),
+                "generated_at": generated_at,
+                "status": status,
+                "target_ticket_id": target,
+            }
+        )
+    return rows
+
+
+def build_daily_parlay_repair_audit_detail(record: Mapping[str, Any] | object) -> str:
+    item = record if isinstance(record, Mapping) else {}
+    if not item:
+        return "暂无二串一修复审计记录。"
+    lines = [
+        f"时间: {item.get('generated_at') or '-'}",
+        f"状态: {item.get('status') or '-'}",
+        f"动作: {item.get('action') or '-'}",
+        f"目标票据: {item.get('target_ticket_id') or '-'}",
+        "",
+        "修复结果",
+        f"- changed: {item.get('changed')}",
+        f"- updated_ticket_count: {item.get('updated_ticket_count', 0)}",
+        f"- updated_leg_count: {item.get('updated_leg_count', 0)}",
+        f"- missing_ref_count: {item.get('missing_ref_count', 0)}",
+        f"- queue_status_after_repair: {item.get('queue_status_after_repair') or '-'}",
+        f"- queue_blocked_after_repair: {item.get('queue_blocked_after_repair', 0)}",
+        f"- queue_ready_after_repair: {item.get('queue_ready_after_repair', 0)}",
+        "",
+        "复跑结果",
+        f"- recovery_status: {item.get('recovery_status') or '-'}",
+        f"- recovery_new_settled: {item.get('recovery_new_settled', 0)}",
+        f"- recovery_won/lost: {item.get('recovery_won', 0)} / {item.get('recovery_lost', 0)}",
+        f"- recovery_skipped_source_health: {item.get('recovery_skipped_source_health', 0)}",
+        f"- recovery_manual_review_count: {item.get('recovery_manual_review_count', 0)}",
+        f"- recovery_gate_status: {item.get('recovery_gate_status') or '-'}",
+        f"- recovery_gate_ready/blocked: {item.get('recovery_gate_ready', 0)} / {item.get('recovery_gate_blocked', 0)}",
+        "",
+        f"修复摘要: {item.get('repair_summary_text') or '-'}",
+        f"复跑摘要: {item.get('recovery_summary_text') or '-'}",
+    ]
+    if item.get("error"):
+        lines.extend(["", f"错误: {item.get('error')}"])
+    lines.extend(["", "原始记录", str(_safe_json(item))])
+    return "\n".join(lines)
+
+
 def build_daily_parlay_empty_state(summary: Mapping[str, Any] | object) -> str:
     resolved = summary if isinstance(summary, Mapping) else {}
     active_count = int(_safe_float(resolved.get("active_count"), 0.0))

@@ -18,6 +18,7 @@ from v24_app.ai_dashboard import (
     DashboardRow,
     SmartMatchDashboard,
     _append_daily_parlay_snapshot_log,
+    _append_daily_parlay_repair_audit_log,
     _daily_parlay_toolbar_state,
     _load_daily_parlay_repair_audit_log,
     _load_daily_parlay_snapshot_log,
@@ -290,6 +291,36 @@ class AIDashboardDailyParlayTests(unittest.TestCase):
         self.assertIsNotNone(store.saved_tickets)
         self.assertEqual(store.saved_tickets[0]["manual_review_status"], "split_required")
         self.assertEqual(store.saved_tickets[0]["settlement_recovery_gate"]["status"], "blocked")
+
+    def test_daily_parlay_repair_audit_snapshot_reads_state_store(self) -> None:
+        dashboard = object.__new__(SmartMatchDashboard)
+        dashboard._log_event = lambda *args, **kwargs: None
+        audit_record = {
+            "generated_at": "2026-05-18 12:01:00",
+            "status": "settled",
+            "action": "source_backfill",
+            "target_ticket_id": "ticket-1",
+            "updated_ticket_count": 1,
+            "updated_leg_count": 1,
+            "recovery_new_settled": 1,
+            "queue_blocked_after_repair": 0,
+            "recovery_gate_status": "healthy",
+            "repair_summary_text": "source backfill checked 1 ticket(s)",
+            "recovery_summary_text": "parlay settlement gate healthy",
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "daily_parlay_repair_audit_log.json"
+            _append_daily_parlay_repair_audit_log(audit_record, log_path)
+            with patch("v24_app.ai_dashboard.DAILY_PARLAY_REPAIR_AUDIT_LOG", log_path):
+                snapshot = dashboard._daily_parlay_repair_audit_snapshot()
+            loaded = _load_daily_parlay_repair_audit_log(log_path)
+
+        self.assertEqual(snapshot["summary"]["total"], 1)
+        self.assertEqual(snapshot["summary"]["status"], "healthy")
+        self.assertEqual(snapshot["rows"][0]["status"], "settled")
+        self.assertIn("source_backfill", snapshot["rows"][0]["body"])
+        self.assertEqual(loaded[0]["target_ticket_id"], "ticket-1")
 
     def test_export_daily_parlay_report_writes_report_and_snapshot_log(self) -> None:
         dashboard = object.__new__(SmartMatchDashboard)
