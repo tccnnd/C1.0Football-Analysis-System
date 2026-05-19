@@ -213,8 +213,11 @@ from .ui_modules import (
     build_daily_parlay_source_health_card_rows,
     build_daily_parlay_source_health_issue_rows,
     apply_daily_parlay_source_backfill,
+    apply_daily_parlay_priority_source_backfill,
     mark_daily_parlay_split_required,
+    mark_daily_parlay_priority_split_required,
     build_daily_parlay_repair_queue_action_hint,
+    build_daily_parlay_repair_priority_batch_plan,
     build_daily_parlay_repair_queue_rows,
     build_daily_parlay_repair_queue_route_counts,
     build_daily_parlay_repair_queue_summary,
@@ -13602,6 +13605,45 @@ class SmartMatchDashboard:
         messagebox.showinfo("二串一修复队列", message)
         return {**result, "saved": bool(result.get("changed")), "recovery_result": recovery_result, "repair_audit": audit}
 
+    def apply_daily_parlay_repair_priority_source_backfill(self) -> dict[str, object]:
+        try:
+            tickets = STATE_STORE.load_parlay_tickets()
+        except Exception as exc:
+            self._log_event("WARN", f"二串一修复队列读取失败: {exc}")
+            messagebox.showwarning("二串一修复队列", f"读取票据失败: {exc}")
+            return {"changed": False, "error": str(exc)}
+        result = apply_daily_parlay_priority_source_backfill(
+            tickets,
+            self._daily_parlay_source_backfill_refs(),
+            generated_at=datetime.now(),
+        )
+        if bool(result.get("changed")):
+            try:
+                updated_tickets = result.get("tickets") if isinstance(result.get("tickets"), list) else []
+                STATE_STORE.save_parlay_tickets(updated_tickets)
+            except Exception as exc:
+                self._log_event("WARN", f"二串一修复队列保存失败: {exc}")
+                messagebox.showwarning("二串一修复队列", f"保存修复结果失败: {exc}")
+                return {**result, "saved": False, "error": str(exc)}
+        recovery_result: dict[str, object] = {}
+        if bool(result.get("changed")):
+            try:
+                recovery_result = auto_settle_pending_parlays()
+            except Exception as exc:
+                recovery_result = {"status": "error", "error": str(exc)}
+                self._log_event("WARN", f"二串一修复后复跑失败: {exc}")
+        audit = self._record_daily_parlay_repair_audit(result, recovery_result or None)
+        message = str(result.get("summary_text") or "二串一修复队列已批量检查")
+        if recovery_result:
+            gate = recovery_result.get("gate") if isinstance(recovery_result.get("gate"), dict) else {}
+            message = (
+                f"{message} | 复跑 新结算 {int(recovery_result.get('new_settled', 0) or 0)}"
+                f" | 待人工 {int(gate.get('manual_review_count', 0) or 0)}"
+            )
+        self.status_var.set(message)
+        messagebox.showinfo("二串一修复队列", message)
+        return {**result, "saved": bool(result.get("changed")), "recovery_result": recovery_result, "repair_audit": audit}
+
     def mark_daily_parlay_repair_split_required(self, ticket_id: str | None) -> dict[str, object]:
         target_ticket_id = str(ticket_id or "").strip()
         if not target_ticket_id:
@@ -13628,6 +13670,31 @@ class SmartMatchDashboard:
                 return {**result, "saved": False, "error": str(exc)}
         audit = self._record_daily_parlay_repair_audit(result, None)
         message = str(result.get("summary_text") or "二串一修复队列已标记")
+        self.status_var.set(message)
+        messagebox.showinfo("二串一修复队列", message)
+        return {**result, "saved": bool(result.get("changed")), "repair_audit": audit}
+
+    def mark_daily_parlay_repair_priority_split_required(self) -> dict[str, object]:
+        try:
+            tickets = STATE_STORE.load_parlay_tickets()
+        except Exception as exc:
+            self._log_event("WARN", f"二串一修复队列读取失败: {exc}")
+            messagebox.showwarning("二串一修复队列", f"读取票据失败: {exc}")
+            return {"changed": False, "error": str(exc)}
+        result = mark_daily_parlay_priority_split_required(
+            tickets,
+            generated_at=datetime.now(),
+        )
+        if bool(result.get("changed")):
+            try:
+                updated_tickets = result.get("tickets") if isinstance(result.get("tickets"), list) else []
+                STATE_STORE.save_parlay_tickets(updated_tickets)
+            except Exception as exc:
+                self._log_event("WARN", f"二串一修复队列保存失败: {exc}")
+                messagebox.showwarning("二串一修复队列", f"保存修复结果失败: {exc}")
+                return {**result, "saved": False, "error": str(exc)}
+        audit = self._record_daily_parlay_repair_audit(result, None)
+        message = str(result.get("summary_text") or "二串一修复队列已批量标记")
         self.status_var.set(message)
         messagebox.showinfo("二串一修复队列", message)
         return {**result, "saved": bool(result.get("changed")), "repair_audit": audit}
@@ -13892,6 +13959,8 @@ class SmartMatchDashboard:
         snapshot = self._daily_parlay_repair_queue_snapshot()
         summary = snapshot.get("summary") if isinstance(snapshot.get("summary"), dict) else {}
         rows = snapshot.get("rows") if isinstance(snapshot.get("rows"), list) else []
+        queue_tickets = snapshot.get("tickets") if isinstance(snapshot.get("tickets"), list) else []
+        priority_batch_plan = build_daily_parlay_repair_priority_batch_plan(queue_tickets)
         priority_counts = summary.get("priority_counts") if isinstance(summary.get("priority_counts"), dict) else {}
         priority_summary_text = str(summary.get("priority_summary_text") or "-")
         active_route = str(route_filter or "").strip().lower()
@@ -14028,7 +14097,7 @@ class SmartMatchDashboard:
             messagebox.showinfo("二串一修复队列", str(hint.get("recommendation") or "请先查看门禁原文后人工处理。"))
             return {"changed": False}
 
-        def _action_button(label: str, command, *, color: str = PANEL_2) -> None:
+        def _action_button(label: str, command, *, color: str = PANEL_2, state: str = tk.NORMAL) -> None:
             tk.Button(
                 action_bar,
                 text=label,
@@ -14041,6 +14110,7 @@ class SmartMatchDashboard:
                 font=("Microsoft YaHei UI", 10, "bold"),
                 padx=14,
                 pady=6,
+                state=state,
             ).pack(side=tk.LEFT, padx=(0, 8))
 
         _action_button(
@@ -14058,6 +14128,19 @@ class SmartMatchDashboard:
             color=YELLOW,
         )
         _action_button("重新生成票据", lambda: (window.destroy(), self.open_daily_parlay_window()))
+
+        _action_button(
+            f"批量回填高优先级 {int(priority_batch_plan.get('source_backfill_count', 0) or 0)}",
+            lambda: _run_repair_action(self.apply_daily_parlay_repair_priority_source_backfill),
+            color=BLUE,
+            state=tk.NORMAL if int(priority_batch_plan.get('source_backfill_count', 0) or 0) > 0 else tk.DISABLED,
+        )
+        _action_button(
+            f"批量拆票高优先级 {int(priority_batch_plan.get('mixed_source_split_count', 0) or 0)}",
+            lambda: _run_repair_action(self.mark_daily_parlay_repair_priority_split_required),
+            color=YELLOW,
+            state=tk.NORMAL if int(priority_batch_plan.get('mixed_source_split_count', 0) or 0) > 0 else tk.DISABLED,
+        )
 
         route_action_button = tk.Button(
             action_bar,

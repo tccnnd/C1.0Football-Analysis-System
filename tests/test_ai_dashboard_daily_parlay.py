@@ -268,6 +268,51 @@ class AIDashboardDailyParlayTests(unittest.TestCase):
         self.assertEqual(records[0]["recovery_new_settled"], 1)
         self.assertEqual(records[0]["status"], "settled")
 
+    def test_daily_parlay_priority_source_backfill_action_only_targets_auto_recoverable_tickets(self) -> None:
+        dashboard = object.__new__(SmartMatchDashboard)
+        dashboard._log_event = lambda *args, **kwargs: None
+        dashboard.status_var = self._StatusVar()
+        tickets = [
+            {
+                "ticket_id": "source-1",
+                "status": "pending",
+                "legs": [
+                    {"match_id": "m1", "source": "live:titan", "source_id": "s1"},
+                    {"match_id": "m2"},
+                ],
+                "settlement_recovery_gate": {
+                    "status": "blocked",
+                    "code": "parlay_source_traceability_missing",
+                },
+            },
+            {
+                "ticket_id": "mixed-1",
+                "status": "pending",
+                "legs": [
+                    {"match_id": "m3", "source": "live:titan", "source_id": "s3"},
+                    {"match_id": "m4", "source": "cache", "source_id": "c4"},
+                ],
+                "settlement_recovery_gate": {
+                    "status": "blocked",
+                    "code": "parlay_mixed_sources",
+                },
+            },
+        ]
+        store = self._ParlayStore(tickets, {"m2": {"match": {"source": "live:titan", "source_id": "s2"}}})
+
+        with patch("v24_app.ai_dashboard.STATE_STORE", store), patch(
+            "v24_app.ai_dashboard.auto_settle_pending_parlays",
+            return_value={"new_settled": 0, "won": 0, "lost": 0, "skipped_source_health": 0, "manual_review_items": [], "gate": {"manual_review_count": 0, "status": "healthy"}},
+        ) as settle_mock, patch("v24_app.ai_dashboard.messagebox.showinfo"):
+            result = dashboard.apply_daily_parlay_repair_priority_source_backfill()
+
+        settle_mock.assert_called_once()
+        self.assertTrue(result["changed"])
+        self.assertEqual(result["target_ticket_ids"], ["source-1"])
+        self.assertIsNotNone(store.saved_tickets)
+        self.assertEqual(store.saved_tickets[0]["legs"][1]["source_id"], "s2")
+        self.assertEqual(store.saved_tickets[1]["legs"][1]["source"], "cache")
+
     def test_daily_parlay_split_required_action_saves_manual_mark(self) -> None:
         dashboard = object.__new__(SmartMatchDashboard)
         dashboard._log_event = lambda *args, **kwargs: None
@@ -291,6 +336,48 @@ class AIDashboardDailyParlayTests(unittest.TestCase):
         self.assertIsNotNone(store.saved_tickets)
         self.assertEqual(store.saved_tickets[0]["manual_review_status"], "split_required")
         self.assertEqual(store.saved_tickets[0]["settlement_recovery_gate"]["status"], "blocked")
+
+    def test_daily_parlay_priority_split_required_action_marks_only_mixed_tickets(self) -> None:
+        dashboard = object.__new__(SmartMatchDashboard)
+        dashboard._log_event = lambda *args, **kwargs: None
+        dashboard.status_var = self._StatusVar()
+        tickets = [
+            {
+                "ticket_id": "mixed-1",
+                "status": "pending",
+                "legs": [
+                    {"match_id": "m1", "source": "live:titan", "source_id": "s1"},
+                    {"match_id": "m2", "source": "cache", "source_id": "c2"},
+                ],
+                "settlement_recovery_gate": {
+                    "status": "blocked",
+                    "code": "parlay_mixed_sources",
+                },
+            },
+            {
+                "ticket_id": "source-1",
+                "status": "pending",
+                "legs": [
+                    {"match_id": "m3", "source": "live:titan", "source_id": "s3"},
+                    {"match_id": "m4", "source": "live:titan", "source_id": "s4"},
+                ],
+                "settlement_recovery_gate": {
+                    "status": "blocked",
+                    "code": "parlay_source_traceability_missing",
+                },
+            },
+        ]
+        store = self._ParlayStore(tickets)
+
+        with patch("v24_app.ai_dashboard.STATE_STORE", store), patch("v24_app.ai_dashboard.messagebox.showinfo"):
+            result = dashboard.mark_daily_parlay_repair_priority_split_required()
+
+        self.assertTrue(result["changed"])
+        self.assertEqual(result["changed_count"], 1)
+        self.assertEqual(result["target_ticket_ids"], ["mixed-1"])
+        self.assertIsNotNone(store.saved_tickets)
+        self.assertEqual(store.saved_tickets[0]["manual_review_status"], "split_required")
+        self.assertNotIn("manual_review_status", store.saved_tickets[1])
 
     def test_daily_parlay_repair_audit_snapshot_reads_state_store(self) -> None:
         dashboard = object.__new__(SmartMatchDashboard)

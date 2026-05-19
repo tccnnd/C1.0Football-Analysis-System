@@ -32,6 +32,7 @@ from v24_app.ui_modules import (
     build_daily_parlay_repair_loop_report_lines,
     build_daily_parlay_settlement_rows,
     build_daily_parlay_repair_queue_action_hint,
+    build_daily_parlay_repair_priority_batch_plan,
     build_daily_parlay_repair_queue_priority,
     build_daily_parlay_repair_queue_priority_counts,
     build_daily_parlay_repair_queue_rows,
@@ -398,6 +399,82 @@ class UIDailyParlayFlowModuleTests(unittest.TestCase):
         self.assertEqual(counts["high"], 2)
         self.assertEqual(counts["auto_recoverable"], 2)
         self.assertEqual(mixed_priority["priority_bucket"], "critical")
+
+    def test_daily_parlay_repair_priority_batch_plan_separates_source_and_mixed(self) -> None:
+        tickets = [
+            {
+                "ticket_id": "source-high",
+                "status": "pending",
+                "created_at": "2026-05-18 09:00:00",
+                "settlement_recovery_gate": {
+                    "status": "blocked",
+                    "code": "parlay_source_traceability_missing",
+                    "missing_source_count": 1,
+                    "missing_source_id_count": 1,
+                },
+            },
+            {
+                "ticket_id": "mixed-high",
+                "status": "pending",
+                "created_at": "2026-05-18 10:00:00",
+                "settlement_recovery_gate": {
+                    "status": "blocked",
+                    "code": "parlay_mixed_sources",
+                    "mixed_source_count": 1,
+                },
+            },
+            {
+                "ticket_id": "low-manual",
+                "status": "pending",
+                "created_at": "2026-05-18 07:00:00",
+                "settlement_recovery_gate": {
+                    "status": "blocked",
+                    "code": "other",
+                },
+            },
+        ]
+
+        plan = build_daily_parlay_repair_priority_batch_plan(tickets)
+
+        self.assertEqual(plan["priority_buckets"], ["critical", "high"])
+        self.assertEqual(plan["source_backfill_ticket_ids"], ["source-high"])
+        self.assertEqual(plan["mixed_source_split_ticket_ids"], ["mixed-high"])
+        self.assertEqual(plan["manual_review_ticket_ids"], [])
+        self.assertEqual(plan["source_backfill_count"], 1)
+        self.assertEqual(plan["mixed_source_split_count"], 1)
+        self.assertEqual(plan["total_actionable_count"], 2)
+        self.assertIn("priority batch", plan["summary_text"])
+
+    def test_daily_parlay_repair_priority_batch_plan_can_include_medium_bucket_when_requested(self) -> None:
+        tickets = [
+            {
+                "ticket_id": "source-high",
+                "status": "pending",
+                "created_at": "2026-05-18 09:00:00",
+                "settlement_recovery_gate": {
+                    "status": "blocked",
+                    "code": "parlay_source_traceability_missing",
+                    "missing_source_count": 1,
+                    "missing_source_id_count": 1,
+                },
+            },
+            {
+                "ticket_id": "low-manual",
+                "status": "pending",
+                "created_at": "2026-05-18 07:00:00",
+                "settlement_recovery_gate": {
+                    "status": "blocked",
+                    "code": "other",
+                },
+            },
+        ]
+
+        plan = build_daily_parlay_repair_priority_batch_plan(tickets, priority_buckets=("critical", "high", "medium"))
+
+        self.assertEqual(plan["priority_buckets"], ["critical", "high", "medium"])
+        self.assertEqual(plan["source_backfill_ticket_ids"], ["source-high"])
+        self.assertEqual(plan["manual_review_ticket_ids"], ["low-manual"])
+        self.assertEqual(plan["manual_review_count"], 1)
 
     def test_daily_parlay_repair_queue_summary_is_healthy_when_no_blocked_tickets_remain(self) -> None:
         tickets = [

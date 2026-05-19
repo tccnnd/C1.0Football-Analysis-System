@@ -565,6 +565,50 @@ def build_daily_parlay_repair_queue_priority_counts(rows: Sequence[Any] | object
     return counts
 
 
+def build_daily_parlay_repair_priority_batch_plan(
+    parlay_tickets: Sequence[Any] | object,
+    *,
+    priority_buckets: Sequence[str] | object = ("critical", "high"),
+) -> dict[str, Any]:
+    allowed_buckets = {
+        str(item).strip().lower()
+        for item in (priority_buckets if isinstance(priority_buckets, Sequence) and not isinstance(priority_buckets, (str, bytes, bytearray)) else [])
+        if str(item).strip()
+    } or {"critical", "high"}
+    rows = build_daily_parlay_repair_queue_rows(parlay_tickets, limit=500)
+    source_ids: list[str] = []
+    mixed_ids: list[str] = []
+    manual_ids: list[str] = []
+    for row in rows:
+        bucket = str(row.get("priority_bucket") or "").strip().lower()
+        if bucket not in allowed_buckets:
+            continue
+        ticket_id = str(row.get("ticket_id") or "").strip()
+        if not ticket_id or ticket_id == "-":
+            continue
+        route_type = str(row.get("route_type") or "").strip().lower()
+        if route_type == "source_backfill" and bool(row.get("auto_recoverable")):
+            source_ids.append(ticket_id)
+        elif route_type == "mixed_source_split":
+            mixed_ids.append(ticket_id)
+        else:
+            manual_ids.append(ticket_id)
+    return {
+        "priority_buckets": sorted(allowed_buckets),
+        "source_backfill_ticket_ids": source_ids,
+        "mixed_source_split_ticket_ids": mixed_ids,
+        "manual_review_ticket_ids": manual_ids,
+        "source_backfill_count": len(source_ids),
+        "mixed_source_split_count": len(mixed_ids),
+        "manual_review_count": len(manual_ids),
+        "total_actionable_count": len(source_ids) + len(mixed_ids),
+        "summary_text": (
+            f"priority batch | source_backfill {len(source_ids)} | "
+            f"mixed_source_split {len(mixed_ids)} | manual_review {len(manual_ids)}"
+        ),
+    }
+
+
 def _source_ref_match_id(ref: Mapping[str, Any]) -> str:
     match_id = str(ref.get("match_id") or "").strip()
     if match_id:
@@ -634,10 +678,18 @@ def apply_daily_parlay_source_backfill(
     source_refs: Sequence[Any] | object,
     *,
     ticket_id: str | None = None,
+    ticket_ids: Sequence[str] | object | None = None,
     generated_at: datetime | None = None,
 ) -> dict[str, Any]:
     source_index = build_daily_parlay_source_backfill_index(source_refs)
     target_ticket_id = str(ticket_id or "").strip()
+    target_ticket_ids = {
+        str(item).strip()
+        for item in (ticket_ids if isinstance(ticket_ids, Sequence) and not isinstance(ticket_ids, (str, bytes, bytearray)) else [])
+        if str(item).strip()
+    }
+    if target_ticket_id:
+        target_ticket_ids = {target_ticket_id}
     updated_tickets = [deepcopy(dict(item)) for item in _as_items(parlay_tickets)]
     checked_at = generated_at or datetime.now()
     updated_ticket_count = 0
@@ -646,7 +698,8 @@ def apply_daily_parlay_source_backfill(
     checked_ticket_count = 0
 
     for ticket in updated_tickets:
-        if target_ticket_id and str(ticket.get("ticket_id") or "").strip() != target_ticket_id:
+        current_ticket_id = str(ticket.get("ticket_id") or "").strip()
+        if target_ticket_ids and current_ticket_id not in target_ticket_ids:
             continue
         if _status(ticket, "pending") != "pending":
             continue
@@ -704,6 +757,7 @@ def apply_daily_parlay_source_backfill(
         "missing_ref_count": missing_ref_count,
         "source_ref_count": len(source_index),
         "target_ticket_id": target_ticket_id or "-",
+        "target_ticket_ids": sorted(target_ticket_ids),
         "queue_summary": summary,
         "summary_text": (
             f"source backfill checked {checked_ticket_count} ticket(s), "
@@ -711,6 +765,49 @@ def apply_daily_parlay_source_backfill(
             f"remaining blocked {summary.get('blocked_count', 0)}"
         ),
     }
+
+
+def apply_daily_parlay_priority_source_backfill(
+    parlay_tickets: Sequence[Any] | object,
+    source_refs: Sequence[Any] | object,
+    *,
+    priority_buckets: Sequence[str] | object = ("critical", "high"),
+    generated_at: datetime | None = None,
+) -> dict[str, Any]:
+    plan = build_daily_parlay_repair_priority_batch_plan(parlay_tickets, priority_buckets=priority_buckets)
+    ticket_ids = [str(item) for item in plan.get("source_backfill_ticket_ids", []) if str(item).strip()]
+    if not ticket_ids:
+        summary = build_daily_parlay_repair_queue_summary(parlay_tickets)
+        return {
+            "action": "priority_source_backfill",
+            "changed": False,
+            "tickets": [deepcopy(dict(item)) for item in _as_items(parlay_tickets)],
+            "checked_ticket_count": 0,
+            "updated_ticket_count": 0,
+            "updated_leg_count": 0,
+            "missing_ref_count": 0,
+            "source_ref_count": len(build_daily_parlay_source_backfill_index(source_refs)),
+            "target_ticket_id": "-",
+            "target_ticket_ids": [],
+            "priority_batch_plan": plan,
+            "queue_summary": summary,
+            "summary_text": f"priority source backfill skipped | {plan.get('summary_text')}",
+        }
+    result = apply_daily_parlay_source_backfill(
+        parlay_tickets,
+        source_refs,
+        ticket_ids=ticket_ids,
+        generated_at=generated_at,
+    )
+    result["action"] = "priority_source_backfill"
+    result["target_ticket_id"] = " / ".join(ticket_ids[:5]) if ticket_ids else "-"
+    result["priority_batch_plan"] = plan
+    result["summary_text"] = (
+        f"priority source backfill checked {result.get('checked_ticket_count', 0)} ticket(s), "
+        f"updated {result.get('updated_ticket_count', 0)} ticket(s) / {result.get('updated_leg_count', 0)} leg(s), "
+        f"remaining blocked {result.get('queue_summary', {}).get('blocked_count', 0) if isinstance(result.get('queue_summary'), Mapping) else 0}"
+    )
+    return result
 
 
 def mark_daily_parlay_split_required(
@@ -753,6 +850,57 @@ def mark_daily_parlay_split_required(
         "queue_summary": summary,
         "summary_text": (
             f"split mark {'updated' if changed else 'not_found'} for {target_ticket_id or '-'} | "
+            f"remaining blocked {summary.get('blocked_count', 0)}"
+        ),
+    }
+
+
+def mark_daily_parlay_priority_split_required(
+    parlay_tickets: Sequence[Any] | object,
+    *,
+    priority_buckets: Sequence[str] | object = ("critical", "high"),
+    generated_at: datetime | None = None,
+) -> dict[str, Any]:
+    plan = build_daily_parlay_repair_priority_batch_plan(parlay_tickets, priority_buckets=priority_buckets)
+    target_ticket_ids = [str(item) for item in plan.get("mixed_source_split_ticket_ids", []) if str(item).strip()]
+    updated_tickets = [deepcopy(dict(item)) for item in _as_items(parlay_tickets)]
+    checked_at = generated_at or datetime.now()
+    changed_count = 0
+    for ticket in updated_tickets:
+        ticket_id = str(ticket.get("ticket_id") or "").strip()
+        if ticket_id not in target_ticket_ids:
+            continue
+        if _status(ticket, "pending") != "pending":
+            continue
+        gate = _fresh_parlay_gate(ticket, checked_at)
+        ticket["manual_review_status"] = "split_required"
+        ticket["manual_review_note"] = "Mixed-source or invalid parlay ticket should be split/regenerated before settlement recovery."
+        ticket["repair_queue_last_action"] = {
+            "action": "priority_mark_split_required",
+            "updated_at": checked_at.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        ticket["settlement_recovery_gate"] = {
+            **gate,
+            "status": "blocked",
+            "code": str(gate.get("code") or "parlay_split_required"),
+            "message": str(gate.get("message") or "Parlay ticket requires manual split/regeneration."),
+            "recommendation": "Split or regenerate this ticket before rerunning result recovery.",
+        }
+        changed_count += 1
+    summary = build_daily_parlay_repair_queue_summary(updated_tickets)
+    return {
+        "action": "priority_mark_split_required",
+        "changed": changed_count > 0,
+        "changed_count": changed_count,
+        "updated_ticket_count": changed_count,
+        "updated_leg_count": 0,
+        "tickets": updated_tickets,
+        "target_ticket_id": " / ".join(target_ticket_ids[:5]) if target_ticket_ids else "-",
+        "target_ticket_ids": target_ticket_ids,
+        "priority_batch_plan": plan,
+        "queue_summary": summary,
+        "summary_text": (
+            f"priority split mark updated {changed_count} ticket(s) | "
             f"remaining blocked {summary.get('blocked_count', 0)}"
         ),
     }
