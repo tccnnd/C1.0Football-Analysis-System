@@ -5098,6 +5098,13 @@ class SmartMatchDashboard:
                 "restored_snapshots": int(result_payload.get("restored_snapshots", 0) or 0),
                 "new_settled": int(result_payload.get("new_settled", 0) or 0),
                 "new_parlay_settled": int(result_payload.get("new_parlay_settled", 0) or 0),
+                "parlay_skipped_source_health": int(result_payload.get("parlay_skipped_source_health", 0) or 0),
+                "parlay_manual_review_items": result_payload.get("parlay_manual_review_items", [])
+                if isinstance(result_payload.get("parlay_manual_review_items"), list)
+                else [],
+                "parlay_settlement_gate": result_payload.get("parlay_settlement_gate", {})
+                if isinstance(result_payload.get("parlay_settlement_gate"), dict)
+                else {},
                 "already_settled": int(result_payload.get("already_settled", 0) or 0),
                 "skipped": int(result_payload.get("skipped", 0) or 0),
                 "snapshot_checked": int(result_payload.get("snapshot_checked", 0) or 0),

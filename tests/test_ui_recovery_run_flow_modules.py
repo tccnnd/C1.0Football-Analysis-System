@@ -277,6 +277,20 @@ class UIRecoveryRunFlowModuleTests(unittest.TestCase):
                 "restored_snapshots": 1,
                 "new_settled": 3,
                 "new_parlay_settled": 1,
+                "parlay_skipped_source_health": 1,
+                "parlay_settlement_gate": {
+                    "status": "attention",
+                    "checked_ticket_count": 2,
+                    "ready_ticket_count": 1,
+                    "manual_review_count": 1,
+                },
+                "parlay_manual_review_items": [
+                    {
+                        "ticket_id": "ticket-gap",
+                        "code": "parlay_source_traceability_missing",
+                        "recommendation": "Backfill source and source_id",
+                    }
+                ],
                 "snapshot_recoverable": 2,
                 "snapshot_missing_source_id": 1,
                 "snapshot_checked": 4,
@@ -370,6 +384,9 @@ class UIRecoveryRunFlowModuleTests(unittest.TestCase):
         self.assertIn("来源追溯", detail)
         self.assertIn("live:titan | titan-123", detail)
         self.assertIn("新增闭环票据: 1", detail)
+        self.assertIn("manual_review 1", detail)
+        self.assertIn("parlay_source_traceability_missing", detail)
+        self.assertIn("ticket-gap", detail)
         self.assertIn("- done", detail)
 
     def test_quality_alerts_detect_failures_no_settlement_and_slow_runs(self) -> None:

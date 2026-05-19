@@ -13,10 +13,26 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from v24_app.core import AppMatch, generate_mix_parlay_recommendations, get_parlay_selector_metrics
+from v24_app.core import AppMatch, auto_settle_pending_parlays, generate_mix_parlay_recommendations, get_parlay_selector_metrics
 
 
 class CoreParlayProbabilityTests(unittest.TestCase):
+    class _FakeStateStore:
+        def __init__(self, tickets: list[dict], settlements: list[dict]) -> None:
+            self.tickets = tickets
+            self.settlements = settlements
+            self.saved_tickets: list[dict] | None = None
+
+        def load_parlay_tickets(self) -> list[dict]:
+            return self.tickets
+
+        def save_parlay_tickets(self, items: list[dict], limit: int = 1000) -> None:
+            self.saved_tickets = items
+            self.tickets = items
+
+        def load_settlements(self) -> list[dict]:
+            return self.settlements
+
     def _match(self, home: str, away: str, league: str, kick: str) -> AppMatch:
         return AppMatch(
             home_team=home,
@@ -173,6 +189,93 @@ class CoreParlayProbabilityTests(unittest.TestCase):
         self.assertEqual(metrics.get("high_expected_hit_count"), 1)
         self.assertEqual(metrics.get("low_discount_count"), 1)
         self.assertEqual(metrics.get("high_upset_leg_count"), 1)
+
+    def test_auto_settle_pending_parlays_skips_untraceable_tickets(self) -> None:
+        tickets = [
+            {
+                "ticket_id": "ready",
+                "status": "pending",
+                "legs": [
+                    {"match_id": "m1", "play_type": "1x2", "pick": "home", "source": "live:titan", "source_id": "s1"},
+                    {
+                        "match_id": "m2",
+                        "play_type": "total_goals",
+                        "pick": "over",
+                        "source": "live:titan",
+                        "source_id": "s2",
+                    },
+                ],
+            },
+            {
+                "ticket_id": "missing-source",
+                "status": "pending",
+                "legs": [
+                    {"match_id": "m1", "play_type": "1x2", "pick": "home"},
+                    {"match_id": "m2", "play_type": "total_goals", "pick": "over"},
+                ],
+            },
+            {
+                "ticket_id": "mixed-source",
+                "status": "pending",
+                "legs": [
+                    {"match_id": "m1", "play_type": "1x2", "pick": "home", "source": "live:titan", "source_id": "s1"},
+                    {"match_id": "m2", "play_type": "total_goals", "pick": "over", "source": "cache", "source_id": "s2"},
+                ],
+            },
+        ]
+        settlements = [
+            {"match_id": "m1", "is_correct": True},
+            {"match_id": "m2", "total_goals_is_correct": True},
+        ]
+        store = self._FakeStateStore(tickets, settlements)
+
+        with patch("v24_app.core.STATE_STORE", store):
+            result = auto_settle_pending_parlays()
+
+        self.assertEqual(result["new_settled"], 1)
+        self.assertEqual(result["won"], 1)
+        self.assertEqual(result["skipped_source_health"], 2)
+        self.assertEqual(result["gate"]["status"], "attention")
+        self.assertEqual(result["gate"]["ready_ticket_count"], 1)
+        self.assertEqual(result["gate"]["manual_review_count"], 2)
+        self.assertEqual(
+            {item["code"] for item in result["manual_review_items"]},
+            {"parlay_source_traceability_missing", "parlay_mixed_sources"},
+        )
+        saved = store.saved_tickets or []
+        by_id = {item["ticket_id"]: item for item in saved}
+        self.assertEqual(by_id["ready"]["status"], "won")
+        self.assertEqual(by_id["ready"]["leg_results"][0]["source_id"], "s1")
+        self.assertEqual(by_id["missing-source"]["status"], "pending")
+        self.assertEqual(by_id["missing-source"]["settlement_recovery_gate"]["code"], "parlay_source_traceability_missing")
+        self.assertEqual(by_id["mixed-source"]["settlement_recovery_gate"]["code"], "parlay_mixed_sources")
+
+    def test_auto_settle_pending_parlays_clears_stale_gate_after_traceability_fix(self) -> None:
+        tickets = [
+            {
+                "ticket_id": "fixed",
+                "status": "pending",
+                "settlement_recovery_gate": {"status": "blocked", "code": "parlay_source_traceability_missing"},
+                "legs": [
+                    {"match_id": "m1", "play_type": "1x2", "pick": "home", "source": "live:titan", "source_id": "s1"},
+                    {"match_id": "m2", "play_type": "handicap", "pick": "+1", "source": "live:titan", "source_id": "s2"},
+                ],
+            }
+        ]
+        settlements = [
+            {"match_id": "m1", "is_correct": True},
+            {"match_id": "m2", "handicap_is_correct": False},
+        ]
+        store = self._FakeStateStore(tickets, settlements)
+
+        with patch("v24_app.core.STATE_STORE", store):
+            result = auto_settle_pending_parlays()
+
+        self.assertEqual(result["new_settled"], 1)
+        self.assertEqual(result["lost"], 1)
+        self.assertEqual(result["skipped_source_health"], 0)
+        saved = store.saved_tickets or []
+        self.assertNotIn("settlement_recovery_gate", saved[0])
 
 
 if __name__ == "__main__":

@@ -2637,10 +2637,149 @@ def _settlement_hit_by_play_type(settlement: dict, play_type: str) -> bool | Non
     return value if isinstance(value, bool) else None
 
 
+_PARLAY_MISSING_SOURCE_VALUES = {"", "-", "unknown", "none", "null", "n/a"}
+
+
+def _parlay_trace_value_present(value: object) -> bool:
+    text = normalize_text(value).strip()
+    return bool(text) and text.lower() not in _PARLAY_MISSING_SOURCE_VALUES
+
+
+def _parlay_ticket_settlement_gate(ticket: dict) -> dict:
+    ticket_id = normalize_text(ticket.get("ticket_id", ""))
+    legs = ticket.get("legs", [])
+    if not isinstance(legs, list) or not legs:
+        return {
+            "status": "blocked",
+            "code": "parlay_invalid_legs",
+            "ticket_id": ticket_id or "-",
+            "message": "Parlay ticket has no valid legs for automatic settlement.",
+            "recommendation": "Regenerate the ticket from current match analysis before result recovery.",
+            "source": "-",
+            "source_id": "-",
+            "leg_count": 0,
+            "missing_source_count": 0,
+            "missing_source_id_count": 0,
+        }
+
+    sources: list[str] = []
+    source_ids: list[str] = []
+    invalid_leg_count = 0
+    missing_source_count = 0
+    missing_source_id_count = 0
+    for leg in legs:
+        if not isinstance(leg, dict):
+            invalid_leg_count += 1
+            continue
+        source = normalize_text(leg.get("source") or ticket.get("source") or "")
+        source_id = normalize_text(leg.get("source_id") or ticket.get("source_id") or "")
+        if _parlay_trace_value_present(source):
+            if source not in sources:
+                sources.append(source)
+        else:
+            missing_source_count += 1
+        if _parlay_trace_value_present(source_id):
+            if source_id not in source_ids:
+                source_ids.append(source_id)
+        else:
+            missing_source_id_count += 1
+
+    base = {
+        "ticket_id": ticket_id or "-",
+        "source": " / ".join(sources) if sources else "-",
+        "source_id": " / ".join(source_ids) if source_ids else "-",
+        "leg_count": len(legs),
+        "missing_source_count": missing_source_count,
+        "missing_source_id_count": missing_source_id_count,
+        "invalid_leg_count": invalid_leg_count,
+    }
+    if invalid_leg_count:
+        return {
+            **base,
+            "status": "blocked",
+            "code": "parlay_invalid_legs",
+            "message": f"{invalid_leg_count}/{len(legs)} parlay legs are invalid.",
+            "recommendation": "Regenerate the ticket and keep only structured legs before automatic recovery.",
+        }
+    if missing_source_count or missing_source_id_count:
+        return {
+            **base,
+            "status": "blocked",
+            "code": "parlay_source_traceability_missing",
+            "message": (
+                f"Missing source/source_id on parlay legs: source={missing_source_count}, "
+                f"source_id={missing_source_id_count}."
+            ),
+            "recommendation": "Backfill source and source_id for every leg, then rerun result recovery.",
+        }
+    if len(sources) > 1:
+        return {
+            **base,
+            "status": "blocked",
+            "code": "parlay_mixed_sources",
+            "message": f"Parlay ticket mixes {len(sources)} data sources.",
+            "recommendation": "Split or regenerate the ticket with one consistent data source before auto settlement.",
+        }
+    return {
+        **base,
+        "status": "ready",
+        "code": "ready",
+        "message": "Parlay ticket is traceable and eligible for automatic settlement.",
+        "recommendation": "Proceed with automatic result recovery.",
+    }
+
+
+def _parlay_settlement_gate_summary(gate_items: list[dict]) -> dict:
+    checked = len(gate_items)
+    ready = sum(1 for item in gate_items if item.get("status") == "ready")
+    blocked = checked - ready
+    reason_counts = Counter(str(item.get("code") or "unknown") for item in gate_items if item.get("status") != "ready")
+    if checked <= 0:
+        status = "empty"
+    elif blocked <= 0:
+        status = "healthy"
+    elif ready <= 0:
+        status = "blocked"
+    else:
+        status = "attention"
+    return {
+        "status": status,
+        "checked_ticket_count": checked,
+        "ready_ticket_count": ready,
+        "blocked_ticket_count": blocked,
+        "manual_review_count": blocked,
+        "reason_counts": dict(reason_counts),
+        "manual_review_items": [dict(item) for item in gate_items if item.get("status") != "ready"][:20],
+        "summary_text": f"parlay settlement gate {status} | ready {ready}/{checked} | manual_review {blocked}",
+    }
+
+
+def _compact_parlay_settlement_gate(gate: dict) -> dict:
+    return {
+        "status": str(gate.get("status") or "-"),
+        "code": str(gate.get("code") or "-"),
+        "message": str(gate.get("message") or "-"),
+        "recommendation": str(gate.get("recommendation") or "-"),
+        "source": str(gate.get("source") or "-"),
+        "source_id": str(gate.get("source_id") or "-"),
+        "leg_count": int(gate.get("leg_count", 0) or 0),
+        "missing_source_count": int(gate.get("missing_source_count", 0) or 0),
+        "missing_source_id_count": int(gate.get("missing_source_id_count", 0) or 0),
+    }
+
+
 def auto_settle_pending_parlays() -> dict:
     tickets = STATE_STORE.load_parlay_tickets()
     if not tickets:
-        return {"new_settled": 0, "won": 0, "lost": 0, "items": []}
+        return {
+            "new_settled": 0,
+            "won": 0,
+            "lost": 0,
+            "items": [],
+            "skipped_source_health": 0,
+            "manual_review_items": [],
+            "gate": _parlay_settlement_gate_summary([]),
+        }
 
     settlement_map: dict[str, dict] = {}
     for item in STATE_STORE.load_settlements():
@@ -2649,12 +2788,40 @@ def auto_settle_pending_parlays() -> dict:
             settlement_map[match_id] = item
 
     changed = False
-    summary = {"new_settled": 0, "won": 0, "lost": 0, "items": []}
+    gate_items: list[dict] = []
+    summary = {
+        "new_settled": 0,
+        "won": 0,
+        "lost": 0,
+        "items": [],
+        "skipped_source_health": 0,
+        "manual_review_items": [],
+        "gate": {},
+    }
     for ticket in tickets:
         if not isinstance(ticket, dict) or ticket.get("status") != "pending":
             continue
 
         legs = ticket.get("legs", [])
+        gate = _parlay_ticket_settlement_gate(ticket)
+        gate_items.append(gate)
+        if gate.get("status") != "ready":
+            compact_gate = _compact_parlay_settlement_gate(gate)
+            existing_gate = ticket.get("settlement_recovery_gate") if isinstance(ticket.get("settlement_recovery_gate"), dict) else {}
+            compare_keys = ("status", "code", "message", "recommendation", "source", "source_id", "leg_count")
+            if {key: existing_gate.get(key) for key in compare_keys} != {key: compact_gate.get(key) for key in compare_keys}:
+                ticket["settlement_recovery_gate"] = {
+                    **compact_gate,
+                    "checked_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                }
+                changed = True
+            summary["skipped_source_health"] += 1
+            if len(summary["manual_review_items"]) < 20:
+                summary["manual_review_items"].append(compact_gate)
+            continue
+        if isinstance(ticket.get("settlement_recovery_gate"), dict):
+            ticket.pop("settlement_recovery_gate", None)
+            changed = True
         if not isinstance(legs, list) or not legs:
             continue
 
@@ -2672,6 +2839,8 @@ def auto_settle_pending_parlays() -> dict:
                     "match_id": leg.get("match_id"),
                     "play_type": leg.get("play_type"),
                     "pick": leg.get("pick"),
+                    "source": leg.get("source") or ticket.get("source"),
+                    "source_id": leg.get("source_id") or ticket.get("source_id"),
                     "resolved": hit is not None,
                     "is_hit": hit,
                 }
@@ -2696,6 +2865,7 @@ def auto_settle_pending_parlays() -> dict:
 
     if changed:
         STATE_STORE.save_parlay_tickets(tickets)
+    summary["gate"] = _parlay_settlement_gate_summary(gate_items)
     return summary
 
 
@@ -14928,6 +15098,9 @@ def auto_settle_finished_matches(
         "messages": [],
         "items": [],
         "parlay_items": [],
+        "parlay_skipped_source_health": 0,
+        "parlay_manual_review_items": [],
+        "parlay_settlement_gate": {},
         "gate": {},
     }
 
@@ -15075,6 +15248,9 @@ def auto_settle_finished_matches(
         parlay_summary = auto_settle_pending_parlays()
         summary["new_parlay_settled"] = parlay_summary.get("new_settled", 0)
         summary["parlay_items"] = parlay_summary.get("items", [])
+        summary["parlay_skipped_source_health"] = parlay_summary.get("skipped_source_health", 0)
+        summary["parlay_manual_review_items"] = parlay_summary.get("manual_review_items", [])
+        summary["parlay_settlement_gate"] = parlay_summary.get("gate", {})
         summary["gate"] = get_gate_metrics(window=20)
         summary["messages"].append(
             f"最近 {lookback_days} 天未发现可自动结算的新完场比赛（修复快照 {summary['restored_snapshots']} 场，快照回查 {summary['snapshot_checked']} 场，命中 {summary['snapshot_result_hits']} 场）。"
@@ -15120,6 +15296,9 @@ def auto_settle_finished_matches(
     parlay_summary = auto_settle_pending_parlays()
     summary["new_parlay_settled"] = parlay_summary.get("new_settled", 0)
     summary["parlay_items"] = parlay_summary.get("items", [])
+    summary["parlay_skipped_source_health"] = parlay_summary.get("skipped_source_health", 0)
+    summary["parlay_manual_review_items"] = parlay_summary.get("manual_review_items", [])
+    summary["parlay_settlement_gate"] = parlay_summary.get("gate", {})
     summary["gate"] = get_gate_metrics(window=20)
 
     summary["messages"].append(

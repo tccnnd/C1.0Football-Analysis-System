@@ -898,6 +898,18 @@ def build_result_recovery_run_detail(record: Mapping[str, object] | object) -> s
     release_loop_hit_rate = item.get("strategy_release_loop_hit_rate_text") or result.get("strategy_release_loop_hit_rate_text") or "-"
     live_feedback_validation = _as_mapping(item.get("live_feedback_validation") or result.get("live_feedback_validation"))
     daily_parlay_closure = _as_mapping(item.get("daily_parlay_snapshot_closure") or result.get("daily_parlay_snapshot_closure"))
+    parlay_settlement_gate = _as_mapping(item.get("parlay_settlement_gate") or result.get("parlay_settlement_gate"))
+    parlay_manual_items = item.get("parlay_manual_review_items") or result.get("parlay_manual_review_items")
+    if isinstance(parlay_manual_items, Sequence) and not isinstance(parlay_manual_items, (str, bytes)):
+        parlay_manual_detail = "\n".join(
+            f"- {row.get('ticket_id') or '-'}: {row.get('code') or '-'} | {row.get('recommendation') or '-'}"
+            for row in parlay_manual_items[:5]
+            if isinstance(row, Mapping)
+        )
+    else:
+        parlay_manual_detail = ""
+    if not parlay_manual_detail:
+        parlay_manual_detail = "- 无"
     live_feedback_rows = live_feedback_validation.get("rows")
     if isinstance(live_feedback_rows, Sequence) and not isinstance(live_feedback_rows, (str, bytes)):
         live_feedback_detail = "\n".join(
@@ -923,6 +935,11 @@ def build_result_recovery_run_detail(record: Mapping[str, object] | object) -> s
         f"- \u4fee\u590d\u5feb\u7167: {_safe_int(item.get('restored_snapshots') or result.get('restored_snapshots'), 0)}\n"
         f"- \u65b0\u589e\u7ed3\u7b97: {_safe_int(item.get('new_settled') or result.get('new_settled'), 0)}\n"
         f"- \u65b0\u589e\u4e8c\u4e32\u4e00\u7ed3\u7b97: {_safe_int(item.get('new_parlay_settled') or result.get('new_parlay_settled'), 0)}\n"
+        f"- 二串一来源门禁: {parlay_settlement_gate.get('status') or '-'} | "
+        f"ready {_safe_int(parlay_settlement_gate.get('ready_ticket_count'), 0)}/"
+        f"{_safe_int(parlay_settlement_gate.get('checked_ticket_count'), 0)} | "
+        f"manual_review {_safe_int(parlay_settlement_gate.get('manual_review_count'), 0)}\n"
+        f"- 二串一来源跳过: {_safe_int(item.get('parlay_skipped_source_health') or result.get('parlay_skipped_source_health'), 0)}\n"
         f"- \u5df2\u7ed3\u7b97\u8df3\u8fc7: {_safe_int(item.get('already_settled') or result.get('already_settled'), 0)}\n"
         f"- \u5176\u4ed6\u8df3\u8fc7: {_safe_int(item.get('skipped') or result.get('skipped'), 0)}\n"
         f"- \u5feb\u7167\u56de\u67e5: {_safe_int(item.get('snapshot_checked') or result.get('snapshot_checked'), 0)} / "
@@ -936,6 +953,8 @@ def build_result_recovery_run_detail(record: Mapping[str, object] | object) -> s
         f"- 来源追溯: {daily_parlay_closure.get('source_summary_text') or '-'}\n"
         f"- 新增闭环票据: {_safe_int(item.get('daily_parlay_snapshot_closed') or daily_parlay_closure.get('newly_settled_ticket_count'), 0)}\n"
         f"- 快照数: {_safe_int(daily_parlay_closure.get('snapshot_count'), 0)}\n\n"
+        f"二串一人工修复队列:\n"
+        f"{parlay_manual_detail}\n\n"
         f"\u5feb\u7167\u53ef\u56de\u6536\u6027:\n"
         f"- \u53ef\u81ea\u52a8\u56de\u67e5: {_safe_int(item.get('snapshot_recoverable') or result.get('snapshot_recoverable'), 0)}\n"
         f"- \u7f3a source_id: {_safe_int(item.get('snapshot_missing_source_id') or result.get('snapshot_missing_source_id'), 0)}\n"
