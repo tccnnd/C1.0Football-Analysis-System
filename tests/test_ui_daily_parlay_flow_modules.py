@@ -540,9 +540,13 @@ class UIDailyParlayFlowModuleTests(unittest.TestCase):
         self.assertIn("# 二串一修复闭环报告", "\n".join(lines))
         self.assertIn("ticket-blocked", "\n".join(lines))
         self.assertIn("record_type,generated_at,status", csv_text)
+        self.assertIn("route_type", csv_text)
+        self.assertIn("source_backfill", csv_text)
         self.assertIn("audit,2026-05-18 12:01:00,settled", csv_text)
         self.assertIn("queue,", csv_text)
         self.assertIn("Markdown: report.md", message)
+        self.assertIn("自动分流", "\n".join(lines))
+        self.assertIn("自动分流", message)
 
     def test_mark_split_required_keeps_mixed_ticket_in_manual_queue(self) -> None:
         tickets = [

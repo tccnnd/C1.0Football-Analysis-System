@@ -422,6 +422,15 @@ def filter_daily_parlay_repair_queue_rows(rows: Sequence[Any] | object, route_ke
     return [item for item in items if _daily_parlay_repair_queue_row_route(item) == normalized]
 
 
+def _daily_parlay_repair_queue_route_summary_text(rows: Sequence[Any] | object) -> str:
+    counts = build_daily_parlay_repair_queue_route_counts(rows)
+    return (
+        f"{daily_parlay_repair_queue_route_label('source_backfill')}(source_backfill) {counts.get('source_backfill', 0)} | "
+        f"{daily_parlay_repair_queue_route_label('mixed_source_split')}(mixed_source_split) {counts.get('mixed_source_split', 0)} | "
+        f"其他(manual_review) {counts.get('manual_review', 0)}"
+    )
+
+
 def _source_ref_match_id(ref: Mapping[str, Any]) -> str:
     match_id = str(ref.get("match_id") or "").strip()
     if match_id:
@@ -839,6 +848,7 @@ def build_daily_parlay_repair_loop_report_lines(
     audit_summary = payload.get("repair_audit_summary") if isinstance(payload.get("repair_audit_summary"), Mapping) else {}
     audit_rows = [item for item in _as_items(payload.get("repair_audit_rows")) if isinstance(item, Mapping)]
     audit_card_rows = build_daily_parlay_repair_audit_card_rows(payload.get("repair_audit_records"))
+    route_summary = _daily_parlay_repair_queue_route_summary_text(queue_rows)
     current = generated_at or datetime.now()
     lines = [
         "# 二串一修复闭环报告",
@@ -852,6 +862,7 @@ def build_daily_parlay_repair_loop_report_lines(
         "| 指标 | 数值 | 说明 |",
         "| --- | ---: | --- |",
     ]
+    lines.insert(4, f"- 自动分流: {route_summary}")
     if not audit_card_rows:
         lines.append("| - | - | - |")
     for row in audit_card_rows:
@@ -956,6 +967,7 @@ def build_daily_parlay_repair_loop_csv_text(snapshot: Mapping[str, Any] | object
         "recovery_new_settled",
         "recovery_gate_status",
         "queue_blocked_after_repair",
+        "route_type",
         "message",
         "recommendation",
     ]
@@ -974,6 +986,7 @@ def build_daily_parlay_repair_loop_csv_text(snapshot: Mapping[str, Any] | object
             record.get("recovery_new_settled", 0),
             record.get("recovery_gate_status") or "",
             record.get("queue_blocked_after_repair", 0),
+            record.get("route_type") or "",
             record.get("repair_summary_text") or row.get("body") or "",
             record.get("recovery_summary_text") or "",
         ]
@@ -991,6 +1004,7 @@ def build_daily_parlay_repair_loop_csv_text(snapshot: Mapping[str, Any] | object
             "",
             "",
             "",
+            row.get("route_type") or _daily_parlay_repair_queue_row_route(row),
             row.get("message") or "",
             row.get("recommendation") or "",
         ]
@@ -1005,13 +1019,16 @@ def build_daily_parlay_repair_loop_export_message(
 ) -> str:
     payload = snapshot if isinstance(snapshot, Mapping) else {}
     queue_summary = payload.get("repair_queue_summary") if isinstance(payload.get("repair_queue_summary"), Mapping) else {}
+    queue_rows = [item for item in _as_items(payload.get("repair_queue_rows")) if isinstance(item, Mapping)]
     audit_summary = payload.get("repair_audit_summary") if isinstance(payload.get("repair_audit_summary"), Mapping) else {}
+    route_summary = _daily_parlay_repair_queue_route_summary_text(queue_rows)
     return "\n".join(
         [
             "二串一修复闭环报告已导出",
             "",
             f"Markdown: {md_path}",
             f"CSV: {csv_path}",
+            f"自动分流: {route_summary}",
             f"待修复: {queue_summary.get('blocked_count', 0)}",
             f"审计记录: {audit_summary.get('total', 0)}",
             f"累计复跑新结算: {audit_summary.get('recovery_new_settled', 0)}",
