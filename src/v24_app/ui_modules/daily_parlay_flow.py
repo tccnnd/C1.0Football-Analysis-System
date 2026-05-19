@@ -324,10 +324,21 @@ def _parlay_manual_review_queue_items(parlay_tickets: Sequence[Any] | object) ->
                 "legs": list(gate.get("legs", [])) if isinstance(gate.get("legs"), Sequence) and not isinstance(gate.get("legs"), (str, bytes, bytearray)) else [],
             }
         )
+        priority = build_daily_parlay_repair_queue_priority(items[-1])
+        items[-1].update(
+            {
+                "route_type": priority["route_key"],
+                "priority_score": priority["priority_score"],
+                "priority_bucket": priority["priority_bucket"],
+                "priority_label": priority["priority_label"],
+                "priority_reason": priority["priority_reason"],
+                "auto_recoverable": priority["auto_recoverable"],
+            }
+        )
     items.sort(
         key=lambda item: (
-            0 if str(item.get("status") or "") == "blocked" else 1,
-            str(item.get("code") or ""),
+            -int(item.get("priority_score", 0) or 0),
+            0 if bool(item.get("auto_recoverable")) else 1,
             str(item.get("created_at") or ""),
             str(item.get("ticket_id") or ""),
         )
@@ -338,6 +349,7 @@ def _parlay_manual_review_queue_items(parlay_tickets: Sequence[Any] | object) ->
 def build_daily_parlay_repair_queue_summary(parlay_tickets: Sequence[Any] | object) -> dict[str, Any]:
     tickets = _as_items(parlay_tickets)
     items = _parlay_manual_review_queue_items(tickets)
+    priority_counts = build_daily_parlay_repair_queue_priority_counts(items)
     pending_count = sum(1 for ticket in tickets if _status(ticket, "pending") == "pending")
     blocked_count = len(items)
     ready_count = sum(
@@ -364,7 +376,13 @@ def build_daily_parlay_repair_queue_summary(parlay_tickets: Sequence[Any] | obje
         "ready_count": ready_count,
         "source_issue_count": source_issue_count,
         "mixed_source_count": mixed_source_count,
+        "priority_counts": priority_counts,
         "queue_items": items,
+        "priority_summary_text": (
+            f"最高 {priority_counts.get('critical', 0)} | 高 {priority_counts.get('high', 0)} | "
+            f"中 {priority_counts.get('medium', 0)} | 低 {priority_counts.get('low', 0)} | "
+            f"可自动回填 {priority_counts.get('auto_recoverable', 0)}"
+        ),
         "summary_text": (
             f"二串一修复队列 {status} | 待检查 {pending_count} | 待修复 {blocked_count} | "
             f"可自动回收 {ready_count} | 源问题 {source_issue_count} | 混源 {mixed_source_count}"
@@ -469,6 +487,82 @@ def build_daily_parlay_repair_queue_action_hint(row: Mapping[str, Any] | object)
         "recommendation": "先查看门禁原文和腿概览，再决定是否重建票据或补充来源快照。",
         "done_when": "人工确认后通过回填、拆票或重新生成票据消除阻塞。",
     }
+
+
+def build_daily_parlay_repair_queue_priority(row: Mapping[str, Any] | object) -> dict[str, Any]:
+    item = row if isinstance(row, Mapping) else {}
+    route_key = str(item.get("route_type") or _daily_parlay_repair_queue_row_route(item)).strip().lower()
+    code = str(item.get("code") or "").strip()
+    status = str(item.get("status") or "").strip().lower()
+    missing_source_count = _safe_limit(item.get("missing_source_count", 0))
+    missing_source_id_count = _safe_limit(item.get("missing_source_id_count", 0))
+    invalid_leg_count = _safe_limit(item.get("invalid_leg_count", 0))
+    mixed_source_count = _safe_limit(item.get("mixed_source_count", 0))
+    route_base = {
+        "mixed_source_split": 300,
+        "source_backfill": 200,
+    }.get(route_key, 100)
+    issue_bonus = (
+        missing_source_count * 20
+        + missing_source_id_count * 18
+        + invalid_leg_count * 24
+        + mixed_source_count * 30
+    )
+    status_bonus = 30 if status == "blocked" else 12 if status == "warning" else 0
+    code_bonus = 0
+    if code == "parlay_mixed_sources":
+        code_bonus += 24
+    elif code == "parlay_source_traceability_missing":
+        code_bonus += 16
+    elif code == "parlay_invalid_legs":
+        code_bonus += 20
+    priority_score = route_base + issue_bonus + status_bonus + code_bonus
+    if priority_score >= 320:
+        priority_bucket = "critical"
+        priority_label = "最高"
+    elif priority_score >= 220:
+        priority_bucket = "high"
+        priority_label = "高"
+    elif priority_score >= 120:
+        priority_bucket = "medium"
+        priority_label = "中"
+    else:
+        priority_bucket = "low"
+        priority_label = "低"
+    if route_key == "mixed_source_split":
+        reason = "混源票据会影响回收准确性，优先拆票。"
+    elif route_key == "source_backfill":
+        reason = "该票据可通过来源回填快速恢复自动回收能力。"
+    else:
+        reason = "该票据需要人工复查门禁原文后再处理。"
+    if missing_source_count > 0:
+        reason += f" 缺 source {missing_source_count}。"
+    if missing_source_id_count > 0:
+        reason += f" 缺 source_id {missing_source_id_count}。"
+    if invalid_leg_count > 0:
+        reason += f" 非法腿 {invalid_leg_count}。"
+    if mixed_source_count > 0:
+        reason += f" 混源腿 {mixed_source_count}。"
+    return {
+        "route_key": route_key or "manual_review",
+        "priority_score": priority_score,
+        "priority_bucket": priority_bucket,
+        "priority_label": priority_label,
+        "priority_reason": reason,
+        "auto_recoverable": route_key == "source_backfill",
+    }
+
+
+def build_daily_parlay_repair_queue_priority_counts(rows: Sequence[Any] | object) -> dict[str, int]:
+    counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "auto_recoverable": 0}
+    for row in _as_items(rows):
+        priority = build_daily_parlay_repair_queue_priority(row)
+        bucket = str(priority.get("priority_bucket") or "low")
+        if bucket in counts:
+            counts[bucket] += 1
+        if bool(priority.get("auto_recoverable")):
+            counts["auto_recoverable"] += 1
+    return counts
 
 
 def _source_ref_match_id(ref: Mapping[str, Any]) -> str:
@@ -889,6 +983,14 @@ def build_daily_parlay_repair_loop_report_lines(
     audit_rows = [item for item in _as_items(payload.get("repair_audit_rows")) if isinstance(item, Mapping)]
     audit_card_rows = build_daily_parlay_repair_audit_card_rows(payload.get("repair_audit_records"))
     route_summary = _daily_parlay_repair_queue_route_summary_text(queue_rows)
+    priority_summary_text = str(queue_summary.get("priority_summary_text") or "").strip()
+    if not priority_summary_text:
+        priority_counts = build_daily_parlay_repair_queue_priority_counts(queue_rows)
+        priority_summary_text = (
+            f"最高 {priority_counts.get('critical', 0)} | 高 {priority_counts.get('high', 0)} | "
+            f"中 {priority_counts.get('medium', 0)} | 低 {priority_counts.get('low', 0)} | "
+            f"可自动回填 {priority_counts.get('auto_recoverable', 0)}"
+        )
     current = generated_at or datetime.now()
     lines = [
         "# 二串一修复闭环报告",
@@ -903,6 +1005,7 @@ def build_daily_parlay_repair_loop_report_lines(
         "| --- | ---: | --- |",
     ]
     lines.insert(4, f"- 自动分流: {route_summary}")
+    lines.insert(5, f"- 优先级概览: {priority_summary_text}")
     if not audit_card_rows:
         lines.append("| - | - | - |")
     for row in audit_card_rows:
@@ -950,21 +1053,26 @@ def build_daily_parlay_repair_loop_report_lines(
             "",
             "## 当前待人工修复队列",
             "",
-            "| # | ticket_id | 状态 | 代码 | 来源 | source_id | 建议 |",
-            "| ---: | --- | --- | --- | --- | --- | --- |",
+            "| # | 优先级 | 分流 | ticket_id | 状态 | 代码 | 时间 | 来源 | source_id | 建议 |",
+            "| ---: | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
     )
     if not queue_rows:
-        lines.append("| - | - | - | - | - | - | 当前没有待人工修复的二串一票据 |")
+        lines.append("| - | - | - | - | - | - | - | - | - | 当前没有待人工修复的二串一票据 |")
     for index, row in enumerate(queue_rows[:50], start=1):
+        priority = build_daily_parlay_repair_queue_priority(row)
+        route_type = row.get("route_type") or priority.get("route_key") or _daily_parlay_repair_queue_row_route(row)
         lines.append(
             "| "
             + " | ".join(
                 [
                     str(index),
+                    _md_cell(f"{row.get('priority_label') or priority.get('priority_label') or '-'} {row.get('priority_score') or priority.get('priority_score') or 0}"),
+                    _md_cell(route_type),
                     _md_cell(row.get("ticket_id")),
                     _md_cell(row.get("status")),
                     _md_cell(row.get("code")),
+                    _md_cell(row.get("created_at")),
                     _md_cell(row.get("source")),
                     _md_cell(row.get("source_id")),
                     _md_cell(row.get("recommendation")),
@@ -1008,6 +1116,9 @@ def build_daily_parlay_repair_loop_csv_text(snapshot: Mapping[str, Any] | object
         "recovery_gate_status",
         "queue_blocked_after_repair",
         "route_type",
+        "priority_bucket",
+        "priority_score",
+        "auto_recoverable",
         "message",
         "recommendation",
     ]
@@ -1027,11 +1138,16 @@ def build_daily_parlay_repair_loop_csv_text(snapshot: Mapping[str, Any] | object
             record.get("recovery_gate_status") or "",
             record.get("queue_blocked_after_repair", 0),
             record.get("route_type") or "",
+            record.get("priority_bucket") or "",
+            record.get("priority_score") or "",
+            record.get("auto_recoverable") or "",
             record.get("repair_summary_text") or row.get("body") or "",
             record.get("recovery_summary_text") or "",
         ]
         lines.append(",".join(_csv_cell(value) for value in values))
     for row in queue_rows:
+        priority = build_daily_parlay_repair_queue_priority(row)
+        route_type = row.get("route_type") or priority.get("route_key") or _daily_parlay_repair_queue_row_route(row)
         values = [
             "queue",
             row.get("created_at") or "",
@@ -1044,7 +1160,10 @@ def build_daily_parlay_repair_loop_csv_text(snapshot: Mapping[str, Any] | object
             "",
             "",
             "",
-            row.get("route_type") or _daily_parlay_repair_queue_row_route(row),
+            route_type,
+            row.get("priority_bucket") or priority.get("priority_bucket") or "",
+            row.get("priority_score") or priority.get("priority_score") or "",
+            row.get("auto_recoverable") if "auto_recoverable" in row else priority.get("auto_recoverable") or "",
             row.get("message") or "",
             row.get("recommendation") or "",
         ]
@@ -1062,12 +1181,21 @@ def build_daily_parlay_repair_loop_export_message(
     queue_rows = [item for item in _as_items(payload.get("repair_queue_rows")) if isinstance(item, Mapping)]
     audit_summary = payload.get("repair_audit_summary") if isinstance(payload.get("repair_audit_summary"), Mapping) else {}
     route_summary = _daily_parlay_repair_queue_route_summary_text(queue_rows)
+    priority_summary_text = str(queue_summary.get("priority_summary_text") or "").strip()
+    if not priority_summary_text:
+        priority_counts = build_daily_parlay_repair_queue_priority_counts(queue_rows)
+        priority_summary_text = (
+            f"最高 {priority_counts.get('critical', 0)} | 高 {priority_counts.get('high', 0)} | "
+            f"中 {priority_counts.get('medium', 0)} | 低 {priority_counts.get('low', 0)} | "
+            f"可自动回填 {priority_counts.get('auto_recoverable', 0)}"
+        )
     return "\n".join(
         [
             "二串一修复闭环报告已导出",
             "",
             f"Markdown: {md_path}",
             f"CSV: {csv_path}",
+            f"优先级概览: {priority_summary_text}",
             f"自动分流: {route_summary}",
             f"待修复: {queue_summary.get('blocked_count', 0)}",
             f"审计记录: {audit_summary.get('total', 0)}",

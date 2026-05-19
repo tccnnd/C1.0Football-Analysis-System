@@ -32,6 +32,8 @@ from v24_app.ui_modules import (
     build_daily_parlay_repair_loop_report_lines,
     build_daily_parlay_settlement_rows,
     build_daily_parlay_repair_queue_action_hint,
+    build_daily_parlay_repair_queue_priority,
+    build_daily_parlay_repair_queue_priority_counts,
     build_daily_parlay_repair_queue_rows,
     build_daily_parlay_repair_queue_route_counts,
     build_daily_parlay_repair_queue_summary,
@@ -270,8 +272,14 @@ class UIDailyParlayFlowModuleTests(unittest.TestCase):
         self.assertEqual(summary["ready_count"], 1)
         self.assertEqual(summary["source_issue_count"], 1)
         self.assertEqual(summary["mixed_source_count"], 0)
+        self.assertEqual(summary["priority_counts"]["high"], 1)
+        self.assertEqual(summary["priority_counts"]["auto_recoverable"], 1)
+        self.assertIn("可自动回填", summary["priority_summary_text"])
         self.assertEqual(rows[0]["ticket_id"], "ticket-blocked")
         self.assertEqual(rows[0]["code"], "parlay_source_traceability_missing")
+        self.assertEqual(rows[0]["route_type"], "source_backfill")
+        self.assertEqual(rows[0]["priority_bucket"], "high")
+        self.assertTrue(rows[0]["auto_recoverable"])
         self.assertIn("Backfill source and source_id", rows[0]["body"])
         self.assertEqual(rows[0]["tone"], "danger")
         self.assertEqual(rows[0]["gate"]["status"], "blocked")
@@ -342,6 +350,54 @@ class UIDailyParlayFlowModuleTests(unittest.TestCase):
         self.assertIn("混源", mixed_hint["route_label"])
         self.assertEqual(manual_hint["action_key"], "manual_review")
         self.assertIn("门禁原文", manual_hint["primary_action"])
+
+    def test_daily_parlay_repair_queue_priority_orders_by_severity_and_time(self) -> None:
+        tickets = [
+            {
+                "ticket_id": "source-new",
+                "status": "pending",
+                "created_at": "2026-05-18 09:00:00",
+                "settlement_recovery_gate": {
+                    "status": "blocked",
+                    "code": "parlay_source_traceability_missing",
+                    "missing_source_count": 1,
+                    "missing_source_id_count": 1,
+                },
+            },
+            {
+                "ticket_id": "mixed",
+                "status": "pending",
+                "created_at": "2026-05-18 10:00:00",
+                "settlement_recovery_gate": {
+                    "status": "blocked",
+                    "code": "parlay_mixed_sources",
+                    "mixed_source_count": 1,
+                },
+            },
+            {
+                "ticket_id": "source-old",
+                "status": "pending",
+                "created_at": "2026-05-18 08:00:00",
+                "settlement_recovery_gate": {
+                    "status": "blocked",
+                    "code": "parlay_source_traceability_missing",
+                    "missing_source_count": 1,
+                    "missing_source_id_count": 1,
+                },
+            },
+        ]
+
+        rows = build_daily_parlay_repair_queue_rows(tickets)
+        counts = build_daily_parlay_repair_queue_priority_counts(rows)
+        mixed_priority = build_daily_parlay_repair_queue_priority(rows[0])
+
+        self.assertEqual([row["ticket_id"] for row in rows], ["mixed", "source-old", "source-new"])
+        self.assertEqual(rows[0]["priority_bucket"], "critical")
+        self.assertGreater(rows[0]["priority_score"], rows[1]["priority_score"])
+        self.assertEqual(counts["critical"], 1)
+        self.assertEqual(counts["high"], 2)
+        self.assertEqual(counts["auto_recoverable"], 2)
+        self.assertEqual(mixed_priority["priority_bucket"], "critical")
 
     def test_daily_parlay_repair_queue_summary_is_healthy_when_no_blocked_tickets_remain(self) -> None:
         tickets = [
@@ -570,10 +626,15 @@ class UIDailyParlayFlowModuleTests(unittest.TestCase):
         self.assertIn("ticket-blocked", "\n".join(lines))
         self.assertIn("record_type,generated_at,status", csv_text)
         self.assertIn("route_type", csv_text)
+        self.assertIn("priority_bucket", csv_text)
+        self.assertIn("auto_recoverable", csv_text)
+        self.assertIn("high", csv_text)
         self.assertIn("source_backfill", csv_text)
         self.assertIn("audit,2026-05-18 12:01:00,settled", csv_text)
         self.assertIn("queue,", csv_text)
         self.assertIn("Markdown: report.md", message)
+        self.assertIn("优先级概览", "\n".join(lines))
+        self.assertIn("优先级概览", message)
         self.assertIn("自动分流", "\n".join(lines))
         self.assertIn("自动分流", message)
 

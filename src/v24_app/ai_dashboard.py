@@ -13892,6 +13892,8 @@ class SmartMatchDashboard:
         snapshot = self._daily_parlay_repair_queue_snapshot()
         summary = snapshot.get("summary") if isinstance(snapshot.get("summary"), dict) else {}
         rows = snapshot.get("rows") if isinstance(snapshot.get("rows"), list) else []
+        priority_counts = summary.get("priority_counts") if isinstance(summary.get("priority_counts"), dict) else {}
+        priority_summary_text = str(summary.get("priority_summary_text") or "-")
         active_route = str(route_filter or "").strip().lower()
         if active_route not in {"source_backfill", "mixed_source_split"}:
             active_route = ""
@@ -13949,6 +13951,16 @@ class SmartMatchDashboard:
             ("最近审计", str(repair_audit_summary.get("total", 0)), "#7aa2ff"),
         ]:
             self._detail_metric(top, label, value, color)
+
+        priority_strip = tk.Frame(shell, bg=BG)
+        priority_strip.pack(fill=tk.X, pady=(0, 10))
+        tk.Label(
+            priority_strip,
+            text=f"优先级队列: {priority_summary_text}",
+            bg=BG,
+            fg=YELLOW if int(priority_counts.get("critical", 0) or 0) else TEXT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+        ).pack(side=tk.LEFT)
 
         filter_bar = tk.Frame(shell, bg=BG)
         filter_bar.pack(fill=tk.X, pady=(0, 12))
@@ -14140,6 +14152,8 @@ class SmartMatchDashboard:
                 legs = row.get("legs") if isinstance(row.get("legs"), list) else []
                 legs_lines = [f"- {str(item)}" for item in legs] if legs else ["- 无"]
                 detail_lines = [
+                    f"优先级: {row.get('priority_label') or '-'} | 分数: {row.get('priority_score', 0)} | 自动回填: {'是' if row.get('auto_recoverable') else '否'}",
+                    f"排序原因: {row.get('priority_reason') or '-'}",
                     f"分流: {action_hint.get('route_label') or '-'} | 推荐动作: {action_hint.get('primary_action') or '-'}",
                     f"处理提示: {action_hint.get('message') or '-'}",
                     f"操作建议: {action_hint.get('recommendation') or '-'}",
@@ -14166,7 +14180,7 @@ class SmartMatchDashboard:
         for row in queue_rows_cache:
             listbox.insert(
                 tk.END,
-                f"{row.get('ticket_id') or '-'} | {row.get('code') or '-'} | {row.get('source') or '-'}",
+                f"{row.get('priority_label') or '-'} {row.get('priority_score', 0)} | {row.get('route_type') or '-'} | {row.get('ticket_id') or '-'} | {row.get('code') or '-'}",
             )
         if queue_rows_cache:
             _render_detail(0)
@@ -14181,7 +14195,7 @@ class SmartMatchDashboard:
 
         listbox.bind("<<ListboxSelect>>", on_select)
         self.status_var.set(
-            f"二串一人工修复队列: {active_route_label} {len(queue_rows_cache)}/{len(full_queue_rows)} | 待检查 {summary.get('pending_count', 0)} | 待修复 {summary.get('blocked_count', 0)} | 可自动回收 {summary.get('ready_count', 0)}"
+            f"二串一人工修复队列: {active_route_label} {len(queue_rows_cache)}/{len(full_queue_rows)} | {priority_summary_text} | 待修复 {summary.get('blocked_count', 0)}"
         )
 
     def open_daily_parlay_window(self) -> None:
