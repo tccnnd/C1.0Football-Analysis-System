@@ -1,1 +1,24 @@
 mode: formal_list_default
+
+guard_rails:
+  default_provider_policy:
+    shadow: fail_open
+    gate_only: fail_close
+    formal_list_default: fail_close
+  providers:
+    api_football_primary:
+      shadow: fail_open
+      gate_only: fail_close
+      formal_list_default: fail_close
+    titan_detail_primary:
+      shadow: fail_open
+      gate_only: fail_close
+      formal_list_default: fail_close
+    crawler_fallback:
+      shadow: fail_open
+      gate_only: fail_open
+      formal_list_default: fail_close
+    external_availability_file:
+      shadow: fail_open
+      gate_only: fail_open
+      formal_list_default: fail_close

@@ -115,6 +115,75 @@ class UIC1AvailabilityFlowModuleTests(unittest.TestCase):
         self.assertIn("attempts=2 retries=1", guard["message"])
         self.assertTrue(any("recovered_after_retry" in issue for issue in guard["issues"]))
 
+    def test_release_review_guard_fail_open_in_shadow_mode(self) -> None:
+        guard = build_c1_release_review_availability_guard(
+            {
+                "total_rows": 12,
+                "total_keys": 24,
+                "imported_providers": 1,
+                "quality_failures": 0,
+                "quality_warnings": 0,
+                "provider_failure_reasons": [
+                    {
+                        "provider_name": "api_football_primary",
+                        "severity": "error",
+                        "code": "upstream_error",
+                        "status": "error",
+                        "message": "timeout while loading source",
+                    }
+                ],
+                "smoke_check": {
+                    "status": "fail",
+                    "issues": ["provider timeout"],
+                    "release_review_allowed": False,
+                },
+            },
+            runtime_mode="shadow",
+        )
+        self.assertTrue(guard["allowed"])
+        self.assertEqual(guard["status"], "warn")
+        self.assertEqual(guard["raw_status"], "fail")
+        self.assertEqual(guard["runtime_mode"], "shadow")
+        self.assertIn("mode=shadow", guard["status_text"])
+        self.assertEqual(guard["provider_policy_blocking_count"], 0)
+        self.assertEqual(guard["provider_policy_open_count"], 1)
+        self.assertTrue(any("policy=fail_open" in issue for issue in guard["issues"]))
+
+    def test_release_review_guard_blocks_gate_only_fail_close_policy(self) -> None:
+        guard = build_c1_release_review_availability_guard(
+            {
+                "total_rows": 18,
+                "total_keys": 36,
+                "imported_providers": 1,
+                "quality_failures": 1,
+                "quality_warnings": 0,
+                "provider_failure_reasons": [
+                    {
+                        "provider_name": "api_football_primary",
+                        "severity": "error",
+                        "code": "upstream_error",
+                        "status": "error",
+                        "message": "timeout while loading source",
+                    }
+                ],
+                "smoke_check": {
+                    "status": "fail",
+                    "issues": ["provider timeout"],
+                    "release_review_allowed": True,
+                },
+            },
+            runtime_mode="gate_only",
+        )
+        self.assertFalse(guard["allowed"])
+        self.assertEqual(guard["status"], "fail")
+        self.assertEqual(guard["raw_status"], "fail")
+        self.assertEqual(guard["runtime_mode"], "gate_only")
+        self.assertEqual(guard["provider_policy_blocking_count"], 1)
+        self.assertEqual(guard["provider_policy_open_count"], 0)
+        self.assertIn("mode=gate_only", guard["status_text"])
+        self.assertIn("policy block=1 open=0", guard["status_text"])
+        self.assertIn("timeout while loading source", guard["message"])
+
     def test_release_guard_block_report_lines(self) -> None:
         generated_at = datetime(2026, 5, 11, 10, 30, 5)
         self.assertEqual(

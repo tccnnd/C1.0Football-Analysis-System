@@ -11,6 +11,7 @@ from c1.data import (
     export_availability_template_csv,
     load_rows_from_file,
 )
+from c1.runtime import get_provider_guard_policy, get_runtime_mode, load_runtime_mode_config
 
 
 def _build_provider_error_hint(item: Mapping[str, object]) -> str:
@@ -49,6 +50,10 @@ def _format_provider_failure_reason(value: object) -> str:
     reason = str(value.get("reason", "")).strip()
     message = str(value.get("message", "")).strip()
     recommendation = str(value.get("recommendation", "")).strip()
+    runtime_mode = str(value.get("runtime_mode", "")).strip()
+    policy = str(value.get("policy", "")).strip()
+    policy_source = str(value.get("policy_source", "")).strip()
+    policy_effect = str(value.get("policy_effect", "")).strip()
     attempt_count = _safe_int(value.get("attempt_count", 0))
     retry_count = _safe_int(value.get("retry_count", 0))
 
@@ -65,6 +70,15 @@ def _format_provider_failure_reason(value: object) -> str:
         parts.append(message)
     if attempt_count > 0 or retry_count > 0:
         parts.append(f"attempts={attempt_count} retries={retry_count}")
+    if policy:
+        policy_text = f"policy={policy}"
+        if runtime_mode:
+            policy_text += f" mode={runtime_mode}"
+        if policy_source:
+            policy_text += f" source={policy_source}"
+        if policy_effect:
+            policy_text += f" effect={policy_effect}"
+        parts.append(policy_text)
 
     attempt_errors = value.get("attempt_errors")
     if isinstance(attempt_errors, list) and attempt_errors:
@@ -115,38 +129,148 @@ def _safe_allowed_flag(value: object) -> bool:
     return True
 
 
-def build_c1_release_review_availability_guard(sync_summary: Mapping[str, object] | None) -> dict:
+def build_c1_release_review_availability_guard(
+    sync_summary: Mapping[str, object] | None,
+    *,
+    runtime_mode: str | None = None,
+    runtime_mode_config: Mapping[str, object] | None = None,
+) -> dict:
     summary = sync_summary if isinstance(sync_summary, Mapping) else {}
     smoke = summary.get("smoke_check") if isinstance(summary.get("smoke_check"), Mapping) else {}
     smoke_status = str(smoke.get("status") or ("missing" if not smoke else "-")).strip().lower()
     release_review_allowed = _safe_allowed_flag(smoke.get("release_review_allowed", True))
     quality_failures = _safe_int(summary.get("quality_failures", 0))
     quality_warnings = _safe_int(summary.get("quality_warnings", 0))
+    total_rows = _safe_int(summary.get("total_rows", 0))
+    total_keys = _safe_int(summary.get("total_keys", 0))
+    imported_providers = _safe_int(summary.get("imported_providers", 0))
 
-    blocked = not release_review_allowed or smoke_status == "fail" or quality_failures > 0
+    policy_enabled = runtime_mode is not None or runtime_mode_config is not None
+    resolved_runtime_mode = str(runtime_mode or "").strip()
+    if policy_enabled:
+        if runtime_mode_config is None:
+            runtime_mode_config = load_runtime_mode_config()
+        if resolved_runtime_mode not in {"shadow", "gate_only", "formal_list_default"}:
+            config_mode = ""
+            if isinstance(runtime_mode_config, Mapping):
+                config_mode = str(runtime_mode_config.get("mode", "")).strip()
+            resolved_runtime_mode = config_mode if config_mode in {"shadow", "gate_only", "formal_list_default"} else get_runtime_mode()
+
     issues: list[str] = []
     smoke_issues = smoke.get("issues") if isinstance(smoke.get("issues"), list) else []
     provider_reasons = (
         summary.get("provider_failure_reasons") if isinstance(summary.get("provider_failure_reasons"), list) else []
     )
+    resolved_provider_reasons: list[dict[str, object]] = []
+    provider_policy_blocking_count = 0
+    provider_policy_open_count = 0
+    for value in provider_reasons:
+        if isinstance(value, Mapping):
+            resolved = dict(value)
+            provider_name = str(resolved.get("provider_name", "")).strip()
+            if policy_enabled and provider_name:
+                policy_info = get_provider_guard_policy(
+                    provider_name,
+                    runtime_mode=resolved_runtime_mode or None,
+                    config=runtime_mode_config,
+                )
+            else:
+                policy_info = {
+                    "provider_name": provider_name or "-",
+                    "runtime_mode": resolved_runtime_mode or "-",
+                    "policy": "fail_close",
+                    "policy_source": "legacy",
+                }
+            resolved.update(policy_info)
+            policy = str(resolved.get("policy") or "fail_close").strip().lower()
+            severity = str(resolved.get("severity") or "error").strip().lower()
+            policy_effect = "block" if policy == "fail_close" and severity in {"error", "warning"} else "open"
+            resolved["policy_effect"] = policy_effect
+            resolved["policy_blocking"] = policy_effect == "block"
+            resolved_provider_reasons.append(resolved)
+            if policy_effect == "block":
+                provider_policy_blocking_count += 1
+            else:
+                provider_policy_open_count += 1
+            continue
+        text = str(value).strip()
+        if text:
+            resolved_provider_reasons.append(
+                {
+                    "provider_name": "-",
+                    "severity": "error",
+                    "code": "legacy_provider_reason",
+                    "message": text,
+                    "policy": "fail_close",
+                    "policy_source": "legacy",
+                    "runtime_mode": resolved_runtime_mode or "-",
+                    "policy_effect": "block",
+                    "policy_blocking": True,
+                }
+            )
+            provider_policy_blocking_count += 1
+    provider_reasons = resolved_provider_reasons
     for value in [*smoke_issues, *provider_reasons]:
         text = _format_provider_failure_reason(value)
         if text and text not in issues:
             issues.append(text)
+    has_row_counters = any(key in summary for key in ("imported_providers", "total_rows", "total_keys"))
+    has_rows = (not has_row_counters) or (imported_providers > 0 and total_rows > 0 and total_keys > 0)
+    provider_policy_open = provider_policy_open_count > 0
+    provider_policy_blocking = provider_policy_blocking_count > 0
+    blocked = not has_rows
+    if smoke_status == "fail":
+        if provider_reasons:
+            blocked = blocked or provider_policy_blocking
+        else:
+            blocked = blocked or quality_failures > 0 or not release_review_allowed
+    elif not provider_reasons and (quality_failures > 0 or not release_review_allowed):
+        blocked = True
     if blocked and not issues:
         issues.append("availability quality gate failed")
 
-    status_text = "C1 放行评估已阻止 | 阵容源质量门控失败" if blocked else "C1 放行评估门控通过"
-    if not blocked and smoke_status in {"warn", "missing"}:
-        status_text = f"C1 放行评估门控可运行 | smoke={smoke_status}"
+    mode_note = f" | mode={resolved_runtime_mode}" if policy_enabled and resolved_runtime_mode else ""
+    policy_note = ""
+    if policy_enabled or provider_policy_blocking_count > 0 or provider_policy_open_count > 0:
+        policy_note = f" | policy block={provider_policy_blocking_count} open={provider_policy_open_count}"
+
+    if blocked:
+        effective_status = "fail"
+        status_text = f"C1 放行评估已阻止{mode_note}{policy_note}"
+    else:
+        if smoke_status == "fail":
+            effective_status = "warn" if provider_policy_open or quality_warnings > 0 else "pass"
+        elif smoke_status == "warn":
+            effective_status = "warn"
+        elif smoke_status == "missing":
+            effective_status = "missing"
+        elif quality_warnings > 0 or provider_policy_open:
+            effective_status = "warn"
+        else:
+            effective_status = "pass"
+
+        if effective_status in {"warn", "missing"}:
+            status_text = f"C1 放行评估可运行{mode_note}{policy_note} | smoke={smoke_status}"
+        else:
+            status_text = f"C1 放行评估通过{mode_note}{policy_note}"
 
     message_lines = [
         "C1 阵容源质量门控未通过，已跳过本次放行评估。"
         if blocked
         else "C1 阵容源质量门控允许本次放行评估。",
         f"Smoke: {smoke_status or '-'}",
+        f"Raw release_review_allowed: {'on' if release_review_allowed else 'off'}",
         f"Quality fail/warn: {quality_failures}/{quality_warnings}",
     ]
+    if has_row_counters:
+        message_lines.append(
+            f"Rows/Keys/Imported providers: {total_rows}/{total_keys}/{imported_providers}"
+        )
+    if policy_enabled and resolved_runtime_mode:
+        message_lines.append(f"Runtime mode: {resolved_runtime_mode}")
+        message_lines.append(
+            f"Provider policy: block={provider_policy_blocking_count} | open={provider_policy_open_count}"
+        )
     if issues:
         message_lines.append("原因:")
         message_lines.extend(f"- {item}" for item in issues[:8])
@@ -155,12 +279,17 @@ def build_c1_release_review_availability_guard(sync_summary: Mapping[str, object
 
     return {
         "allowed": not blocked,
-        "status": smoke_status or "-",
+        "status": effective_status or "-",
+        "raw_status": smoke_status or "-",
+        "runtime_mode": resolved_runtime_mode or "-",
         "quality_failures": quality_failures,
         "quality_warnings": quality_warnings,
+        "provider_policy_blocking_count": provider_policy_blocking_count,
+        "provider_policy_open_count": provider_policy_open_count,
         "issues": issues,
         "status_text": status_text,
         "message": "\n".join(message_lines),
+        "provider_failure_reasons": provider_reasons,
     }
 
 
@@ -338,7 +467,11 @@ def build_c1_release_guard_history_text(rows: list[Mapping[str, object]] | objec
 
 def get_c1_release_review_availability_guard(project_root: Path) -> dict:
     store = C1AvailabilityStore(project_root)
-    return build_c1_release_review_availability_guard(store.load_sync_status())
+    return build_c1_release_review_availability_guard(
+        store.load_sync_status(),
+        runtime_mode=get_runtime_mode(),
+        runtime_mode_config=load_runtime_mode_config(),
+    )
 
 
 def get_c1_availability_provider_statuses(project_root: Path) -> list[dict]:

@@ -10,8 +10,11 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+SRC_ROOT = PROJECT_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
 
-from c1.runtime.mode import get_default_ui_filter, get_runtime_mode, is_release_gate_active
+from c1.runtime.mode import get_default_ui_filter, get_provider_guard_policy, get_runtime_mode, is_release_gate_active
 
 
 class C1RuntimeModeTests(unittest.TestCase):
@@ -38,6 +41,55 @@ class C1RuntimeModeTests(unittest.TestCase):
         self.assertFalse(is_release_gate_active("shadow"))
         self.assertTrue(is_release_gate_active("gate_only"))
         self.assertTrue(is_release_gate_active("formal_list_default"))
+
+    def test_provider_guard_policy_resolves_by_runtime_mode(self) -> None:
+        config_dir = self.make_config_dir()
+        config_path = config_dir / "runtime_mode.yaml"
+        config_path.write_text(
+            "\n".join(
+                [
+                    "mode: shadow",
+                    "guard_rails:",
+                    "  default_provider_policy:",
+                    "    shadow: fail_open",
+                    "    gate_only: fail_close",
+                    "    formal_list_default: fail_close",
+                    "  providers:",
+                    "    api_football_primary:",
+                    "      shadow: fail_open",
+                    "      gate_only: fail_close",
+                    "      formal_list_default: fail_close",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        shadow_policy = get_provider_guard_policy(
+            "api_football_primary",
+            runtime_mode="shadow",
+            path=config_path,
+        )
+        formal_policy = get_provider_guard_policy(
+            "api_football_primary",
+            runtime_mode="formal_list_default",
+            path=config_path,
+        )
+        fallback_policy = get_provider_guard_policy(
+            "unknown_provider",
+            runtime_mode="shadow",
+            path=config_path,
+        )
+        self.assertEqual(shadow_policy["policy"], "fail_open")
+        self.assertEqual(formal_policy["policy"], "fail_close")
+        self.assertEqual(fallback_policy["policy"], "fail_open")
+
+    def test_provider_guard_policy_empty_config_uses_mode_fallback(self) -> None:
+        policy = get_provider_guard_policy(
+            "crawler_fallback",
+            runtime_mode="gate_only",
+            config={},
+        )
+        self.assertEqual(policy["policy"], "fail_close")
+        self.assertEqual(policy["policy_source"], "fallback")
 
 
 if __name__ == "__main__":
