@@ -83,6 +83,38 @@ class UIC1AvailabilityFlowModuleTests(unittest.TestCase):
         self.assertIn("阻止", build_c1_release_review_guard_status_text(guard))
         self.assertIn("fail/warn=1/2", build_c1_release_review_guard_status_text(guard))
 
+    def test_release_review_guard_formats_structured_provider_reasons(self) -> None:
+        guard = build_c1_release_review_availability_guard(
+            {
+                "quality_failures": 0,
+                "quality_warnings": 1,
+                "provider_failure_reasons": [
+                    {
+                        "provider_name": "flaky_source",
+                        "severity": "warning",
+                        "code": "provider_warning",
+                        "status": "imported",
+                        "reason": "temporary upstream timeout",
+                        "message": "Recovered after retry.",
+                        "recommendation": "Monitor the provider and re-run sync before release review.",
+                        "attempt_count": 2,
+                        "retry_count": 1,
+                        "attempt_errors": ["timeout"],
+                        "signal_issues": ["recovered_after_retry"],
+                    }
+                ],
+                "smoke_check": {
+                    "status": "warn",
+                    "issues": ["provider quality_gate warning"],
+                    "release_review_allowed": True,
+                },
+            }
+        )
+        self.assertTrue(guard["allowed"])
+        self.assertIn("flaky_source", guard["message"])
+        self.assertIn("attempts=2 retries=1", guard["message"])
+        self.assertTrue(any("recovered_after_retry" in issue for issue in guard["issues"]))
+
     def test_release_guard_block_report_lines(self) -> None:
         generated_at = datetime(2026, 5, 11, 10, 30, 5)
         self.assertEqual(
@@ -229,6 +261,34 @@ class UIC1AvailabilityFlowModuleTests(unittest.TestCase):
         self.assertIn("最近同步: 2026-04-07 14:30:00", joined)
         self.assertIn("上次同步: status=imported | rows=80 | keys=240", joined)
         self.assertIn("API样本: total=158 | issue=92 | limit=132", joined)
+
+
+    def test_sync_message_surfaces_retry_details(self) -> None:
+        result = {
+            "total_rows": 40,
+            "total_keys": 21,
+            "snapshot_file": "snap.json",
+            "provider_reports": [
+                {
+                    "provider_name": "flaky_source",
+                    "status": "imported",
+                    "rows": 3,
+                    "written_keys": 3,
+                    "attempt_count": 2,
+                    "retry_count": 1,
+                    "recovered_after_retry": True,
+                    "retry_exhausted": False,
+                    "quality_gate": "warn",
+                    "quality_score": 0.73,
+                    "quality_issues": ["availability_known_low"],
+                    "signal_issues": ["recovered_after_retry"],
+                }
+            ],
+        }
+        message = build_c1_sync_message_text(result)
+        self.assertIn("attempts=2 retries=1", message)
+        self.assertIn("recovered_after_retry=yes", message)
+        self.assertIn("quality=warn", message)
 
 
 if __name__ == "__main__":

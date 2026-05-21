@@ -21,6 +21,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Sync configured C1 availability providers into local snapshot store.")
     parser.add_argument("--project-root", default=str(Path(__file__).resolve().parents[1]))
     parser.add_argument("--replace", action="store_true")
+    parser.add_argument("--retry-attempts", type=int, default=1)
+    parser.add_argument("--retry-backoff-ms", type=int, default=250)
+    parser.add_argument("--max-retry-backoff-ms", type=int, default=2000)
     args = parser.parse_args()
 
     project_root = Path(args.project_root).resolve()
@@ -29,7 +32,13 @@ def main() -> int:
     from c1.data import AvailabilityProviderChain
 
     chain = AvailabilityProviderChain.from_project_root(project_root)
-    result = chain.sync_to_store(project_root, replace=args.replace)
+    result = chain.sync_to_store(
+        project_root,
+        replace=args.replace,
+        retry_attempts=args.retry_attempts,
+        retry_backoff_ms=args.retry_backoff_ms,
+        max_retry_backoff_ms=args.max_retry_backoff_ms,
+    )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 

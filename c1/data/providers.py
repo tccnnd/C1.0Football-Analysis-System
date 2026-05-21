@@ -132,6 +132,127 @@ def _clip(value: float, low: float = 0.0, high: float = 1.0) -> float:
     return max(low, min(high, float(value)))
 
 
+def _retry_delay_ms(base_delay_ms: int, attempt_index: int, max_delay_ms: int) -> int:
+    base = max(0, int(base_delay_ms))
+    if base <= 0:
+        return 0
+    step = max(0, int(attempt_index))
+    delay = base * (2**step)
+    return max(0, min(int(max_delay_ms), int(delay)))
+
+
+def _provider_signal_issues(item: Mapping[str, Any]) -> list[str]:
+    issues: list[str] = []
+
+    def _append(value: str) -> None:
+        text = _text(value)
+        if text and text not in issues:
+            issues.append(text)
+
+    attempt_errors = item.get("attempt_errors")
+    if isinstance(attempt_errors, list):
+        for value in attempt_errors:
+            text = _text(value)
+            if text:
+                _append(f"attempt_error:{text}")
+
+    fixtures_errors = item.get("fixtures_errors")
+    if isinstance(fixtures_errors, list):
+        for value in fixtures_errors:
+            text = _text(value)
+            if text:
+                _append(f"fixtures_error:{text}")
+
+    detail_errors = item.get("detail_errors")
+    if isinstance(detail_errors, list):
+        for value in detail_errors:
+            text = _text(value)
+            if text:
+                _append(f"detail_error:{text}")
+
+    if _safe_bool(item.get("fixtures_upstream_error")):
+        _append("fixtures_upstream_error")
+    if _safe_bool(item.get("fixtures_account_suspended")):
+        _append("fixtures_account_suspended")
+    if _safe_bool(item.get("recovered_after_retry")):
+        _append("recovered_after_retry")
+    if _safe_bool(item.get("retry_exhausted")):
+        _append("retry_exhausted")
+
+    detail_error_count = _safe_int(item.get("detail_error_count"), 0)
+    if detail_error_count > 0:
+        _append(f"detail_error_count={detail_error_count}")
+
+    return issues
+
+
+def _provider_failure_reason(item: Mapping[str, Any]) -> dict[str, Any] | None:
+    status = _text(item.get("status")).lower()
+    quality_gate = _text(item.get("quality_gate")).lower()
+    signal_issues = _provider_signal_issues(item)
+
+    severity = ""
+    code = ""
+    if status == "error":
+        severity = "error"
+        code = _text(item.get("reason")) or "provider_error"
+    elif quality_gate == "fail":
+        severity = "error"
+        code = "quality_gate_failed"
+    elif _safe_bool(item.get("retry_exhausted")) or _safe_bool(item.get("fixtures_account_suspended")):
+        severity = "error"
+        code = "provider_retry_exhausted"
+    elif quality_gate == "warn" or signal_issues:
+        severity = "warning"
+        code = "quality_gate_warning" if quality_gate == "warn" else "provider_warning"
+
+    if not severity:
+        return None
+
+    provider_name = _text(item.get("provider_name")) or "-"
+    reason = _text(item.get("reason"))
+    error = _text(item.get("error"))
+    message_parts: list[str] = []
+    if reason:
+        message_parts.append(reason)
+    if error and error not in message_parts:
+        message_parts.append(error)
+    quality_issues = item.get("quality_issues")
+    if isinstance(quality_issues, list) and quality_issues:
+        message_parts.append("quality=" + ",".join(_text(issue) for issue in quality_issues if _text(issue)))
+    if signal_issues:
+        message_parts.append("signals=" + ",".join(signal_issues))
+    attempt_count = _safe_int(item.get("attempt_count"), 0)
+    retry_count = _safe_int(item.get("retry_count"), 0)
+    if attempt_count > 0 or retry_count > 0:
+        message_parts.append(f"attempts={attempt_count} retries={retry_count}")
+
+    recommendation = "Keep release review blocked until the provider is healthy."
+    if severity == "warning":
+        recommendation = "Monitor the provider and re-run sync before release review."
+    if code == "quality_gate_failed":
+        recommendation = "Repair the imported rows or loosen the gate only after validating coverage loss."
+    elif code == "provider_retry_exhausted":
+        recommendation = "Retry later with backoff or switch to a fallback source."
+
+    return {
+        "provider_name": provider_name,
+        "severity": severity,
+        "code": code,
+        "status": status or "-",
+        "quality_gate": quality_gate or "-",
+        "reason": reason or "-",
+        "error": error or "-",
+        "message": " | ".join(message_parts) if message_parts else provider_name,
+        "recommendation": recommendation,
+        "attempt_count": attempt_count,
+        "retry_count": retry_count,
+        "attempt_errors": [str(value) for value in (item.get("attempt_errors") if isinstance(item.get("attempt_errors"), list) else []) if str(value).strip()],
+        "quality_issues": [str(value) for value in (quality_issues if isinstance(quality_issues, list) else []) if str(value).strip()],
+        "signal_issues": signal_issues,
+    }
+
+
 def _render_url_template(url: str) -> str:
     text = str(url or "").strip()
     if not text:
@@ -1194,6 +1315,77 @@ class AvailabilityProviderChain:
     def __init__(self, providers: Iterable[AvailabilityProvider]) -> None:
         self.providers = list(providers)
 
+    @staticmethod
+    def _provider_retry_attempts(provider: AvailabilityProvider, default: int) -> int:
+        value = getattr(provider, "sync_retry_attempts", default)
+        return max(0, _safe_int(value, default))
+
+    @staticmethod
+    def _provider_retry_backoff_ms(provider: AvailabilityProvider, default: int) -> int:
+        value = getattr(provider, "sync_retry_backoff_ms", default)
+        return max(0, _safe_int(value, default))
+
+    @staticmethod
+    def _provider_retry_max_backoff_ms(provider: AvailabilityProvider, default: int) -> int:
+        value = getattr(provider, "sync_retry_max_backoff_ms", default)
+        return max(0, _safe_int(value, default))
+
+    @staticmethod
+    def _load_rows_with_retry(
+        provider: AvailabilityProvider,
+        *,
+        retry_attempts: int,
+        retry_backoff_ms: int,
+        max_retry_backoff_ms: int,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        attempts = max(0, int(retry_attempts))
+        attempt_errors: list[str] = []
+        retry_delays_ms: list[int] = []
+        last_error: str = ""
+        attempt_count = 0
+
+        for attempt_index in range(attempts + 1):
+            attempt_count = attempt_index + 1
+            try:
+                rows = provider.load_rows()
+                if not isinstance(rows, list):
+                    rows = list(rows) if isinstance(rows, tuple) else []
+                meta = {
+                    "attempt_count": int(attempt_count),
+                    "retry_count": int(max(attempt_count - 1, 0)),
+                    "retry_attempts": int(attempts),
+                    "retry_backoff_ms": int(retry_backoff_ms),
+                    "retry_max_backoff_ms": int(max_retry_backoff_ms),
+                    "attempt_errors": list(attempt_errors),
+                    "retry_delays_ms": list(retry_delays_ms),
+                    "recovered_after_retry": bool(attempt_index > 0),
+                    "retry_exhausted": False,
+                    "last_error": "",
+                }
+                return rows, meta
+            except Exception as exc:
+                last_error = str(exc)
+                attempt_errors.append(last_error)
+                if attempt_index < attempts:
+                    delay_ms = _retry_delay_ms(retry_backoff_ms, attempt_index, max_retry_backoff_ms)
+                    retry_delays_ms.append(delay_ms)
+                    if delay_ms > 0:
+                        time.sleep(delay_ms / 1000.0)
+
+        meta = {
+            "attempt_count": int(attempt_count),
+            "retry_count": int(max(attempt_count - 1, 0)),
+            "retry_attempts": int(attempts),
+            "retry_backoff_ms": int(retry_backoff_ms),
+            "retry_max_backoff_ms": int(max_retry_backoff_ms),
+            "attempt_errors": list(attempt_errors),
+            "retry_delays_ms": list(retry_delays_ms),
+            "recovered_after_retry": False,
+            "retry_exhausted": bool(attempts > 0),
+            "last_error": last_error,
+        }
+        return [], meta
+
     def resolve_for_match(self, match: Any) -> AvailabilityProviderResult:
         attempts: list[dict[str, Any]] = []
         for provider in self.providers:
@@ -1224,7 +1416,15 @@ class AvailabilityProviderChain:
                 )
         return AvailabilityProviderResult(provider_name="none", record={}, metadata={"attempts": attempts})
 
-    def sync_to_store(self, project_root: str | Path, *, replace: bool = False) -> dict[str, Any]:
+    def sync_to_store(
+        self,
+        project_root: str | Path,
+        *,
+        replace: bool = False,
+        retry_attempts: int = 1,
+        retry_backoff_ms: int = 250,
+        max_retry_backoff_ms: int = 2000,
+    ) -> dict[str, Any]:
         store = C1AvailabilityStore(project_root)
         provider_reports: list[dict[str, Any]] = []
         total_rows = 0
@@ -1232,6 +1432,9 @@ class AvailabilityProviderChain:
         first_write = True
         for provider in self.providers:
             provider_meta = provider.sync_report() if hasattr(provider, "sync_report") else {}
+            provider_retry_attempts = self._provider_retry_attempts(provider, retry_attempts)
+            provider_retry_backoff_ms = self._provider_retry_backoff_ms(provider, retry_backoff_ms)
+            provider_retry_max_backoff_ms = self._provider_retry_max_backoff_ms(provider, max_retry_backoff_ms)
             if not getattr(provider, "sync_enabled", True):
                 row = {
                     "provider_name": provider.provider_name,
@@ -1239,13 +1442,27 @@ class AvailabilityProviderChain:
                     "reason": "sync_not_supported",
                     "rows": 0,
                     "written_keys": 0,
+                    "attempt_count": 0,
+                    "retry_count": 0,
+                    "retry_attempts": 0,
+                    "retry_backoff_ms": provider_retry_backoff_ms,
+                    "retry_max_backoff_ms": provider_retry_max_backoff_ms,
+                    "attempt_errors": [],
+                    "retry_delays_ms": [],
+                    "recovered_after_retry": False,
+                    "retry_exhausted": False,
                 }
                 if isinstance(provider_meta, Mapping):
                     row.update(dict(provider_meta))
                 provider_reports.append(row)
                 continue
             try:
-                rows = provider.load_rows()
+                rows, attempt_meta = self._load_rows_with_retry(
+                    provider,
+                    retry_attempts=provider_retry_attempts,
+                    retry_backoff_ms=provider_retry_backoff_ms,
+                    max_retry_backoff_ms=provider_retry_max_backoff_ms,
+                )
             except Exception as exc:
                 row = {
                     "provider_name": provider.provider_name,
@@ -1254,12 +1471,23 @@ class AvailabilityProviderChain:
                     "error": str(exc),
                     "rows": 0,
                     "written_keys": 0,
+                    "attempt_count": 0,
+                    "retry_count": 0,
+                    "retry_attempts": provider_retry_attempts,
+                    "retry_backoff_ms": provider_retry_backoff_ms,
+                    "retry_max_backoff_ms": provider_retry_max_backoff_ms,
+                    "attempt_errors": [str(exc)],
+                    "retry_delays_ms": [],
+                    "recovered_after_retry": False,
+                    "retry_exhausted": bool(provider_retry_attempts > 0),
                 }
                 provider_meta = provider.sync_report() if hasattr(provider, "sync_report") else {}
                 if isinstance(provider_meta, Mapping):
                     row.update(dict(provider_meta))
                 row["quality_gate"] = "fail"
                 row["quality_issues"] = ["load_failed"]
+                signal_issues = _provider_signal_issues(row)
+                row["signal_issues"] = signal_issues
                 provider_reports.append(row)
                 continue
             if not rows:
@@ -1267,17 +1495,29 @@ class AvailabilityProviderChain:
                 upstream_error = False
                 if isinstance(provider_meta, Mapping):
                     upstream_error = bool(provider_meta.get("fixtures_upstream_error"))
+                load_failed = bool(attempt_meta.get("attempt_errors")) or bool(attempt_meta.get("retry_exhausted"))
                 row = {
                     "provider_name": provider.provider_name,
-                    "status": "error" if upstream_error else "empty",
-                    "reason": "upstream_error" if upstream_error else "no_rows",
+                    "status": "error" if (upstream_error or load_failed) else "empty",
+                    "reason": "upstream_error" if upstream_error else ("load_failed" if load_failed else "no_rows"),
                     "rows": 0,
                     "written_keys": 0,
+                    "attempt_count": attempt_meta.get("attempt_count", 0),
+                    "retry_count": attempt_meta.get("retry_count", 0),
+                    "retry_attempts": attempt_meta.get("retry_attempts", provider_retry_attempts),
+                    "retry_backoff_ms": attempt_meta.get("retry_backoff_ms", provider_retry_backoff_ms),
+                    "retry_max_backoff_ms": attempt_meta.get("retry_max_backoff_ms", provider_retry_max_backoff_ms),
+                    "attempt_errors": attempt_meta.get("attempt_errors", []),
+                    "retry_delays_ms": attempt_meta.get("retry_delays_ms", []),
+                    "recovered_after_retry": bool(attempt_meta.get("recovered_after_retry")),
+                    "retry_exhausted": bool(attempt_meta.get("retry_exhausted")),
+                    "last_error": attempt_meta.get("last_error", ""),
                 }
                 if isinstance(provider_meta, Mapping):
                     row.update(dict(provider_meta))
                 row["quality_gate"] = "fail"
                 row["quality_issues"] = ["upstream_error" if upstream_error else "no_rows"]
+                row["signal_issues"] = _provider_signal_issues(row)
                 provider_reports.append(row)
                 continue
             quality = _availability_quality_report(rows)
@@ -1288,11 +1528,23 @@ class AvailabilityProviderChain:
                 "status": "imported",
                 "rows": int(result.get("imported_rows", 0)),
                 "written_keys": int(result.get("written_keys", 0)),
+                "attempt_count": attempt_meta.get("attempt_count", 0),
+                "retry_count": attempt_meta.get("retry_count", 0),
+                "retry_attempts": attempt_meta.get("retry_attempts", provider_retry_attempts),
+                "retry_backoff_ms": attempt_meta.get("retry_backoff_ms", provider_retry_backoff_ms),
+                "retry_max_backoff_ms": attempt_meta.get("retry_max_backoff_ms", provider_retry_max_backoff_ms),
+                "attempt_errors": attempt_meta.get("attempt_errors", []),
+                "retry_delays_ms": attempt_meta.get("retry_delays_ms", []),
+                "recovered_after_retry": bool(attempt_meta.get("recovered_after_retry")),
+                "retry_exhausted": bool(attempt_meta.get("retry_exhausted")),
+                "last_error": attempt_meta.get("last_error", ""),
             }
             row.update(quality)
             provider_meta = provider.sync_report() if hasattr(provider, "sync_report") else {}
             if isinstance(provider_meta, Mapping):
                 row.update(dict(provider_meta))
+            signal_issues = _provider_signal_issues(row)
+            row["signal_issues"] = signal_issues
             provider_reports.append(row)
             total_rows += int(result.get("imported_rows", 0))
             total_keys += int(result.get("written_keys", 0))
@@ -1300,27 +1552,25 @@ class AvailabilityProviderChain:
         imported_providers = sum(1 for item in provider_reports if str(item.get("status")) == "imported")
         quality_failures = sum(1 for item in provider_reports if str(item.get("quality_gate")) == "fail")
         quality_warnings = sum(1 for item in provider_reports if str(item.get("quality_gate")) == "warn")
-        provider_failure_reasons = [
-            {
-                "provider_name": item.get("provider_name"),
-                "status": item.get("status"),
-                "reason": item.get("reason"),
-                "error": item.get("error"),
-                "quality_gate": item.get("quality_gate"),
-                "quality_issues": item.get("quality_issues", []),
-            }
-            for item in provider_reports
-            if str(item.get("status")) == "error" or str(item.get("quality_gate")) in {"fail", "warn"}
-        ]
+        retry_recovered_providers = sum(1 for item in provider_reports if bool(item.get("recovered_after_retry")))
+        retry_exhausted_providers = sum(1 for item in provider_reports if bool(item.get("retry_exhausted")))
+        provider_failure_reasons = []
+        for item in provider_reports:
+            failure_reason = _provider_failure_reason(item)
+            if not failure_reason:
+                continue
+            provider_failure_reasons.append(failure_reason)
+        provider_signal_errors = sum(1 for item in provider_failure_reasons if item.get("severity") == "error")
+        provider_signal_warnings = sum(1 for item in provider_failure_reasons if item.get("severity") == "warning")
         smoke_status = "pass"
         smoke_issues: list[str] = []
         if imported_providers <= 0 or total_rows <= 0 or total_keys <= 0:
             smoke_status = "fail"
             smoke_issues.append("no_imported_availability_rows")
-        if quality_failures > 0:
+        if quality_failures > 0 or provider_signal_errors > 0:
             smoke_status = "fail"
             smoke_issues.append("provider_quality_gate_failed")
-        elif quality_warnings > 0 and smoke_status == "pass":
+        elif (quality_warnings > 0 or provider_signal_warnings > 0 or retry_recovered_providers > 0) and smoke_status == "pass":
             smoke_status = "warn"
             smoke_issues.append("provider_quality_gate_warning")
         if failed_providers > 0 and smoke_status == "pass":
@@ -1334,7 +1584,16 @@ class AvailabilityProviderChain:
             "imported_providers": imported_providers,
             "quality_failures": quality_failures,
             "quality_warnings": quality_warnings,
+            "retry_recovered_providers": retry_recovered_providers,
+            "retry_exhausted_providers": retry_exhausted_providers,
+            "provider_signal_errors": provider_signal_errors,
+            "provider_signal_warnings": provider_signal_warnings,
             "provider_failure_reasons": provider_failure_reasons,
+            "retry_policy": {
+                "default_attempts": int(max(0, retry_attempts)),
+                "default_backoff_ms": int(max(0, retry_backoff_ms)),
+                "default_max_backoff_ms": int(max(0, max_retry_backoff_ms)),
+            },
             "smoke_check": {
                 "status": smoke_status,
                 "issues": smoke_issues,
@@ -1359,6 +1618,13 @@ class AvailabilityProviderChain:
         root = Path(project_root)
         provider_config = dict(config or load_availability_provider_config())
         providers: list[AvailabilityProvider] = []
+
+        def _apply_retry_policy(provider: AvailabilityProvider, item: Mapping[str, Any]) -> AvailabilityProvider:
+            provider.sync_retry_attempts = _safe_int(item.get("retry_attempts"), 1)  # type: ignore[attr-defined]
+            provider.sync_retry_backoff_ms = _safe_int(item.get("retry_backoff_ms"), 250)  # type: ignore[attr-defined]
+            provider.sync_retry_max_backoff_ms = _safe_int(item.get("retry_max_backoff_ms"), 2000)  # type: ignore[attr-defined]
+            return provider
+
         for item in provider_config.get("providers", []):
             if not isinstance(item, Mapping):
                 continue
@@ -1367,7 +1633,7 @@ class AvailabilityProviderChain:
             if not enabled:
                 continue
             if provider_type == "stored_snapshots":
-                providers.append(StoredAvailabilityProvider(root))
+                providers.append(_apply_retry_policy(StoredAvailabilityProvider(root), item))
             elif provider_type == "file_source":
                 source_path = _text(item.get("path"))
                 if not source_path:
@@ -1376,9 +1642,12 @@ class AvailabilityProviderChain:
                 if not path.is_absolute():
                     path = root / path
                 providers.append(
-                    FileAvailabilityProvider(
-                        source_path=path,
-                        provider_name=_text(item.get("name")) or "file_source",
+                    _apply_retry_policy(
+                        FileAvailabilityProvider(
+                            source_path=path,
+                            provider_name=_text(item.get("name")) or "file_source",
+                        ),
+                        item,
                     )
                 )
             elif provider_type == "http_source":
@@ -1386,15 +1655,18 @@ class AvailabilityProviderChain:
                 if not url:
                     continue
                 providers.append(
-                    HttpAvailabilityProvider(
-                        url=url,
-                        provider_name=_text(item.get("name")) or "http_source",
-                        source_format=_text(item.get("format")) or "json",
-                        items_key=_text(item.get("items_key")) or None,
-                        timeout_seconds=_safe_int(item.get("timeout_seconds"), 15),
-                        provider_kind=_text(item.get("provider_kind")) or "generic",
-                        resolve_direct=bool(item.get("resolve_direct", True)),
-                        headers=item.get("headers") if isinstance(item.get("headers"), Mapping) else None,
+                    _apply_retry_policy(
+                        HttpAvailabilityProvider(
+                            url=url,
+                            provider_name=_text(item.get("name")) or "http_source",
+                            source_format=_text(item.get("format")) or "json",
+                            items_key=_text(item.get("items_key")) or None,
+                            timeout_seconds=_safe_int(item.get("timeout_seconds"), 15),
+                            provider_kind=_text(item.get("provider_kind")) or "generic",
+                            resolve_direct=bool(item.get("resolve_direct", True)),
+                            headers=item.get("headers") if isinstance(item.get("headers"), Mapping) else None,
+                        ),
+                        item,
                     )
                 )
             elif provider_type == "api_football_source":
@@ -1402,28 +1674,34 @@ class AvailabilityProviderChain:
                 if not fixtures_url:
                     continue
                 providers.append(
-                    ApiFootballAvailabilityProvider(
-                        fixtures_url=fixtures_url,
-                        provider_name=_text(item.get("name")) or "api_football_source",
-                        lineups_url_template=_text(item.get("lineups_url_template")) or None,
-                        injuries_url_template=_text(item.get("injuries_url_template")) or None,
-                        timeout_seconds=_safe_int(item.get("timeout_seconds"), 15),
-                        resolve_direct=bool(item.get("resolve_direct", False)),
-                        headers=item.get("headers") if isinstance(item.get("headers"), Mapping) else None,
-                        max_fixtures=_safe_int(item.get("max_fixtures"), 60),
-                        request_delay_ms=_safe_int(item.get("request_delay_ms"), 0),
+                    _apply_retry_policy(
+                        ApiFootballAvailabilityProvider(
+                            fixtures_url=fixtures_url,
+                            provider_name=_text(item.get("name")) or "api_football_source",
+                            lineups_url_template=_text(item.get("lineups_url_template")) or None,
+                            injuries_url_template=_text(item.get("injuries_url_template")) or None,
+                            timeout_seconds=_safe_int(item.get("timeout_seconds"), 15),
+                            resolve_direct=bool(item.get("resolve_direct", False)),
+                            headers=item.get("headers") if isinstance(item.get("headers"), Mapping) else None,
+                            max_fixtures=_safe_int(item.get("max_fixtures"), 60),
+                            request_delay_ms=_safe_int(item.get("request_delay_ms"), 0),
+                        ),
+                        item,
                     )
                 )
             elif provider_type == "titan_detail_source":
                 providers.append(
-                    TitanDetailAvailabilityProvider(
-                        provider_name=_text(item.get("name")) or "titan_detail_source",
-                        base_url=_text(item.get("base_url")) or "https://live.titan007.com",
-                        timeout_seconds=_safe_int(item.get("timeout_seconds"), 15),
-                        resolve_direct=bool(item.get("resolve_direct", False)),
-                        max_matches=_safe_int(item.get("max_matches"), 80),
-                        request_delay_ms=_safe_int(item.get("request_delay_ms"), 0),
-                        headers=item.get("headers") if isinstance(item.get("headers"), Mapping) else None,
+                    _apply_retry_policy(
+                        TitanDetailAvailabilityProvider(
+                            provider_name=_text(item.get("name")) or "titan_detail_source",
+                            base_url=_text(item.get("base_url")) or "https://live.titan007.com",
+                            timeout_seconds=_safe_int(item.get("timeout_seconds"), 15),
+                            resolve_direct=bool(item.get("resolve_direct", False)),
+                            max_matches=_safe_int(item.get("max_matches"), 80),
+                            request_delay_ms=_safe_int(item.get("request_delay_ms"), 0),
+                            headers=item.get("headers") if isinstance(item.get("headers"), Mapping) else None,
+                        ),
+                        item,
                     )
                 )
             elif provider_type == "crawler_source":
@@ -1431,17 +1709,20 @@ class AvailabilityProviderChain:
                 if not url:
                     continue
                 providers.append(
-                    CrawlerAvailabilityProvider(
-                        url=url,
-                        provider_name=_text(item.get("name")) or "crawler_source",
-                        source_format=_text(item.get("format")) or "json",
-                        items_key=_text(item.get("items_key")) or None,
-                        parser_kind=_text(item.get("parser_kind")) or "embedded_json",
-                        payload_pattern=_text(item.get("payload_pattern")) or None,
-                        timeout_seconds=_safe_int(item.get("timeout_seconds"), 15),
-                        provider_kind=_text(item.get("provider_kind")) or "generic",
-                        resolve_direct=bool(item.get("resolve_direct", False)),
-                        headers=item.get("headers") if isinstance(item.get("headers"), Mapping) else None,
+                    _apply_retry_policy(
+                        CrawlerAvailabilityProvider(
+                            url=url,
+                            provider_name=_text(item.get("name")) or "crawler_source",
+                            source_format=_text(item.get("format")) or "json",
+                            items_key=_text(item.get("items_key")) or None,
+                            parser_kind=_text(item.get("parser_kind")) or "embedded_json",
+                            payload_pattern=_text(item.get("payload_pattern")) or None,
+                            timeout_seconds=_safe_int(item.get("timeout_seconds"), 15),
+                            provider_kind=_text(item.get("provider_kind")) or "generic",
+                            resolve_direct=bool(item.get("resolve_direct", False)),
+                            headers=item.get("headers") if isinstance(item.get("headers"), Mapping) else None,
+                        ),
+                        item,
                     )
                 )
         if not providers:

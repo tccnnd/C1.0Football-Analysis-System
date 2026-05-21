@@ -38,6 +38,48 @@ def _build_provider_error_hint(item: Mapping[str, object]) -> str:
     return ""
 
 
+def _format_provider_failure_reason(value: object) -> str:
+    if not isinstance(value, Mapping):
+        return str(value).strip()
+
+    provider_name = str(value.get("provider_name", "-")).strip() or "-"
+    severity = str(value.get("severity", "")).strip()
+    code = str(value.get("code", "")).strip()
+    status = str(value.get("status", "")).strip()
+    reason = str(value.get("reason", "")).strip()
+    message = str(value.get("message", "")).strip()
+    recommendation = str(value.get("recommendation", "")).strip()
+    attempt_count = _safe_int(value.get("attempt_count", 0))
+    retry_count = _safe_int(value.get("retry_count", 0))
+
+    parts: list[str] = [provider_name]
+    if severity:
+        parts.append(f"[{severity}]")
+    if code:
+        parts.append(code)
+    if status and status != "-":
+        parts.append(f"status={status}")
+    if reason and reason not in {code, "-"}:
+        parts.append(reason)
+    if message:
+        parts.append(message)
+    if attempt_count > 0 or retry_count > 0:
+        parts.append(f"attempts={attempt_count} retries={retry_count}")
+
+    attempt_errors = value.get("attempt_errors")
+    if isinstance(attempt_errors, list) and attempt_errors:
+        parts.append("attempt_errors=" + ", ".join(str(item) for item in attempt_errors if str(item).strip()))
+    quality_issues = value.get("quality_issues")
+    if isinstance(quality_issues, list) and quality_issues:
+        parts.append("quality=" + ", ".join(str(item) for item in quality_issues if str(item).strip()))
+    signal_issues = value.get("signal_issues")
+    if isinstance(signal_issues, list) and signal_issues:
+        parts.append("signals=" + ", ".join(str(item) for item in signal_issues if str(item).strip()))
+    if recommendation:
+        parts.append(f"建议: {recommendation}")
+    return " | ".join(part for part in parts if part)
+
+
 def export_c1_availability_template(matches: list[Any], target: Path) -> dict:
     rows = build_availability_template_rows(matches)
     path = export_availability_template_csv(target, rows)
@@ -88,7 +130,7 @@ def build_c1_release_review_availability_guard(sync_summary: Mapping[str, object
         summary.get("provider_failure_reasons") if isinstance(summary.get("provider_failure_reasons"), list) else []
     )
     for value in [*smoke_issues, *provider_reasons]:
-        text = str(value).strip()
+        text = _format_provider_failure_reason(value)
         if text and text not in issues:
             issues.append(text)
     if blocked and not issues:
@@ -429,6 +471,15 @@ def build_c1_availability_provider_status_lines(statuses: list[dict]) -> list[st
                 )
             )
 
+        attempt_count = int(item.get("attempt_count", 0) or 0)
+        retry_count = int(item.get("retry_count", 0) or 0)
+        if attempt_count > 0 or retry_count > 0:
+            lines.append(f"  重试: attempts={attempt_count} | retries={retry_count}")
+        if bool(item.get("recovered_after_retry")):
+            lines.append("  重试状态: recovered_after_retry=yes")
+        if bool(item.get("retry_exhausted")):
+            lines.append("  重试状态: retry_exhausted=yes")
+
         quality_gate = str(item.get("quality_gate", "")).strip()
         if quality_gate:
             issues = item.get("quality_issues") if isinstance(item.get("quality_issues"), list) else []
@@ -519,6 +570,14 @@ def build_c1_sync_message_text(result: Mapping[str, object]) -> str:
                     f" score={float(item.get('quality_score', 0) or 0):.2f}"
                     f" issues={','.join(str(issue) for issue in issues) if issues else '-'}"
                 )
+            attempt_count = int(item.get("attempt_count", 0) or 0)
+            retry_count = int(item.get("retry_count", 0) or 0)
+            if attempt_count > 0 or retry_count > 0:
+                line += f" | attempts={attempt_count} retries={retry_count}"
+            if bool(item.get("recovered_after_retry")):
+                line += " | recovered_after_retry=yes"
+            if bool(item.get("retry_exhausted")):
+                line += " | retry_exhausted=yes"
             error = str(item.get("error", "")).strip()
             if error:
                 line += f" | error={error}"

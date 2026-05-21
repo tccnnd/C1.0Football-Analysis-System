@@ -591,7 +591,7 @@ class C1AvailabilityProviderTests(unittest.TestCase):
             },
         )
 
-        report = chain.sync_to_store(root, replace=False)
+        report = chain.sync_to_store(root, replace=False, retry_backoff_ms=0)
         self.assertEqual(int(report.get("failed_providers", 0)), 1)
         self.assertEqual(int(report.get("imported_providers", 0)), 1)
         self.assertGreater(int(report.get("total_rows", 0)), 0)
@@ -599,11 +599,70 @@ class C1AvailabilityProviderTests(unittest.TestCase):
         self.assertEqual(provider_reports[0].get("status"), "error")
         self.assertEqual(provider_reports[1].get("status"), "imported")
         self.assertEqual(provider_reports[2].get("status"), "sync_skipped")
+        self.assertEqual(int(provider_reports[0].get("attempt_count", 0)), 2)
+        self.assertEqual(int(provider_reports[0].get("retry_count", 0)), 1)
+        self.assertTrue(bool(provider_reports[0].get("retry_exhausted")))
         self.assertEqual(provider_reports[0].get("quality_gate"), "fail")
         self.assertIn(provider_reports[1].get("quality_gate"), {"pass", "warn"})
         self.assertGreaterEqual(int(report.get("quality_failures", 0)), 1)
         self.assertIn("smoke_check", report)
         self.assertFalse(bool(report["smoke_check"]["release_review_allowed"]))
+
+    def test_sync_to_store_records_retry_recovery_and_persists_status(self) -> None:
+        root = self.make_test_root()
+
+        class FlakyProvider:
+            provider_name = "flaky_source"
+            sync_enabled = True
+            resolve_enabled = False
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def load_rows(self) -> list[dict[str, object]]:
+                self.calls += 1
+                if self.calls < 2:
+                    raise RuntimeError("temporary upstream timeout")
+                return [
+                    {
+                        "source_id": "2965321",
+                        "match_date": "2026-04-03",
+                        "league": "Friendly",
+                        "home_team": "A",
+                        "away_team": "B",
+                        "lineup_known": True,
+                        "lineup_updated_at": "2026-04-03 18:00:00",
+                        "lineup_freshness_hours": 2,
+                    }
+                ]
+
+            def sync_report(self) -> dict[str, object]:
+                return {"provider_kind": "flaky"}
+
+        chain = AvailabilityProviderChain([FlakyProvider()])
+        report = chain.sync_to_store(root, replace=True, retry_backoff_ms=0)
+
+        self.assertEqual(int(report.get("failed_providers", 0)), 0)
+        self.assertEqual(int(report.get("imported_providers", 0)), 1)
+        self.assertEqual(int(report.get("retry_recovered_providers", 0)), 1)
+        self.assertEqual(report["smoke_check"]["status"], "warn")
+        self.assertTrue(bool(report["smoke_check"]["release_review_allowed"]))
+
+        provider_report = report.get("provider_reports", [{}])[0]
+        self.assertEqual(provider_report.get("status"), "imported")
+        self.assertEqual(int(provider_report.get("attempt_count", 0)), 2)
+        self.assertEqual(int(provider_report.get("retry_count", 0)), 1)
+        self.assertTrue(bool(provider_report.get("recovered_after_retry")))
+        self.assertEqual(provider_report.get("attempt_errors"), ["temporary upstream timeout"])
+        self.assertIn("recovered_after_retry", provider_report.get("signal_issues", []))
+
+        persisted = C1AvailabilityStore(root).load_sync_status()
+        persisted_report = persisted.get("provider_reports", [{}])[0]
+        self.assertEqual(int(persisted_report.get("attempt_count", 0)), 2)
+        self.assertEqual(int(persisted_report.get("retry_count", 0)), 1)
+        self.assertTrue(bool(persisted_report.get("recovered_after_retry")))
+        failure_reasons = persisted.get("provider_failure_reasons") or []
+        self.assertTrue(any(reason.get("code") == "provider_warning" for reason in failure_reasons if isinstance(reason, dict)))
 
     def test_api_football_dynamic_fixture_limit(self) -> None:
         provider = ApiFootballAvailabilityProvider(
