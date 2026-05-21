@@ -5601,6 +5601,98 @@ def build_strategy_policy_effect_review(
     }
 
 
+def _strategy_policy_formal_release_audit_summary(
+    policy_effect_review: Mapping[str, object] | object,
+    *,
+    limit: int = 8,
+) -> dict[str, object]:
+    review = _as_mapping(policy_effect_review)
+    source_rows = [row for row in (_as_list(review.get("all_rows")) or _as_list(review.get("rows"))) if isinstance(row, Mapping)]
+    source_rows.sort(
+        key=lambda row: (
+            _parse_policy_review_time(row.get("updated_at")) or datetime.min,
+            str(row.get("version_id") or ""),
+        ),
+        reverse=True,
+    )
+    detail_rows: list[dict[str, object]] = []
+    version_map: dict[str, dict[str, object]] = {}
+    reason_counts: dict[str, int] = {}
+    sample_count = 0
+    allow_count = 0
+    known_count = 0
+    allow_hits = 0
+    allow_misses = 0
+    replay_net = 0
+    for row in source_rows:
+        diagnostics = _as_mapping(row.get("negative_diagnostics"))
+        top_reason = _text(diagnostics.get("top_negative_reason"), "-")
+        if top_reason and top_reason != "-":
+            reason_counts[top_reason] = reason_counts.get(top_reason, 0) + 1
+        window_sample_count = _safe_int(row.get("sample_count"))
+        row_allow_count = _safe_int(row.get("allow_count"))
+        row_known_count = _safe_int(row.get("known_allow_count"))
+        row_allow_hits = _safe_int(row.get("allow_hits"))
+        row_allow_misses = _safe_int(row.get("allow_misses"))
+        row_replay_net = _safe_int(row.get("replay_guard_net"))
+        row_hit_rate = _safe_float(row.get("allow_hit_rate"))
+        version_id = _text(row.get("version_id"), "-")
+        detail = {
+            "version_id": version_id,
+            "updated_at": _text(row.get("updated_at"), "-"),
+            "source": _text(row.get("source"), "-"),
+            "effect_label": _text(row.get("effect_label"), "-"),
+            "window_sample_count": window_sample_count,
+            "allow_count": row_allow_count,
+            "known_count": row_known_count,
+            "allow_hits": row_allow_hits,
+            "allow_misses": row_allow_misses,
+            "allow_hit_rate": row_hit_rate,
+            "allow_hit_rate_text": _pct(row_hit_rate) if row_hit_rate is not None else "-",
+            "replay_guard_net": row_replay_net,
+            "top_failure": top_reason,
+            "summary_text": (
+                f"{version_id} | \u653e\u884c {row_allow_hits}/{row_known_count if row_known_count else 0} "
+                f"({_pct(row_hit_rate) if row_hit_rate is not None else '-'}) | "
+                f"\u7a97\u53e3 {window_sample_count} | Replay {row_replay_net:+d} | \u4e3b\u56e0 {top_reason}"
+            ),
+        }
+        detail_rows.append(detail)
+        version_map[version_id] = detail
+        sample_count += window_sample_count
+        allow_count += row_allow_count
+        known_count += row_known_count
+        allow_hits += row_allow_hits
+        allow_misses += row_allow_misses
+        replay_net += row_replay_net
+    hit_rate = allow_hits / known_count if known_count else None
+    top_failure = "-"
+    if reason_counts:
+        reason, count = sorted(reason_counts.items(), key=lambda item: (-_safe_int(item[1]), str(item[0])))[0]
+        top_failure = f"{reason} {count}\u6b21"
+    summary_text = (
+        f"\u6b63\u5f0f\u653e\u884c\u56de\u653e | \u7248\u672c {len(source_rows)} | "
+        f"\u547d\u4e2d {allow_hits}/{known_count if known_count else 0} ({_pct(hit_rate) if hit_rate is not None else '-'}) | "
+        f"Replay\u51c0\u503c {replay_net:+d} | \u4e3b\u56e0 {top_failure}"
+    )
+    return {
+        "version_count": len(source_rows),
+        "sample_count": sample_count,
+        "allow_count": allow_count,
+        "known_count": known_count,
+        "allow_hits": allow_hits,
+        "allow_misses": allow_misses,
+        "hit_rate": hit_rate,
+        "hit_rate_text": _pct(hit_rate) if hit_rate is not None else "-",
+        "replay_guard_net": replay_net,
+        "top_failure": top_failure,
+        "summary_text": summary_text,
+        "rows": detail_rows[: max(0, int(limit))],
+        "all_rows": detail_rows,
+        "row_by_version_id": version_map,
+    }
+
+
 def _policy_gate_source_matches(source: object, target_sources: Sequence[str]) -> bool:
     key = str(source or "").strip().lower()
     if not key:
@@ -9146,6 +9238,7 @@ def build_strategy_policy_audit_report_lines(
             rollback_effect_review=draw_guard_rollback_effect,
             freeze_override_status=draw_guard_freeze_override,
         )
+    formal_release_audit = _strategy_policy_formal_release_audit_summary(review)
     governance = build_strategy_policy_governance_event_summary(
         review,
         draw_release_guard_policy_history=draw_guard_history,
@@ -9171,6 +9264,7 @@ def build_strategy_policy_audit_report_lines(
         f"- \u8c03\u53c2\u95e8\u63a7: {tuning_guard.get('summary_text', '-')}",
         f"- \u6cbb\u7406\u4e8b\u4ef6: {governance.get('summary_text', '-')}",
         f"- \u6458\u8981: {review.get('summary_text', '-')}",
+        f"- \u6b63\u5f0f\u653e\u884c\u56de\u653e: {formal_release_audit.get('summary_text', '-')}",
         "",
         "## \u7b56\u7565\u6cbb\u7406\u4e8b\u4ef6",
         "",
@@ -9181,6 +9275,7 @@ def build_strategy_policy_audit_report_lines(
         f"- DrawGuard\u56de\u6eda\u4fee\u590d: {draw_guard_rollback_effect.get('summary_text', '-') if draw_guard_rollback_effect else '-'}",
         f"- DrawGuard\u51bb\u7ed3\u89e3\u9664: {draw_guard_freeze_override.get('summary_text', '-') if draw_guard_freeze_override else '-'}",
         f"- DrawGuard\u95e8\u63a7: {draw_guard_tuning_guard.get('label', '-') if draw_guard_tuning_guard else '-'} / {draw_guard_tuning_guard.get('body', '-') if draw_guard_tuning_guard else '-'}",
+        f"- \u6b63\u5f0f\u653e\u884c\u56de\u653e: {formal_release_audit.get('summary_text', '-')}",
         "",
         "| \u65f6\u95f4 | \u7248\u672c | \u4e8b\u4ef6 | \u6765\u6e90 | \u5173\u8054\u7248\u672c | \u6548\u679c | \u653e\u884c\u547d\u4e2d | Replay\u51c0\u503c | \u8bf4\u660e |",
         "| --- | --- | --- | --- | --- | --- | --- | ---: | --- |",
@@ -9207,6 +9302,47 @@ def build_strategy_policy_audit_report_lines(
             )
     else:
         lines.append("| - | - | \u6682\u65e0\u6cbb\u7406\u4e8b\u4ef6 | - | - | - | - | 0 | - |")
+    lines.extend(
+        [
+            "",
+            "## \u6b63\u5f0f\u653e\u884c\u56de\u653e",
+            "",
+            f"- \u7edf\u8ba1: {formal_release_audit.get('summary_text', '-')}",
+            f"- \u7a97\u53e3\u6837\u672c: {formal_release_audit.get('sample_count', 0)}",
+            f"- \u653e\u884c\u6e05\u5355: {formal_release_audit.get('allow_count', 0)}",
+            f"- \u6709\u6548\u6837\u672c: {formal_release_audit.get('known_count', 0)}",
+            f"- \u62d6\u7d2f\u51c0\u503c: {formal_release_audit.get('replay_guard_net', 0):+d}"
+            if isinstance(formal_release_audit.get("replay_guard_net"), int)
+            else f"- \u62d6\u7d2f\u51c0\u503c: {formal_release_audit.get('replay_guard_net', 0)}",
+            f"- \u4e3b\u56e0: {formal_release_audit.get('top_failure', '-')}",
+            "",
+            "| \u7248\u672c | \u65f6\u95f4 | \u6765\u6e90 | \u533a\u95f4\u6837\u672c | \u653e\u884c | \u547d\u4e2d | \u5931\u8bef | \u547d\u4e2d\u7387 | Replay\u51c0\u503c | \u4e3b\u56e0 |",
+            "| --- | --- | --- | ---: | ---: | ---: | ---: | --- | ---: | --- |",
+        ]
+    )
+    formal_release_rows = [row for row in _as_list(formal_release_audit.get("rows")) if isinstance(row, Mapping)]
+    if formal_release_rows:
+        for row in formal_release_rows:
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        _md_cell(row.get("version_id")),
+                        _md_cell(row.get("updated_at")),
+                        _md_cell(row.get("source")),
+                        str(_safe_int(row.get("window_sample_count"))),
+                        str(_safe_int(row.get("allow_count"))),
+                        str(_safe_int(row.get("allow_hits"))),
+                        str(_safe_int(row.get("allow_misses"))),
+                        _md_cell(row.get("allow_hit_rate_text")),
+                        f"{_safe_int(row.get('replay_guard_net')):+d}",
+                        _md_cell(row.get("top_failure")),
+                    ]
+                )
+                + " |"
+            )
+    else:
+        lines.append("| - | - | \u6682\u65e0\u56de\u653e\u6837\u672c | 0 | 0 | 0 | 0 | - | 0 | - |")
     lines.extend(
         [
             "",
@@ -9360,7 +9496,7 @@ def build_strategy_policy_audit_csv_text(
     draw_release_guard_tuning_guard: Mapping[str, object] | object | None = None,
 ) -> str:
     review = _as_mapping(policy_effect_review)
-    rows = [row for row in (_as_list(review.get("all_rows")) or _as_list(review.get("rows"))) if isinstance(row, Mapping)]
+    rows = [row for row in (_as_list(review.get('all_rows')) or _as_list(review.get('rows'))) if isinstance(row, Mapping)]
     draw_guard_history = draw_release_guard_policy_history or []
     draw_guard_tuning_effect = _as_mapping(draw_release_guard_tuning_effect_review)
     if not draw_guard_tuning_effect and draw_guard_history:
@@ -9378,6 +9514,8 @@ def build_strategy_policy_audit_csv_text(
             rollback_effect_review=draw_guard_rollback_effect,
             freeze_override_status=draw_guard_freeze_override,
         )
+    formal_release_audit = _strategy_policy_formal_release_audit_summary(review)
+    formal_release_by_version = _as_mapping(formal_release_audit.get('row_by_version_id'))
     governance = build_strategy_policy_governance_event_summary(
         review,
         draw_release_guard_policy_history=draw_guard_history,
@@ -9387,109 +9525,135 @@ def build_strategy_policy_audit_csv_text(
         draw_release_guard_tuning_guard=draw_guard_tuning_guard,
     )
     governance_by_version = {
-        str(row.get("version_id") or ""): row
-        for row in _as_list(governance.get("rows"))
-        if isinstance(row, Mapping) and str(row.get("domain") or "strategy") == "strategy"
+        str(row.get('version_id') or ''): row
+        for row in _as_list(governance.get('rows'))
+        if isinstance(row, Mapping) and str(row.get('domain') or 'strategy') == 'strategy'
     }
     output = io.StringIO()
-    writer = csv.writer(output, lineterminator="\n")
+    writer = csv.writer(output, lineterminator='\n')
     writer.writerow(
         [
-            "version_id",
-            "updated_at",
-            "source",
-            "effect_label",
-            "event_type",
-            "event_label",
-            "related_version_id",
-            "governance_description",
-            "governance_domain",
-            "draw_guard_blocked_count",
-            "draw_guard_avoid_rate",
-            "draw_guard_missed_rate",
-            "rollback_recommended",
-            "match_id",
-            "time",
-            "match",
-            "decision",
-            "prediction_result",
-            "handicap_result",
-            "replay_guard",
-            "replay_agent",
-            "replay_net_hint",
-            "drag_score",
-            "drag_reason",
+            'version_id',
+            'updated_at',
+            'source',
+            'effect_label',
+            'event_type',
+            'event_label',
+            'related_version_id',
+            'governance_description',
+            'governance_domain',
+            'formal_release_window_sample_count',
+            'formal_release_allow_count',
+            'formal_release_known_count',
+            'formal_release_allow_hits',
+            'formal_release_allow_misses',
+            'formal_release_allow_hit_rate_text',
+            'formal_release_replay_net',
+            'formal_release_top_failure',
+            'draw_guard_blocked_count',
+            'draw_guard_avoid_rate',
+            'draw_guard_missed_rate',
+            'rollback_recommended',
+            'match_id',
+            'time',
+            'match',
+            'decision',
+            'prediction_result',
+            'handicap_result',
+            'replay_guard',
+            'replay_agent',
+            'replay_net_hint',
+            'drag_score',
+            'drag_reason',
         ]
     )
     for row in rows:
-        diagnostics = _as_mapping(row.get("negative_diagnostics"))
-        version_id = _text(row.get("version_id"), "-")
-        governance_row = _as_mapping(governance_by_version.get(str(row.get("version_id") or "")))
-        sample_rows = [item for item in _as_list(row.get("sample_rows")) if isinstance(item, Mapping)]
+        diagnostics = _as_mapping(row.get('negative_diagnostics'))
+        version_id = _text(row.get('version_id'), '-')
+        governance_row = _as_mapping(governance_by_version.get(str(row.get('version_id') or '')))
+        formal_release_row = _as_mapping(formal_release_by_version.get(version_id))
+        sample_rows = [item for item in _as_list(row.get('sample_rows')) if isinstance(item, Mapping)]
         if not sample_rows:
             sample_rows = [{}]
         for sample in sample_rows:
             writer.writerow(
                 [
                     version_id,
-                    _text(row.get("updated_at"), "-"),
-                    _text(row.get("source"), "-"),
-                    _text(row.get("effect_label"), "-"),
-                    _text(governance_row.get("event_type"), "-"),
-                    _text(governance_row.get("event_label"), "-"),
-                    _text(governance_row.get("related_version_id"), "-"),
-                    _text(governance_row.get("description"), "-"),
-                    _text(governance_row.get("domain"), "strategy"),
-                    _safe_int(governance_row.get("draw_guard_blocked_count")),
-                    _text(governance_row.get("draw_guard_avoid_rate_text"), "-"),
-                    _text(governance_row.get("draw_guard_missed_rate_text"), "-"),
-                    "YES" if diagnostics.get("rollback_recommended") else "NO",
-                    _text(sample.get("match_id"), "-"),
-                    _text(sample.get("time"), "-"),
-                    _text(sample.get("title"), "-"),
-                    _text(sample.get("decision"), "-"),
-                    _text(sample.get("prediction_result"), "-"),
-                    _text(sample.get("handicap_result"), "-"),
-                    _text(sample.get("replay_guard"), "-"),
-                    _text(sample.get("replay_agent"), "-"),
-                    _safe_int(sample.get("replay_net_hint")),
-                    _safe_int(sample.get("drag_score")),
-                    _text(sample.get("drag_reason_text"), "-"),
+                    _text(row.get('updated_at'), '-'),
+                    _text(row.get('source'), '-'),
+                    _text(row.get('effect_label'), '-'),
+                    _text(governance_row.get('event_type'), '-'),
+                    _text(governance_row.get('event_label'), '-'),
+                    _text(governance_row.get('related_version_id'), '-'),
+                    _text(governance_row.get('description'), '-'),
+                    _text(governance_row.get('domain'), 'strategy'),
+                    _safe_int(formal_release_row.get('window_sample_count')),
+                    _safe_int(formal_release_row.get('allow_count')),
+                    _safe_int(formal_release_row.get('known_count')),
+                    _safe_int(formal_release_row.get('allow_hits')),
+                    _safe_int(formal_release_row.get('allow_misses')),
+                    _text(formal_release_row.get('allow_hit_rate_text'), '-'),
+                    _safe_int(formal_release_row.get('replay_guard_net')),
+                    _text(formal_release_row.get('top_failure'), '-'),
+                    _safe_int(governance_row.get('draw_guard_blocked_count')),
+                    _text(governance_row.get('draw_guard_avoid_rate_text'), '-'),
+                    _text(governance_row.get('draw_guard_missed_rate_text'), '-'),
+                    'YES' if diagnostics.get('rollback_recommended') else 'NO',
+                    _text(sample.get('match_id'), '-'),
+                    _text(sample.get('time'), '-'),
+                    _text(sample.get('title'), '-'),
+                    _text(sample.get('decision'), '-'),
+                    _text(sample.get('prediction_result'), '-'),
+                    _text(sample.get('handicap_result'), '-'),
+                    _text(sample.get('replay_guard'), '-'),
+                    _text(sample.get('replay_agent'), '-'),
+                    _safe_int(sample.get('replay_net_hint')),
+                    _safe_int(sample.get('drag_score')),
+                    _text(sample.get('drag_reason_text'), '-'),
                 ]
             )
-    for event in _as_list(governance.get("rows")):
-        if not isinstance(event, Mapping) or str(event.get("domain") or "") != "draw_guard":
+    for event in _as_list(governance.get('rows')):
+        if not isinstance(event, Mapping) or str(event.get('domain') or '') != 'draw_guard':
             continue
+        event_version_id = _text(event.get('version_id'), '-')
+        formal_release_row = _as_mapping(formal_release_by_version.get(event_version_id))
         writer.writerow(
             [
-                _text(event.get("version_id"), "-"),
-                _text(event.get("updated_at"), "-"),
-                _text(event.get("source"), "-"),
-                _text(event.get("effect_label"), "-"),
-                _text(event.get("event_type"), "-"),
-                _text(event.get("event_label"), "-"),
-                _text(event.get("related_version_id"), "-"),
-                _text(event.get("description"), "-"),
-                _text(event.get("domain"), "draw_guard"),
-                _safe_int(event.get("draw_guard_blocked_count")),
-                _text(event.get("draw_guard_avoid_rate_text"), "-"),
-                _text(event.get("draw_guard_missed_rate_text"), "-"),
-                "YES" if str(event.get("effect_status") or "") == "negative" else "NO",
-                "-",
-                _text(event.get("updated_at"), "-"),
-                _text(event.get("summary"), "-"),
-                "-",
-                "-",
-                "-",
-                "-",
-                "-",
+                event_version_id,
+                _text(event.get('updated_at'), '-'),
+                _text(event.get('source'), '-'),
+                _text(event.get('effect_label'), '-'),
+                _text(event.get('event_type'), '-'),
+                _text(event.get('event_label'), '-'),
+                _text(event.get('related_version_id'), '-'),
+                _text(event.get('description'), '-'),
+                _text(event.get('domain'), 'draw_guard'),
+                _safe_int(formal_release_row.get('window_sample_count')),
+                _safe_int(formal_release_row.get('allow_count')),
+                _safe_int(formal_release_row.get('known_count')),
+                _safe_int(formal_release_row.get('allow_hits')),
+                _safe_int(formal_release_row.get('allow_misses')),
+                _text(formal_release_row.get('allow_hit_rate_text'), '-'),
+                _safe_int(formal_release_row.get('replay_guard_net')),
+                _text(formal_release_row.get('top_failure'), '-'),
+                _safe_int(event.get('draw_guard_blocked_count')),
+                _text(event.get('draw_guard_avoid_rate_text'), '-'),
+                _text(event.get('draw_guard_missed_rate_text'), '-'),
+                'YES' if str(event.get('effect_status') or '') == 'negative' else 'NO',
+                '-',
+                _text(event.get('updated_at'), '-'),
+                _text(event.get('summary'), '-'),
+                '-',
+                '-',
+                '-',
+                '-',
+                '-',
                 0,
                 0,
-                _text(event.get("description"), "-"),
+                _text(event.get('description'), '-'),
             ]
         )
     return output.getvalue()
-
 
 def build_strategy_allowlist_report_lines(
     rows: Sequence[object] | object,
