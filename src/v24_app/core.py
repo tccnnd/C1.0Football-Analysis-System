@@ -15072,6 +15072,7 @@ def classify_snapshot_result_lookup(result: object) -> dict[str, object]:
 def auto_settle_finished_matches(
     prediction_cache: dict[str, dict] | None = None,
     lookback_days: int = 2,
+    max_snapshot_lookups: int | None = 80,
 ) -> dict:
     history_backfill = backfill_analysis_history_from_prediction_snapshots()
     repair_report = repair_prediction_snapshots_from_analysis_history(lookback_days=max(3, int(lookback_days)))
@@ -15086,6 +15087,10 @@ def auto_settle_finished_matches(
         "snapshot_predictions": 0,
         "snapshot_result_hits": 0,
         "snapshot_checked": 0,
+        "snapshot_lookup_candidates": 0,
+        "snapshot_lookup_limit": max(0, int(max_snapshot_lookups)) if max_snapshot_lookups is not None else 0,
+        "snapshot_lookup_skipped_by_limit": 0,
+        "snapshot_lookup_cache_hits": 0,
         "snapshot_result_misses": 0,
         "snapshot_result_miss_reasons": {},
         "snapshot_result_miss_items": [],
@@ -15192,8 +15197,43 @@ def auto_settle_finished_matches(
                     app_match.match_time = match_time
         append_candidate(app_match, item.home_goals, item.away_goals, snapshot_record)
 
+    snapshot_lookup_records: list[tuple[str, dict]] = []
+    if summary["snapshot_recoverable"] and hasattr(fetcher, "get_result_by_schedule_id"):
+        sortable_snapshot_rows: list[tuple[datetime, str, dict]] = []
+        for snapshot_match_id, snapshot_record in snapshot_records.items():
+            if snapshot_match_id in settled_ids or snapshot_match_id in candidate_ids:
+                continue
+            if not isinstance(snapshot_record, dict):
+                continue
+            snapshot_match = snapshot_record.get("match")
+            app_match = _app_match_from_payload(snapshot_match, source="snapshot:titan:result")
+            if app_match is None or not in_lookback_window(app_match.match_date):
+                continue
+            snapshot_source = normalize_text(snapshot_match.get("source", "") if isinstance(snapshot_match, dict) else "")
+            schedule_id = _snapshot_result_schedule_id(
+                snapshot_source,
+                snapshot_match.get("source_id", "") if isinstance(snapshot_match, dict) else "",
+            )
+            if not schedule_id:
+                continue
+            try:
+                match_dt = datetime.strptime(app_match.match_date, "%Y-%m-%d")
+            except Exception:
+                match_dt = datetime.min
+            sortable_snapshot_rows.append((match_dt, str(snapshot_match_id), snapshot_record))
+        sortable_snapshot_rows.sort(key=lambda row: (row[0], row[1]), reverse=True)
+        summary["snapshot_lookup_candidates"] = len(sortable_snapshot_rows)
+        if max_snapshot_lookups is not None:
+            lookup_limit = max(0, int(max_snapshot_lookups))
+            if len(sortable_snapshot_rows) > lookup_limit:
+                summary["snapshot_lookup_skipped_by_limit"] = len(sortable_snapshot_rows) - lookup_limit
+                sortable_snapshot_rows = sortable_snapshot_rows[:lookup_limit]
+        snapshot_lookup_records = [(match_id, record) for _match_dt, match_id, record in sortable_snapshot_rows]
+
+    snapshot_result_cache: dict[str, dict] = {}
+
     # 兜底: 对重启后丢失于主赛事流中的比赛，按快照保存的 Titan schedule_id 回查赛果。
-    for snapshot_match_id, snapshot_record in snapshot_records.items():
+    for snapshot_match_id, snapshot_record in snapshot_lookup_records:
         if snapshot_match_id in settled_ids or snapshot_match_id in candidate_ids:
             continue
         if not isinstance(snapshot_record, dict):
@@ -15209,8 +15249,14 @@ def auto_settle_finished_matches(
         )
         if not schedule_id or not hasattr(fetcher, "get_result_by_schedule_id"):
             continue
-        summary["snapshot_checked"] += 1
-        result = fetcher.get_result_by_schedule_id(schedule_id)
+        if schedule_id in snapshot_result_cache:
+            result = snapshot_result_cache[schedule_id]
+            summary["snapshot_lookup_cache_hits"] += 1
+        else:
+            summary["snapshot_checked"] += 1
+            raw_result = fetcher.get_result_by_schedule_id(schedule_id)
+            result = raw_result if isinstance(raw_result, dict) else {}
+            snapshot_result_cache[schedule_id] = result
         lookup = classify_snapshot_result_lookup(result)
         if not lookup.get("is_finished"):
             reason = str(lookup.get("reason") or "unknown")

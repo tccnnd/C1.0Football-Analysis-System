@@ -52,6 +52,7 @@ def build_auto_settle_popup_message(result: Mapping[str, object] | object) -> st
         + f"已结算跳过: {int(resolved.get('already_settled', 0) or 0)}\n"
         + f"其他跳过: {int(resolved.get('skipped', 0) or 0)}\n\n"
         + f"赛果回查: 检查 {int(resolved.get('snapshot_checked', 0) or 0)} / 命中 {int(resolved.get('snapshot_result_hits', 0) or 0)} / 未命中 {int(resolved.get('snapshot_result_misses', 0) or 0)}\n"
+        + f"Snapshot lookup queue: candidates {int(resolved.get('snapshot_lookup_candidates', 0) or 0)} / limit {int(resolved.get('snapshot_lookup_limit', 0) or 0)} / skipped {int(resolved.get('snapshot_lookup_skipped_by_limit', 0) or 0)} / cache_hits {int(resolved.get('snapshot_lookup_cache_hits', 0) or 0)}\n"
         + f"未命中原因: {miss_reason_text}\n"
         + f"预测快照命中: {int(resolved.get('snapshot_predictions', 0) or 0)}\n\n"
         + ("\n".join(_format_backfill_report_lines("历史快照回填", history_backfill)) + "\n\n" if isinstance(history_backfill, Mapping) and history_backfill else "")

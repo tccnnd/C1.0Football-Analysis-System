@@ -217,5 +217,120 @@ class CoreResultRecoverySnapshotAuditTests(unittest.TestCase):
         self.assertEqual(settled[0][3], {"recommendation": "主胜", "confidence": 0.62})
 
 
+    def test_auto_settle_limits_snapshot_result_lookup_queue(self) -> None:
+        class FakeFetcher:
+            calls: list[str] = []
+
+            def __init__(self, debug: bool = False) -> None:
+                self.debug = debug
+
+            def get_recent_finished_matches(self, lookback_days: int = 2) -> list:
+                return []
+
+            def get_result_by_schedule_id(self, schedule_id: str) -> dict:
+                self.calls.append(schedule_id)
+                return {
+                    "schedule_id": schedule_id,
+                    "state_code": "-1",
+                    "home_goals": 1,
+                    "away_goals": 0,
+                    "is_finished": True,
+                }
+
+        class FakeStateStore:
+            def load_settlements(self) -> list:
+                return []
+
+            def load_prediction_snapshots(self) -> dict:
+                return snapshots
+
+        today = core.datetime.now().strftime("%Y-%m-%d")
+        yesterday = (core.datetime.now() - core.timedelta(days=1)).strftime("%Y-%m-%d")
+        snapshots = {
+            "old": self._snapshot(home="Old Queue FC", match_date=yesterday, source_id="titan_old_queue"),
+            "new": self._snapshot(home="New Queue FC", match_date=today, source_id="titan_new_queue"),
+        }
+        settled: list[str] = []
+
+        def fake_settle(match: core.AppMatch, home_goals: int, away_goals: int, prediction: dict | None = None) -> dict:
+            settled.append(match.match_id)
+            return {"match_id": match.match_id}
+
+        with (
+            patch("v24_app.core.backfill_analysis_history_from_prediction_snapshots", return_value={}),
+            patch("v24_app.core.repair_prediction_snapshots_from_analysis_history", return_value={"restored": 0}),
+            patch("v24_app.core.migrate_prediction_snapshots", return_value={}),
+            patch("v24_app.core.MatchFetcherTitan", FakeFetcher),
+            patch("v24_app.core.STATE_STORE", FakeStateStore()),
+            patch("v24_app.core.settle_match_result", side_effect=fake_settle),
+            patch("v24_app.core.auto_settle_pending_parlays", return_value={"new_settled": 0, "items": []}),
+            patch("v24_app.core.get_gate_metrics", return_value={}),
+        ):
+            result = core.auto_settle_finished_matches(lookback_days=14, max_snapshot_lookups=1)
+
+        self.assertEqual(result["snapshot_lookup_candidates"], 2)
+        self.assertEqual(result["snapshot_lookup_skipped_by_limit"], 1)
+        self.assertEqual(result["snapshot_checked"], 1)
+        self.assertEqual(result["snapshot_result_hits"], 1)
+        self.assertEqual(result["new_settled"], 1)
+        self.assertEqual(FakeFetcher.calls, ["titan_new_queue"])
+        self.assertEqual(len(settled), 1)
+
+    def test_auto_settle_dedupes_snapshot_result_lookup_by_schedule_id(self) -> None:
+        class FakeFetcher:
+            calls: list[str] = []
+
+            def __init__(self, debug: bool = False) -> None:
+                self.debug = debug
+
+            def get_recent_finished_matches(self, lookback_days: int = 2) -> list:
+                return []
+
+            def get_result_by_schedule_id(self, schedule_id: str) -> dict:
+                self.calls.append(schedule_id)
+                return {
+                    "schedule_id": schedule_id,
+                    "state_code": "-1",
+                    "home_goals": 2,
+                    "away_goals": 1,
+                    "is_finished": True,
+                }
+
+        class FakeStateStore:
+            def load_settlements(self) -> list:
+                return []
+
+            def load_prediction_snapshots(self) -> dict:
+                return snapshots
+
+        today = core.datetime.now().strftime("%Y-%m-%d")
+        snapshots = {
+            "dup_a": self._snapshot(home="Dup A FC", match_date=today, source_id="titan_duplicate"),
+            "dup_b": self._snapshot(home="Dup B FC", match_date=today, source_id="titan_duplicate"),
+        }
+
+        def fake_settle(match: core.AppMatch, home_goals: int, away_goals: int, prediction: dict | None = None) -> dict:
+            return {"match_id": match.match_id}
+
+        with (
+            patch("v24_app.core.backfill_analysis_history_from_prediction_snapshots", return_value={}),
+            patch("v24_app.core.repair_prediction_snapshots_from_analysis_history", return_value={"restored": 0}),
+            patch("v24_app.core.migrate_prediction_snapshots", return_value={}),
+            patch("v24_app.core.MatchFetcherTitan", FakeFetcher),
+            patch("v24_app.core.STATE_STORE", FakeStateStore()),
+            patch("v24_app.core.settle_match_result", side_effect=fake_settle),
+            patch("v24_app.core.auto_settle_pending_parlays", return_value={"new_settled": 0, "items": []}),
+            patch("v24_app.core.get_gate_metrics", return_value={}),
+        ):
+            result = core.auto_settle_finished_matches(lookback_days=14, max_snapshot_lookups=None)
+
+        self.assertEqual(result["snapshot_lookup_candidates"], 2)
+        self.assertEqual(result["snapshot_checked"], 1)
+        self.assertEqual(result["snapshot_lookup_cache_hits"], 1)
+        self.assertEqual(result["snapshot_result_hits"], 2)
+        self.assertEqual(result["new_settled"], 2)
+        self.assertEqual(FakeFetcher.calls, ["titan_duplicate"])
+
+
 if __name__ == "__main__":
     unittest.main()

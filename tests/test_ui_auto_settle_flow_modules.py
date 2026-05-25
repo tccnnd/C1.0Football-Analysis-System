@@ -38,6 +38,10 @@ class UIAutoSettleFlowModuleTests(unittest.TestCase):
                 "already_settled": 3,
                 "skipped": 1,
                 "snapshot_checked": 10,
+                "snapshot_lookup_candidates": 20,
+                "snapshot_lookup_limit": 8,
+                "snapshot_lookup_skipped_by_limit": 12,
+                "snapshot_lookup_cache_hits": 2,
                 "snapshot_result_hits": 6,
                 "snapshot_result_misses": 4,
                 "snapshot_result_miss_reasons": {"no_result": 3, "state_not_finished": 1},
@@ -55,6 +59,7 @@ class UIAutoSettleFlowModuleTests(unittest.TestCase):
         self.assertIn("新增结算: 4", message)
         self.assertIn("赛果回查: 检查 10 / 命中 6", message)
         self.assertIn("no_result=3", message)
+        self.assertIn("Snapshot lookup queue: candidates 20 / limit 8 / skipped 12 / cache_hits 2", message)
         self.assertIn("state_not_finished=1", message)
         self.assertIn("历史快照回填", message)
         self.assertIn("历史 Trace 回填", message)
