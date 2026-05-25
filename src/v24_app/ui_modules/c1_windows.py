@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tkinter as tk
 from tkinter import ttk
-from typing import Callable
+from typing import Callable, Mapping
 
 from .c1_release import (
     comparison_window_row_values,
@@ -10,6 +10,7 @@ from .c1_release import (
     filter_release_rows,
     release_window_row_values,
 )
+from .c1_availability_flow import build_c1_release_guard_history_rows, build_c1_release_guard_history_text
 
 
 def show_c1_release_window(
@@ -206,4 +207,139 @@ def show_c1_comparison_window(
     ttk.Button(footer, text="应用到主列表", command=lambda: on_apply_to_main(rows)).pack(side=tk.RIGHT, padx=(0, 8))
     ttk.Button(footer, text="仅导出待处理模板", command=lambda: on_export_pending_template(rows)).pack(side=tk.RIGHT, padx=(0, 8))
     ttk.Button(footer, text="关闭", command=window.destroy).pack(side=tk.RIGHT)
+    return window
+
+
+def show_c1_release_guard_history_window(
+    *,
+    root: tk.Tk,
+    existing_window: tk.Toplevel | None,
+    rows: list[Mapping[str, object]],
+    header: str,
+    on_close: Callable[[], None],
+) -> tk.Toplevel:
+    if existing_window is not None and existing_window.winfo_exists():
+        existing_window.lift()
+        existing_window.focus_force()
+        return existing_window
+
+    window = tk.Toplevel(root)
+    window.title("C1 放行门控审计")
+    window.geometry("1180x720")
+    window.minsize(980, 560)
+    window.transient(root)
+    window.protocol("WM_DELETE_WINDOW", on_close)
+
+    container = ttk.Frame(window, padding=14)
+    container.pack(fill=tk.BOTH, expand=True)
+    ttk.Label(container, text="C1 放行门控审计", font=("Microsoft YaHei UI", 14, "bold")).pack(anchor=tk.W)
+    ttk.Label(container, text=header, style="Sub.TLabel").pack(anchor=tk.W, pady=(4, 10))
+
+    table_rows = build_c1_release_guard_history_rows(rows, limit=50)
+    columns = ("time", "file", "status", "raw_status", "mode", "policy", "quality", "matches", "reasons", "issue")
+    tree = ttk.Treeview(container, columns=columns, show="headings", height=10)
+    headings = {
+        "time": "时间",
+        "file": "报告",
+        "status": "状态",
+        "raw_status": "原始",
+        "mode": "模式",
+        "policy": "策略阻/开",
+        "quality": "质检F/W",
+        "matches": "场次",
+        "reasons": "源原因",
+        "issue": "首要问题",
+    }
+    widths = {
+        "time": 150,
+        "file": 230,
+        "status": 70,
+        "raw_status": 70,
+        "mode": 120,
+        "policy": 80,
+        "quality": 80,
+        "matches": 58,
+        "reasons": 64,
+        "issue": 260,
+    }
+    for key in columns:
+        tree.heading(key, text=headings[key])
+        tree.column(key, width=widths[key], anchor=tk.W if key in {"file", "issue"} else tk.CENTER)
+
+    table_frame = ttk.Frame(container)
+    table_frame.pack(fill=tk.BOTH, expand=False)
+    y_scroll = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=tree.yview)
+    x_scroll = ttk.Scrollbar(table_frame, orient=tk.HORIZONTAL, command=tree.xview)
+    tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+    tree.grid(row=0, column=0, sticky="nsew")
+    y_scroll.grid(row=0, column=1, sticky="ns")
+    x_scroll.grid(row=1, column=0, sticky="ew")
+    table_frame.rowconfigure(0, weight=1)
+    table_frame.columnconfigure(0, weight=1)
+
+    detail_label_var = tk.StringVar(value="报告详情")
+    ttk.Label(container, textvariable=detail_label_var, style="Sub.TLabel").pack(anchor=tk.W, pady=(12, 4))
+    detail_frame = ttk.Frame(container)
+    detail_frame.pack(fill=tk.BOTH, expand=True)
+    detail = tk.Text(detail_frame, wrap=tk.NONE, font=("Consolas", 10), background="#fbfdff")
+    detail_y = ttk.Scrollbar(detail_frame, orient=tk.VERTICAL, command=detail.yview)
+    detail_x = ttk.Scrollbar(detail_frame, orient=tk.HORIZONTAL, command=detail.xview)
+    detail.configure(yscrollcommand=detail_y.set, xscrollcommand=detail_x.set)
+    detail.grid(row=0, column=0, sticky="nsew")
+    detail_y.grid(row=0, column=1, sticky="ns")
+    detail_x.grid(row=1, column=0, sticky="ew")
+    detail_frame.rowconfigure(0, weight=1)
+    detail_frame.columnconfigure(0, weight=1)
+
+    row_by_id: dict[str, Mapping[str, object]] = {}
+    for idx, item in enumerate(table_rows):
+        iid = str(idx)
+        row_by_id[iid] = item
+        tree.insert(
+            "",
+            tk.END,
+            iid=iid,
+            values=(
+                item.get("time", "-"),
+                item.get("file", "-"),
+                item.get("status", "-"),
+                item.get("raw_status", "-"),
+                item.get("runtime_mode", "-"),
+                item.get("policy", "-"),
+                item.get("quality", "-"),
+                item.get("matches", "0"),
+                item.get("provider_reasons", "0"),
+                item.get("issue", "-"),
+            ),
+        )
+
+    def _set_detail(text: str, label: str) -> None:
+        detail.configure(state=tk.NORMAL)
+        detail.delete("1.0", tk.END)
+        detail.insert("1.0", text)
+        detail.configure(state=tk.DISABLED)
+        detail_label_var.set(label)
+
+    def _show_selected_detail(_event: object | None = None) -> None:
+        selection = tree.selection()
+        if not selection:
+            _set_detail(build_c1_release_guard_history_text(rows), "报告详情 | 汇总")
+            return
+        item = row_by_id.get(selection[0], {})
+        label = f"报告详情 | {item.get('file', '-')}"
+        text = str(item.get("text") or "").strip() or build_c1_release_guard_history_text(rows)
+        _set_detail(text, label)
+
+    tree.bind("<<TreeviewSelect>>", _show_selected_detail)
+    if table_rows:
+        tree.selection_set("0")
+        tree.focus("0")
+        _show_selected_detail()
+    else:
+        _show_selected_detail()
+
+    footer = ttk.Frame(container)
+    footer.pack(fill=tk.X, pady=(10, 0))
+    ttk.Label(footer, text=f"显示 {len(table_rows)} / {len(rows)} 份报告", style="Sub.TLabel").pack(side=tk.LEFT)
+    ttk.Button(footer, text="关闭", command=on_close).pack(side=tk.RIGHT)
     return window

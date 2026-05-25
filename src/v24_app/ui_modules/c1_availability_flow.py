@@ -561,6 +561,52 @@ def build_c1_release_guard_history_text(rows: list[Mapping[str, object]] | objec
     return "\n".join(lines)
 
 
+def _truncate_guard_history_text(value: object, *, limit: int = 96) -> str:
+    text = str(value or "").strip().replace("\n", " ")
+    if len(text) <= limit:
+        return text or "-"
+    return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def build_c1_release_guard_history_rows(
+    rows: list[Mapping[str, object]] | object,
+    *,
+    limit: int = 50,
+) -> list[dict[str, object]]:
+    items = rows if isinstance(rows, list) else []
+    resolved: list[dict[str, object]] = []
+    for item in items[: max(0, int(limit))]:
+        if not isinstance(item, Mapping):
+            continue
+        status = str(item.get("status") or item.get("smoke_status") or "-").strip().lower() or "-"
+        raw_status = str(item.get("raw_status") or item.get("smoke_status") or status).strip().lower() or "-"
+        runtime_mode = str(item.get("runtime_mode") or "-").strip() or "-"
+        quality = f"{_safe_int(item.get('quality_failures', 0))}/{_safe_int(item.get('quality_warnings', 0))}"
+        policy = (
+            f"{_safe_int(item.get('provider_policy_blocking_count', 0))}/"
+            f"{_safe_int(item.get('provider_policy_open_count', 0))}"
+        )
+        issues = item.get("issues") if isinstance(item.get("issues"), list) else []
+        issue_text = _truncate_guard_history_text(issues[0] if issues else "-", limit=88)
+        resolved.append(
+            {
+                "time": str(item.get("updated_at") or "-"),
+                "file": str(item.get("name") or "-"),
+                "matches": str(_safe_int(item.get("matches_requested", 0))),
+                "status": status,
+                "raw_status": raw_status,
+                "runtime_mode": runtime_mode,
+                "quality": quality,
+                "policy": policy,
+                "provider_reasons": str(_safe_int(item.get("provider_reasons_count", 0))),
+                "issue": issue_text,
+                "path": str(item.get("path") or ""),
+                "text": str(item.get("text") or ""),
+            }
+        )
+    return resolved
+
+
 def get_c1_release_review_availability_guard(project_root: Path) -> dict:
     store = C1AvailabilityStore(project_root)
     return build_c1_release_review_availability_guard(

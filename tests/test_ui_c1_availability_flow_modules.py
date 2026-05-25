@@ -16,6 +16,7 @@ if str(SRC_ROOT) not in sys.path:
 
 from v24_app.ui_modules import (
     build_c1_availability_provider_status_lines,
+    build_c1_release_guard_history_rows,
     build_c1_release_guard_history_text,
     build_c1_release_guard_report_filename,
     build_c1_release_guard_report_lines,
@@ -322,6 +323,17 @@ class UIC1AvailabilityFlowModuleTests(unittest.TestCase):
         self.assertEqual(rows[0]["quality_failures"], 2)
         self.assertEqual(rows[0]["provider_policy_blocking_count"], 1)
         self.assertEqual(rows[0]["provider_policy_open_count"], 0)
+        table_rows = build_c1_release_guard_history_rows(rows)
+        self.assertEqual(len(table_rows), 2)
+        self.assertEqual(table_rows[0]["file"], "c1_release_guard_block_20260511_110000.md")
+        self.assertEqual(table_rows[0]["status"], "fail")
+        self.assertEqual(table_rows[0]["raw_status"], "fail")
+        self.assertEqual(table_rows[0]["runtime_mode"], "gate_only")
+        self.assertEqual(table_rows[0]["policy"], "1/0")
+        self.assertEqual(table_rows[0]["quality"], "2/0")
+        self.assertEqual(table_rows[0]["matches"], "4")
+        self.assertEqual(table_rows[0]["provider_reasons"], "1")
+        self.assertIn("api-football: suspended", table_rows[0]["issue"])
         text = build_c1_release_guard_history_text(rows)
         self.assertIn("C1 Release Guard Block History", text)
         self.assertIn("Matches Requested: 7", text)

@@ -18,7 +18,7 @@ from .c1_release import (
 )
 from .final_bindings_manifest import FINAL_BINDING_MANIFEST, resolve_final_bindings
 from .reporting import build_export_report_lines
-from .c1_windows import show_c1_comparison_window, show_c1_release_window
+from .c1_windows import show_c1_comparison_window, show_c1_release_guard_history_window, show_c1_release_window
 from .user_center import build_user_center_sections, open_user_center_window
 from .special_workbench_flow import (
     SPECIAL_WORKBENCH_LAYOUT,
@@ -38,6 +38,7 @@ from .main_list_sync import (
 from .c1_apply_flow import resolve_selected_prediction_for_details, sync_tree_c1_action_column
 from .c1_availability_flow import (
     build_c1_availability_provider_status_lines,
+    build_c1_release_guard_history_rows,
     build_c1_release_guard_report_filename,
     build_c1_release_guard_history_text,
     build_c1_release_guard_report_lines,
@@ -408,6 +409,7 @@ __all__ = [
     "comparison_window_row_values",
     "build_export_report_lines",
     "show_c1_comparison_window",
+    "show_c1_release_guard_history_window",
     "show_c1_release_window",
     "build_user_center_sections",
     "open_user_center_window",
@@ -425,6 +427,7 @@ __all__ = [
     "resolve_selected_prediction_for_details",
     "sync_tree_c1_action_column",
     "build_c1_availability_provider_status_lines",
+    "build_c1_release_guard_history_rows",
     "build_c1_release_guard_report_filename",
     "build_c1_release_guard_history_text",
     "build_c1_release_guard_report_lines",

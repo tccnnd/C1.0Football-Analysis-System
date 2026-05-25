@@ -36,7 +36,6 @@ from .ui_modules import (
     build_c1_apply_status_text,
     build_c1_availability_provider_status_lines,
     build_c1_release_guard_report_filename,
-    build_c1_release_guard_history_text,
     build_c1_release_guard_report_lines,
     build_c1_release_review_availability_guard,
     build_c1_release_review_guard_status_text,
@@ -114,6 +113,7 @@ from .ui_modules import (
     resolve_release_gate_pick,
     select_matches_for_export,
     show_c1_comparison_window,
+    show_c1_release_guard_history_window,
     show_c1_release_window,
     show_c1_formal_recommendations_window,
     show_recent_settlements_window,
@@ -1951,15 +1951,12 @@ def _app_open_c1_release_guard_history(self) -> None:
         return
     latest = rows[0]
     header = f"最近 {len(rows)} 份阻止报告 | 最新: {latest.get('name', '-')}"
-    self.c1_release_guard_history_window = open_text_view_window(
+    self.c1_release_guard_history_window = show_c1_release_guard_history_window(
         root=self.root,
         existing_window=self.c1_release_guard_history_window,
-        title="C1 放行门控审计",
         header=header,
-        content=build_c1_release_guard_history_text(rows),
+        rows=rows,
         on_close=lambda: _app_close_c1_release_guard_history_window(self),
-        width=1040,
-        height=720,
     )
     self.status_var.set(f"已打开 C1 放行门控审计 | {latest.get('name', '-')}")
 
