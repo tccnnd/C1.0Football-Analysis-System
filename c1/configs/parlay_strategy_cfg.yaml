@@ -1,0 +1,77 @@
+# 2串1 策略配置
+# 基于 8000 场历史数据回测校准（2026-05-29）
+
+version: "c1.parlay.v1"
+calibrated_at: "2026-05-29"
+
+# ── 基础筛选条件 ──────────────────────────────────────────────────────────────
+selection:
+  # 单场最低置信度
+  min_confidence: 0.55
+  # 预测方向赔率范围
+  min_odds: 1.20
+  max_odds: 2.00
+  # 排除平局预测（2串1 不选平局）
+  exclude_draw: true
+  # 排除杯赛（杯赛不确定性高）
+  exclude_cup: true
+
+# ── 每日出单限制（根据实际比赛分布）──────────────────────────────────────────
+daily_limits:
+  # 工作日（周一~周五）：日均 5 场比赛，约 2-3 场符合条件
+  weekday:
+    max_parlays: 1          # 最多 1 串
+    min_eligible_matches: 2 # 至少 2 场合格才出单
+  # 周末（周六~周日）：日均 25+ 场比赛，约 10-15 场符合条件
+  weekend:
+    max_parlays: 3          # 最多 3 串
+    min_eligible_matches: 4 # 至少 4 场合格才出单
+
+# ── 组合规则 ──────────────────────────────────────────────────────────────────
+combination:
+  # 两场比赛不能来自同一联赛（降低关联性）
+  different_league_preferred: true
+  # 两场比赛的置信度之和最低要求
+  min_combined_confidence: 1.15
+  # 串关赔率范围
+  min_parlay_odds: 2.00
+  max_parlay_odds: 4.50
+
+# ── 高准模式（重要场次）──────────────────────────────────────────────────────
+high_accuracy_mode:
+  enabled: true
+  min_confidence: 0.60
+  # 高准模式下放宽赔率上限
+  max_odds: 2.20
+  # 高准模式标签
+  tag: "high_accuracy_parlay"
+
+# ── 资金管理 ──────────────────────────────────────────────────────────────────
+bankroll:
+  # 单串固定注额（占总资金比例）
+  stake_ratio: 0.02         # 2% 资金/串
+  # 连输止损
+  max_losing_streak: 6      # 连输 6 串暂停 1 天
+  # 连赢加注（可选）
+  winning_streak_boost: false
+
+# ── 回测指标（参考）──────────────────────────────────────────────────────────
+backtest_reference:
+  sample_size: 8000
+  period: "2019-2025"
+  strategy_b:
+    description: "conf>=0.55 + odds<=2.00（推荐）"
+    win_rate: 0.645
+    roi: 0.451
+    avg_parlay_odds: 2.35
+    daily_pnl: 135
+  strategy_a:
+    description: "conf>=0.60（纯高准）"
+    win_rate: 0.627
+    roi: 0.242
+    avg_parlay_odds: 2.20
+  strategy_c:
+    description: "conf>=0.50 + odds<=2.50（激进）"
+    win_rate: 0.596
+    roi: 0.588
+    avg_parlay_odds: 2.86

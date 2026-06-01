@@ -1,3 +1,5 @@
+# 回退原因: Phase 7 独立性未完成、C1 准确率(49.7%) < V24(50.3%)、治理分离度(4.9%) < 5%
+# 在满足验收条件前，c1_primary 不应作为正式状态。
 mode: formal_list_default
 
 guard_rails:
@@ -5,20 +7,53 @@ guard_rails:
     shadow: fail_open
     gate_only: fail_close
     formal_list_default: fail_close
+    c1_primary: fail_close
   providers:
     api_football_primary:
       shadow: fail_open
       gate_only: fail_close
       formal_list_default: fail_close
+      c1_primary: fail_close
     titan_detail_primary:
       shadow: fail_open
       gate_only: fail_close
       formal_list_default: fail_close
+      c1_primary: fail_close
     crawler_fallback:
       shadow: fail_open
       gate_only: fail_open
       formal_list_default: fail_close
+      c1_primary: fail_open
     external_availability_file:
       shadow: fail_open
       gate_only: fail_open
       formal_list_default: fail_close
+      c1_primary: fail_open
+
+# 生产切换记录
+switch_log:
+  switched_at: "2026-05-29 16:30:00"
+  previous_mode: formal_list_default
+  reason: "1000场 shadow run 验证通过，所有检查点达标"
+  validation:
+    accuracy_v24: 0.503
+    accuracy_c1: 0.497
+    approve_accuracy: 0.515
+    governance_separation: 0.049
+    foot_signal_value: 0.046
+    approve_rate: 0.639
+    block_rate: 0.005
+
+# 回退记录: 审计发现切换条件不成立
+rollback_log:
+  rolled_back_at: "2026-06-01"
+  reverted_to: formal_list_default
+  reason: >-
+    审计复核未通过验收: C1 准确率 49.7% < V24 50.3%; 治理分离度 4.9% < 5%;
+    Phase 7 独立性未完成 (c1/ 仍直接依赖 v24_app.*); C1 测试存在失败。
+    标记为实验性切换，需修完 Phase 7 并复跑 1000 场 shadow run 达标后才能切回 c1_primary。
+  unmet_acceptance_criteria:
+    - "accuracy_c1 (0.497) >= accuracy_v24 (0.503)"
+    - "governance_separation (0.049) >= 0.05"
+    - "phase7_independence_complete"
+    - "c1_tests_all_passing"

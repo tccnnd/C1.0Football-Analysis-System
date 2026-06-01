@@ -79,7 +79,11 @@ class C1InferenceTests(unittest.TestCase):
         output = engine.infer(inference_input, {"market": 0.35, "elo": 0.30, "poisson": 0.20})
         total = sum(output.fused_probabilities.values())
         self.assertAlmostEqual(total, 1.0, places=5)
-        self.assertEqual({component.name for component in output.components}, {"market", "elo", "poisson"})
+        # Baseline ensemble now includes dixon_coles alongside market/elo/poisson
+        self.assertEqual(
+            {component.name for component in output.components},
+            {"market", "elo", "poisson", "dixon_coles"},
+        )
 
     def test_xgb_adapter_returns_component_shape(self) -> None:
         snapshot = self.feature_snapshot()

@@ -38,3 +38,31 @@ output/
 
 .DS_Store
 Thumbs.db
+
+# IDE
+.vscode/
+
+# 备份文件
+*.backup_*
+
+# foot 相关
+foot_repos/
+foot_0408.sql
+foot_0408.zip
+foot_schema.sql
+
+# MySQL 数据和配置
+mysql_my.ini
+
+# 临时导入文件
+import_*.txt
+*_err.txt
+*_out.txt
+do_import*.bat
+
+# 大文件
+*.zip
+*.sql.gz
+
+# 日志
+logs/

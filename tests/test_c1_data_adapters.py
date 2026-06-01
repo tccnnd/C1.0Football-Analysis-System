@@ -69,7 +69,8 @@ class C1DataAdapterTests(unittest.TestCase):
             created_at="2026-04-03 21:00:00",
         )
         self.assertEqual(result.match_id, "2026-04-03|Friendly|A|B")
-        self.assertEqual(len(result.translation_result.items), 3)
+        # Translation layer now emits 5 plays: 1x2 / handicap / totals / htft / scoreline
+        self.assertEqual(len(result.translation_result.items), 5)
         self.assertEqual(result.feature_snapshot.fields["source_id"], "2965321")
 
     def test_adapter_accepts_external_availability_enrichment(self) -> None:

@@ -7,6 +7,8 @@ import yaml
 
 from c1.core.reason_codes import DecisionAction
 from c1.translation.schema import TranslationItem, TranslationRequest, TranslationResult
+from c1.translation.htft_translator import translate_htft
+from c1.translation.scoreline_translator import translate_scoreline
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "configs" / "translation_cfg.yaml"
@@ -44,6 +46,8 @@ class C1TranslationEngine:
             self._translate_one_x_two(request, governance_status),
             self._translate_handicap(request, governance_status),
             self._translate_totals(request, governance_status),
+            self._translate_htft(request, governance_status),
+            self._translate_scoreline(request, governance_status),
         ]
         return TranslationResult(
             match_id=request.match_id,
@@ -238,4 +242,40 @@ class C1TranslationEngine:
                 "total_edge": round(total_edge, 6),
             },
             tags=["goal_total_translation"],
+        )
+
+    def _translate_htft(self, request: TranslationRequest, governance_status: str) -> TranslationItem:
+        """Translate to HT/FT outcomes."""
+        probabilities = request.inference_result.raw_probabilities
+        confidence = float(request.inference_result.confidence)
+        fields = request.feature_snapshot.fields
+        home_rating = _safe_float(fields.get("home_rating"), 1500.0)
+        away_rating = _safe_float(fields.get("away_rating"), 1500.0)
+        config = self.config.get("htft", {})
+        
+        return translate_htft(
+            raw_probabilities=probabilities,
+            confidence=confidence,
+            governance_status=governance_status,
+            home_rating=home_rating,
+            away_rating=away_rating,
+            config=config,
+        )
+
+    def _translate_scoreline(self, request: TranslationRequest, governance_status: str) -> TranslationItem:
+        """Translate to scoreline outcomes."""
+        probabilities = request.inference_result.raw_probabilities
+        confidence = float(request.inference_result.confidence)
+        fields = request.feature_snapshot.fields
+        home_rating = _safe_float(fields.get("home_rating"), 1500.0)
+        away_rating = _safe_float(fields.get("away_rating"), 1500.0)
+        config = self.config.get("scoreline", {})
+        
+        return translate_scoreline(
+            raw_probabilities=probabilities,
+            confidence=confidence,
+            governance_status=governance_status,
+            home_rating=home_rating,
+            away_rating=away_rating,
+            config=config,
         )

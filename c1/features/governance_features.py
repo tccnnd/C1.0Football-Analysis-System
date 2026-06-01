@@ -195,9 +195,35 @@ def build_governance_feature_fields(
     prediction_snapshot: PredictionSnapshot | None = None,
     config: dict[str, Any] | None = None,
     now: datetime | None = None,
+    enrich_foot: bool = True,
 ) -> dict[str, Any]:
     cfg = config or load_governance_config(DEFAULT_CONFIG_PATH)
     fields = dict(raw_fields)
+
+    # ── foot 信号增强（在其他特征计算之前注入原始信号）──
+    if enrich_foot:
+        try:
+            from c1.features.foot_features import enrich_with_foot_signals
+            predicted_side_hint = _normalize_side(
+                (prediction_snapshot.predicted_side if prediction_snapshot else None)
+                or raw_fields.get("predicted_side", "")
+            )
+            fields = enrich_with_foot_signals(fields, predicted_side=predicted_side_hint)
+        except Exception:
+            pass  # foot 增强失败不影响主流程
+
+    # ── xG 信号增强 ──
+    try:
+        from c1.data.xg_bridge import build_xg_features
+        home_team = str(fields.get("home_team") or fields.get("main_team_id") or "").strip()
+        away_team = str(fields.get("away_team") or fields.get("guest_team_id") or "").strip()
+        league = str(fields.get("league") or "").strip()
+        if home_team and away_team and league:
+            xg_feats = build_xg_features(home_team, away_team, league)
+            fields.update(xg_feats)
+    except Exception:
+        pass  # xG 增强失败不影响主流程
+
     lineup_known = _safe_bool(raw_fields.get("lineup_known"), default=False)
     lineup_freshness_hours = compute_lineup_freshness_hours(raw_fields, now=now)
     odds_move_against_model = compute_odds_move_against_model(raw_fields, prediction_snapshot=prediction_snapshot)
@@ -218,6 +244,23 @@ def build_governance_feature_fields(
     fields["market_divergence"] = round(_clip(_safe_float(raw_fields.get("market_divergence"), default=0.0)), 4)
     fields["schedule_pressure"] = round(_clip(_safe_float(raw_fields.get("schedule_pressure"), default=0.0)), 4)
     fields["weather_risk"] = round(_clip(_safe_float(raw_fields.get("weather_risk"), default=0.0)), 4)
+
+    # ── foot chaos 增强（在 chaos_score 计算后叠加）──
+    if enrich_foot and fields.get("foot_signals_available"):
+        try:
+            from c1.features.foot_features import (
+                compute_foot_asia_signal_strength,
+                compute_foot_euro_asia_conflict_score,
+                _FOOT_CHAOS_WEIGHT,
+                _clip as _fclip,
+            )
+            asia_s = compute_foot_asia_signal_strength(fields)
+            euro_c = compute_foot_euro_asia_conflict_score(fields)
+            foot_chaos = (asia_s * 0.5 + euro_c * 0.5) * _FOOT_CHAOS_WEIGHT
+            fields["chaos_score"] = round(_clip(fields["chaos_score"] + foot_chaos), 4)
+        except Exception:
+            pass
+
     return fields
 
 

@@ -5,6 +5,8 @@ from .schema import (
     TranslationResult,
     build_translation_request,
 )
+from .htft_translator import translate_htft
+from .scoreline_translator import translate_scoreline
 
 __all__ = [
     "C1TranslationEngine",
@@ -13,4 +15,6 @@ __all__ = [
     "TranslationResult",
     "build_translation_request",
     "load_translation_config",
+    "translate_htft",
+    "translate_scoreline",
 ]

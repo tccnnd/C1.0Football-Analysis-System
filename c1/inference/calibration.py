@@ -7,10 +7,14 @@ from typing import Any
 
 
 DEFAULT_ENSEMBLE_WEIGHTS = {
-    "market": 0.35,
-    "elo": 0.30,
-    "poisson": 0.20,
-    "xgboost": 0.15,
+    # Fix 2: 降低市场权重，提高ELO和Poisson的独立判断空间。
+    # 旧权重 market=0.35 导致模型严重依赖市场共识，无法找到边际优势。
+    # 高准策略本质是找市场定价错误的场次，但模型若是市场的加权平均则无法做到。
+    # 新权重：market降至0.25，elo升至0.35，poisson升至0.25，xgboost保持0.15。
+    "market":   0.25,
+    "elo":      0.35,
+    "poisson":  0.25,
+    "xgboost":  0.15,
 }
 
 

@@ -1,0 +1,55 @@
+# foot (Go) MySQL 桥接配置
+# 对应 foot 项目的 conf/app.ini [mysql] 节
+
+mysql:
+  host: "127.0.0.1"
+  port: 3306
+  user: "root"
+  # 密码从环境变量读取：FOOT_MYSQL_PASSWORD（默认 Meta.123）
+  password: "${FOOT_MYSQL_PASSWORD}"
+  database: "foot"
+  charset: "utf8mb4"
+  connect_timeout: 10
+  pool_size: 5
+
+# 桥接行为配置
+bridge:
+  # 查询最近 N 天的分析结果
+  analy_result_days: 3
+  # 查询最近 N 天的比赛
+  match_days: 2
+  # 是否启用桥接（false 时所有方法返回空结果，不报错）
+  enabled: true
+  # 缓存 TTL（秒），0 表示不缓存
+  cache_ttl_seconds: 300
+
+# 关键赔率公司 ID（与 foot 项目 conf/app.ini 一致）
+odds_companies:
+  euro:
+    weide: "81"          # 伟德
+    sport888: "616"      # 888Sport
+    interwetten: "104"   # Interwetten
+    bet365: "281"        # Bet365
+    jingcai: "1129"      # 竞彩
+  asia:
+    crown: "Crown"
+    mingsheng: "明陞"
+    jinbaobao: "金宝博"
+    bet12: "12bet"
+    yinghe: "盈禾"
+    bet18: "18Bet"
+  # C1 模型使用的亚赔参考公司
+  c1_refer_asia: "18"
+  # A1/E2 模型使用的默认亚赔参考
+  default_refer_asia: "18"
+
+# 模型映射（foot 模型名 → C1.0 信号名）
+model_signal_map:
+  A1: "foot_a1_signal"    # 欧亚联动信号
+  C1: "foot_c1_signal"    # 基本面让球信号
+  E2: "foot_e2_signal"    # 欧赔单边防平信号
+  Q1: "foot_q1_signal"    # 竞彩对比信号
+  E1: "foot_e1_signal"
+  C2: "foot_c2_signal"
+  C3: "foot_c3_signal"
+  C4: "foot_c4_signal"

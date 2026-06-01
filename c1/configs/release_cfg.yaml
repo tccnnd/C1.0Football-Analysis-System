@@ -1,9 +1,13 @@
 allowed_governance_actions:
   - APPROVE
+  - DOWNGRADE
 
 allowed_plays:
   - 1x2
+  - handicap
   - totals
+  - htft
+  - scoreline
 
 min_confidence: 0.30
 

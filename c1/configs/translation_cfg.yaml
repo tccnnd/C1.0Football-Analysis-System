@@ -18,3 +18,15 @@ totals:
   default_line: 2.5
   default_expected_goals: 2.5
   min_total_edge: 0.22
+
+htft:
+  min_confidence: 0.35
+  min_outcome_probability: 0.15
+  ht_scaling: 0.45
+
+scoreline:
+  min_confidence: 0.35
+  min_outcome_probability: 0.08
+  min_score_probability: 0.02
+  max_goals: 5
+  max_outcomes: 20

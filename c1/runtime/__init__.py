@@ -6,9 +6,11 @@ from .comparison import (
 )
 from .legacy_bridge import run_shadow_for_legacy_match, run_shadow_for_legacy_matches
 from .mode import (
+    evaluate_c1_primary_acceptance,
     get_default_ui_filter,
     get_provider_guard_policy,
     get_runtime_mode,
+    is_c1_primary,
     is_release_gate_active,
     load_runtime_mode_config,
 )
@@ -27,9 +29,11 @@ __all__ = [
     "C1ReleaseRunner",
     "C1ShadowRunResult",
     "C1ShadowRunner",
+    "evaluate_c1_primary_acceptance",
     "get_default_ui_filter",
     "get_provider_guard_policy",
     "get_runtime_mode",
+    "is_c1_primary",
     "is_release_gate_active",
     "load_runtime_mode_config",
     "run_controlled_release_for_legacy_matches",

@@ -47,7 +47,11 @@ def _confidence(probabilities: dict[str, float]) -> tuple[str, float, float]:
     top = float(ordered[0][1])
     second = float(ordered[1][1]) if len(ordered) > 1 else 0.0
     margin = max(top - second, 0.0)
-    confidence = min(1.0, max(0.0, 0.65 * top + 0.35 * margin))
+    # Fix 1: 置信度以 top_prob 为主导，margin 作为小幅修正。
+    # 旧公式 0.65*top + 0.35*margin 会系统性压缩置信度约15-20%，
+    # 导致高准策略门槛过滤掉大量真正高概率的预测。
+    # 新公式：top 占 85%，margin 占 15%，保持置信度与原始概率的线性关系。
+    confidence = min(1.0, max(0.0, 0.85 * top + 0.15 * margin))
     return predicted_side, round(confidence, 6), round(margin, 6)
 
 
@@ -78,7 +82,7 @@ class C1InferenceEngine:
         self.project_root = Path(project_root)
         self.baseline = BaselineInferenceEngine()
         self.xgb = C1XGBoostAdapter(self.project_root)
-        self.lightgbm = C1LightGBMAdapter()
+        self.lightgbm = C1LightGBMAdapter(self.project_root)
 
     def infer(
         self,
@@ -97,17 +101,30 @@ class C1InferenceEngine:
         components = list(baseline.components)
 
         if enable_xgboost:
-            components.append(self.xgb.infer(inference_input))
+            xgb_component = self.xgb.infer(inference_input)
+            # Fix 3: fallback时排除XGBoost，避免市场信号被重复计算。
+            # fallback输出本质上是市场+ELO的线性调整，若仍以15%权重参与
+            # ensemble，等于把市场信号计入了两次，放大市场依赖。
+            xgb_is_fallback = bool(xgb_component.metadata.get("xgb_fallback", True))
+            if not xgb_is_fallback:
+                components.append(xgb_component)
+            else:
+                enable_xgboost = False  # 标记为未实际使用，不加入blend_weights
         if enable_lightgbm:
-            components.append(self.lightgbm.infer(inference_input))
+            lgbm_result = self.lightgbm.infer(inference_input)
+            if lgbm_result.metadata.get("available"):
+                components.append(lgbm_result)
 
         blend_weights = {
             "market": weights.get("market", 0.0),
             "elo": weights.get("elo", 0.0),
             "poisson": weights.get("poisson", 0.0),
+            "dixon_coles": weights.get("dixon_coles", 0.10),
         }
         if enable_xgboost:
             blend_weights["xgboost"] = weights.get("xgboost", 0.0)
+        if enable_lightgbm and any(c.name == "lightgbm" for c in components):
+            blend_weights["lightgbm"] = weights.get("lightgbm", weights.get("xgboost", 0.10))
 
         probabilities, effective_weights = _blend_components(components, blend_weights)
         predicted_side, confidence, margin = _confidence(probabilities)

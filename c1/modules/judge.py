@@ -134,7 +134,13 @@ class InfoGate(BaseGate):
                 )
             )
 
-        lineup_required_now = kickoff_hours_to_match is None or kickoff_hours_to_match <= lineup_required_within_hours
+        # 仅在明确知道开赛时间且临近开赛时才要求阵容
+        # kickoff_hours_to_match=None 表示时间未知（历史数据），不触发
+        # kickoff_hours_to_match<=0 表示已开赛，不触发
+        lineup_required_now = (
+            kickoff_hours_to_match is not None
+            and 0 < kickoff_hours_to_match <= lineup_required_within_hours
+        )
         if not lineup_known and lineup_required_now:
             reasons.append(
                 _make_reason(
@@ -289,6 +295,7 @@ class ConflictDetector(BaseGate):
         market_divergence = _safe_float(fields.get("market_divergence"), default=0.0)
         injury_conflict_score = _safe_float(fields.get("injury_conflict_score"), default=0.0)
 
+        # ── 1. 标准市场分歧检测 ──────────────────────────────────────────────
         if predicted_side and market_side and predicted_side != market_side:
             hard_threshold = _safe_float(thresholds.get("market_divergence_hard"), 0.22)
             soft_threshold = _safe_float(thresholds.get("market_divergence_soft"), 0.12)
@@ -321,6 +328,7 @@ class ConflictDetector(BaseGate):
                     )
                 )
 
+        # ── 2. 伤病冲突 ──────────────────────────────────────────────────────
         hard_injury = _safe_float(thresholds.get("injury_conflict_hard"), 0.70)
         if injury_conflict_score >= hard_injury:
             reasons.append(
@@ -336,21 +344,154 @@ class ConflictDetector(BaseGate):
                 )
             )
 
+        # ── 3. foot 欧亚联动冲突（A1 模型核心信号）────────────────────────────
+        # 欧赔和亚赔方向相反，说明市场内部存在分歧，是强烈的不确定性信号
+        foot_signals_available = _safe_bool(fields.get("foot_signals_available"), default=False)
+        if foot_signals_available:
+            foot_euro_asia_conflict_score = _safe_float(
+                fields.get("foot_euro_asia_conflict_score"), default=0.0
+            )
+            foot_euro_asia_conflict = _safe_bool(
+                fields.get("foot_euro_asia_conflict"), default=False
+            )
+            foot_asia_direction = int(fields.get("foot_asia_direction", -1))
+            foot_asia_signal_strength = _safe_float(
+                fields.get("foot_asia_signal_strength"), default=0.0
+            )
+            foot_model_agreement = _safe_float(
+                fields.get("foot_model_agreement"), default=0.5
+            )
+
+            euro_asia_hard = _safe_float(
+                thresholds.get("foot_euro_asia_conflict_hard"), 0.75
+            )
+            euro_asia_soft = _safe_float(
+                thresholds.get("foot_euro_asia_conflict_soft"), 0.40
+            )
+
+            # 3a. 欧亚联动冲突 → market_divergence_conflict
+            if foot_euro_asia_conflict and foot_euro_asia_conflict_score >= euro_asia_hard:
+                reasons.append(
+                    _make_reason(
+                        gate=self.name,
+                        code=ReasonCode.FOOT_EURO_ASIA_CONFLICT,
+                        severity=ReasonSeverity.HARD,
+                        message=(
+                            "foot A1: Euro and Asia odds move in opposite directions "
+                            "(hard conflict). Market internal divergence is critical."
+                        ),
+                        evidence={
+                            "foot_euro_asia_conflict": foot_euro_asia_conflict,
+                            "foot_euro_asia_conflict_score": foot_euro_asia_conflict_score,
+                            "foot_euro_direction": fields.get("foot_euro_direction"),
+                            "foot_asia_direction": foot_asia_direction,
+                            "foot_asia_direction_consensus": fields.get(
+                                "foot_asia_direction_consensus"
+                            ),
+                        },
+                    )
+                )
+            elif foot_euro_asia_conflict and foot_euro_asia_conflict_score >= euro_asia_soft:
+                reasons.append(
+                    _make_reason(
+                        gate=self.name,
+                        code=ReasonCode.FOOT_EURO_ASIA_CONFLICT,
+                        severity=ReasonSeverity.SOFT,
+                        message=(
+                            "foot A1: Euro and Asia odds move in opposite directions. "
+                            "Market divergence signal detected."
+                        ),
+                        evidence={
+                            "foot_euro_asia_conflict": foot_euro_asia_conflict,
+                            "foot_euro_asia_conflict_score": foot_euro_asia_conflict_score,
+                            "foot_euro_direction": fields.get("foot_euro_direction"),
+                            "foot_asia_direction": foot_asia_direction,
+                        },
+                    )
+                )
+
+            # 3b. 亚赔方向与模型预测相反 → 市场信号对抗模型
+            asia_against_soft = _safe_float(
+                thresholds.get("foot_asia_signal_against_model_soft"), 0.45
+            )
+            if foot_asia_direction != -1 and predicted_side and foot_asia_signal_strength >= asia_against_soft:
+                # 亚赔方向 3=主降(利主) 0=客降(利客)，与 predicted_side 对比
+                asia_favors = "home" if foot_asia_direction == 3 else "away" if foot_asia_direction == 0 else ""
+                if asia_favors and asia_favors != predicted_side:
+                    reasons.append(
+                        _make_reason(
+                            gate=self.name,
+                            code=ReasonCode.FOOT_ASIA_SIGNAL_AGAINST_MODEL,
+                            severity=ReasonSeverity.SOFT,
+                            message=(
+                                f"foot: Asia odds signal favors '{asia_favors}' "
+                                f"but model predicts '{predicted_side}'. "
+                                "Market money flow contradicts model view."
+                            ),
+                            evidence={
+                                "foot_asia_direction": foot_asia_direction,
+                                "foot_asia_signal_strength": foot_asia_signal_strength,
+                                "foot_asia_direction_consensus": fields.get(
+                                    "foot_asia_direction_consensus"
+                                ),
+                                "foot_asia_let_ball_move": fields.get("foot_asia_let_ball_move"),
+                                "predicted_side": predicted_side,
+                                "asia_favors": asia_favors,
+                            },
+                        )
+                    )
+
+            # 3c. foot 多模型共识与 C1.0 预测不一致
+            disagreement_soft = _safe_float(
+                thresholds.get("foot_model_disagreement_soft"), 0.30
+            )
+            if foot_model_agreement < disagreement_soft:
+                reasons.append(
+                    _make_reason(
+                        gate=self.name,
+                        code=ReasonCode.FOOT_MODEL_DISAGREEMENT,
+                        severity=ReasonSeverity.SOFT,
+                        message=(
+                            f"foot: Rule-based models (A1/C1/E2) disagree with "
+                            f"C1.0 prediction (agreement={foot_model_agreement:.2f}). "
+                            "Cross-model conflict detected."
+                        ),
+                        evidence={
+                            "foot_model_agreement": foot_model_agreement,
+                            "foot_model_consensus": fields.get("foot_model_consensus"),
+                            "foot_model_consensus_count": fields.get("foot_model_consensus_count"),
+                            "foot_model_conflict": fields.get("foot_model_conflict"),
+                            "predicted_side": predicted_side,
+                        },
+                    )
+                )
+
         status = "PASS"
         if any(reason.severity == ReasonSeverity.HARD for reason in reasons):
             status = "FAIL"
         elif reasons:
             status = "WARN"
+
+        metrics: dict[str, Any] = {
+            "predicted_side": predicted_side,
+            "market_side": market_side,
+            "market_divergence": market_divergence,
+            "injury_conflict_score": injury_conflict_score,
+        }
+        if foot_signals_available:
+            metrics.update({
+                "foot_euro_asia_conflict": fields.get("foot_euro_asia_conflict"),
+                "foot_euro_asia_conflict_score": fields.get("foot_euro_asia_conflict_score"),
+                "foot_asia_direction": fields.get("foot_asia_direction"),
+                "foot_asia_signal_strength": fields.get("foot_asia_signal_strength"),
+                "foot_model_agreement": fields.get("foot_model_agreement"),
+            })
+
         return GateEvaluation(
             gate=self.name,
             status=status,
             reasons=reasons,
-            metrics={
-                "predicted_side": predicted_side,
-                "market_side": market_side,
-                "market_divergence": market_divergence,
-                "injury_conflict_score": injury_conflict_score,
-            },
+            metrics=metrics,
         )
 
 
@@ -457,8 +598,37 @@ class GovernanceJudge:
         decision_rules = self.config.get("decision_rules", {})
         observe_soft_count = int(decision_rules.get("observe_min_soft_conflicts", 3))
 
+        # ── foot_model_agreement 影响决策 ────────────────────────────────────
+        fields = request.feature_snapshot.fields
+        foot_signals_available = _safe_bool(fields.get("foot_signals_available"), default=False)
+        foot_model_agreement = _safe_float(fields.get("foot_model_agreement"), default=0.5)
+
+        agreement_confirm   = _safe_float(decision_rules.get("foot_model_agreement_confirm"),  0.75)
+        agreement_weak      = _safe_float(decision_rules.get("foot_model_agreement_weak"),     0.30)
+        agreement_critical  = _safe_float(decision_rules.get("foot_model_agreement_critical"), 0.15)
+
+        foot_confirmed  = False   # foot 模型确认 C1.0 预测
+        foot_weak       = False   # foot 模型分歧，降低 observe 阈值
+        foot_critical   = False   # foot 模型极度分歧，强制 OBSERVE
+
+        if foot_signals_available:
+            if foot_model_agreement >= agreement_confirm:
+                foot_confirmed = True
+            elif foot_model_agreement < agreement_critical:
+                foot_critical = True
+            elif foot_model_agreement < agreement_weak:
+                foot_weak = True
+
+            # 分歧时降低 observe 触发阈值（更容易进入 OBSERVE）
+            if foot_weak or foot_critical:
+                observe_soft_count = max(1, observe_soft_count - 1)
+
+        # ── 核心决策逻辑 ─────────────────────────────────────────────────────
         if hard_reasons:
             action = DecisionAction.BLOCK
+        elif foot_critical and soft_reasons:
+            # foot 极度分歧 + 任意软冲突 → 强制 OBSERVE
+            action = DecisionAction.OBSERVE
         elif ReasonCode.HIGH_CONFIDENCE_LOW_INFO in soft_codes:
             action = DecisionAction.OBSERVE
         elif len(soft_reasons) >= observe_soft_count:
@@ -468,6 +638,7 @@ class GovernanceJudge:
         else:
             action = DecisionAction.APPROVE
 
+        # ── 标签 ─────────────────────────────────────────────────────────────
         tags: list[str] = []
         if action == DecisionAction.OBSERVE:
             tags.append("shadow_run")
@@ -475,6 +646,14 @@ class GovernanceJudge:
             tags.append("risk_flagged")
         if hard_reasons:
             tags.append("blocked")
+
+        if foot_signals_available:
+            if foot_confirmed:
+                tags.append("foot_model_confirmed")   # foot 规则模型支持此预测
+            elif foot_critical:
+                tags.append("foot_model_critical_disagreement")
+            elif foot_weak:
+                tags.append("foot_model_weak_agreement")
 
         return GovernanceDecision(
             match_id=request.match_id,
@@ -491,6 +670,11 @@ class GovernanceJudge:
                 "soft_reason_count": len(soft_reasons),
                 "gate_statuses": {result.gate: result.status for result in gate_results},
                 "predicted_side": request.prediction_snapshot.predicted_side,
+                "foot_model_agreement": foot_model_agreement if foot_signals_available else None,
+                "foot_confirmed": foot_confirmed,
+                "foot_weak": foot_weak,
+                "foot_critical": foot_critical,
+                "effective_observe_threshold": observe_soft_count,
             },
         )
 

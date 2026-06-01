@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Mapping
 
-from c1.data import AvailabilityProviderChain, adapt_legacy_match, adapt_legacy_matches
+from c1.data import AvailabilityProviderChain, adapt_legacy_match, adapt_legacy_matches, load_elo_ratings, resolve_team_rating
 from c1.runtime.shadow import C1ShadowRunResult, C1ShadowRunner
 
 
@@ -19,10 +19,21 @@ def run_shadow_for_legacy_match(
     enable_lightgbm: bool = False,
     created_at: str | None = None,
 ) -> C1ShadowRunResult:
+    project_root = Path(project_root)
     availability_result = AvailabilityProviderChain.from_project_root(project_root).resolve_for_match(match)
     merged_extra_fields = dict(availability_result.record)
     if extra_fields:
         merged_extra_fields.update(dict(extra_fields))
+    
+    # Load ELO ratings from V24 state and inject into extra_fields
+    elo_ratings = load_elo_ratings(project_root)
+    home_team = str(getattr(match, "home_team", "")).strip()
+    away_team = str(getattr(match, "away_team", "")).strip()
+    if home_team and "home_rating" not in merged_extra_fields:
+        merged_extra_fields["home_rating"] = resolve_team_rating(home_team, elo_ratings)
+    if away_team and "away_rating" not in merged_extra_fields:
+        merged_extra_fields["away_rating"] = resolve_team_rating(away_team, elo_ratings)
+    
     adapter_output = adapt_legacy_match(match, extra_fields=merged_extra_fields)
     shadow_runner = runner or C1ShadowRunner(project_root)
     merged_context = dict(context or {})
@@ -53,8 +64,10 @@ def run_shadow_for_legacy_matches(
     enable_lightgbm: bool = False,
     created_at: str | None = None,
 ) -> list[C1ShadowRunResult]:
+    project_root = Path(project_root)
     shadow_runner = runner or C1ShadowRunner(project_root)
     provider_chain = AvailabilityProviderChain.from_project_root(project_root)
+    elo_ratings = load_elo_ratings(project_root)
     results: list[C1ShadowRunResult] = []
     for adapter_output in adapt_legacy_matches(matches, extra_fields_by_match_id=extra_fields_by_match_id):
         availability_result = provider_chain.resolve_for_match(
@@ -70,6 +83,15 @@ def run_shadow_for_legacy_matches(
         merged_fields = dict(availability_result.record)
         if extra_fields_by_match_id and adapter_output.match_id in extra_fields_by_match_id:
             merged_fields.update(dict(extra_fields_by_match_id[adapter_output.match_id]))
+        
+        # Inject ELO ratings if not already present
+        home_team = str(adapter_output.raw_fields.get("home_team", "")).strip()
+        away_team = str(adapter_output.raw_fields.get("away_team", "")).strip()
+        if home_team and "home_rating" not in merged_fields:
+            merged_fields["home_rating"] = resolve_team_rating(home_team, elo_ratings)
+        if away_team and "away_rating" not in merged_fields:
+            merged_fields["away_rating"] = resolve_team_rating(away_team, elo_ratings)
+        
         if merged_fields:
             adapter_output = adapt_legacy_match(
                 {

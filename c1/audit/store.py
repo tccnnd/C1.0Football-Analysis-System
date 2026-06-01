@@ -223,3 +223,105 @@ class C1AuditStore:
 
     def read_market_snapshots(self, limit: int | None = None) -> list[dict[str, Any]]:
         return self._read_jsonl(self.market_snapshots_file, limit=limit)
+
+    def record_backtest_result(
+        self,
+        *,
+        match_id: str,
+        strategy_name: str,
+        play_type: str,
+        selection: str,
+        odds: float,
+        stake: float,
+        predicted_confidence: float,
+        predicted_ev: float,
+        actual_outcome: str,
+        pnl: float,
+        roi: float,
+        attribution_tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Record a backtest result."""
+        record = {
+            "record_id": str(uuid.uuid4()),
+            "record_type": "backtest_result",
+            "recorded_at": self._now(),
+            "match_id": match_id,
+            "strategy_name": strategy_name,
+            "play_type": play_type,
+            "selection": selection,
+            "odds": odds,
+            "stake": stake,
+            "predicted_confidence": predicted_confidence,
+            "predicted_ev": predicted_ev,
+            "actual_outcome": actual_outcome,
+            "pnl": pnl,
+            "roi": roi,
+            "attribution_tags": attribution_tags or [],
+            "metadata": metadata or {},
+        }
+        if not hasattr(self, "backtest_results_file"):
+            self.backtest_results_file = self.audit_dir / "backtest_results.jsonl"
+        self._append_jsonl(self.backtest_results_file, record)
+        return record
+
+    def read_backtest_results(self, limit: int | None = None) -> list[dict[str, Any]]:
+        """Read backtest results."""
+        if not hasattr(self, "backtest_results_file"):
+            self.backtest_results_file = self.audit_dir / "backtest_results.jsonl"
+        return self._read_jsonl(self.backtest_results_file, limit=limit)
+
+    def record_backtest_metrics(
+        self,
+        *,
+        strategy_name: str,
+        play_type: str,
+        sample_size: int,
+        total_bets: int,
+        winning_bets: int,
+        losing_bets: int,
+        void_bets: int,
+        hit_rate: float,
+        total_stake: float,
+        total_pnl: float,
+        roi: float,
+        ev_per_bet: float,
+        sharpe_ratio: float,
+        max_drawdown: float,
+        confidence_calibration: dict[str, float] | None = None,
+        attribution_tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Record backtest metrics."""
+        record = {
+            "record_id": str(uuid.uuid4()),
+            "record_type": "backtest_metrics",
+            "recorded_at": self._now(),
+            "strategy_name": strategy_name,
+            "play_type": play_type,
+            "sample_size": sample_size,
+            "total_bets": total_bets,
+            "winning_bets": winning_bets,
+            "losing_bets": losing_bets,
+            "void_bets": void_bets,
+            "hit_rate": hit_rate,
+            "total_stake": total_stake,
+            "total_pnl": total_pnl,
+            "roi": roi,
+            "ev_per_bet": ev_per_bet,
+            "sharpe_ratio": sharpe_ratio,
+            "max_drawdown": max_drawdown,
+            "confidence_calibration": confidence_calibration or {},
+            "attribution_tags": attribution_tags or [],
+            "metadata": metadata or {},
+        }
+        if not hasattr(self, "backtest_metrics_file"):
+            self.backtest_metrics_file = self.audit_dir / "backtest_metrics.jsonl"
+        self._append_jsonl(self.backtest_metrics_file, record)
+        return record
+
+    def read_backtest_metrics(self, limit: int | None = None) -> list[dict[str, Any]]:
+        """Read backtest metrics."""
+        if not hasattr(self, "backtest_metrics_file"):
+            self.backtest_metrics_file = self.audit_dir / "backtest_metrics.jsonl"
+        return self._read_jsonl(self.backtest_metrics_file, limit=limit)

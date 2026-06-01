@@ -1,4 +1,16 @@
 from .adapters import LegacyMatchAdapterOutput, adapt_legacy_match, adapt_legacy_matches
+from .foot_bridge import FootBridge, FootMatchSignals, get_foot_bridge, get_foot_signals
+from .foot_schema import (
+    FootAnalyResult,
+    FootAsiaHis,
+    FootBFBattle,
+    FootBFJin,
+    FootBFScore,
+    FootEuroHis,
+    FootLeague,
+    FootMatchLast,
+    FootMatchSignals,
+)
 from .availability import build_match_context, build_team_availability
 from .availability_store import C1AvailabilityStore, load_rows_from_file
 from .availability_templates import (
@@ -18,6 +30,7 @@ from .contracts import (
     build_play_model_takeover_gate_audit_report,
     build_play_model_takeover_gate_audit_summary,
 )
+from .elo_loader import load_elo_ratings, resolve_team_rating
 from .fact_contracts import (
     ACTION_FACT_SCHEMA_VERSION,
     MATCH_FACT_SCHEMA_VERSION,
@@ -80,8 +93,10 @@ __all__ = [
     "build_team_availability",
     "export_availability_template_csv",
     "load_availability_provider_config",
+    "load_elo_ratings",
     "load_rows_from_file",
     "normalize_api_football_rows",
     "normalize_provider_rows",
     "normalize_sportmonks_rows",
+    "resolve_team_rating",
 ]

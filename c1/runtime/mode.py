@@ -7,13 +7,20 @@ import yaml
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "configs" / "runtime_mode.yaml"
-SUPPORTED_MODES = {"shadow", "gate_only", "formal_list_default"}
+SUPPORTED_MODES = {"shadow", "gate_only", "formal_list_default", "c1_primary"}
 SUPPORTED_GUARD_POLICIES = {"fail_open", "fail_close"}
 DEFAULT_GUARD_POLICY_BY_MODE = {
     "shadow": "fail_open",
     "gate_only": "fail_close",
     "formal_list_default": "fail_close",
+    "c1_primary": "fail_close",
 }
+
+# c1_primary 验收门槛：未达标时运行时拒绝以 c1_primary 运行。
+# 这是防回归的硬约束——即使有人手动把 YAML 改回 c1_primary，
+# 只要 switch_log.validation 不满足这些条件，运行时也会降级到 formal_list_default。
+C1_PRIMARY_MIN_GOVERNANCE_SEPARATION = 0.05
+C1_PRIMARY_DOWNGRADE_FALLBACK = "formal_list_default"
 
 
 def load_runtime_mode_config(path: str | Path | None = None) -> dict[str, Any]:
@@ -24,11 +31,54 @@ def load_runtime_mode_config(path: str | Path | None = None) -> dict[str, Any]:
     return payload
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value in (None, ""):
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def evaluate_c1_primary_acceptance(config: Mapping[str, Any]) -> dict[str, Any]:
+    """检查 c1_primary 验收条件是否满足。
+
+    依据 switch_log.validation 中记录的 shadow run 指标：
+    - accuracy_c1 >= accuracy_v24
+    - governance_separation >= 0.05
+
+    返回 {'accepted': bool, 'unmet': [...], 'validation': {...}}。
+    缺少 validation 数据时视为未达标（保守 fail-close）。
+    """
+    switch_log = config.get("switch_log") if isinstance(config, Mapping) else None
+    validation = switch_log.get("validation") if isinstance(switch_log, Mapping) else None
+    if not isinstance(validation, Mapping):
+        return {"accepted": False, "unmet": ["missing_validation_data"], "validation": {}}
+
+    acc_c1 = _safe_float(validation.get("accuracy_c1"), -1.0)
+    acc_v24 = _safe_float(validation.get("accuracy_v24"), 0.0)
+    separation = _safe_float(validation.get("governance_separation"), -1.0)
+
+    unmet: list[str] = []
+    if acc_c1 < acc_v24:
+        unmet.append(f"accuracy_c1({acc_c1:.3f}) < accuracy_v24({acc_v24:.3f})")
+    if separation < C1_PRIMARY_MIN_GOVERNANCE_SEPARATION:
+        unmet.append(
+            f"governance_separation({separation:.3f}) < {C1_PRIMARY_MIN_GOVERNANCE_SEPARATION}"
+        )
+    return {"accepted": not unmet, "unmet": unmet, "validation": dict(validation)}
+
+
 def get_runtime_mode(path: str | Path | None = None) -> str:
     config = load_runtime_mode_config(path)
     mode = str(config.get("mode", "shadow")).strip()
     if mode not in SUPPORTED_MODES:
         return "shadow"
+    # 防回归门槛：c1_primary 必须通过验收条件，否则降级。
+    if mode == "c1_primary":
+        acceptance = evaluate_c1_primary_acceptance(config)
+        if not acceptance["accepted"]:
+            return C1_PRIMARY_DOWNGRADE_FALLBACK
     return mode
 
 
@@ -71,6 +121,16 @@ def get_provider_guard_policy(
     if mode not in SUPPORTED_MODES:
         mode = get_runtime_mode(path)
     payload = dict(config) if config is not None else load_runtime_mode_config(path)
+
+    # 防回归 guard：即使显式传入 runtime_mode='c1_primary'，
+    # 也必须通过验收条件，否则降级（与 get_runtime_mode 行为一致）。
+    mode_downgraded_from: str | None = None
+    if mode == "c1_primary":
+        acceptance = evaluate_c1_primary_acceptance(payload)
+        if not acceptance["accepted"]:
+            mode_downgraded_from = "c1_primary"
+            mode = C1_PRIMARY_DOWNGRADE_FALLBACK
+
     guard_rails = payload.get("guard_rails", {})
     default_rule = {}
     provider_rule = {}
@@ -89,21 +149,29 @@ def get_provider_guard_policy(
         policy = DEFAULT_GUARD_POLICY_BY_MODE.get(mode, "fail_close")
         source = "fallback"
     policy = _normalize_guard_policy(policy)
-    return {
+    result = {
         "provider_name": str(provider_name),
         "runtime_mode": mode,
         "policy": policy,
         "policy_source": source,
     }
+    if mode_downgraded_from is not None:
+        result["mode_downgraded_from"] = mode_downgraded_from
+    return result
 
 
 def get_default_ui_filter(mode: str, *, has_formal_rows: bool) -> str:
     normalized = str(mode or "shadow").strip()
-    if normalized == "formal_list_default" and has_formal_rows:
+    if normalized in {"formal_list_default", "c1_primary"} and has_formal_rows:
         return "正式建议"
     return "全部"
 
 
 def is_release_gate_active(mode: str) -> bool:
     normalized = str(mode or "shadow").strip()
-    return normalized in {"gate_only", "formal_list_default"}
+    return normalized in {"gate_only", "formal_list_default", "c1_primary"}
+
+
+def is_c1_primary(mode: str) -> bool:
+    """C1.0 是否作为主决策引擎"""
+    return str(mode or "").strip() == "c1_primary"

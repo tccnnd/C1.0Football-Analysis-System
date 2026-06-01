@@ -17,8 +17,25 @@ thresholds:
   chaos_score_block: 0.82
   circuit_breaker_losing_streak: 5
 
+  # foot (Go) 信号阈值
+  # 欧亚联动冲突分数触发软冲突的最低值（0=无冲突，1=强冲突）
+  foot_euro_asia_conflict_soft: 0.40
+  # 欧亚联动冲突分数触发硬冲突的最低值
+  foot_euro_asia_conflict_hard: 0.75
+  # 亚赔信号强度：当信号方向与模型预测相反时触发
+  foot_asia_signal_against_model_soft: 0.45
+  # foot 多模型共识与 C1.0 预测方向不一致时触发（agreement < 阈值）
+  foot_model_disagreement_soft: 0.30
+
 decision_rules:
   observe_min_soft_conflicts: 3
+  # foot_model_agreement 影响决策的阈值
+  # agreement >= 此值时视为 foot 模型确认，加 tag 并放宽 observe 阈值
+  foot_model_agreement_confirm: 0.75
+  # agreement < 此值时视为 foot 模型分歧，observe 阈值降低 1
+  foot_model_agreement_weak: 0.30
+  # agreement < 此值时视为极度分歧，直接触发 OBSERVE（不管软冲突数量）
+  foot_model_agreement_critical: 0.15
 
 feature_rules:
   freshness_hours_cap: 24

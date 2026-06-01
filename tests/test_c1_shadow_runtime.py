@@ -93,7 +93,12 @@ class C1ShadowRuntimeTests(unittest.TestCase):
         self.assertEqual(result.match_id, "2026-04-03|friendly|A|B")
         self.assertIn(result.inference_result.predicted_side, {"home", "draw", "away"})
         self.assertIn(result.governance_decision.action, {DecisionAction.APPROVE, DecisionAction.DOWNGRADE, DecisionAction.OBSERVE, DecisionAction.BLOCK})
-        self.assertEqual(len(result.translation_result.items), 3)
+        # Translation layer now emits 5 plays: 1x2 / handicap / totals / htft / scoreline
+        self.assertEqual(len(result.translation_result.items), 5)
+        self.assertEqual(
+            {item.play for item in result.translation_result.items},
+            {"1x2", "handicap", "totals", "htft", "scoreline"},
+        )
         self.assertIn("translation_record_id", result.audit_metadata)
 
         store = C1AuditStore(PROJECT_ROOT, audit_dir=audit_dir)
