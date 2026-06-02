@@ -109,3 +109,12 @@ This project keeps development evidence in several forms:
 
 See [docs/MAINTENANCE.md](docs/MAINTENANCE.md) for the maintenance and review
 workflow used for this repository.
+
+## Collaboration And Release Planning
+
+- [CONTRIBUTING.md](CONTRIBUTING.md): branch, commit, staging, and review rules.
+- [docs/ROADMAP.md](docs/ROADMAP.md): v0.2 to v0.6 iteration roadmap.
+- [docs/RELEASE_PROCESS.md](docs/RELEASE_PROCESS.md): release, validation, and
+  rollback process.
+- [docs/TOOL_WORKFLOW.md](docs/TOOL_WORKFLOW.md): Codex + Kiro + Cursor
+  collaboration model.
