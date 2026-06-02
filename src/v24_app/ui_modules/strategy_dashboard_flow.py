@@ -8951,6 +8951,74 @@ def _strategy_release_settlement_row(item: Mapping[str, object]) -> dict[str, ob
     }
 
 
+def _strategy_release_recovery_rate_text(value: int, total: int) -> str:
+    if total <= 0:
+        return "-"
+    return f"{value / total:.1%}"
+
+
+def _strategy_release_recovery_action_rows(
+    *,
+    total_count: int,
+    pending_count: int,
+    stale_pending_count: int,
+    missing_snapshot_count: int,
+    alert_count: int,
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    if stale_pending_count:
+        rows.append(
+            {
+                "code": "run_result_recovery",
+                "title": "\u4f18\u5148\u56de\u6536\u8d85\u671f\u8d5b\u679c",
+                "body": f"{stale_pending_count} \u573a\u6b63\u5f0f\u653e\u884c\u5df2\u8d85\u671f\u5f85\u56de\u6536\uff0c\u5148\u8fd0\u884c\u8d5b\u679c\u56de\u6536\uff0c\u907f\u514d\u547d\u4e2d\u7387\u6ede\u540e\u3002",
+                "tone": "warning",
+                "action_key": "run_result_recovery",
+            }
+        )
+    if missing_snapshot_count:
+        rows.append(
+            {
+                "code": "snapshot_capture_gap",
+                "title": "\u4fee\u590d\u653e\u884c\u5feb\u7167\u7559\u5b58",
+                "body": f"{missing_snapshot_count} \u573a\u653e\u884c\u7f3a\u5feb\u7167\uff0c\u540e\u7eed\u5bfc\u51fa\u653e\u884c\u6e05\u5355\u65f6\u9700\u540c\u6b65\u4fdd\u5b58\u8d5b\u524d\u5feb\u7167\u3002",
+                "tone": "danger",
+                "action_key": "open_snapshot_center",
+            }
+        )
+    if pending_count and not stale_pending_count:
+        rows.append(
+            {
+                "code": "wait_for_finished_matches",
+                "title": "\u7b49\u5f85\u5b8c\u8d5b\u540e\u56de\u6536",
+                "body": f"{pending_count} \u573a\u6b63\u5f0f\u653e\u884c\u5c1a\u672a\u8fbe\u5230\u8d85\u671f\u95e8\u69db\uff0c\u5b8c\u8d5b\u540e\u518d\u89e6\u53d1\u81ea\u52a8\u56de\u6536\u3002",
+                "tone": "info",
+                "action_key": "run_result_recovery",
+            }
+        )
+    if total_count and not pending_count and not alert_count:
+        rows.append(
+            {
+                "code": "review_release_quality",
+                "title": "\u8fdb\u5165\u653e\u884c\u8d28\u91cf\u590d\u76d8",
+                "body": "\u6b63\u5f0f\u653e\u884c\u5df2\u5b8c\u6210\u56de\u6536\uff0c\u53ef\u4ee5\u7ee7\u7eed\u505a\u7b56\u7565\u7a33\u5b9a\u6027\u548c\u9519\u56e0\u5f52\u56e0\u3002",
+                "tone": "good",
+                "action_key": "open_strategy_library",
+            }
+        )
+    if not total_count:
+        rows.append(
+            {
+                "code": "collect_release_samples",
+                "title": "\u5148\u79ef\u7d2f\u6b63\u5f0f\u653e\u884c\u6837\u672c",
+                "body": "\u6682\u65e0\u6b63\u5f0f\u653e\u884c\u56de\u6536\u6837\u672c\uff0c\u5148\u751f\u6210\u653e\u884c\u6e05\u5355\u5e76\u7559\u5b58\u8d5b\u524d\u5feb\u7167\u3002",
+                "tone": "neutral",
+                "action_key": "open_strategy_library",
+            }
+        )
+    return rows
+
+
 def build_strategy_release_recovery_loop(
     rows: Sequence[object] | object,
     *,
@@ -9039,6 +9107,21 @@ def build_strategy_release_recovery_loop(
     ready_for_recovery_count = sum(1 for item in loop_rows if item.get("ready_for_recovery"))
     stale_pending_count = sum(1 for item in loop_rows if item.get("stale_pending"))
     missing_snapshot_count = sum(1 for item in loop_rows if item.get("pending") and not item.get("snapshot_saved"))
+    alert_count = sum(
+        1
+        for item in loop_rows
+        if item.get("pending") and (item.get("stale_pending") or not item.get("snapshot_saved"))
+    )
+    snapshot_coverage_text = _strategy_release_recovery_rate_text(snapshot_saved_count, total_count)
+    settlement_completion_text = _strategy_release_recovery_rate_text(settled_count, total_count)
+    action_rows = _strategy_release_recovery_action_rows(
+        total_count=total_count,
+        pending_count=pending_count,
+        stale_pending_count=stale_pending_count,
+        missing_snapshot_count=missing_snapshot_count,
+        alert_count=alert_count,
+    )
+    action_summary_text = " | ".join(str(row.get("title") or "-") for row in action_rows[:3]) or "-"
     settlement_summary = build_strategy_allowlist_settlement_summary(settlement_items)
     tuning = build_strategy_allowlist_tuning_recommendation(settlement_items)
     if stale_pending_count or missing_snapshot_count:
@@ -9062,6 +9145,11 @@ def build_strategy_release_recovery_loop(
         "ready_for_recovery_count": ready_for_recovery_count,
         "stale_pending_count": stale_pending_count,
         "missing_snapshot_count": missing_snapshot_count,
+        "alert_count": alert_count,
+        "snapshot_coverage_text": snapshot_coverage_text,
+        "settlement_completion_text": settlement_completion_text,
+        "action_rows": action_rows,
+        "action_summary_text": action_summary_text,
         "hit_rate": settlement_summary.get("hit_rate"),
         "hit_rate_text": settlement_summary.get("hit_rate_text", "-"),
         "settlement_summary": settlement_summary,
@@ -9071,7 +9159,7 @@ def build_strategy_release_recovery_loop(
         "rows": loop_rows,
         "summary_text": (
             f"\u653e\u884c {total_count} | \u5df2\u56de\u6536 {settled_count} | \u5f85\u56de\u6536 {pending_count} | "
-            f"\u7f3a\u5feb\u7167 {missing_snapshot_count} | \u8d85\u671f {stale_pending_count} | \u547d\u4e2d {settlement_summary.get('hit_rate_text', '-')}"
+            f"\u7f3a\u5feb\u7167 {missing_snapshot_count} | \u8d85\u671f {stale_pending_count} | \u544a\u8b66 {alert_count} | \u547d\u4e2d {settlement_summary.get('hit_rate_text', '-')}"
         ),
     }
 
@@ -9117,12 +9205,14 @@ def build_strategy_release_recovery_loop_report_lines(
     settlement_summary = _as_mapping(loop.get("settlement_summary"))
     tuning = _as_mapping(loop.get("tuning"))
     rows = [item for item in _as_list(loop.get("rows")) if isinstance(item, Mapping)]
+    action_rows = [item for item in _as_list(loop.get("action_rows")) if isinstance(item, Mapping)]
     lines = [
         "# \u7b56\u7565\u653e\u884c\u56de\u6536\u95ed\u73af\u62a5\u544a",
         "",
         f"- \u751f\u6210\u65f6\u95f4: {current.strftime('%Y-%m-%d %H:%M:%S')}",
         f"- \u95ed\u73af\u72b6\u6001: {loop.get('health_text', '-')}",
         f"- \u6458\u8981: {loop.get('summary_text', '-')}",
+        f"- \u4e0b\u4e00\u6b65: {loop.get('action_summary_text', '-')}",
         f"- \u8c03\u53c2\u5efa\u8bae: {tuning.get('label', '-')}",
         "",
         "## \u95ed\u73af\u6307\u6807",
@@ -9136,6 +9226,9 @@ def build_strategy_release_recovery_loop_report_lines(
         f"| \u5f85\u56de\u6536 | {_safe_int(loop.get('pending_count'))} |",
         f"| \u7f3a\u5feb\u7167 | {_safe_int(loop.get('missing_snapshot_count'))} |",
         f"| \u8d85\u671f\u5f85\u56de\u6536 | {_safe_int(loop.get('stale_pending_count'))} |",
+        f"| \u544a\u8b66\u573a\u6b21 | {_safe_int(loop.get('alert_count'))} |",
+        f"| \u5feb\u7167\u8986\u76d6 | {_text(loop.get('snapshot_coverage_text'), '-')} |",
+        f"| \u56de\u6536\u5b8c\u6210 | {_text(loop.get('settlement_completion_text'), '-')} |",
         f"| \u653e\u884c\u547d\u4e2d | {_text(loop.get('hit_rate_text'), '-')} |",
         "",
         "## \u7ed3\u7b97\u8d28\u91cf",
@@ -9156,6 +9249,20 @@ def build_strategy_release_recovery_loop_report_lines(
             lines.append(f"- {label}: {value}")
     else:
         lines.append("- \u6682\u65e0\u8c03\u53c2\u4fe1\u53f7")
+    lines.extend(
+        [
+            "",
+            "## \u4e0b\u4e00\u6b65\u52a8\u4f5c",
+            "",
+        ]
+    )
+    if action_rows:
+        for item in action_rows[:5]:
+            lines.append(
+                f"- [{_text(item.get('tone'), 'neutral')}] {_text(item.get('title'), '-')}: {_text(item.get('body'), '-')}"
+            )
+    else:
+        lines.append("- \u6682\u65e0\u52a8\u4f5c\u5efa\u8bae")
     lines.extend(
         [
             "",

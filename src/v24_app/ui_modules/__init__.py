@@ -19,7 +19,7 @@ from .c1_release import (
 from .final_bindings_manifest import FINAL_BINDING_MANIFEST, resolve_final_bindings
 from .reporting import build_export_report_lines
 from .c1_windows import show_c1_comparison_window, show_c1_release_guard_history_window, show_c1_release_window
-from .user_center import build_user_center_sections, open_user_center_window
+from .user_center import build_user_center_sections, build_user_center_panel, open_user_center_window
 from .special_workbench_flow import (
     SPECIAL_WORKBENCH_LAYOUT,
     build_data_training_special_section_rows,
@@ -412,6 +412,7 @@ __all__ = [
     "show_c1_release_guard_history_window",
     "show_c1_release_window",
     "build_user_center_sections",
+    "build_user_center_panel",
     "open_user_center_window",
     "SPECIAL_WORKBENCH_LAYOUT",
     "build_data_training_special_section_rows",

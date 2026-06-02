@@ -67,16 +67,37 @@ class UIUserCenterModuleTests(unittest.TestCase):
         ]
         actions = {key: (lambda: None) for key in required_keys}
         sections = build_user_center_sections(actions=actions)
-        self.assertEqual(len(sections), 6)
-        self.assertEqual(sections[-1][1][6][0], "放行门控审计")
-        self.assertEqual(sections[0][0], "分析与报告")
-        self.assertEqual(sections[1][0], "结算与复盘")
-        self.assertEqual(sections[-1][0], "C1 对照")
+
+        # Phase 5 重构：6组 → 3组
+        self.assertEqual(len(sections), 3)
+
+        # 组名验证
+        titles = [s[0] for s in sections]
+        self.assertEqual(titles[0], "分析与结算")
+        self.assertEqual(titles[1], "模型与校准")
+        self.assertEqual(titles[2], "C1 管理")
+
+        # 第0组：分析与结算 — 首个按钮是"分析选中"
         self.assertEqual(sections[0][1][0][0], "分析选中")
-        self.assertEqual(sections[1][1][2][0], "让球专项看板")
-        self.assertEqual(sections[1][1][3][0], "导出让球14天日报")
-        self.assertEqual(sections[4][1][2][0], "高准策略")
-        self.assertEqual(sections[-1][1][-1][0], "打开C1工作台")
+
+        # 第0组：包含"录入赛果"（原结算组）
+        group0_labels = [btn[0] for btn in sections[0][1]]
+        self.assertIn("录入赛果", group0_labels)
+        self.assertIn("让球专项看板", group0_labels)
+        self.assertIn("导出让球14天日报", group0_labels)
+
+        # 第1组：模型与校准 — 包含训练和校准功能
+        group1_labels = [btn[0] for btn in sections[1][1]]
+        self.assertIn("模型总览", group1_labels)
+        self.assertIn("训练XGB", group1_labels)
+        self.assertIn("校准权重", group1_labels)
+        self.assertIn("高准策略", group1_labels)
+
+        # 第2组：C1管理 — 末尾是"打开C1工作台"
+        self.assertEqual(sections[2][1][-1][0], "打开C1工作台")
+        group2_labels = [btn[0] for btn in sections[2][1]]
+        self.assertIn("放行门控审计", group2_labels)
+        self.assertIn("运行C1对照", group2_labels)
 
 
 if __name__ == "__main__":

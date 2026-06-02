@@ -22,6 +22,9 @@ class StateStore:
         self.result_recovery_runs_file = self.state_dir / "result_recovery_runs.json"
         self.snapshot_migration_report_file = self.state_dir / "prediction_snapshot_migration.json"
         self.c1_comparison_marks_file = self.state_dir / "c1_comparison_marks.json"
+        # 结算账本：仅保存已结算 match_id，作为结算幂等性的权威来源。
+        # 独立于可变且会被裁剪/清空的 settlements.json，避免快照被重复结算。
+        self.settled_ledger_file = self.state_dir / "settled_ledger.json"
 
     def load_ratings(self) -> dict[str, float]:
         return self._load_rating_file(self.ratings_file)
@@ -72,6 +75,45 @@ class StateStore:
             "items": current,
         }
         self.settlements_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        # 记录到结算账本（权威幂等来源），独立于 settlements.json 的裁剪。
+        match_id = str(record.get("match_id") or "")
+        if match_id:
+            self.mark_settled(match_id)
+
+    def load_settled_ledger(self) -> set[str]:
+        """加载已结算 match_id 集合（结算幂等性的权威来源）。"""
+        if not self.settled_ledger_file.exists():
+            return set()
+        try:
+            payload = json.loads(self.settled_ledger_file.read_text(encoding="utf-8"))
+        except Exception:
+            return set()
+        ids = payload.get("settled_ids", [])
+        if not isinstance(ids, list):
+            return set()
+        return {str(value) for value in ids if value}
+
+    def mark_settled(self, match_id: str) -> None:
+        """将 match_id 标记为已结算并持久化。幂等：重复标记无副作用。"""
+        match_id = str(match_id or "")
+        if not match_id:
+            return
+        ledger = self.load_settled_ledger()
+        if match_id in ledger:
+            return
+        ledger.add(match_id)
+        payload = {
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "settled_ids": sorted(ledger),
+        }
+        self.settled_ledger_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def is_settled(self, match_id: str) -> bool:
+        """查询 match_id 是否已结算（基于权威账本）。"""
+        match_id = str(match_id or "")
+        if not match_id:
+            return False
+        return match_id in self.load_settled_ledger()
 
     def save_settlements(self, items: list[dict], limit: int = 500) -> None:
         normalized = items[-limit:] if len(items) > limit else items

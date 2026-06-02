@@ -49,14 +49,26 @@ def _load_cfg(path: Path | None = None) -> dict[str, Any]:
 
 
 def _mysql_dsn(cfg: dict[str, Any]) -> str:
-    """从配置构建 PyMySQL 连接参数，支持环境变量替换"""
+    """从配置构建 PyMySQL 连接参数，支持环境变量替换。
+
+    密码解析为 fail-closed：当配置使用 ${ENV_VAR} 语法但环境变量未设置时，
+    返回空密码而不是硬编码 fallback，避免凭据泄漏到源码。
+    连接将因空密码而失败，由调用方优雅降级。
+    """
     import os
     mysql = cfg.get("mysql", {})
     password = str(mysql.get("password", ""))
-    # 支持 ${ENV_VAR} 语法
+    # 支持 ${ENV_VAR} 语法（fail-closed：未设置时为空，不使用硬编码 fallback）
     if password.startswith("${") and password.endswith("}"):
         env_key = password[2:-1]
-        password = os.environ.get(env_key, "Meta.123")
+        password = os.environ.get(env_key, "")
+        if not password:
+            logger.warning(
+                "foot_bridge: 环境变量 %s 未设置，MySQL 密码为空。"
+                "请设置 %s 以启用 foot 桥接。",
+                env_key,
+                env_key,
+            )
     return {
         "host": str(mysql.get("host", "127.0.0.1")),
         "port": int(mysql.get("port", 3306)),

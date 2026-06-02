@@ -446,21 +446,52 @@ class XGBoostProbabilityModel:
         return result
 
     def predict(self, context: EnsembleContext) -> ModelOutput:
-        feature_map = self._feature_map(context)
-        self._load_model()
-        if self._model is None:
-            self._maybe_train()
-        probs = self._predict_with_model(feature_map)
-        using_fallback = probs is None
-        if probs is None:
-            probs = self._fallback_probs(context, feature_map)
-        probs = self._normalize_probs(probs)
-        return ModelOutput(
-            key=self.key,
-            probabilities=probs,
-            metadata={
-                "xgb_features": feature_map,
-                "xgb_model_ready": self._model_ready,
-                "xgb_fallback": using_fallback,
-            },
-        )
+        import time
+        start_time = time.perf_counter()
+        
+        try:
+            feature_map = self._feature_map(context)
+            self._load_model()
+            if self._model is None:
+                self._maybe_train()
+            probs = self._predict_with_model(feature_map)
+            using_fallback = probs is None
+            if probs is None:
+                probs = self._fallback_probs(context, feature_map)
+            probs = self._normalize_probs(probs)
+            
+            # 记录预测指标
+            latency_ms = (time.perf_counter() - start_time) * 1000
+            confidence = max(probs)
+            
+            try:
+                from ..model_monitoring import record_prediction
+                record_prediction(
+                    model_name="xgboost_v0",
+                    latency_ms=latency_ms,
+                    prediction={"home": probs[0], "draw": probs[1], "away": probs[2]},
+                    confidence=confidence,
+                    features_count=len(feature_map),
+                    model_version="v0",
+                )
+            except Exception:
+                pass  # 监控失败不影响预测
+            
+            return ModelOutput(
+                key=self.key,
+                probabilities=probs,
+                metadata={
+                    "xgb_features": feature_map,
+                    "xgb_model_ready": self._model_ready,
+                    "xgb_fallback": using_fallback,
+                },
+            )
+        
+        except Exception as e:
+            # 记录错误
+            try:
+                from ..model_monitoring import record_error
+                record_error("xgboost_v0", str(e))
+            except Exception:
+                pass
+            raise

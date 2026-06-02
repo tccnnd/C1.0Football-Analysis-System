@@ -53,6 +53,8 @@ try:
     from .data_sources.match_fetcher_500 import MatchFetcher500
 except Exception:
     MatchFetcher500 = None
+# 500.com 数据源已弃用（网页结构变动频繁，2026-05-29）
+MatchFetcher500 = None
 
 try:
     from .data_sources.market_intent_500 import MarketIntentFetcher500
@@ -150,6 +152,23 @@ XGBOOST_MODEL = XGBoostProbabilityModel(PROJECT_DIR)
 TOTAL_GOALS_MODEL = TotalGoalsXGBoostModel(PROJECT_DIR)
 SCORELINE_MODEL = ScorelineXGBoostModel(PROJECT_DIR)
 VOLATILE_SCORELINE_MODEL = VolatileScorelineXGBoostModel(PROJECT_DIR)
+
+# 预加载所有 XGBoost 模型以消除首次预测延迟
+def _preload_xgboost_models() -> None:
+    """预加载所有 XGBoost 模型"""
+    import os
+    # 仅在非测试环境下预加载
+    if os.environ.get("SKIP_MODEL_PRELOAD") != "1":
+        try:
+            XGBOOST_MODEL._load_model()
+            TOTAL_GOALS_MODEL._load_model()
+            SCORELINE_MODEL._load_model()
+            VOLATILE_SCORELINE_MODEL._load_model()
+        except Exception:
+            # 预加载失败不影响启动，模型会在首次使用时加载
+            pass
+
+_preload_xgboost_models()
 DEFAULT_ENSEMBLE_WEIGHTS = {
     "market": 0.35,
     "elo": 0.30,
@@ -12075,6 +12094,100 @@ def predict_match(match: AppMatch) -> dict:
     prediction["rating_pool"] = _rating_pool_name(match)
     prediction = _apply_world_cup_overlay(match, prediction)
     _ensure_prediction_trace(match, prediction, started_at=started_at, latency_ms=(time.perf_counter() - started_perf) * 1000.0)
+
+    # ── C1.0 概率叠加（c1_primary 模式下用 6 模型 ensemble 覆盖概率）──
+    prediction = _apply_c1_probability_overlay(match, prediction)
+
+    return prediction
+
+
+def _apply_c1_probability_overlay(match: AppMatch, prediction: dict) -> dict:
+    """
+    在 c1_primary 模式下，用 C1.0 BaselineInferenceEngine 的 4 模型 ensemble 概率
+    （Market + ELO + Poisson + DixonColes）覆盖 V24 的概率。
+    保留 V24 的所有其他字段（play strategy, handicap, poisson 等）。
+
+    可观测性约定：
+    - 覆盖前先快照 V24 原始概率/置信度/推荐方向，写入 c1_overlay.v24_original。
+    - 成功时 c1_overlay.applied = True。
+    - 失败时 c1_overlay.applied = False 并记录 reason，不再静默吞掉异常，
+      从而可在审计中判断 c1_primary 是否真正生效。
+    - 非 c1_primary 模式不写入 c1_overlay。
+    """
+    # 先快照 V24 原始输出，无论成败都可追溯
+    v24_original = {
+        "probabilities": dict(prediction.get("probabilities") or {}),
+        "confidence": _safe_float(prediction.get("confidence"), 0.0),
+        "recommendation": prediction.get("recommendation"),
+    }
+    try:
+        from c1.runtime.mode import is_c1_primary, get_runtime_mode
+        if not is_c1_primary(get_runtime_mode()):
+            return prediction
+
+        from c1.inference.baseline import BaselineInferenceEngine
+        from c1.inference.schema import InferenceInput
+
+        # 用全局缓存避免重复实例化
+        global _C1_BASELINE_ENGINE
+        if "_C1_BASELINE_ENGINE" not in globals() or _C1_BASELINE_ENGINE is None:
+            _C1_BASELINE_ENGINE = BaselineInferenceEngine()
+
+        inp = InferenceInput(
+            match_id=match.match_id,
+            odds_home=match.odds_home,
+            odds_draw=match.odds_draw,
+            odds_away=match.odds_away,
+            home_rating=_safe_float(prediction.get("elo", {}).get("home_rating"), 1500.0),
+            away_rating=_safe_float(prediction.get("elo", {}).get("away_rating"), 1500.0),
+            league_strength=LEAGUE_STRENGTH.get(match.league, 0.92),
+            feature_fields={},
+            metadata={},
+        )
+
+        # 加载校准后的权重（缓存）
+        from c1.inference.calibration import load_ensemble_calibration
+        calibration = load_ensemble_calibration(PROJECT_DIR)
+        weights = calibration.weights_for_league(match.league)
+
+        result = _C1_BASELINE_ENGINE.infer(inp, weights=weights)
+
+        # 覆盖概率和置信度
+        prediction["probabilities"] = {
+            "home": round(result.fused_probabilities.get("home", 0.33), 4),
+            "draw": round(result.fused_probabilities.get("draw", 0.33), 4),
+            "away": round(result.fused_probabilities.get("away", 0.33), 4),
+        }
+
+        # 用 C1.0 置信度覆盖（如果更高）
+        c1_conf = max(result.fused_probabilities.values())
+        v24_conf = v24_original["confidence"]
+        if c1_conf > v24_conf:
+            prediction["confidence"] = round(c1_conf, 4)
+
+        # 更新推荐方向（如果 C1.0 和 V24 一致则不变，不一致则用 C1.0）
+        c1_side = max(result.fused_probabilities, key=result.fused_probabilities.get)
+        side_label = {"home": "主胜", "draw": "平局", "away": "客胜"}.get(c1_side, "")
+        if side_label:
+            prediction["recommendation"] = side_label
+
+        prediction["c1_overlay"] = {
+            "applied": True,
+            "model": "C1.0(Market+ELO+Poisson+DixonColes)",
+            "weights": weights,
+            "c1_confidence": round(c1_conf, 4),
+            "v24_original": v24_original,
+            "recommendation_changed": bool(side_label and side_label != v24_original["recommendation"]),
+        }
+
+    except Exception as exc:
+        # C1.0 叠加失败：不再静默降级，记录失败原因以便审计判断 c1_primary 是否生效。
+        prediction["c1_overlay"] = {
+            "applied": False,
+            "reason": f"{type(exc).__name__}: {exc}",
+            "v24_original": v24_original,
+        }
+
     return prediction
 
 
@@ -14203,14 +14316,35 @@ def settle_match_result(
     prediction: dict | None = None,
 ) -> dict:
     existing_settlements = STATE_STORE.load_settlements()
-    for item in reversed(existing_settlements):
-        if isinstance(item, dict) and str(item.get("match_id") or "") == match.match_id:
-            existing = dict(item)
-            existing["duplicate_skipped"] = True
-            existing["duplicate_checked_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            STATE_STORE.pop_prediction_snapshot(match.match_id)
-            auto_settle_pending_parlays()
-            return existing
+    # 结算幂等性的权威来源是结算账本（独立于会被裁剪/清空的 settlements 列表）。
+    # 若账本已记录该 match_id，则视为已结算，直接跳过并清理快照。
+    already_settled = False
+    is_settled_fn = getattr(STATE_STORE, "is_settled", None)
+    if callable(is_settled_fn):
+        try:
+            already_settled = bool(is_settled_fn(match.match_id))
+        except Exception:
+            already_settled = False
+    if not already_settled:
+        for item in existing_settlements:
+            if isinstance(item, dict) and str(item.get("match_id") or "") == match.match_id:
+                already_settled = True
+                break
+
+    if already_settled:
+        existing = None
+        for item in reversed(existing_settlements):
+            if isinstance(item, dict) and str(item.get("match_id") or "") == match.match_id:
+                existing = dict(item)
+                break
+        if existing is None:
+            # 账本记录已结算但 settlements 列表已被裁剪/清空：仍视为重复，避免重复结算。
+            existing = {"match_id": match.match_id}
+        existing["duplicate_skipped"] = True
+        existing["duplicate_checked_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        STATE_STORE.pop_prediction_snapshot(match.match_id)
+        auto_settle_pending_parlays()
+        return existing
 
     enrich_match_from_market_snapshot_store(match)
     ratings_map = _load_match_ratings(match)
@@ -15072,7 +15206,7 @@ def classify_snapshot_result_lookup(result: object) -> dict[str, object]:
 def auto_settle_finished_matches(
     prediction_cache: dict[str, dict] | None = None,
     lookback_days: int = 2,
-    max_snapshot_lookups: int | None = 80,
+    max_snapshot_lookups: int | None = 150,
 ) -> dict:
     history_backfill = backfill_analysis_history_from_prediction_snapshots()
     repair_report = repair_prediction_snapshots_from_analysis_history(lookback_days=max(3, int(lookback_days)))
@@ -15128,6 +15262,14 @@ def auto_settle_finished_matches(
 
     settlements = STATE_STORE.load_settlements()
     settled_ids = {str(item.get("match_id", "")) for item in settlements if item.get("match_id")}
+    # 合并结算账本（权威幂等来源），即使 settlements.json 被裁剪/清空也能识别已结算比赛，
+    # 避免被 repair_prediction_snapshots 重建的快照重复结算。
+    load_ledger_fn = getattr(STATE_STORE, "load_settled_ledger", None)
+    if callable(load_ledger_fn):
+        try:
+            settled_ids |= {str(mid) for mid in load_ledger_fn() if mid}
+        except Exception:
+            pass
     snapshot_records = STATE_STORE.load_prediction_snapshots()
     snapshot_audit = build_result_recovery_snapshot_audit(
         snapshot_records,
@@ -15231,64 +15373,140 @@ def auto_settle_finished_matches(
         snapshot_lookup_records = [(match_id, record) for _match_dt, match_id, record in sortable_snapshot_rows]
 
     snapshot_result_cache: dict[str, dict] = {}
+    # 加载持久化的回查缓存（避免重复查询未完赛比赛）
+    _result_cache_file = PROJECT_DIR / "data" / "state" / "snapshot_result_cache.json"
+    try:
+        if _result_cache_file.exists():
+            _cached = json.loads(_result_cache_file.read_text(encoding="utf-8"))
+            if isinstance(_cached, dict):
+                snapshot_result_cache.update(_cached)
+    except Exception:
+        pass
 
-    # 兜底: 对重启后丢失于主赛事流中的比赛，按快照保存的 Titan schedule_id 回查赛果。
-    for snapshot_match_id, snapshot_record in snapshot_lookup_records:
-        if snapshot_match_id in settled_ids or snapshot_match_id in candidate_ids:
-            continue
-        if not isinstance(snapshot_record, dict):
-            continue
-        snapshot_match = snapshot_record.get("match")
-        app_match = _app_match_from_payload(snapshot_match, source="snapshot:titan:result")
-        if app_match is None or not in_lookback_window(app_match.match_date):
-            continue
-        snapshot_source = normalize_text(snapshot_match.get("source", "") if isinstance(snapshot_match, dict) else "")
-        schedule_id = _snapshot_result_schedule_id(
-            snapshot_source,
-            snapshot_match.get("source_id", "") if isinstance(snapshot_match, dict) else "",
-        )
-        if not schedule_id or not hasattr(fetcher, "get_result_by_schedule_id"):
-            continue
-        if schedule_id in snapshot_result_cache:
-            result = snapshot_result_cache[schedule_id]
-            summary["snapshot_lookup_cache_hits"] += 1
-        else:
-            summary["snapshot_checked"] += 1
-            raw_result = fetcher.get_result_by_schedule_id(schedule_id)
-            result = raw_result if isinstance(raw_result, dict) else {}
-            snapshot_result_cache[schedule_id] = result
-        lookup = classify_snapshot_result_lookup(result)
-        if not lookup.get("is_finished"):
-            reason = str(lookup.get("reason") or "unknown")
-            summary["snapshot_result_misses"] += 1
-            miss_reasons = summary["snapshot_result_miss_reasons"]
-            if isinstance(miss_reasons, dict):
-                miss_reasons[reason] = int(miss_reasons.get(reason, 0) or 0) + 1
-            miss_items = summary["snapshot_result_miss_items"]
-            if isinstance(miss_items, list) and len(miss_items) < 20:
-                miss_items.append(
-                    {
-                        "match_id": app_match.match_id,
-                        "match_date": app_match.match_date,
-                        "league": app_match.league,
-                        "home_team": app_match.home_team,
-                        "away_team": app_match.away_team,
-                        "schedule_id": schedule_id,
-                        "reason": reason,
-                        "state_code": lookup.get("state_code", ""),
-                        "home_goals": lookup.get("home_goals"),
-                        "away_goals": lookup.get("away_goals"),
-                    }
+    # 兜底: 对重启后丢失于主赛事流中的比赛，按快照保存的 Titan schedule_id 批量并行回查赛果。
+    if snapshot_lookup_records and hasattr(fetcher, "get_results_batch"):
+        # 收集所有需要回查的 schedule_id
+        lookup_plan: list[tuple[str, str, dict, AppMatch]] = []  # (schedule_id, match_id, record, app_match)
+        for snapshot_match_id, snapshot_record in snapshot_lookup_records:
+            if snapshot_match_id in settled_ids or snapshot_match_id in candidate_ids:
+                continue
+            if not isinstance(snapshot_record, dict):
+                continue
+            snapshot_match = snapshot_record.get("match")
+            app_match = _app_match_from_payload(snapshot_match, source="snapshot:titan:result")
+            if app_match is None or not in_lookback_window(app_match.match_date):
+                continue
+            snapshot_source = normalize_text(snapshot_match.get("source", "") if isinstance(snapshot_match, dict) else "")
+            schedule_id = _snapshot_result_schedule_id(
+                snapshot_source,
+                snapshot_match.get("source_id", "") if isinstance(snapshot_match, dict) else "",
+            )
+            if not schedule_id:
+                continue
+            lookup_plan.append((schedule_id, snapshot_match_id, snapshot_record, app_match))
+
+        # 批量并行回查（8 线程）
+        if lookup_plan:
+            schedule_ids_to_query = [item[0] for item in lookup_plan]
+            summary["snapshot_checked"] = len(schedule_ids_to_query)
+            batch_results = fetcher.get_results_batch(schedule_ids_to_query, max_workers=8)
+            snapshot_result_cache.update({k: v for k, v in batch_results.items() if v is not None})
+
+            for schedule_id, snapshot_match_id, snapshot_record, app_match in lookup_plan:
+                result = batch_results.get(schedule_id) or {}
+                lookup = classify_snapshot_result_lookup(result)
+                if not lookup.get("is_finished"):
+                    reason = str(lookup.get("reason") or "unknown")
+                    summary["snapshot_result_misses"] += 1
+                    miss_reasons = summary["snapshot_result_miss_reasons"]
+                    if isinstance(miss_reasons, dict):
+                        miss_reasons[reason] = int(miss_reasons.get(reason, 0) or 0) + 1
+                    miss_items = summary["snapshot_result_miss_items"]
+                    if isinstance(miss_items, list) and len(miss_items) < 20:
+                        miss_items.append({
+                            "match_id": app_match.match_id,
+                            "match_date": app_match.match_date,
+                            "league": app_match.league,
+                            "home_team": app_match.home_team,
+                            "away_team": app_match.away_team,
+                            "schedule_id": schedule_id,
+                            "reason": reason,
+                            "state_code": lookup.get("state_code", ""),
+                            "home_goals": lookup.get("home_goals"),
+                            "away_goals": lookup.get("away_goals"),
+                        })
+                    continue
+
+                snapshot_source = normalize_text(
+                    (snapshot_record.get("match") or {}).get("source", "") if isinstance(snapshot_record, dict) else ""
                 )
-            continue
-        app_match.source = (
-            "snapshot:titan:analysisheader"
-            if "titan" in snapshot_source.lower()
-            else "snapshot:cache:analysisheader"
-        )
-        app_match.source_id = schedule_id
-        append_candidate(app_match, lookup.get("home_goals"), lookup.get("away_goals"), snapshot_record)
-        summary["snapshot_result_hits"] += 1
+                app_match.source = (
+                    "snapshot:titan:analysisheader"
+                    if "titan" in snapshot_source.lower()
+                    else "snapshot:cache:analysisheader"
+                )
+                app_match.source_id = schedule_id
+                append_candidate(app_match, lookup.get("home_goals"), lookup.get("away_goals"), snapshot_record)
+                summary["snapshot_result_hits"] += 1
+
+    elif snapshot_lookup_records:
+        # 降级：无批量接口时仍用串行（兼容旧版本）
+        for snapshot_match_id, snapshot_record in snapshot_lookup_records:
+            if snapshot_match_id in settled_ids or snapshot_match_id in candidate_ids:
+                continue
+            if not isinstance(snapshot_record, dict):
+                continue
+            snapshot_match = snapshot_record.get("match")
+            app_match = _app_match_from_payload(snapshot_match, source="snapshot:titan:result")
+            if app_match is None or not in_lookback_window(app_match.match_date):
+                continue
+            snapshot_source = normalize_text(snapshot_match.get("source", "") if isinstance(snapshot_match, dict) else "")
+            schedule_id = _snapshot_result_schedule_id(
+                snapshot_source,
+                snapshot_match.get("source_id", "") if isinstance(snapshot_match, dict) else "",
+            )
+            if not schedule_id or not hasattr(fetcher, "get_result_by_schedule_id"):
+                continue
+            if schedule_id in snapshot_result_cache:
+                result = snapshot_result_cache[schedule_id]
+                summary["snapshot_lookup_cache_hits"] += 1
+            else:
+                summary["snapshot_checked"] += 1
+                raw_result = fetcher.get_result_by_schedule_id(schedule_id)
+                result = raw_result if isinstance(raw_result, dict) else {}
+                snapshot_result_cache[schedule_id] = result
+            lookup = classify_snapshot_result_lookup(result)
+            if not lookup.get("is_finished"):
+                reason = str(lookup.get("reason") or "unknown")
+                summary["snapshot_result_misses"] += 1
+                miss_reasons = summary["snapshot_result_miss_reasons"]
+                if isinstance(miss_reasons, dict):
+                    miss_reasons[reason] = int(miss_reasons.get(reason, 0) or 0) + 1
+                miss_items = summary["snapshot_result_miss_items"]
+                if isinstance(miss_items, list) and len(miss_items) < 20:
+                    miss_items.append(
+                        {
+                            "match_id": app_match.match_id,
+                            "match_date": app_match.match_date,
+                            "league": app_match.league,
+                            "home_team": app_match.home_team,
+                            "away_team": app_match.away_team,
+                            "schedule_id": schedule_id,
+                            "reason": reason,
+                            "state_code": lookup.get("state_code", ""),
+                            "home_goals": lookup.get("home_goals"),
+                            "away_goals": lookup.get("away_goals"),
+                        }
+                    )
+                continue
+            app_match.source = (
+                "snapshot:titan:analysisheader"
+                if "titan" in snapshot_source.lower()
+                else "snapshot:cache:analysisheader"
+            )
+            app_match.source_id = schedule_id
+            append_candidate(app_match, lookup.get("home_goals"), lookup.get("away_goals"), snapshot_record)
+            summary["snapshot_result_hits"] += 1
 
     if not candidates:
         parlay_summary = auto_settle_pending_parlays()
@@ -15359,6 +15577,13 @@ def auto_settle_finished_matches(
             out_window=int(snapshot_audit.get("out_of_window", 0) or 0),
         )
     )
+    # 保存回查缓存（仅保留已完赛的结果，未完赛的下次重新查）
+    try:
+        _persist_cache = {k: v for k, v in snapshot_result_cache.items() if isinstance(v, dict) and v.get("is_finished")}
+        _result_cache_file.parent.mkdir(parents=True, exist_ok=True)
+        _result_cache_file.write_text(json.dumps(_persist_cache, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
     return summary
 
 

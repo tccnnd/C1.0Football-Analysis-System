@@ -120,6 +120,7 @@ from .ui_modules import (
     sync_tree_c1_action_column,
     should_run_pre_export_analysis,
     build_user_center_sections,
+    build_user_center_panel,
     is_settlement_score_in_range,
     parse_settlement_score_inputs,
     refresh_parlay_recommendations,
@@ -194,7 +195,7 @@ from .core import (
 class FootballPredictionApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("V24 足球预测 APP")
+        self.root.title("V24 足球预测系统 — C1.0 Governance")
         self.root.geometry("1460x840")
         self.root.minsize(1240, 740)
 
@@ -229,20 +230,28 @@ class FootballPredictionApp:
         }
         self.c1_filter_var = tk.StringVar(value="全部")
         self.auto_settle_enabled = tk.BooleanVar(value=True)
-        self.auto_settle_interval_min = tk.IntVar(value=8)
+        self.auto_settle_interval_min = tk.IntVar(value=4)
         self._auto_settle_after_id: str | None = None
         self._auto_settle_running = False
+        # 模型监控状态栏变量
+        self.monitoring_var = tk.StringVar(value="⬜ 模型监控")
+        self._monitoring_after_id: str | None = None
         self.user_center_window: tk.Toplevel | None = None
         self.ops_daily_window: tk.Toplevel | None = None
         self.ops_trend_window: tk.Toplevel | None = None
         self.c1_release_guard_history_window: tk.Toplevel | None = None
+        self.model_center_window: tk.Toplevel | None = None
+        self.analysis_center_window: tk.Toplevel | None = None
+        self.c1_center_window: tk.Toplevel | None = None
         self._busy_tasks: set[str] = set()
 
         self._configure_style()
+        self._build_menu_bar()
         self._build_layout()
         self._refresh_c1_release_guard_status()
         self.refresh_matches()
         self._schedule_auto_settle()
+        self._schedule_monitoring_refresh()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _configure_style(self) -> None:
@@ -252,23 +261,120 @@ class FootballPredictionApp:
         except tk.TclError:
             pass
 
-        self.root.configure(bg="#eef3f8")
-        style.configure("App.TFrame", background="#eef3f8")
-        style.configure("Card.TFrame", background="#fbfdff")
+        # ── 主色调 ──
+        BG_PRIMARY = "#f0f4f8"       # 主背景（更柔和的蓝灰）
+        BG_CARD = "#ffffff"           # 卡片背景
+        FG_TITLE = "#0f172a"          # 标题文字
+        FG_BODY = "#334155"           # 正文文字
+        FG_MUTED = "#64748b"          # 次要文字
+        ACCENT = "#2563eb"            # 强调色（蓝）
+        ACCENT_HOVER = "#1d4ed8"
+        SUCCESS = "#16a34a"           # 成功色
+        WARNING = "#d97706"           # 警告色
+        BORDER = "#e2e8f0"            # 边框色
+
+        self.root.configure(bg=BG_PRIMARY)
+
+        # ── Frame 样式 ──
+        style.configure("App.TFrame", background=BG_PRIMARY)
+        style.configure("Card.TFrame", background=BG_CARD)
+
+        # ── Label 样式 ──
         style.configure(
             "Title.TLabel",
-            font=("Microsoft YaHei UI", 18, "bold"),
-            background="#eef3f8",
-            foreground="#0f172a",
+            font=("Microsoft YaHei UI", 16, "bold"),
+            background=BG_PRIMARY,
+            foreground=FG_TITLE,
         )
         style.configure(
             "Sub.TLabel",
-            font=("Microsoft YaHei UI", 10),
-            background="#eef3f8",
-            foreground="#475569",
+            font=("Microsoft YaHei UI", 9),
+            background=BG_PRIMARY,
+            foreground=FG_MUTED,
         )
-        style.configure("Treeview", rowheight=30, font=("Microsoft YaHei UI", 10))
-        style.configure("Treeview.Heading", font=("Microsoft YaHei UI", 10, "bold"))
+        style.configure(
+            "Accent.TLabel",
+            font=("Microsoft YaHei UI", 9, "bold"),
+            background=BG_PRIMARY,
+            foreground=ACCENT,
+        )
+
+        # ── Button 样式 ──
+        style.configure(
+            "TButton",
+            font=("Microsoft YaHei UI", 9),
+            padding=(10, 4),
+        )
+        style.configure(
+            "Primary.TButton",
+            font=("Microsoft YaHei UI", 9, "bold"),
+        )
+
+        # ── Treeview 样式（斑马纹 + 更大行高）──
+        style.configure(
+            "Treeview",
+            rowheight=32,
+            font=("Microsoft YaHei UI", 9),
+            background=BG_CARD,
+            fieldbackground=BG_CARD,
+            foreground=FG_BODY,
+        )
+        style.configure(
+            "Treeview.Heading",
+            font=("Microsoft YaHei UI", 9, "bold"),
+            background="#f1f5f9",
+            foreground=FG_TITLE,
+        )
+        style.map(
+            "Treeview",
+            background=[("selected", "#dbeafe")],
+            foreground=[("selected", "#1e40af")],
+        )
+
+        # ── Notebook 样式 ──
+        style.configure(
+            "TNotebook.Tab",
+            font=("Microsoft YaHei UI", 9),
+            padding=(12, 4),
+        )
+
+        # ── Separator ──
+        style.configure("TSeparator", background=BORDER)
+
+    def _build_menu_bar(self) -> None:
+        """构建菜单栏 - Phase 1重构"""
+        menubar = tk.Menu(self.root)
+        self.root.config(menu=menubar)
+        
+        # 文件菜单
+        file_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="文件", menu=file_menu)
+        file_menu.add_command(label="刷新赛事", command=self.refresh_matches, accelerator="F5")
+        file_menu.add_separator()
+        file_menu.add_command(label="退出", command=self._on_close, accelerator="Alt+F4")
+        
+        # 功能中心菜单
+        centers_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="功能中心", menu=centers_menu)
+        centers_menu.add_command(label="模型中心", command=self.open_model_center)
+        centers_menu.add_command(label="分析中心", command=self.open_analysis_center)
+        centers_menu.add_command(label="C1管理中心", command=self.open_c1_center)
+        centers_menu.add_separator()
+        centers_menu.add_command(label="用户中心（传统）", command=self.open_user_center)        
+        # 工具菜单
+        tools_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="工具", menu=tools_menu)
+        tools_menu.add_command(label="模型状态总览", command=self.show_model_training_overview)
+        tools_menu.add_command(label="覆盖率监控", command=self.show_coverage_monitor)
+        tools_menu.add_command(label="让球监控", command=self.show_handicap_monitor)
+        tools_menu.add_separator()
+        tools_menu.add_command(label="运营日报", command=self.show_ops_daily_report)
+        tools_menu.add_command(label="7天趋势", command=self.show_ops_weekly_trend)
+        
+        # 帮助菜单
+        help_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="帮助", menu=help_menu)
+        help_menu.add_command(label="关于", command=self._show_about)
 
     def _build_layout(self) -> None:
         outer = ttk.Frame(self.root, style="App.TFrame", padding=16)
@@ -277,22 +383,26 @@ class FootballPredictionApp:
         header = ttk.Frame(outer, style="App.TFrame")
         header.pack(fill=tk.X, pady=(0, 12))
 
-        ttk.Label(header, text="V24 足球预测 APP | 第四阶段", style="Title.TLabel").pack(anchor=tk.W)
+        ttk.Label(header, text="V24 足球预测系统", style="Title.TLabel").pack(anchor=tk.W)
         ttk.Label(
             header,
-            text="Ensemble(市场+ELO+Poisson+XGBv0) + 多维指标 + 赛果结算闭环",
+            text="Ensemble + XGBoost + LightGBM + C1.0 Governance + foot 信号增强",
             style="Sub.TLabel",
         ).pack(anchor=tk.W, pady=(4, 0))
 
         toolbar = ttk.Frame(outer, style="App.TFrame")
         toolbar.pack(fill=tk.X, pady=(0, 12))
 
+        # 左侧：核心操作按钮
         ttk.Button(toolbar, text="刷新赛事", command=self.refresh_matches).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(toolbar, text="分析选中", command=self.analyze_selected).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(toolbar, text="分析全部", command=self.analyze_all).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(toolbar, text="自动回收赛果", command=self.auto_settle_results).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Button(toolbar, text="模型状态", command=self.show_model_training_overview).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Button(toolbar, text="用户中心", command=self.open_user_center).pack(side=tk.LEFT, padx=(0, 8))
+        
+        # 分隔符
+        ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8)
+        
+        # C1快速筛选按钮
         ttk.Button(
             toolbar,
             textvariable=self.formal_toolbar_var,
@@ -318,13 +428,10 @@ class FootballPredictionApp:
             textvariable=self.restore_all_toolbar_var,
             command=lambda: self._set_c1_filter("全部"),
         ).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Label(toolbar, textvariable=self.c1_filter_status_var, style="Sub.TLabel").pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Label(toolbar, textvariable=self.c1_mode_status_var, style="Sub.TLabel").pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Button(
-            toolbar,
-            textvariable=self.c1_release_guard_var,
-            command=self.show_c1_availability_provider_status,
-        ).pack(side=tk.LEFT, padx=(0, 8))
+        
+        # 右侧：筛选和配置
+        ttk.Label(toolbar, textvariable=self.summary_var, style="Sub.TLabel").pack(side=tk.RIGHT)
+        
         ttk.Label(toolbar, text="C1筛选", style="Sub.TLabel").pack(side=tk.RIGHT, padx=(8, 4))
         c1_filter = ttk.Combobox(
             toolbar,
@@ -335,6 +442,7 @@ class FootballPredictionApp:
         )
         c1_filter.pack(side=tk.RIGHT, padx=(0, 12))
         c1_filter.bind("<<ComboboxSelected>>", lambda _event: self._apply_main_list_filter())
+        
         ttk.Checkbutton(
             toolbar,
             text="自动轮询回收",
@@ -350,31 +458,6 @@ class FootballPredictionApp:
             command=self._on_toggle_auto_settle,
         ).pack(side=tk.RIGHT, padx=(4, 0))
         ttk.Label(toolbar, text="分钟", style="Sub.TLabel").pack(side=tk.RIGHT, padx=(4, 8))
-        c1_stats = ttk.Frame(toolbar, style="App.TFrame")
-        c1_stats.pack(side=tk.RIGHT, padx=(0, 12))
-        ttk.Label(c1_stats, text="C1统计", style="Sub.TLabel").pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Button(
-            c1_stats,
-            textvariable=self.c1_stat_button_vars["正式建议"],
-            command=lambda: self._set_c1_filter("正式建议"),
-            width=10,
-        ).pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Button(
-            c1_stats,
-            textvariable=self.c1_stat_button_vars["待处理"],
-            command=lambda: self._set_c1_filter("待处理"),
-            width=10,
-        ).pack(side=tk.LEFT, padx=(0, 4))
-        for action in ["补阵容", "观察", "可放行", "接近阻断", "阻断"]:
-            ttk.Button(
-                c1_stats,
-                textvariable=self.c1_stat_button_vars[action],
-                command=lambda value=action: self._set_c1_filter(value),
-                width=10,
-            ).pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Button(c1_stats, text="全部", command=lambda: self._set_c1_filter("全部"), width=6).pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Label(c1_stats, textvariable=self.c1_stats_var, style="Sub.TLabel").pack(side=tk.LEFT, padx=(4, 0))
-        ttk.Label(toolbar, textvariable=self.summary_var, style="Sub.TLabel").pack(side=tk.RIGHT)
 
         content = ttk.PanedWindow(outer, orient=tk.HORIZONTAL)
         content.pack(fill=tk.BOTH, expand=True)
@@ -438,12 +521,16 @@ class FootballPredictionApp:
         self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
         self.tree.bind("<Double-1>", lambda _event: self.analyze_selected())
 
+        # 斑马纹标签
+        self.tree.tag_configure("oddrow", background="#f8fafc")
+        self.tree.tag_configure("evenrow", background="#ffffff")
+
         tk.Label(
             right,
             text="诊断与分析详情",
-            font=("Microsoft YaHei UI", 13, "bold"),
-            bg="#fbfdff",
-            fg="#111827",
+            font=("Microsoft YaHei UI", 12, "bold"),
+            bg="#ffffff",
+            fg="#0f172a",
         ).pack(anchor=tk.W)
 
         self.inline_actions_container = ttk.Frame(right, style="Card.TFrame")
@@ -451,12 +538,14 @@ class FootballPredictionApp:
         self.details = tk.Text(
             right,
             wrap=tk.WORD,
-            font=("Microsoft YaHei UI", 10),
-            bg="#fbfdff",
-            fg="#1f2937",
+            font=("Consolas", 9),
+            bg="#ffffff",
+            fg="#334155",
             relief=tk.FLAT,
-            padx=4,
+            padx=8,
             pady=8,
+            selectbackground="#dbeafe",
+            selectforeground="#1e40af",
         )
         detail_scroll = ttk.Scrollbar(right, orient=tk.VERTICAL, command=self.details.yview)
         self.details.configure(yscrollcommand=detail_scroll.set)
@@ -465,7 +554,23 @@ class FootballPredictionApp:
 
         footer = ttk.Frame(outer, style="App.TFrame")
         footer.pack(fill=tk.X, pady=(10, 0))
-        ttk.Label(footer, textvariable=self.status_var, style="Sub.TLabel").pack(anchor=tk.W)
+        
+        # 左侧：主状态信息
+        ttk.Label(footer, textvariable=self.status_var, style="Sub.TLabel").pack(side=tk.LEFT, anchor=tk.W)
+        
+        # 右侧：C1统计和模式信息（紧凑显示）
+        ttk.Label(footer, textvariable=self.c1_stats_var, style="Sub.TLabel").pack(side=tk.RIGHT, padx=(8, 0))
+        ttk.Label(footer, textvariable=self.c1_mode_status_var, style="Sub.TLabel").pack(side=tk.RIGHT, padx=(8, 0))
+        ttk.Label(footer, textvariable=self.c1_filter_status_var, style="Sub.TLabel").pack(side=tk.RIGHT, padx=(8, 0))
+        # 模型监控指示灯（可点击打开模型中心监控标签）
+        monitoring_label = ttk.Label(
+            footer,
+            textvariable=self.monitoring_var,
+            style="Sub.TLabel",
+            cursor="hand2",
+        )
+        monitoring_label.pack(side=tk.RIGHT, padx=(8, 0))
+        monitoring_label.bind("<Button-1>", lambda _e: self._open_model_center_monitoring())
 
     def refresh_matches(self) -> None:
         self._run_background(
@@ -610,6 +715,48 @@ class FootballPredictionApp:
     def open_user_center(self) -> None:
         _app_open_user_center_final(self)
 
+    def open_model_center(self) -> None:
+        """打开模型中心窗口"""
+        from .model_center import ModelCenterWindow
+
+        if self.model_center_window is None:
+            self.model_center_window = ModelCenterWindow(self.root, self)
+            self._model_center_obj = self.model_center_window
+
+        self.model_center_window.open()
+
+    def open_analysis_center(self) -> None:
+        """打开分析中心窗口 - Phase 3实现"""
+        from .analysis_center import AnalysisCenterWindow
+
+        if self.analysis_center_window is None:
+            self.analysis_center_window = AnalysisCenterWindow(self.root, self)
+
+        self.analysis_center_window.open()
+
+    def open_c1_center(self) -> None:
+        """打开C1管理中心窗口 - Phase 4实现"""
+        from .c1_center import C1CenterWindow
+
+        if self.c1_center_window is None:
+            self.c1_center_window = C1CenterWindow(self.root, self)
+
+        self.c1_center_window.open()
+
+    def _show_about(self) -> None:
+        """显示关于对话框"""
+        messagebox.showinfo(
+            "关于 V24 足球预测 APP",
+            "V24 足球预测 APP | 第四阶段\n\n"
+            "Ensemble(市场+ELO+Poisson+XGBv0)\n"
+            "+ 多维指标 + 赛果结算闭环\n\n"
+            "UI重构 Phase 1: 主窗口简化\n"
+            "- 添加菜单栏导航\n"
+            "- 简化工具栏按钮\n"
+            "- 优化状态栏显示\n\n"
+            "版本: 2026-05-27"
+        )
+
     def _close_user_center(self) -> None:
         if self.user_center_window is not None and self.user_center_window.winfo_exists():
             self.user_center_window.destroy()
@@ -734,16 +881,82 @@ class FootballPredictionApp:
         self._auto_settle_running = True
         self._run_auto_settle(show_popup=False)
 
+    # ========== 模型监控状态栏 ==========
+
+    def _schedule_monitoring_refresh(self) -> None:
+        """启动监控状态栏定时刷新（每 30 秒）"""
+        self._refresh_monitoring_indicator()
+        self._monitoring_after_id = self.root.after(30_000, self._monitoring_tick)
+
+    def _monitoring_tick(self) -> None:
+        self._monitoring_after_id = None
+        self._refresh_monitoring_indicator()
+        self._monitoring_after_id = self.root.after(30_000, self._monitoring_tick)
+
+    def _refresh_monitoring_indicator(self) -> None:
+        """刷新 footer 监控指示灯文字"""
+        try:
+            from .model_monitoring import get_monitor
+            monitor = get_monitor()
+            system = monitor.get_system_metrics()
+            alerts = monitor.get_alerts()
+
+            critical = sum(1 for a in alerts if a["level"] == "critical")
+            warning  = sum(1 for a in alerts if a["level"] == "warning")
+
+            if system.total_predictions == 0:
+                icon = "⬜"
+                tip  = "模型监控"
+            elif critical:
+                icon = "🔴"
+                tip  = f"模型监控 {critical}严重"
+            elif warning:
+                icon = "🟡"
+                tip  = f"模型监控 {warning}警告"
+            else:
+                icon = "🟢"
+                tip  = f"模型监控 {system.total_predictions}次"
+
+            self.monitoring_var.set(f"{icon} {tip}")
+        except Exception:
+            self.monitoring_var.set("⬜ 模型监控")
+
+    def _open_model_center_monitoring(self) -> None:
+        """点击监控指示灯 → 打开模型中心并切换到监控标签"""
+        try:
+            center = getattr(self, "_model_center_obj", None)
+            if center is None:
+                from .model_center import ModelCenterWindow
+                center = ModelCenterWindow(self.root, self)
+                self._model_center_obj = center
+            center.open(focus_tab="实时监控")
+        except Exception:
+            pass
+
     def _on_close(self) -> None:
         self._close_user_center()
         _app_close_ops_daily_window(self)
         _app_close_ops_trend_window(self)
+        # Phase 6: 关闭三个功能中心窗口
+        for attr in ("model_center_window", "analysis_center_window", "c1_center_window"):
+            center = getattr(self, attr, None)
+            if center is not None and hasattr(center, "close"):
+                try:
+                    center.close()
+                except Exception:
+                    pass
         if self._auto_settle_after_id is not None:
             try:
                 self.root.after_cancel(self._auto_settle_after_id)
             except Exception:
                 pass
             self._auto_settle_after_id = None
+        if self._monitoring_after_id is not None:
+            try:
+                self.root.after_cancel(self._monitoring_after_id)
+            except Exception:
+                pass
+            self._monitoring_after_id = None
         self.root.destroy()
 
     def _xgb_status_text(self) -> str:
@@ -1034,7 +1247,10 @@ class FootballPredictionApp:
                 button_var.set(f"{action} {count}")
         if visible_count is None:
             visible_count = total
-        self.c1_stats_var.set(f"显示 {visible_count}/{total}")
+        # Phase 1重构: 紧凑的C1统计显示
+        self.c1_stats_var.set(
+            f"C1: 正式{formal_count} 待处理{pending_count} 阻断{counts['阻断']} | 显示{visible_count}/{total}"
+        )
         self.c1_mode_status_var.set(
             build_c1_mode_status_text(
                 runtime_mode=self.c1_runtime_mode,
@@ -2440,24 +2656,30 @@ def _app_open_user_center_final(self) -> None:
         "open_c1_release_allowlist": self.open_c1_release_allowlist,
         "open_c1_workbench": self.open_c1_workbench,
     }
+    # Phase 5: 功能中心快速入口
+    center_actions = {
+        "model_center":    self.open_model_center,
+        "analysis_center": self.open_analysis_center,
+        "c1_center":       self.open_c1_center,
+    }
     self._close_user_center()
     container = self.inline_actions_container
     container.pack(fill=tk.X, pady=(8, 2), before=self.details)
 
-    for section_title, buttons in build_user_center_sections(actions):
-        section = ttk.LabelFrame(container, text=section_title, padding=8)
-        section.pack(fill=tk.X, pady=(0, 8))
-        for index, (button_text, callback) in enumerate(buttons):
-            button = ttk.Button(section, text=button_text, command=callback)
-            button.grid(row=index // 6, column=index % 6, sticky=tk.W, padx=(0, 8), pady=(0, 6))
-
-    ttk.Button(container, text="收起用户中心", command=self._close_user_center).pack(anchor=tk.E, pady=(0, 6))
+    build_user_center_panel(
+        container,
+        actions=actions,
+        center_actions=center_actions,
+        on_close=self._close_user_center,
+        match_count=len(self.matches),
+        analyzed_count=len(self.predictions),
+    )
     self._write_details(
         "用户中心\n\n"
         + f"- 当前赛事: {len(self.matches)} 场\n"
         + f"- 已分析: {len(self.predictions)} 场\n"
-        + "- 功能入口已切换为主界面内嵌面板，不再打开独立窗口。\n"
-        + "- 点击上方按钮即可执行分析、结算、训练、校准、回测和 C1 对照任务。",
+        + "- 顶部三个按钮可直接打开模型中心、分析中心、C1管理中心。\n"
+        + "- 下方按钮已合并为三组，点击即可执行对应任务。",
         clear_actions=False,
     )
     self.status_var.set("已打开用户中心")

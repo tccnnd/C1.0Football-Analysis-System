@@ -462,3 +462,36 @@ class MatchFetcherTitan:
             "away_goals": away_goals,
             "is_finished": is_finished,
         }
+
+    def get_results_batch(self, schedule_ids: list[str], max_workers: int = 8) -> dict[str, dict | None]:
+        """
+        批量并行回查赛果。
+
+        Args:
+            schedule_ids: 要查询的 schedule_id 列表
+            max_workers: 并行线程数（默认 8）
+
+        Returns:
+            {schedule_id: result_dict} 映射
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        if not schedule_ids:
+            return {}
+
+        results: dict[str, dict | None] = {}
+        workers = min(max_workers, len(schedule_ids))
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(self.get_result_by_schedule_id, sid): sid
+                for sid in schedule_ids
+            }
+            for future in as_completed(futures):
+                sid = futures[future]
+                try:
+                    results[sid] = future.result()
+                except Exception:
+                    results[sid] = None
+
+        return results

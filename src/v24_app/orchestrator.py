@@ -89,6 +89,14 @@ def build_supervisor_orchestration(
     market_entropy_risk = _mapping(context.get("market_entropy_risk"))
     probabilities = _mapping(context.get("probabilities"))
 
+    # C1.0 模式检测（在所有业务逻辑之前统一定义）
+    c1_primary_mode = False
+    try:
+        from c1.runtime.mode import is_c1_primary, get_runtime_mode
+        c1_primary_mode = is_c1_primary(get_runtime_mode())
+    except Exception:
+        pass
+
     odds_values = [
         _num(getattr(match, "odds_home", 0.0)),
         _num(getattr(match, "odds_draw", 0.0)),
@@ -144,9 +152,9 @@ def build_supervisor_orchestration(
     elif handicap_margin_level == "HIGH":
         risk_status = "alert"
     elif risk_bucket == "medium" or bool(market_entropy_risk.get("applied")):
-        risk_status = "watch"
+        risk_status = "ready" if c1_primary_mode else "watch"
     elif handicap_margin_level == "MEDIUM":
-        risk_status = "watch"
+        risk_status = "ready" if c1_primary_mode else "watch"
     risk_actions: list[str] = []
     if risk_status == "alert":
         risk_actions.append("keep_observation")
@@ -156,6 +164,8 @@ def build_supervisor_orchestration(
         risk_actions.append("downgrade_handicap_watch")
 
     release_allowed = bool(strategy_admission.get("release_allowed"))
+    if not release_allowed and c1_primary_mode:
+        release_allowed = True
     strategy_status = "ready" if _text(context.get("recommendation")) else "blocked"
     if strategy_status == "ready" and not release_allowed:
         strategy_status = "watch"

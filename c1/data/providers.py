@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 from urllib.parse import parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
@@ -962,6 +962,7 @@ class TitanDetailAvailabilityProvider(AvailabilityProvider):
         max_matches: int = 80,
         request_delay_ms: int = 0,
         headers: Mapping[str, Any] | None = None,
+        match_loader: "Callable[[], list[Any]] | None" = None,
     ) -> None:
         self.base_url = str(base_url or "https://live.titan007.com").rstrip("/")
         self.timeout_seconds = max(3, int(timeout_seconds))
@@ -974,6 +975,9 @@ class TitanDetailAvailabilityProvider(AvailabilityProvider):
             **{str(key): str(value) for key, value in dict(headers or {}).items()},
         }
         self._last_load_meta: dict[str, Any] = {}
+        # 依赖注入：上层（V24 集成）可注入今日比赛加载器，避免 C1 → V24 反向耦合。
+        # 未注入时回退到延迟导入（仅作向后兼容的降级路径）。
+        self._match_loader = match_loader
         if provider_name:
             self.provider_name = provider_name
 
@@ -995,6 +999,14 @@ class TitanDetailAvailabilityProvider(AvailabilityProvider):
         return raw.decode("utf-8", errors="ignore")
 
     def _load_titan_matches(self) -> list[Any]:
+        # 优先使用注入的加载器（保持分层方向：上层注入 V24 适配器）。
+        if self._match_loader is not None:
+            try:
+                return list(self._match_loader())
+            except Exception:
+                return []
+        # 向后兼容降级：未注入时延迟导入 V24 抓取器。
+        # 注意：此路径违反 C1 → V24 分层方向，仅在未注入加载器时作为 fallback 保留。
         try:
             from v24_app.data_sources.match_fetcher_titan import MatchFetcherTitan
         except Exception:

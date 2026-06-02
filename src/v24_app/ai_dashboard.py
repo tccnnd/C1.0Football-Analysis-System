@@ -4367,6 +4367,13 @@ class SmartMatchDashboard:
         self.show_all_matches = False
         self.admission_filter = "all"
         self.admission_filter_buttons: dict[str, tk.Button] = {}
+        # c1_primary 模式下默认展开全部比赛
+        try:
+            from c1.runtime.mode import is_c1_primary, get_runtime_mode
+            if is_c1_primary(get_runtime_mode()):
+                self.show_all_matches = True
+        except Exception:
+            pass
         self.nav_items: list[tuple[tk.Frame, list[tk.Label]]] = []
         settings = _load_dashboard_settings()
         self.auto_refresh_enabled = tk.BooleanVar(value=bool(settings.get("auto_refresh_enabled", False)))
@@ -5491,7 +5498,19 @@ class SmartMatchDashboard:
         for item in settlements:
             if not isinstance(item, dict):
                 continue
-            if "is_correct" in item:
+            if "is_correct" not in item:
+                continue
+            # 只统计置信度 >= 50% 的场次（有效推荐）
+            conf = float(item.get("confidence", 0) or 0)
+            if conf < 0.50:
+                continue
+            total += 1
+            hits += 1 if item.get("is_correct") else 0
+        if total == 0:
+            # 降级：如果没有高置信度结算，统计全部
+            for item in settlements:
+                if not isinstance(item, dict) or "is_correct" not in item:
+                    continue
                 total += 1
                 hits += 1 if item.get("is_correct") else 0
         if total == 0:
@@ -14752,6 +14771,7 @@ class SmartMatchDashboard:
             ("\u5f85\u56de\u6536", str(loop.get("pending_count", 0)), YELLOW if int(loop.get("pending_count", 0) or 0) else GREEN),
             ("\u7f3a\u5feb\u7167", str(loop.get("missing_snapshot_count", 0)), RED if int(loop.get("missing_snapshot_count", 0) or 0) else GREEN),
             ("\u8d85\u671f", str(loop.get("stale_pending_count", 0)), RED if int(loop.get("stale_pending_count", 0) or 0) else GREEN),
+            ("\u544a\u8b66", str(loop.get("alert_count", 0)), RED if int(loop.get("alert_count", 0) or 0) else GREEN),
             ("\u547d\u4e2d", str(loop.get("hit_rate_text") or "-"), GREEN if float(loop.get("hit_rate") or 0) >= 0.6 else YELLOW),
         ]:
             self._detail_metric(metric_bar, label, str(value), color)
@@ -14762,6 +14782,13 @@ class SmartMatchDashboard:
             bg=BG,
             fg=MUTED,
             font=("Microsoft YaHei UI", 10),
+        ).pack(anchor=tk.W, pady=(0, 10))
+        tk.Label(
+            container,
+            text=f"\u4e0b\u4e00\u6b65: {loop.get('action_summary_text') or '-'}",
+            bg=BG,
+            fg=TEXT,
+            font=("Microsoft YaHei UI", 10, "bold"),
         ).pack(anchor=tk.W, pady=(0, 10))
 
         table_wrap = tk.Frame(container, bg=BG)

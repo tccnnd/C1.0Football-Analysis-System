@@ -289,7 +289,39 @@ class BasePlayXGBoostModel:
         }
 
     def predict_from_features(self, feature_map: dict[str, float]) -> dict[str, Any]:
-        return self._predict_from_features(feature_map)
+        import time
+        start_time = time.perf_counter()
+        
+        try:
+            result = self._predict_from_features(feature_map)
+            
+            # 记录预测指标
+            latency_ms = (time.perf_counter() - start_time) * 1000
+            confidence = result.get("confidence", 0.0)
+            
+            try:
+                from ..model_monitoring import record_prediction
+                record_prediction(
+                    model_name=self.model_slug,
+                    latency_ms=latency_ms,
+                    prediction=result.get("probabilities", {}),
+                    confidence=confidence,
+                    features_count=len(feature_map),
+                    model_version="v1",
+                )
+            except Exception:
+                pass  # 监控失败不影响预测
+            
+            return result
+        
+        except Exception as e:
+            # 记录错误
+            try:
+                from ..model_monitoring import record_error
+                record_error(self.model_slug, str(e))
+            except Exception:
+                pass
+            raise
 
     def get_training_status(self) -> dict[str, Any]:
         sample_count = self._load_sample_count()
