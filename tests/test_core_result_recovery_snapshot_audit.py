@@ -19,6 +19,22 @@ from v24_app import core
 
 
 class CoreResultRecoverySnapshotAuditTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # 隔离持久化的 snapshot_result_cache.json：真实运行会向其写入 schedule_id，
+        # 若测试 schedule_id 命中该缓存则被计为 cache hit，导致 snapshot_checked 偏差。
+        # 将 PROJECT_DIR 指向临时目录，确保测试不读取真实状态文件。
+        import tempfile
+
+        self._tmpdir = tempfile.TemporaryDirectory()
+        tmp_path = Path(self._tmpdir.name)
+        (tmp_path / "data" / "state").mkdir(parents=True, exist_ok=True)
+        self._project_dir_patch = patch.object(core, "PROJECT_DIR", tmp_path)
+        self._project_dir_patch.start()
+
+    def tearDown(self) -> None:
+        self._project_dir_patch.stop()
+        self._tmpdir.cleanup()
+
     def _snapshot(
         self,
         *,
