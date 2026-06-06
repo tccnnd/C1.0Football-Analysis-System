@@ -481,9 +481,30 @@ def main():
     parser.add_argument("--no-foot", action="store_true",            help="禁用 foot 信号增强")
     parser.add_argument("--leagues", type=str, default="",           help="联赛过滤（逗号分隔，如 英超,西甲,法甲）")
     parser.add_argument("--foot-native-only", action="store_true",   help="仅取 foot 原生数据（排除 fdu_ 导入），用于治理信号验证")
+    parser.add_argument(
+        "--acceptance", action="store_true",
+        help="验收模式：强制 signal-bearing 采样（排除 fdu_），并对 foot 信号覆盖率与治理门槛做验收判定。"
+             " 用于 c1_primary 切换前的正式 shadow run。",
+    )
+    parser.add_argument(
+        "--min-foot-coverage", type=float, default=0.60,
+        help="验收模式下要求的最低 foot 信号覆盖率（默认 0.60）。低于此值则判定样本不足以评估治理。",
+    )
     args = parser.parse_args()
 
     enable_foot = not args.no_foot
+    # 验收模式：治理指标只有在 signal-bearing 数据上才有意义。
+    # 历史教训：默认 DESC 采样会命中 2021-2025 的 fdu_ 导入（无 foot 信号表），
+    # 导致 0 DOWNGRADE / separation 塌陷，得出错误的"未达标"结论。
+    # 因此验收模式强制排除 fdu_，并禁止关闭 foot 信号。
+    foot_native_only = args.foot_native_only or args.acceptance
+    if args.acceptance:
+        if args.no_foot:
+            print("  ❌ 验收模式不能与 --no-foot 同用：治理验收必须启用 foot 信号。")
+            sys.exit(2)
+        enable_foot = True
+        if args.limit < 1000:
+            print(f"  ⚠️ 验收模式建议 --limit >= 1000（当前 {args.limit}），样本过小会使分离度不稳定。")
     league_filter = [l.strip() for l in args.leagues.split(",") if l.strip()] if args.leagues else []
 
     print(f"\n{'='*60}")
@@ -496,7 +517,7 @@ def main():
     # 1. 取历史数据
     print("1. 从 foot MySQL 取历史比赛...")
     try:
-        rows = fetch_history_matches(args.limit, args.date, league_filter, foot_native_only=args.foot_native_only)
+        rows = fetch_history_matches(args.limit, args.date, league_filter, foot_native_only=foot_native_only)
     except Exception as e:
         print(f"  ❌ 数据库连接失败: {e}")
         print("  请确认 MySQL 服务正在运行（MySQL84 服务）")
@@ -590,9 +611,54 @@ def main():
         print(f"    confirmed: {fs['confirmed_count']}  weak: {fs['weak_count']}  critical: {fs['critical_count']}")
         print(f"    欧亚冲突: {fs['conflict_count']}")
     print()
+
+    # ── 验收判定（仅 --acceptance 模式）──────────────────────────────────────
+    # 固化样本约束：治理/准确率验收必须在 signal-bearing 数据上进行，
+    # 且 foot 信号覆盖率必须足够，否则判定为"样本不足，结论无效"。
+    acceptance_failed = False
+    if args.acceptance:
+        print(f"{'='*60}")
+        print(f"  验收判定 (c1_primary 切换前置门槛)")
+        print(f"{'='*60}")
+        coverage = 0.0
+        valid_n = max(report.get("valid", 0), 1)
+        if report.get("foot_stats"):
+            coverage = report["foot_stats"].get("available", 0) / valid_n
+        cov_ok = coverage >= args.min_foot_coverage
+        print(f"  [1] foot 信号覆盖率: {coverage:.1%} (要求 >= {args.min_foot_coverage:.0%})  "
+              f"{'PASS' if cov_ok else 'FAIL（样本不足以评估治理）'}")
+
+        sep_val = report.get("governance_separation")
+        sep_ok = sep_val is not None and sep_val >= 0.05
+        sep_str = "N/A" if sep_val is None else f"{sep_val:+.1%}"
+        print(f"  [2] 治理分离度: {sep_str} (要求 >= 5%)  {'PASS' if sep_ok else 'FAIL'}")
+
+        c1_acc = report.get("c1_accuracy")
+        v24_acc = report.get("v24_accuracy")
+        acc_ok = c1_acc is not None and v24_acc is not None and c1_acc >= v24_acc
+        print(f"  [3] 准确率: C1={'N/A' if c1_acc is None else f'{c1_acc:.1%}'} "
+              f"vs V24={'N/A' if v24_acc is None else f'{v24_acc:.1%}'} (要求 C1 >= V24)  "
+              f"{'PASS' if acc_ok else 'FAIL（accuracy 硬阻断）'}")
+
+        all_ok = cov_ok and sep_ok and acc_ok
+        print()
+        if not cov_ok:
+            print("  结论: 样本不满足覆盖率要求 —— 本次结果不可用于验收。")
+            acceptance_failed = True
+        elif all_ok:
+            print("  结论: 全部前置门槛达标。注意：是否切换 c1_primary 仍由人工决策，")
+            print("        本脚本不修改 runtime_mode.yaml。")
+        else:
+            print("  结论: 验收未通过，保持 formal_list_default。")
+            acceptance_failed = True
+        print()
+
     print(f"  报告已保存:")
     print(f"    Markdown: {md_path}")
     print(f"    JSON    : {json_path}")
+
+    if acceptance_failed:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

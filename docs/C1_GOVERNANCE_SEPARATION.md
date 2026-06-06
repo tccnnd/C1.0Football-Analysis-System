@@ -69,8 +69,31 @@ python shadow_run_history.py --limit 2000 --foot-native-only
 python shadow_run_history.py --limit 2000
 ```
 
+## 验收模式（固化采样约束）
+
+为防止再次用 signal-less 的 `fdu_` 样本评估治理，新增 `--acceptance` 模式。
+该模式把样本约束**固化在脚本里**，而不是依赖运行者记得加过滤：
+
+- 强制 `foot_native_only`（排除 `fdu_`），并禁止 `--no-foot`（否则 exit 2）。
+- 校验 foot 信号覆盖率 >= `--min-foot-coverage`（默认 0.60），不足则判定"样本无效"。
+- 逐项判定三道前置门槛并输出 PASS/FAIL：
+  1. foot 信号覆盖率
+  2. 治理分离度 >= 5%
+  3. `accuracy_c1 >= accuracy_v24`
+- 任一门槛未过或样本无效时 **exit 1**，可用于 CI / 发布闸门。
+- **脚本永不修改 `runtime_mode.yaml`**——是否切换 `c1_primary` 仍是人工决策。
+
+```powershell
+# c1_primary 切换前的正式验收 shadow run
+python shadow_run_history.py --acceptance --limit 1000
+```
+
+> 注意：单次 `--acceptance` 通过不等于可以切换。accuracy 门槛对样本敏感
+> （foot 原生数据上 C1 ≈ V24，`fdu_` 数据上 C1 略低），需多次/多窗口稳定达标，
+> 且最终切换由人工决策。
+
 ## 后续建议（accuracy re-fit 阶段处理，本次不做）
-- 正式验收 shadow run 必须使用带信号的数据（`--foot-native-only` 或等价过滤），
-  否则治理指标无意义。建议把这一约束写进验收脚本。
+- 正式验收 shadow run 必须使用 `--acceptance`（已强制 signal-bearing 采样），
+  否则治理指标无意义。
 - `t_analy_result` 为空使 foot 模型共识信号失效。若要启用 `foot_model_agreement`
   的 confirmed/critical 路径，需要重新填充该表或改用其它模型输出来源。
