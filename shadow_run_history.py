@@ -44,8 +44,12 @@ def _normalize_side(v):
 
 # ── 从 foot MySQL 取历史比赛 ──────────────────────────────────────────────────
 
-def fetch_history_matches(limit: int, since_date: str, league_filter: list[str] = None) -> list[dict]:
-    """从 foot MySQL 取有完整赔率数据的历史比赛"""
+def fetch_history_matches(limit: int, since_date: str, league_filter: list[str] = None, *, foot_native_only: bool = False) -> list[dict]:
+    """从 foot MySQL 取有完整赔率数据的历史比赛
+
+    foot_native_only=True 时仅取 foot 原生数据（排除 football-data.co.uk 导入的 fdu_ 行），
+    因为只有 foot 原生数据带有亚赔明细等可驱动治理冲突的信号。
+    """
     import os
     import pymysql, pymysql.cursors
     conn = pymysql.connect(
@@ -80,6 +84,8 @@ def fetch_history_matches(limit: int, since_date: str, league_filter: list[str] 
           AND eh.Ep3 > 1.0 AND eh.Ep0 > 1.0
     """
     args = [since_date]
+    if foot_native_only:
+        sql += " AND mh.Id NOT LIKE 'fdu_%%'"
     if league_filter:
         placeholders = ",".join(["%s"] * len(league_filter))
         sql += f" AND l.Name IN ({placeholders})"
@@ -324,6 +330,24 @@ def build_report(results: list[dict], enable_foot: bool) -> dict:
             "conflict_accuracy": acc(foot_conflict),
         }
 
+    # 治理分离度：APPROVE 组准确率 - DOWNGRADE 组准确率（验收门槛 >= 0.05）
+    approve_acc = None
+    downgrade_acc = None
+    block_acc = None
+    approve_n = acc_by_action.get("APPROVE", {}).get("n", 0)
+    downgrade_n = acc_by_action.get("DOWNGRADE", {}).get("n", 0)
+    block_n = acc_by_action.get("BLOCK", {}).get("n", 0)
+    if approve_n:
+        approve_acc = acc_by_action["APPROVE"]["c1"] / approve_n
+    if downgrade_n:
+        downgrade_acc = acc_by_action["DOWNGRADE"]["c1"] / downgrade_n
+    if block_n:
+        block_acc = acc_by_action["BLOCK"]["c1"] / block_n
+    governance_separation = None
+    if approve_acc is not None and downgrade_acc is not None:
+        governance_separation = approve_acc - downgrade_acc
+    approve_rate = (approve_n / n_known) if n_known else None
+
     return {
         "total": len(results),
         "valid": len(valid),
@@ -334,6 +358,14 @@ def build_report(results: list[dict], enable_foot: bool) -> dict:
         "diverged_count": len(diverged),
         "v24_accuracy": round(v24_hits / n_known, 4) if n_known else None,
         "c1_accuracy":  round(c1_hits  / n_known, 4) if n_known else None,
+        "governance_separation": round(governance_separation, 4) if governance_separation is not None else None,
+        "approve_accuracy": round(approve_acc, 4) if approve_acc is not None else None,
+        "downgrade_accuracy": round(downgrade_acc, 4) if downgrade_acc is not None else None,
+        "block_accuracy": round(block_acc, 4) if block_acc is not None else None,
+        "approve_rate": round(approve_rate, 4) if approve_rate is not None else None,
+        "approve_n": approve_n,
+        "downgrade_n": downgrade_n,
+        "block_n": block_n,
         "accuracy_by_governance": {
             k: {
                 "v24": round(v["v24"]/v["n"], 4) if v["n"] else None,
@@ -448,6 +480,7 @@ def main():
     parser.add_argument("--date",    type=str, default="2019-01-01", help="起始日期（默认 2019-01-01）")
     parser.add_argument("--no-foot", action="store_true",            help="禁用 foot 信号增强")
     parser.add_argument("--leagues", type=str, default="",           help="联赛过滤（逗号分隔，如 英超,西甲,法甲）")
+    parser.add_argument("--foot-native-only", action="store_true",   help="仅取 foot 原生数据（排除 fdu_ 导入），用于治理信号验证")
     args = parser.parse_args()
 
     enable_foot = not args.no_foot
@@ -463,7 +496,7 @@ def main():
     # 1. 取历史数据
     print("1. 从 foot MySQL 取历史比赛...")
     try:
-        rows = fetch_history_matches(args.limit, args.date, league_filter)
+        rows = fetch_history_matches(args.limit, args.date, league_filter, foot_native_only=args.foot_native_only)
     except Exception as e:
         print(f"  ❌ 数据库连接失败: {e}")
         print("  请确认 MySQL 服务正在运行（MySQL84 服务）")
@@ -530,6 +563,21 @@ def main():
         print(f"  准确率（{report['known_outcome']} 场有结果）:")
         print(f"    V24 : {v24_acc:.1%}")
         print(f"    C1.0: {c1_acc:.1%}  ({delta:+.1%})")
+    print()
+    # 治理分离度门槛报告
+    sep = report.get("governance_separation")
+    appr_acc = report.get("approve_accuracy")
+    down_acc = report.get("downgrade_accuracy")
+    appr_rate = report.get("approve_rate")
+    print(f"  治理分离度 (APPROVE acc - DOWNGRADE acc, 门槛 >= 5%):")
+    print(f"    APPROVE  : acc={'N/A' if appr_acc is None else f'{appr_acc:.1%}'}  n={report.get('approve_n')}  rate={'N/A' if appr_rate is None else f'{appr_rate:.1%}'}")
+    print(f"    DOWNGRADE: acc={'N/A' if down_acc is None else f'{down_acc:.1%}'}  n={report.get('downgrade_n')}")
+    print(f"    BLOCK    : n={report.get('block_n')}")
+    if sep is not None:
+        flag = "达标" if sep >= 0.05 else "未达标"
+        print(f"    separation = {sep:+.1%}  [{flag}]")
+    else:
+        print(f"    separation = N/A (APPROVE 或 DOWNGRADE 组为空)")
     print()
     print(f"  Top Reason Codes:")
     for code, cnt in list(report["top_reason_codes"].items())[:5]:
