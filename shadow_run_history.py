@@ -44,18 +44,22 @@ def _normalize_side(v):
 
 # ── 从 foot MySQL 取历史比赛 ──────────────────────────────────────────────────
 
-def fetch_history_matches(limit: int, since_date: str, league_filter: list[str] = None, *, foot_native_only: bool = False) -> list[dict]:
+def fetch_history_matches(limit: int, since_date: str, league_filter: list[str] = None, *, foot_native_only: bool = False, until_date: str | None = None) -> list[dict]:
     """从 foot MySQL 取有完整赔率数据的历史比赛
 
     foot_native_only=True 时仅取 foot 原生数据（排除 football-data.co.uk 导入的 fdu_ 行），
     因为只有 foot 原生数据带有亚赔明细等可驱动治理冲突的信号。
+    until_date 提供时作为 MatchDate 的上界（< until_date），用于按时间窗口采样。
     """
     import os
     import pymysql, pymysql.cursors
+    password = os.environ.get("FOOT_MYSQL_PASSWORD")
+    if not password:
+        raise RuntimeError("FOOT_MYSQL_PASSWORD is required for foot MySQL shadow runs")
     conn = pymysql.connect(
         host="127.0.0.1", port=3306,
         user="root",
-        password=os.environ.get("FOOT_MYSQL_PASSWORD", "Meta.123"),
+        password=password,
         database="foot",
         charset="utf8mb4", cursorclass=pymysql.cursors.DictCursor,
         connect_timeout=10,
@@ -84,6 +88,9 @@ def fetch_history_matches(limit: int, since_date: str, league_filter: list[str] 
           AND eh.Ep3 > 1.0 AND eh.Ep0 > 1.0
     """
     args = [since_date]
+    if until_date:
+        sql += " AND mh.MatchDate < %s"
+        args.append(until_date)
     if foot_native_only:
         sql += " AND mh.Id NOT LIKE 'fdu_%%'"
     if league_filter:
@@ -478,6 +485,7 @@ def main():
     parser = argparse.ArgumentParser(description="历史数据 Shadow Run")
     parser.add_argument("--limit",   type=int, default=50,           help="取样场次数（默认 50）")
     parser.add_argument("--date",    type=str, default="2019-01-01", help="起始日期（默认 2019-01-01）")
+    parser.add_argument("--until",   type=str, default="",           help="截止日期（不含），用于按时间窗口采样")
     parser.add_argument("--no-foot", action="store_true",            help="禁用 foot 信号增强")
     parser.add_argument("--leagues", type=str, default="",           help="联赛过滤（逗号分隔，如 英超,西甲,法甲）")
     parser.add_argument("--foot-native-only", action="store_true",   help="仅取 foot 原生数据（排除 fdu_ 导入），用于治理信号验证")
@@ -517,7 +525,7 @@ def main():
     # 1. 取历史数据
     print("1. 从 foot MySQL 取历史比赛...")
     try:
-        rows = fetch_history_matches(args.limit, args.date, league_filter, foot_native_only=foot_native_only)
+        rows = fetch_history_matches(args.limit, args.date, league_filter, foot_native_only=foot_native_only, until_date=(args.until or None))
     except Exception as e:
         print(f"  ❌ 数据库连接失败: {e}")
         print("  请确认 MySQL 服务正在运行（MySQL84 服务）")
