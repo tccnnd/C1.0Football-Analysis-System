@@ -1,0 +1,4 @@
+-r requirements.txt
+
+# Test runner used by the repository pytest.ini entry point.
+pytest>=8.0

@@ -1,0 +1,19 @@
+# Runtime dependencies for the C1/V24 football analysis system.
+#
+# Keep this file conservative: it should cover local app execution, C1 shadow
+# runs, model inference, and data bridge scripts. Developer-only tools belong in
+# requirements-dev.txt.
+beautifulsoup4>=4.12
+lightgbm>=4.0
+lxml>=5.0
+matplotlib>=3.8
+numpy>=1.26
+pandas>=2.0
+PyMySQL>=1.1
+PyYAML>=6.0
+requests>=2.31
+scikit-learn>=1.3
+scipy>=1.11
+tqdm>=4.66
+understatapi>=0.6
+xgboost>=2.0
