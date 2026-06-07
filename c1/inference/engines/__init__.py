@@ -6,6 +6,7 @@ C1.0 独立推理引擎
 from .elo import EloRatingEngine, EloSnapshot, EloUpdate
 from .poisson import PoissonScoreEngine, PoissonOutcome
 from .dixon_coles import DixonColesEngine, dixon_coles_correction
+from .market_odds_specialist import MARKET_IMPLIED_FEATURES, MarketOddsSpecialist, MarketOddsSpecialistResult
 from .xgboost_engine import XGBoostInferenceEngine, FEATURE_ORDER as XGB_FEATURE_ORDER
 
 __all__ = [
@@ -16,6 +17,9 @@ __all__ = [
     "PoissonOutcome",
     "DixonColesEngine",
     "dixon_coles_correction",
+    "MARKET_IMPLIED_FEATURES",
+    "MarketOddsSpecialist",
+    "MarketOddsSpecialistResult",
     "XGBoostInferenceEngine",
     "XGB_FEATURE_ORDER",
 ]
