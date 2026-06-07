@@ -87,6 +87,11 @@ def run_cell(
     c1 = report.get("c1_accuracy")
     v24 = report.get("v24_accuracy")
     delta = (c1 - v24) if (c1 is not None and v24 is not None) else None
+    drift = report.get("calibration_drift", {}) if isinstance(report.get("calibration_drift"), dict) else {}
+    drift_models = drift.get("models", {}) if isinstance(drift.get("models"), dict) else {}
+    drift_comparison = drift.get("comparison", {}) if isinstance(drift.get("comparison"), dict) else {}
+    c1_calibration = drift_models.get("c1", {}) if isinstance(drift_models.get("c1"), dict) else {}
+    v24_calibration = drift_models.get("v24", {}) if isinstance(drift_models.get("v24"), dict) else {}
 
     return {
         "window": label,
@@ -106,6 +111,15 @@ def run_cell(
         "downgrade_n": report.get("downgrade_n"),
         "block_n": report.get("block_n"),
         "governance_separation": report.get("governance_separation"),
+        "c1_ece": c1_calibration.get("ece"),
+        "v24_ece": v24_calibration.get("ece"),
+        "ece_delta": drift_comparison.get("ece_delta"),
+        "c1_brier": c1_calibration.get("brier"),
+        "v24_brier": v24_calibration.get("brier"),
+        "brier_delta": drift_comparison.get("brier_delta"),
+        "c1_logloss": c1_calibration.get("logloss"),
+        "v24_logloss": v24_calibration.get("logloss"),
+        "logloss_delta": drift_comparison.get("logloss_delta"),
         "elapsed_s": round(time.time() - t0, 1),
     }
 
@@ -196,19 +210,22 @@ def main():
         f"- sample sizes: {sizes}",
         "- data: foot-native only (signal-bearing); fdu_ excluded",
         "",
-        "| window | limit | known | C1 acc | V24 acc | delta | C1>=V24 | foot cov | approve rate | separation |",
-        "|--------|-------|-------|--------|---------|-------|---------|----------|--------------|------------|",
+        "| window | limit | known | C1 acc | V24 acc | delta | C1>=V24 | C1 ECE | V24 ECE | Brier Δ | Logloss Δ | foot cov | approve rate | separation |",
+        "|--------|-------|-------|--------|---------|-------|---------|--------|---------|---------|-----------|----------|--------------|------------|",
     ]
     for c in cells:
         if "error" in c:
-            lines.append(f"| {c['window']} | {c['limit']} | - | ERROR | - | - | - | - | - | {c.get('error','')[:30]} |")
+            lines.append(
+                f"| {c['window']} | {c['limit']} | - | ERROR | - | - | - | - | - | - | - | - | - | {c.get('error','')[:30]} |"
+            )
             continue
         def pct(v):
             return f"{v:.1%}" if isinstance(v, (int, float)) else "N/A"
         lines.append(
             f"| {c['window']} | {c['limit']} | {c.get('known_outcome')} | {pct(c['c1_accuracy'])} | "
             f"{pct(c['v24_accuracy'])} | {('%+.1f%%' % (c['delta']*100)) if c['delta'] is not None else 'N/A'} | "
-            f"{'YES' if c['c1_geq_v24'] else 'no'} | {pct(c['foot_coverage'])} | "
+            f"{'YES' if c['c1_geq_v24'] else 'no'} | {pct(c.get('c1_ece'))} | {pct(c.get('v24_ece'))} | "
+            f"{c.get('brier_delta', 'N/A')} | {c.get('logloss_delta', 'N/A')} | {pct(c['foot_coverage'])} | "
             f"{pct(c['approve_rate']) if c['approve_rate'] is not None else 'N/A'} | "
             f"{('%+.1f%%' % (c['governance_separation']*100)) if c['governance_separation'] is not None else 'N/A'} |"
         )

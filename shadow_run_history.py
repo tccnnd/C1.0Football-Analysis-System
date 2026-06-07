@@ -25,6 +25,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
+from c1.audit.calibration_drift import build_calibration_drift_report, normalize_probabilities
+
 
 # ── 工具函数 ──────────────────────────────────────────────────────────────────
 
@@ -231,7 +233,9 @@ def run_one_match(
 
     # 提取结果
     v24_side = _normalize_side(v24_pred.get("recommendation", ""))
+    v24_probabilities = normalize_probabilities(v24_pred.get("probabilities")) or {}
     c1_side = str(shadow.inference_result.predicted_side)
+    c1_probabilities = normalize_probabilities(shadow.inference_result.raw_probabilities) or {}
     gov_action = str(shadow.governance_decision.action)
     reason_codes = [str(c) for c in shadow.governance_decision.reason_codes]
     tags = [str(t) for t in shadow.governance_decision.tags]
@@ -258,10 +262,12 @@ def run_one_match(
         # V24
         "v24_side": v24_side,
         "v24_confidence": _safe_float(v24_pred.get("confidence"), 0.0),
+        "v24_probabilities": {key: round(value, 6) for key, value in v24_probabilities.items()},
         "v24_correct": v24_correct,
         # C1.0
         "c1_side": c1_side,
         "c1_confidence": _safe_float(shadow.inference_result.confidence, 0.0),
+        "c1_probabilities": {key: round(value, 6) for key, value in c1_probabilities.items()},
         "c1_correct": c1_correct,
         # Governance
         "governance_action": gov_action,
@@ -354,6 +360,7 @@ def build_report(results: list[dict], enable_foot: bool) -> dict:
     if approve_acc is not None and downgrade_acc is not None:
         governance_separation = approve_acc - downgrade_acc
     approve_rate = (approve_n / n_known) if n_known else None
+    calibration_drift = build_calibration_drift_report(known)
 
     return {
         "total": len(results),
@@ -382,6 +389,7 @@ def build_report(results: list[dict], enable_foot: bool) -> dict:
             for k, v in acc_by_action.items()
         },
         "foot_stats": foot_stats,
+        "calibration_drift": calibration_drift,
     }
 
 
@@ -422,6 +430,23 @@ def write_reports(results: list[dict], report: dict, enable_foot: bool) -> tuple
     lines.append(f"|------|--------|------|")
     lines.append(f"| V24  | {v24_acc:.1%} | {n} |" if v24_acc else "| V24 | N/A | - |")
     lines.append(f"| C1.0 | {c1_acc:.1%} | {n} |" if c1_acc else "| C1.0 | N/A | - |")
+
+    drift = report.get("calibration_drift", {}) if isinstance(report.get("calibration_drift"), dict) else {}
+    drift_models = drift.get("models", {}) if isinstance(drift.get("models"), dict) else {}
+    if drift_models:
+        lines += ["", "## 校准漂移", ""]
+        lines.append("| 系统 | 样本 | ECE | Brier | Logloss | 平均置信度 | 实际命中率 | Gap |")
+        lines.append("|------|------|-----|-------|---------|------------|------------|-----|")
+        for label, key in (("V24", "v24"), ("C1.0", "c1")):
+            item = drift_models.get(key, {}) if isinstance(drift_models.get(key), dict) else {}
+            def pct(value):
+                return "N/A" if value is None else f"{float(value):.1%}"
+            lines.append(
+                f"| {label} | {item.get('count', 0)} | {pct(item.get('ece'))} | "
+                f"{item.get('brier', 'N/A')} | {item.get('logloss', 'N/A')} | "
+                f"{pct(item.get('avg_confidence'))} | {pct(item.get('avg_actual_rate'))} | "
+                f"{pct(item.get('calibration_gap'))} |"
+            )
 
     lines += ["", "### 按 Governance 动作分组准确率", ""]
     lines.append("| 动作 | V24 准确率 | C1.0 准确率 | 场次 |")
